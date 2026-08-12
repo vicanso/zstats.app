@@ -1,0 +1,590 @@
+// Release builds detach from the console on Windows — otherwise launching the
+// app pops an empty terminal behind the window.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod assets;
+#[cfg(target_os = "macos")]
+mod dock;
+mod font;
+mod format;
+mod i18n;
+mod i18n_loader;
+mod metrics;
+mod state;
+mod theme;
+#[cfg(not(target_os = "linux"))]
+mod tray;
+mod views;
+
+use crate::assets::Assets;
+use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
+
+// Pointed at the empty `locales_stub/` so the macro embeds no translations.
+// Real files live in `assets/locales/` and inflate via `i18n_loader`.
+rust_i18n::i18n!(
+    "locales_stub",
+    fallback = "en",
+    backend = crate::i18n_loader::runtime_backend()
+);
+use gpui::{
+    App, Bounds, Context, KeyBinding, Menu, MenuItem, Pixels, Point, QuitMode, SharedString, Size,
+    Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    actions, div, point, prelude::*, px, size,
+};
+// macOS deliberately runs with `titlebar: None` — see `open_main_window`.
+#[cfg(not(target_os = "macos"))]
+use gpui::TitlebarOptions;
+use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
+
+use std::time::Duration;
+
+/// Shown in the app menu, the tray tooltip, the task switcher and the Linux
+/// title bar.
+pub const APP_NAME: &str = "ZStats";
+/// Wayland `app_id` / X11 WM_CLASS — task switchers group windows by it and
+/// resolve the icon from the installed `.desktop` entry.
+const LINUX_APP_ID: &str = "com.github.vicanso.zstats";
+
+/// Menu-bar panel: 320px matches Control Center / Stats combined popovers
+/// and lets eight icon tabs breathe. Height covers header, icon strip,
+/// two overview cards and the footer without feeling like a window.
+const DEFAULT_WINDOW_SIZE: (f32, f32) = (320., 500.);
+/// Fixed width — the layout is built for exactly this and nothing reflows.
+const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
+/// Gap between the tray icon and the top of the window.
+const TRAY_GAP: f32 = 6.;
+/// Native vibrancy, but only on macOS: there gpui backs `Blurred` with an
+/// `NSVisualEffectView`. Elsewhere it's documented as "not always supported"
+/// and degrades to plain transparency, which would show the raw desktop.
+const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(target_os = "macos") {
+    WindowBackgroundAppearance::Blurred
+} else {
+    WindowBackgroundAppearance::Opaque
+};
+/// Dark: a *thin* near-black wash. The Popover material is already dark;
+/// anything much heavier than this crushes the blur into flat black.
+/// Light: a *thick* wash. Light tokens use dark type, and a dark wallpaper
+/// shining through 0.2 opacity turns the panel into grey fog.
+const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.18 } else { 1.0 };
+const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.93 } else { 1.0 };
+/// Clicking the tray icon first takes focus away from the window, which
+/// auto-hides it, and only then delivers the click. A click landing inside
+/// this window of an auto-hide is read as "the user wanted it gone" and does
+/// not reopen — that's what makes the tray icon toggle.
+const TOGGLE_GRACE: Duration = Duration::from_millis(300);
+
+actions!(zstats, [Quit]);
+
+/// The root view. Owns the window-lifecycle subscriptions and hands the
+/// panel itself to `views::root`; the gpui-component dialog / notification
+/// layers are mounted over it.
+struct ZStatsApp {
+    /// Whether the window has ever held focus. A freshly created window also
+    /// gets a deactivation callback before it is first activated; closing on
+    /// that one would make it flash open and vanish.
+    was_active: bool,
+    _activation: Subscription,
+    /// Follows System Settings → Appearance so our tokens stay in sync
+    /// with the Popover material (they are not derived from Theme).
+    _appearance: Subscription,
+    /// Repaints the panel when a collection tick lands. Without it the store
+    /// would update and nothing on screen would move.
+    _metrics: Subscription,
+}
+
+impl ZStatsApp {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.was_active = true;
+                return;
+            }
+            if !this.was_active {
+                return;
+            }
+            // Debug keeps the panel up so you can inspect it from the IDE
+            // or another window. Release still collapses to the tray.
+            if cfg!(debug_assertions) {
+                return;
+            }
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, _| state.mark_auto_hidden());
+            // gpui can't hide an individual window, so "collapse to the tray"
+            // has to be a real close; the next tray click rebuilds it under
+            // the icon.
+            window.remove_window();
+        });
+        let appearance = cx.observe_window_appearance(window, |_this, window, cx| {
+            apply_system_appearance(window.appearance(), cx);
+            cx.notify();
+        });
+        let store = cx.global::<ZStatsGlobalStore>().clone();
+        let metrics = cx.observe(&store, |_this, _state, cx| cx.notify());
+
+        Self {
+            was_active: false,
+            _activation: activation,
+            _appearance: appearance,
+            _metrics: metrics,
+        }
+    }
+}
+
+impl Render for ZStatsApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+
+        // Mirror the window geometry into the global state on *every* frame,
+        // including the first: reopening from the tray builds a brand-new
+        // window, and this is the only place the old size and the display
+        // scale factor survive. `set_window_metrics` does its own
+        // change-detection, so this is cheap and doesn't loop.
+        let bounds = window.bounds();
+        let scale_factor = window.scale_factor();
+        let store = cx.global::<ZStatsGlobalStore>().clone();
+        store.update(cx, |state, cx| {
+            state.set_window_metrics(bounds, scale_factor, cx)
+        });
+
+        let tint = if theme::is_dark() {
+            BACKGROUND_OPACITY_DARK
+        } else {
+            BACKGROUND_OPACITY_LIGHT
+        };
+        div()
+            .relative()
+            .size_full()
+            .bg(cx.theme().background.opacity(tint))
+            .text_color(cx.theme().foreground)
+            .child(views::root(cx))
+            .children(dialog_layer)
+            .children(notification_layer)
+    }
+}
+
+/// Map the OS appearance to a theme mode when the user hasn't pinned one.
+/// `VibrantLight` is macOS's translucent *light* appearance — group it with
+/// `Light` so only genuinely dark appearances select the dark theme.
+fn theme_mode_for_appearance(appearance: WindowAppearance) -> ThemeMode {
+    match appearance {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeMode::Light,
+        _ => ThemeMode::Dark,
+    }
+}
+
+/// gpui-component Theme plus our own tokens. `Theme::change` resets the
+/// mono family, so [`font::apply`] has to run every time.
+fn apply_system_appearance(appearance: WindowAppearance, cx: &mut App) {
+    let mode = theme_mode_for_appearance(appearance);
+    Theme::change(mode, None, cx);
+    font::apply(cx);
+    theme::set_dark(matches!(mode, ThemeMode::Dark));
+}
+
+/// Fill in the app identity fields on a [`WindowOptions`] without clobbering
+/// caller-supplied values. Call it for every window: Linux compositors
+/// (especially KDE + Wayland) otherwise show a generic icon and an empty
+/// title, and macOS / Windows still use the title in the task switcher even
+/// when the title bar is custom-drawn.
+fn with_app_identity(mut options: WindowOptions) -> WindowOptions {
+    if options.app_id.is_none() {
+        options.app_id = Some(LINUX_APP_ID.to_string());
+    }
+    match &mut options.titlebar {
+        Some(titlebar) if titlebar.title.is_none() => {
+            titlebar.title = Some(SharedString::from(APP_NAME));
+        }
+        // Only where a title bar is actually wanted. On macOS `None` is the
+        // whole point — conjuring one here would put the traffic lights back.
+        #[cfg(not(target_os = "macos"))]
+        None => {
+            options.titlebar = Some(TitlebarOptions {
+                title: Some(SharedString::from(APP_NAME)),
+                ..Default::default()
+            });
+        }
+        _ => {}
+    }
+    options
+}
+
+/// Hang the window under the tray icon: horizontally centred on it, `TRAY_GAP`
+/// below it. Centring is the default; the clamp only kicks in when the window
+/// would run past a screen edge, in which case it sits flush against that edge.
+///
+/// Pure geometry, all in logical pixels, so it's testable without an `App`.
+fn anchored_origin(
+    icon: Bounds<Pixels>,
+    window_size: Size<Pixels>,
+    screen: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let mut origin = point(
+        icon.origin.x + icon.size.width / 2. - window_size.width / 2.,
+        icon.origin.y + icon.size.height + px(TRAY_GAP),
+    );
+    // `.max(origin)` guards the degenerate case of a window wider than the
+    // screen, where the upper clamp bound would fall below the lower one.
+    let max_x = (screen.origin.x + screen.size.width - window_size.width).max(screen.origin.x);
+    let max_y = (screen.origin.y + screen.size.height - window_size.height).max(screen.origin.y);
+    origin.x = origin.x.clamp(screen.origin.x, max_x);
+    origin.y = origin.y.clamp(screen.origin.y, max_y);
+    origin
+}
+
+/// Retarget gpui's vibrancy view at the `Popover` material.
+///
+/// gpui hardcodes `NSVisualEffectMaterial::Selection` (`gpui_macos/src/window.rs`),
+/// which is the selection-highlight material, not the one AppKit uses for
+/// menu bar panels. The view itself is fine — it's the bottom-most subview of
+/// the window's content view — so this just walks the subviews and re-materials
+/// the `NSVisualEffectView` it finds. A no-op if gpui ever stops adding one.
+#[cfg(target_os = "macos")]
+fn use_popover_material(window: &Window) {
+    use objc2::ClassType;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSVisualEffectMaterial, NSVisualEffectView};
+    use raw_window_handle::RawWindowHandle;
+
+    // Fully qualified: gpui's inherent `Window::window_handle()` (returning
+    // `AnyWindowHandle`) shadows the `HasWindowHandle` trait method.
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+        let ns_window: *mut AnyObject = objc2::msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let content: *mut AnyObject = objc2::msg_send![ns_window, contentView];
+        let subviews: *mut AnyObject = objc2::msg_send![content, subviews];
+        let count: usize = objc2::msg_send![subviews, count];
+        for i in 0..count {
+            let view: *mut AnyObject = objc2::msg_send![subviews, objectAtIndex: i];
+            let is_effect_view: bool =
+                objc2::msg_send![view, isKindOfClass: NSVisualEffectView::class()];
+            if is_effect_view {
+                let _: () = objc2::msg_send![view, setMaterial: NSVisualEffectMaterial::Popover];
+            }
+        }
+    }
+}
+
+/// Scale factor of the display that owns the menu bar — `screens()[0]` is
+/// always that one, unlike `mainScreen`, which follows the key window.
+///
+/// gpui's `PlatformDisplay` exposes no scale factor, and mirroring the main
+/// window's isn't an option here: the tray fires with no window open at all.
+#[cfg(target_os = "macos")]
+fn menu_bar_scale_factor() -> Option<f32> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let mtm = MainThreadMarker::new()?;
+    let screen = NSScreen::screens(mtm).firstObject()?;
+    Some(screen.backingScaleFactor() as f32)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn menu_bar_scale_factor() -> Option<f32> {
+    None
+}
+
+/// [`anchored_origin`] plus the two things that need an `App`: converting the
+/// tray's physical pixels to logical ones, and finding the icon's display.
+fn bounds_below_tray(anchor: TrayAnchor, window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
+    let scale = menu_bar_scale_factor()
+        // Fallback for platforms without the AppKit path: whatever the main
+        // window last reported.
+        .unwrap_or_else(|| cx.global::<ZStatsGlobalStore>().read(cx).scale_factor());
+    let scale = if scale > 0. { scale } else { 1. };
+    let to_px = |v: f64| px(v as f32 / scale);
+    let icon = Bounds {
+        origin: point(to_px(anchor.x), to_px(anchor.y)),
+        size: size(to_px(anchor.width), to_px(anchor.height)),
+    };
+
+    // `visible_bounds` already excludes the menu bar and the Dock.
+    let screen = cx
+        .displays()
+        .into_iter()
+        .find(|d| d.bounds().contains(&icon.origin))
+        .or_else(|| cx.primary_display())
+        .map(|d| d.visible_bounds());
+    let origin = match screen {
+        Some(screen) => anchored_origin(icon, window_size, screen),
+        // No display info to clamp against — centre and hope for the best.
+        None => point(
+            icon.origin.x + icon.size.width / 2. - window_size.width / 2.,
+            icon.origin.y + icon.size.height + px(TRAY_GAP),
+        ),
+    };
+
+    Bounds {
+        origin,
+        size: window_size,
+    }
+}
+
+/// Create the main window. With a tray `anchor` it opens under the tray icon;
+/// without one (startup, or the tray menu's "Show Window") it restores the
+/// last known position.
+pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
+    let saved = cx.global::<ZStatsGlobalStore>().read(cx).window_bounds();
+    let default_size = {
+        let (w, h) = DEFAULT_WINDOW_SIZE;
+        size(px(w), px(h))
+    };
+    let bounds = match anchor {
+        // Keep whatever size the user last left the window at.
+        Some(anchor) => {
+            let window_size = saved.map_or(default_size, |b| b.size);
+            bounds_below_tray(anchor, window_size, cx)
+        }
+        None => saved.unwrap_or_else(|| Bounds::centered(None, default_size, cx)),
+    };
+    let (min_w, min_h) = MIN_WINDOW_SIZE;
+
+    let opened = cx.open_window(
+        with_app_identity(WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(min_w), px(min_h))),
+            window_background: WINDOW_BACKGROUND,
+            // macOS: `None`, and it has to be written explicitly —
+            // `WindowOptions::default().titlebar` is `Some(..)`
+            // (`gpui/src/platform.rs:1964`), so leaving the field out would
+            // put a default (opaque, traffic-lit) title bar back.
+            //
+            // With `None`, gpui builds the window with a
+            // `Titled | FullSizeContentView` style mask and *without*
+            // `Closable`/`Miniaturizable`/`Resizable`, so there are no traffic
+            // lights, while it still applies `titlebarAppearsTransparent` +
+            // `titleHidden` (`gpui_macos/src/window.rs:815,977`). The result is
+            // a clean panel that is nonetheless a normal titled window — it
+            // keeps the system rounding and shadow, and can still take keyboard
+            // focus, which `WindowKind::PopUp` (a nonactivating panel) could
+            // not. Linux keeps server-side decorations with the title from
+            // `with_app_identity`.
+            #[cfg(target_os = "macos")]
+            titlebar: None,
+            #[cfg(target_os = "windows")]
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                ..Default::default()
+            }),
+            // macOS only: create the window hidden and reveal it after the
+            // first themed frame (see `on_next_frame` below) so there's no
+            // white flash. Windows drives frames from WM_PAINT, which hidden
+            // windows never receive — the reveal would deadlock and the window
+            // would never appear; Wayland can't reliably reveal a window that
+            // was never mapped either.
+            show: cfg!(not(target_os = "macos")),
+            ..Default::default()
+        }),
+        |window, cx| {
+            // No `on_window_should_close` override: closing really closes, on
+            // every platform. `QuitMode::Explicit` keeps the process and the
+            // tray alive, and the next tray click rebuilds the window.
+
+            // Pairs with `show: false` above — macOS paints hidden windows, so
+            // this fires; on Windows / Linux it never would.
+            #[cfg(target_os = "macos")]
+            window.on_next_frame(|window, _cx| {
+                window.activate_window();
+                use_popover_material(window);
+            });
+
+            let view = cx.new(|cx| ZStatsApp::new(window, cx));
+            cx.new(|cx| {
+                let root = Root::new(view, window, cx);
+                match WINDOW_BACKGROUND {
+                    WindowBackgroundAppearance::Opaque => root,
+                    // `Root::render` paints an opaque `theme.tokens.background`
+                    // across the whole window, which would bury the vibrancy
+                    // layer. Its `refine_style` runs after that `bg`, so this
+                    // overrides it and lets our own translucent fill be the
+                    // only thing between the content and the blur.
+                    _ => root.bg(gpui::transparent_black()),
+                }
+            })
+        },
+    );
+    if let Err(e) = opened {
+        eprintln!("failed to open main window: {e}");
+    }
+}
+
+/// Left-clicking the tray icon: open the window under the icon, or close it if
+/// it's already up.
+///
+/// Deliberately independent of the focus-loss timing. Two orders are possible
+/// and both end up closed:
+///   - the click doesn't deactivate the window → it's still open here, so
+///     close it outright;
+///   - the click deactivates it first → auto-hide already closed it, and
+///     `TOGGLE_GRACE` stops this click from immediately reopening it.
+pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
+    if let Some(handle) = cx.windows().first().copied() {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        return;
+    }
+    let just_auto_hid = cx
+        .global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
+    if just_auto_hid {
+        return;
+    }
+    cx.activate(true);
+    open_main_window(cx, Some(anchor));
+}
+
+/// The tray menu's "Show Window": always shows, never toggles.
+pub fn show_main_window(cx: &mut App) {
+    cx.activate(true);
+    if let Some(handle) = cx.windows().first().copied() {
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+        return;
+    }
+    // Drop any pending auto-hide mark so an explicit "show" is never swallowed
+    // by the toggle grace period.
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
+    open_main_window(cx, None);
+}
+
+fn main() {
+    // Before anything else, and specifically before gpui starts the run loop:
+    // this neuters the `setActivationPolicy(Regular)` it would otherwise make
+    // during `applicationDidFinishLaunching`.
+    #[cfg(target_os = "macos")]
+    dock::suppress_regular_policy();
+
+    // `Assets` supplies the SVGs behind `IconName`; without it every icon
+    // renders empty.
+    let app = gpui_platform::application().with_assets(Assets);
+
+    app.run(|cx| {
+        // Still required: a `cargo run` binary has no `LSUIElement`, so
+        // LaunchServices already made it `Regular` without going through the
+        // swizzled setter.
+        #[cfg(target_os = "macos")]
+        dock::hide_dock_icon();
+
+        // Must run before touching any gpui-component feature.
+        gpui_component::init(cx);
+        font::register(cx);
+        // Resolve light/dark against the OS appearance *before* the window
+        // opens, so the first painted frame is already themed (otherwise the
+        // stock theme shows for a frame and flashes).
+        apply_system_appearance(cx.window_appearance(), cx);
+        i18n::init();
+        // The tray outlives the window. Without this, gpui's default quits the
+        // process as soon as the last window closes on every platform except
+        // macOS — taking the tray icon with it.
+        cx.set_quit_mode(QuitMode::Explicit);
+
+        let app_state = cx.new(|_| ZStatsAppState::new());
+        cx.set_global(ZStatsGlobalStore::new(app_state));
+
+        cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+        cx.bind_keys([KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-q"
+            } else {
+                "ctrl-q"
+            },
+            Quit,
+            None,
+        )]);
+        cx.set_menus(vec![Menu {
+            name: APP_NAME.into(),
+            items: vec![MenuItem::action(i18n::tr("common.quit"), Quit)],
+            disabled: false,
+        }]);
+
+        #[cfg(not(target_os = "linux"))]
+        tray::init_tray(cx);
+        metrics::start(cx);
+
+        // Release builds start with no window at all — the app lives in the
+        // tray until the icon is clicked, and deliberately does not
+        // `cx.activate`, because launching shouldn't steal focus from
+        // whatever the user is doing.
+        //
+        // Debug builds open the panel immediately instead, so `cargo run`
+        // puts the thing being worked on straight on screen.
+        #[cfg(debug_assertions)]
+        {
+            cx.activate(true);
+            open_main_window(cx, None);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1440×900 display with the 38px menu bar taken off the top, i.e. what
+    /// `visible_bounds()` reports on macOS.
+    fn screen() -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(0.), px(38.)),
+            size: size(px(1440.), px(862.)),
+        }
+    }
+
+    /// A 24×24 menu bar icon with its left edge at `x`.
+    fn icon_at(x: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(x), px(0.)),
+            size: size(px(24.), px(24.)),
+        }
+    }
+
+    fn window() -> Size<Pixels> {
+        let (w, h) = DEFAULT_WINDOW_SIZE;
+        size(px(w), px(h))
+    }
+
+    #[test]
+    fn centers_under_the_icon_when_there_is_room() {
+        let icon = icon_at(700.);
+        let origin = anchored_origin(icon, window(), screen());
+        // Icon centre 712, window 320 wide → 712 - 160.
+        assert_eq!(origin.x, px(552.));
+        // Icon bottom 24 + 6px gap, which clears the 38px menu bar.
+        assert_eq!(origin.y, px(38.));
+    }
+
+    #[test]
+    fn sticks_to_the_right_edge_when_the_icon_is_near_it() {
+        // Centring would put the window at 1416 - 160 = 1256, whose right
+        // edge (1576) overflows the 1440 screen.
+        let origin = anchored_origin(icon_at(1404.), window(), screen());
+        assert_eq!(origin.x, px(1120.)); // 1440 - 320
+    }
+
+    #[test]
+    fn sticks_to_the_left_edge_when_the_icon_is_near_it() {
+        let origin = anchored_origin(icon_at(4.), window(), screen());
+        assert_eq!(origin.x, px(0.));
+    }
+
+    #[test]
+    fn never_overflows_the_bottom() {
+        let tall = size(px(320.), px(2000.));
+        let origin = anchored_origin(icon_at(700.), tall, screen());
+        // Taller than the screen: pinned to the top of the visible area rather
+        // than to a negative coordinate.
+        assert_eq!(origin.y, px(38.));
+    }
+}
