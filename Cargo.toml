@@ -46,9 +46,12 @@ gpui_macros = { git = "https://github.com/zed-industries/zed" }
 # rolling per-process averages and the settings model — and deliberately no
 # tokio. `client` (the daemon's unix-socket probe) is left off for that reason.
 zstats = { version = "0.2", default-features = false, features = ["frontend"] }
+# Same pin as zstats. Used only to read NIC lifetime counters — zstats
+# diffs them into rates and drops the totals, but we need "ever used
+# since boot" to hide unused interfaces.
 # Hands collected ticks (and tray events) from their blocking threads onto
 # gpui's main-thread executor. Already in the tree via gpui.
-smol = "2"
+smol = "2.0.2"
 # Embeds `assets/` (fonts now; locales next) and zstd-compresses them in
 # release. `default-features` off so debug builds embed too, instead of
 # reading the folder at runtime.
@@ -58,25 +61,37 @@ rust-embed = { version = "8.12.0", default-features = false, features = [
 # Locale files live in `assets/locales/` (compressed by rust-embed). The
 # `i18n!` macro is pointed at the empty `locales_stub/` so it does not
 # codegen a  backend map; `i18n_loader` inflates one locale on first use.
-rust-i18n = "4.1.0"
+rust-i18n = "4.2.1"
 sys-locale = "0.3.2"
 toml = "1.1.4"
+# Desktop banners. Cross-platform; macOS uses NSUserNotification
+# (`set_application` + `wait_for_action` for the click that opens Alerts).
+notify-rust = "4.18"
 
 # Tray. Linux is excluded on purpose — see "已知问题 / TODO" in README.md.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.24.1"
+# Rasterises the menu bar SVG at startup — tray-icon only accepts raw RGBA.
+# Same version gpui already pulls in for its own icon rendering.
+resvg = "0.46"
 
 # Only for the menu bar's scale factor: the tray reports physical pixels and
 # gpui's `PlatformDisplay` doesn't expose a scale factor. Same versions gpui
 # itself pins, so nothing new gets built.
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.6"
+# NSPoint / NSRect for positioning the panel window.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "NSGeometry",
+] }
 raw-window-handle = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSApplication",
     "NSResponder",
     "NSScreen",
     "NSVisualEffectView",
+    "NSWindow",
     "objc2-core-foundation",
 ] }
 

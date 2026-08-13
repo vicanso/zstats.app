@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod confirm;
 #[cfg(target_os = "macos")]
 mod dock;
 mod font;
@@ -10,11 +11,16 @@ mod format;
 mod i18n;
 mod i18n_loader;
 mod metrics;
+mod notify;
+#[cfg(target_os = "macos")]
+mod procscan;
 mod state;
 mod theme;
 #[cfg(not(target_os = "linux"))]
 mod tray;
 mod views;
+#[cfg(target_os = "macos")]
+mod window_ext;
 
 use crate::assets::Assets;
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
@@ -28,8 +34,8 @@ rust_i18n::i18n!(
 );
 use gpui::{
     App, Bounds, Context, KeyBinding, Menu, MenuItem, Pixels, Point, QuitMode, SharedString, Size,
-    Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowOptions,
-    actions, div, point, prelude::*, px, size,
+    Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, actions, div, point, prelude::*, px, size,
 };
 // macOS deliberately runs with `titlebar: None` — see `open_main_window`.
 #[cfg(not(target_os = "macos"))]
@@ -46,9 +52,9 @@ pub const APP_NAME: &str = "ZStats";
 const LINUX_APP_ID: &str = "com.github.vicanso.zstats";
 
 /// Menu-bar panel: 320px matches Control Center / Stats combined popovers
-/// and lets eight icon tabs breathe. Height covers header, icon strip,
-/// two overview cards and the footer without feeling like a window.
-const DEFAULT_WINDOW_SIZE: (f32, f32) = (320., 500.);
+/// and lets eight icon tabs breathe. Height covers the icon strip,
+/// Processor + Top CPU + Memory, and the footer without clipping.
+const DEFAULT_WINDOW_SIZE: (f32, f32) = (320., 640.);
 /// Fixed width — the layout is built for exactly this and nothing reflows.
 const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
 /// Gap between the tray icon and the top of the window.
@@ -61,12 +67,18 @@ const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(target_os = "macos
 } else {
     WindowBackgroundAppearance::Opaque
 };
-/// Dark: a *thin* near-black wash. The Popover material is already dark;
-/// anything much heavier than this crushes the blur into flat black.
+/// Dark: one wash over the whole window. 0.18 is fine on a dark desktop
+/// but a light wallpaper shows straight through and the panel turns into
+/// grey fog (light type on white glass). 0.55 is still one layer — tabs,
+/// cards and empty space stay the same material, no extra body fill.
 /// Light: a *thick* wash. Light tokens use dark type, and a dark wallpaper
 /// shining through 0.2 opacity turns the panel into grey fog.
-const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.18 } else { 1.0 };
-const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.93 } else { 1.0 };
+const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.55 } else { 1.0 };
+/// Light mode is deliberately near-opaque: vibrancy there is pale-on-pale,
+/// so the blur reads as barely anything while the desktop's detail still
+/// bleeds through and fights the dark text. Legibility wins; the effect is
+/// conceded. Dark mode keeps it, where the contrast actually carries.
+const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
 /// Clicking the tray icon first takes focus away from the window, which
 /// auto-hides it, and only then delivers the click. A click landing inside
 /// this window of an auto-hide is read as "the user wanted it gone" and does
@@ -110,9 +122,14 @@ impl ZStatsApp {
             cx.global::<ZStatsGlobalStore>()
                 .clone()
                 .update(cx, |state, _| state.mark_auto_hidden());
-            // gpui can't hide an individual window, so "collapse to the tray"
-            // has to be a real close; the next tray click rebuilds it under
-            // the icon.
+            // Order it off screen rather than destroy it — rebuilding the
+            // window on every toggle is what leaked ~1 MB a cycle.
+            #[cfg(target_os = "macos")]
+            {
+                window_ext::hide(window);
+                cx.global::<metrics::CollectorPace>().hidden();
+            }
+            #[cfg(not(target_os = "macos"))]
             window.remove_window();
         });
         let appearance = cx.observe_window_appearance(window, |_this, window, cx| {
@@ -120,7 +137,14 @@ impl ZStatsApp {
             cx.notify();
         });
         let store = cx.global::<ZStatsGlobalStore>().clone();
-        let metrics = cx.observe(&store, |_this, _state, cx| cx.notify());
+        // Repaint only while the panel is actually on screen: the window is
+        // hidden rather than destroyed, so without this check every tick would
+        // render a full panel that nobody can see.
+        let metrics = cx.observe(&store, |_this, _state, cx| {
+            if cx.global::<metrics::CollectorPace>().is_visible() {
+                cx.notify();
+            }
+        });
 
         Self {
             was_active: false,
@@ -309,7 +333,11 @@ fn bounds_below_tray(anchor: TrayAnchor, window_size: Size<Pixels>, cx: &App) ->
         size: size(to_px(anchor.width), to_px(anchor.height)),
     };
 
-    // `visible_bounds` already excludes the menu bar and the Dock.
+    // Resolved through AppKit rather than `cx.displays()`, which reports
+    // every screen at the same origin — see `window_ext`.
+    #[cfg(target_os = "macos")]
+    let screen = window_ext::visible_bounds_containing(icon.origin);
+    #[cfg(not(target_os = "macos"))]
     let screen = cx
         .displays()
         .into_iter()
@@ -325,10 +353,42 @@ fn bounds_below_tray(anchor: TrayAnchor, window_size: Size<Pixels>, cx: &App) ->
         ),
     };
 
-    Bounds {
+    let bounds = Bounds {
         origin,
         size: window_size,
+    };
+
+    // Multi-display positioning has several places to go wrong and no visible
+    // symptom beyond "it opened on the wrong screen". `ZSTATS_DEBUG_POSITION=1`
+    // prints the whole chain so a bad step can be identified rather than
+    // guessed at.
+    if std::env::var_os("ZSTATS_DEBUG_POSITION").is_some() {
+        eprintln!(
+            "POS tray_physical=({:.0},{:.0} {:.0}x{:.0}) scale={scale} \
+             icon_logical=({:.0},{:.0}) screen={} window=({:.0},{:.0} {:.0}x{:.0})",
+            anchor.x,
+            anchor.y,
+            anchor.width,
+            anchor.height,
+            f32::from(icon.origin.x),
+            f32::from(icon.origin.y),
+            match screen {
+                Some(s) => format!(
+                    "({:.0},{:.0} {:.0}x{:.0})",
+                    f32::from(s.origin.x),
+                    f32::from(s.origin.y),
+                    f32::from(s.size.width),
+                    f32::from(s.size.height)
+                ),
+                None => "none".to_string(),
+            },
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+        );
     }
+    bounds
 }
 
 /// Create the main window. With a tray `anchor` it opens under the tray icon;
@@ -398,6 +458,7 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
             window.on_next_frame(|window, _cx| {
                 window.activate_window();
                 use_popover_material(window);
+                window_ext::join_all_spaces(window);
             });
 
             let view = cx.new(|cx| ZStatsApp::new(window, cx));
@@ -415,8 +476,9 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
             })
         },
     );
-    if let Err(e) = opened {
-        eprintln!("failed to open main window: {e}");
+    match opened {
+        Ok(_) => cx.global::<metrics::CollectorPace>().shown(),
+        Err(e) => eprintln!("failed to open main window: {e}"),
     }
 }
 
@@ -430,34 +492,100 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
 ///   - the click deactivates it first → auto-hide already closed it, and
 ///     `TOGGLE_GRACE` stops this click from immediately reopening it.
 pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
-    if let Some(handle) = cx.windows().first().copied() {
+    // First click of the session: nothing to reveal yet.
+    let Some(handle) = cx.windows().first().copied() else {
+        cx.activate(true);
+        open_main_window(cx, Some(anchor));
+        return;
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let visible = handle
+            .update(cx, |_, window, _| window_ext::is_visible(window))
+            .unwrap_or(false);
+        if visible {
+            hide_main_window(cx);
+            return;
+        }
+        // Clicking the icon steals focus first, which auto-hides the panel;
+        // the click then arrives to a hidden window. Without this the toggle
+        // would read as "it was hidden, so show it" and never close.
+        let just_auto_hid = cx
+            .global::<ZStatsGlobalStore>()
+            .clone()
+            .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
+        if just_auto_hid {
+            return;
+        }
+        reveal_main_window(cx, handle, Some(anchor));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
-        return;
     }
-    let just_auto_hid = cx
-        .global::<ZStatsGlobalStore>()
-        .clone()
-        .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
-    if just_auto_hid {
-        return;
+}
+
+/// Take the panel off screen and drop the collector back to idle.
+///
+/// Hiding rather than closing: gpui leaks roughly 1 MB per create/destroy
+/// cycle (see `window_ext`), and this window is toggled constantly.
+pub fn hide_main_window(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    if let Some(handle) = cx.windows().first().copied() {
+        let _ = handle.update(cx, |_, window, _| window_ext::hide(window));
+        cx.global::<metrics::CollectorPace>().hidden();
     }
+    let _ = cx;
+}
+
+/// Position the existing window under the tray icon and bring it forward.
+#[cfg(target_os = "macos")]
+fn reveal_main_window(cx: &mut App, handle: gpui::AnyWindowHandle, anchor: Option<TrayAnchor>) {
+    let current = handle.update(cx, |_, window, _| window.bounds()).ok();
+    let origin = match (anchor, current) {
+        (Some(anchor), Some(bounds)) => bounds_below_tray(anchor, bounds.size, cx).origin,
+        // No anchor (the tray menu's "Show Window"): leave it where it was.
+        _ => match current {
+            Some(bounds) => bounds.origin,
+            None => return,
+        },
+    };
     cx.activate(true);
-    open_main_window(cx, Some(anchor));
+    let _ = handle.update(cx, |_, window, _| window_ext::show_at(window, origin));
+    cx.global::<metrics::CollectorPace>().shown();
+}
+
+/// Banner click, or anything else that wants the Alerts tab in front:
+/// pin the tab first so a freshly built window paints it, then show.
+pub fn show_alerts_window(cx: &mut App) {
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, cx| state.set_tab(state::Tab::Alerts, cx));
+    show_main_window(cx);
 }
 
 /// The tray menu's "Show Window": always shows, never toggles.
 pub fn show_main_window(cx: &mut App) {
-    cx.activate(true);
-    if let Some(handle) = cx.windows().first().copied() {
-        let _ = handle.update(cx, |_, window, _| window.activate_window());
-        return;
-    }
     // Drop any pending auto-hide mark so an explicit "show" is never swallowed
     // by the toggle grace period.
     cx.global::<ZStatsGlobalStore>()
         .clone()
         .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
-    open_main_window(cx, None);
+
+    match cx.windows().first().copied() {
+        #[cfg(target_os = "macos")]
+        Some(handle) => reveal_main_window(cx, handle, None),
+        #[cfg(not(target_os = "macos"))]
+        Some(handle) => {
+            cx.activate(true);
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+        None => {
+            cx.activate(true);
+            open_main_window(cx, None);
+        }
+    }
 }
 
 fn main() {
@@ -512,6 +640,7 @@ fn main() {
 
         #[cfg(not(target_os = "linux"))]
         tray::init_tray(cx);
+        notify::start(cx);
         metrics::start(cx);
 
         // Release builds start with no window at all — the app lives in the

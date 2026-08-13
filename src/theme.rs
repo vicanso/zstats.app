@@ -19,16 +19,6 @@ pub fn is_dark() -> bool {
     DARK.load(Ordering::Relaxed)
 }
 
-/// Footer wash.
-#[inline]
-pub fn bg_footer() -> Rgba {
-    if is_dark() {
-        rgba(0x00000033)
-    } else {
-        rgba(0x00000008)
-    }
-}
-
 /// Card / grouped fill. Dark: faint white lift. Light: nearly solid white,
 /// so cards sit on the grey panel the way Settings groups do.
 #[inline]

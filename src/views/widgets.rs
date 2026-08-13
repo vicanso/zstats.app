@@ -155,10 +155,12 @@ pub fn stacked_meter(segments: Vec<(f32, gpui::Hsla)>, height: f32) -> AnyElemen
         .bg(theme::inset())
         .overflow_hidden()
         .child(
-            h_flex().size_full().children(segments.into_iter().filter_map(|(frac, fill)| {
-                let w = frac.clamp(0.0, 1.0);
-                (w > 0.0).then(|| div().h_full().w(relative(w)).bg(fill))
-            })),
+            h_flex()
+                .size_full()
+                .children(segments.into_iter().filter_map(|(frac, fill)| {
+                    let w = frac.clamp(0.0, 1.0);
+                    (w > 0.0).then(|| div().h_full().w(relative(w)).bg(fill))
+                })),
         )
         .into_any_element()
 }
@@ -168,30 +170,48 @@ pub fn stacked_meter(segments: Vec<(f32, gpui::Hsla)>, height: f32) -> AnyElemen
 pub fn legend(items: Vec<(gpui::Hsla, SharedString, SharedString)>) -> AnyElement {
     h_flex()
         .gap(px(12.))
-        .children(items.into_iter().enumerate().map(|(i, (color, label, tip))| {
-            h_flex()
-                .id(("legend", i))
-                .items_center()
-                .gap(px(5.))
-                .tooltip(wrap_tooltip(tip))
-                .child(div().size(px(6.)).rounded_full().flex_none().bg(color))
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(theme::text_dim())
-                        .child(label),
-                )
-        }))
+        .children(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(i, (color, label, tip))| {
+                    h_flex()
+                        .id(("legend", i))
+                        .items_center()
+                        .gap(px(5.))
+                        .tooltip(wrap_tooltip(tip))
+                        .child(
+                            // Short bar, same height as the meter, so a mid grey
+                            // and a dark grey stay distinguishable — 6px dots of
+                            // `text_dim` / `text_faint` collapsed into one.
+                            div()
+                                .w(px(10.))
+                                .h(px(6.))
+                                .rounded(px(2.))
+                                .flex_none()
+                                .bg(color),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(theme::text_dim())
+                                .child(label),
+                        )
+                }),
+        )
         .into_any_element()
 }
 
 /// One "label ……… value" line with the design's hairline underneath.
-pub fn kv_row(k: impl Into<SharedString>, v: impl Into<SharedString>) -> AnyElement {
+/// One key/value line. `last` suppresses the rule underneath — a separator on
+/// the final row has nothing to separate and lands on the block's own edge.
+pub fn kv_row(k: impl Into<SharedString>, v: impl Into<SharedString>, last: bool) -> AnyElement {
     h_flex()
         .justify_between()
         .py(px(5.))
-        .border_b(px(1.))
-        .border_color(theme::border_subtle())
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
         .text_size(px(11.))
         .text_color(theme::text_muted())
         .child(div().child(k.into()))
@@ -214,22 +234,29 @@ pub fn kv_columns(rows: Vec<(String, String)>) -> AnyElement {
         .gap(px(14.))
         .mt(px(10.))
         .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .children(left.iter().map(|(k, v)| kv_row(k.clone(), v.clone()))),
+            v_flex().flex_1().min_w_0().children(
+                left.iter()
+                    .enumerate()
+                    .map(|(i, (k, v))| kv_row(k.clone(), v.clone(), i + 1 == left.len())),
+            ),
         )
         .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .children(right.iter().map(|(k, v)| kv_row(k.clone(), v.clone()))),
+            v_flex().flex_1().min_w_0().children(
+                right
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (k, v))| kv_row(k.clone(), v.clone(), i + 1 == right.len())),
+            ),
         )
         .into_any_element()
 }
 
 /// The headline figure with its unit trailing, e.g. "42" + "%".
-pub fn big_number(value: impl Into<SharedString>, unit: impl Into<SharedString>, size: f32) -> AnyElement {
+pub fn big_number(
+    value: impl Into<SharedString>,
+    unit: impl Into<SharedString>,
+    size: f32,
+) -> AnyElement {
     h_flex()
         .items_baseline()
         .gap(px(3.))

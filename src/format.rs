@@ -68,6 +68,36 @@ pub fn gb(bytes: u64) -> String {
     }
 }
 
+/// Whether a process state is worth showing.
+///
+/// At any instant almost every process is asleep — on a 12-core machine with
+/// 700 processes, 696 were `S` and 6 `R`. "Sleeping" is the Unix default, not
+/// information, and a sampled state says little anyway: a process using 50% of
+/// a core is asleep half the time it is looked at. What does matter is a state
+/// that should not persist.
+///
+/// Written as "not one of the ordinary ones" so an unrecognised state counts
+/// as notable rather than being silently hidden.
+pub fn notable_status(status: &str) -> bool {
+    !matches!(
+        status,
+        "Sleeping" | "Sleep" | "Runnable" | "Running" | "Run" | "Idle" | "Parked" | "Waking"
+    )
+}
+
+/// Per-process memory, which spans four orders of magnitude and mostly sits
+/// at the bottom of it. Fixing the unit at GB collapses almost every row onto
+/// "0.0 GB"/"0.1 GB": on a typical machine every process is under a gigabyte
+/// and the median is around 10 MB.
+pub fn memory(bytes: u64) -> String {
+    let v = bytes as f64;
+    if v >= GIB {
+        format!("{:.1} GB", v / GIB)
+    } else {
+        format!("{:.0} MB", v / MIB)
+    }
+}
+
 /// Disk-style capacity, promoting to TB past a terabyte.
 pub fn capacity(bytes: u64) -> String {
     let v = bytes as f64;
@@ -153,6 +183,29 @@ mod tests {
         assert_eq!(gb((2.5 * GIB) as u64), "2.5 GB");
         assert_eq!(gb((23.4 * GIB) as u64), "23 GB");
         assert_eq!(gb(0), "0.0 GB");
+    }
+
+    #[test]
+    fn only_abnormal_states_are_notable() {
+        for ordinary in ["Sleeping", "Runnable", "Running", "Idle"] {
+            assert!(!notable_status(ordinary), "{ordinary} should be hidden");
+        }
+        // A zombie has exited but its parent never reaped it; a stopped
+        // process is suspended. Both should stand out.
+        for odd in ["Zombie", "Stopped", "Dead", "UninterruptibleDiskSleep"] {
+            assert!(notable_status(odd), "{odd} should be shown");
+        }
+        // Unrecognised states are surfaced rather than swallowed.
+        assert!(notable_status("SomethingNew"));
+    }
+
+    #[test]
+    fn process_memory_stays_legible_at_every_scale() {
+        // The common case: a median process is tens of megabytes, and in GB
+        // it would read "0.0 GB" — indistinguishable from its neighbours.
+        assert_eq!(memory((10.0 * MIB) as u64), "10 MB");
+        assert_eq!(memory((885.0 * MIB) as u64), "885 MB");
+        assert_eq!(memory((2.5 * GIB) as u64), "2.5 GB");
     }
 
     #[test]

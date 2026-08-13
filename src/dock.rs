@@ -73,7 +73,9 @@ pub fn suppress_regular_policy() {
     // SAFETY: `replacement` has the signature the runtime expects for this
     // selector, and forwards to the original for every policy it doesn't drop.
     unsafe {
-        method.set_implementation(std::mem::transmute::<SetActivationPolicyFn, Imp>(replacement));
+        method.set_implementation(std::mem::transmute::<SetActivationPolicyFn, Imp>(
+            replacement,
+        ));
     }
 }
 

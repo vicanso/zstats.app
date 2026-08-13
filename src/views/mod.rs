@@ -126,7 +126,11 @@ fn content(state: &ZStatsAppState) -> AnyElement {
     };
 
     div()
-        .id("panel-body")
+        // Keyed per tab: gpui stores scroll offset against the element id, so
+        // one shared id would carry the previous tab's position over to the
+        // next. Distinct ids also mean returning to a tab restores where it
+        // was left, rather than jumping to the top.
+        .id(("panel-body", state.tab().index()))
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
@@ -151,7 +155,6 @@ fn footer() -> AnyElement {
         .pb(px(6.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
-        .bg(theme::bg_footer())
         .child(
             div()
                 .id("github")

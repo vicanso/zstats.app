@@ -5,15 +5,16 @@ use super::widgets::{self, card};
 use crate::font;
 use crate::format;
 use crate::i18n;
-use rust_i18n::t;
 use crate::state::{Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, div, px,
 };
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use rust_i18n::t;
 use zstats::snapshot::{CpuSnapshot, MemorySnapshot};
 
 /// How many processes the first panel names. Enough to answer "who's
@@ -41,19 +42,26 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 /// a glance at the menu bar almost never needs them.
 fn top_cpu(state: &ZStatsAppState) -> AnyElement {
     let Some(tick) = state.latest() else {
-        return widgets::empty_card(i18n::tr("overview.top_cpu"), i18n::tr("common.waiting_sample"));
+        return widgets::empty_card(
+            i18n::tr("overview.top_cpu"),
+            i18n::tr("common.waiting_sample"),
+        );
     };
     let Some(mut rows) = processes::ranked_live(tick) else {
-        return widgets::empty_card(i18n::tr("overview.top_cpu_off"), i18n::tr("overview.top_cpu_off_body"));
+        return widgets::empty_card(
+            i18n::tr("overview.top_cpu_off"),
+            i18n::tr("overview.top_cpu_off_body"),
+        );
     };
     rows.truncate(TOP_N);
+    let n = rows.len();
 
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("overview.top_cpu"),
             Some(top_cpu_all()),
         ))
-        .children(rows.into_iter().map(|(p, avg)| {
+        .children(rows.into_iter().enumerate().map(|(i, (p, avg))| {
             let hot = avg > processes::HOT_PERCENT;
             h_flex()
                 .items_center()
@@ -61,8 +69,9 @@ fn top_cpu(state: &ZStatsAppState) -> AnyElement {
                 .gap(px(8.))
                 .px(px(13.))
                 .py(px(5.))
-                .border_b(px(1.))
-                .border_color(theme::border_subtle())
+                .when(i + 1 < n, |d| {
+                    d.border_b(px(1.)).border_color(theme::border_subtle())
+                })
                 .child(
                     div()
                         .flex_1()
@@ -121,17 +130,15 @@ fn processor(cpu: &CpuSnapshot) -> AnyElement {
         None => widgets::note(i18n::tr("overview.freq_unknown")),
     };
     let mut body = card()
-        .child(widgets::card_header(i18n::tr("overview.processor"), Some(header_right)))
-        .child(
-            h_flex()
-                .items_end()
-                .mt(px(4.))
-                .child(widgets::big_number(
-                    format::whole_pct(cpu.usage_percent),
-                    "%",
-                    20.,
-                )),
-        );
+        .child(widgets::card_header(
+            i18n::tr("overview.processor"),
+            Some(header_right),
+        ))
+        .child(h_flex().items_end().mt(px(4.)).child(widgets::big_number(
+            format::whole_pct(cpu.usage_percent),
+            "%",
+            20.,
+        )));
 
     // Apple Silicon and friends: usage split by performance cluster.
     if let Some(levels) = cpu.perf_levels.as_ref().filter(|l| l.len() > 1) {
@@ -230,11 +237,18 @@ fn memory(mem: &MemorySnapshot) -> AnyElement {
     // kernel says pressure is actually up — a red tail on a healthy Mac
     // reads as an error.
     let pressure_hot = mem.pressure_level.is_some_and(|l| l >= 2);
+    // Three rungs that stay distinct as both a 6px bar slice and a
+    // legend chip: ink (used) → muted (compressed) → faint (free).
+    // `text_dim` sat too close to `text_faint` and the two dots
+    // collapsed into one grey.
+    let used_fill = Hsla::from(theme::ink());
     let compressed_fill = Hsla::from(if pressure_hot {
         theme::accent()
     } else {
-        theme::text_dim()
+        theme::text_muted()
     });
+    let free_fill = Hsla::from(theme::text_faint());
+    let free_w = (1.0 - resident_w - comp_w).max(0.0);
 
     let mut rows = vec![
         (i18n::tr("overview.used"), format::gb(mem.used_bytes)),
@@ -257,7 +271,7 @@ fn memory(mem: &MemorySnapshot) -> AnyElement {
     rows.push((i18n::tr("overview.total"), format::gb(mem.total_bytes)));
 
     let mut legend = vec![(
-        Hsla::from(theme::ink()),
+        used_fill,
         i18n::tr("overview.used").into(),
         i18n::tr("overview.used_tip").into(),
     )];
@@ -269,7 +283,7 @@ fn memory(mem: &MemorySnapshot) -> AnyElement {
         ));
     }
     legend.push((
-        Hsla::from(theme::text_faint()),
+        free_fill,
         i18n::tr("overview.free").into(),
         i18n::tr("overview.free_tip").into(),
     ));
@@ -313,23 +327,19 @@ fn memory(mem: &MemorySnapshot) -> AnyElement {
                         .text_size(px(11.))
                         .text_color(theme::text_muted())
                         .child(
-                            t!(
-                                "overview.available_of",
-                                total = format::gb(mem.total_bytes)
-                            )
-                            .to_string(),
+                            t!("overview.available_of", total = format::gb(mem.total_bytes))
+                                .to_string(),
                         ),
                 ),
         )
-        .child(
-            div().mt(px(10.)).child(widgets::stacked_meter(
-                vec![
-                    (resident_w, Hsla::from(theme::ink())),
-                    (comp_w, compressed_fill),
-                ],
-                6.,
-            )),
-        )
+        .child(div().mt(px(10.)).child(widgets::stacked_meter(
+            vec![
+                (resident_w, used_fill),
+                (comp_w, compressed_fill),
+                (free_w, free_fill),
+            ],
+            6.,
+        )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
         .child(widgets::kv_columns(rows))
         .into_any_element()

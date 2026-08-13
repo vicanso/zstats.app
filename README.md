@@ -28,7 +28,8 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 - **毛玻璃**：设计稿是实心 `#09090b`，这里保留 vibrancy，观感更通透。卡片和 tab 槽用半透明 fill，让 material 透出来。
 - **导航**：设计稿是 4×2 缩写文字（Over / Sens / Conf）。285px 塞不下 8 个全名，缩写也不像 macOS，所以改成单行图标 + tooltip。
 - **字体**：系统字体替代设计指定的 Archivo。
-- **Config tab 只读**。`reload_settings()` 只对 `[alerts]` 生效，而 `[collector]` 开关必须重建 `Monitor`（速率基线会丢），所以不做成可写。改配置走 zstats CLI 或直接编辑 config.toml。
+- **Config tab 只读**。`reload_settings()` 只对 `[alerts]` 生效，而 `[collector]` 开关必须重建 `Monitor`（速率基线会丢），所以不做成可写。改采集开关走 zstats CLI 或直接编辑 config.toml。单个程序的告警阈值可以在 Alerts 卡片上改：写入 `~/.zstats/config.toml` 的 per-name override，采集线程下一次循环 `reload_settings()`。
+- **系统通知**。告警触发时用 [`notify-rust`](https://crates.io/crates/notify-rust) 发一条原生横幅。macOS 走 `NSUserNotification`，后台线程 `wait_for_action` 等点击。不要调用它的 `set_application` / `get_bundle_identifier_or_default`：后者是 AppleScript 按名字找应用，`cargo run` 没有对应 `.app` 时会弹出 “Where is …?”。打包后的 ZStats.app 自带 `CFBundleIdentifier`，横幅会挂在应用自己名下。系统横幅的外观不能自定义。点击横幅会打开 popover 并切到 Alerts 页。
 - **Apps 展开显示聚合详情而非成员进程列表**。`ProcessGroupSnapshot` 只给出整棵树的汇总，不返回成员清单。
 - 设计稿里的假菜单栏和右下角说明文字不实现 —— 那是设计稿自己的展示环境。
 
@@ -49,6 +50,7 @@ make release  # cargo build --release
 - `cx.set_quit_mode(QuitMode::Explicit)` —— gpui 默认在非 macOS 平台关掉最后一个窗口就退出进程（`QuitMode::Default`），零窗口的启动状态会直接退出，所以必须显式改成"只有 `cx.quit()` 才退出"。
 - **失焦自动收起**（仅 release）：`Context::observe_window_activation` 里发现窗口失活就 `remove_window()`。gpui 没有隐藏单个窗口的 API，收起只能是真关闭。`was_active` 标志用来跳过窗口刚创建、还没首次激活时的那一次失活回调，否则窗口会一闪即逝。`cargo run` / debug 构建失焦不关，方便对着 IDE 看。
 - **托盘点击的 toggle**：点图标会先让窗口失焦（触发自动收起），点击事件随后才到。所以 `TOGGLE_GRACE`（300ms）内如果刚发生过自动收起，这次点击就不再开窗 —— 于是表现为 toggle。`took_recent_auto_hide` 会取走标记，只生效一次。
+- **托盘图标**：`assets/icons/trending-up.svg` 在启动时由 `resvg` 光栅化。`tray-icon` **不支持 SVG**，只接受原始 RGBA（它内部再编码成 PNG 交给 `NSImage`）。两个要点：macOS 会把图标缩放到 **18pt 高**，所以按 2x（36px）出图才不会在 Retina 上发虚；注册为 template image 后**只有 alpha 通道有效**，颜色由系统按明暗模式重新上色，因此渲染后把 RGB 抹成黑色。另外 lucide 的 `stroke="currentColor"` 是 CSS 上下文关键字，usvg 解析不了，加载前需替换成具体颜色。有单测校验光栅化结果的覆盖率——解析失败会得到一张全透明位图，不报任何错，只表现为图标消失。
 - **托盘交互**：左键单击直接显示窗口，右键弹出菜单（Show Window / Quit）。实现上是 `with_menu_on_left_click(false)` 关掉左键弹菜单，再监听 `TrayIconEvent::Click`；`MenuEvent` 和 `TrayIconEvent` 各用一个阻塞线程，汇入同一个 `smol::channel`。
 - **无标题栏**：macOS 上 `WindowOptions.titlebar` 留 `None`。gpui 此时用 `Titled | FullSizeContentView` 的 style mask，且**不含** `Closable`/`Miniaturizable`/`Resizable`（所以没有 traffic light、也不可缩放），同时照样会设 `titlebarAppearsTransparent` + `titleHidden`（`gpui_macos/src/window.rs:815,977`）。
 
@@ -59,13 +61,17 @@ make release  # cargo build --release
 - **退出按钮**：面板 footer 右侧。accessory app 没有应用菜单栏、没有 Dock 图标可右键、窗口也没有关闭按钮，所以退出必须有个看得见的入口（托盘右键菜单的 Quit 仍在）。
 - **窗口定位**：`TrayIconEvent::Click` 带的图标矩形是物理像素，换算成逻辑坐标后，窗口以图标为中心水平居中、下方留 6px，再夹进该显示器的 `visible_bounds()`（已排除菜单栏和 Dock）—— 只有居中会越界时才贴边。纯几何部分是 `anchored_origin()`，单元测试覆盖了居中 / 贴左 / 贴右 / 窗口超高四种情况。
 
-  gpui **无法移动已存在的窗口**（`PlatformWindow` 只有 `resize`，没有 set position），所以位置只能在 `open_window` 时定。`show_main_window` 发现窗口不在目标位置时会 `remove_window` 再重建（判断带 1px 容差，避免合成器亚像素抖动导致每次都重建）。
+  位置通过 `window_ext::show_at()` 在每次唤起时设置，不再需要重建窗口。
 - **毛玻璃**：`WindowOptions::window_background = WindowBackgroundAppearance::Blurred`，gpui 在 macOS 上用 `NSVisualEffectView` 实现，是系统原生 vibrancy。仅 macOS 启用：其他平台 `Blurred` 文档标注"not always supported"，退化后是纯透明，会直接看到桌面。
 
   想看到模糊，上面盖的每一层都必须让路，缺一层就是"完全没有透明效果"：
 
   1. `Root::render` 会铺一层不透明的 `theme.tokens.background`（`gpui-component/crates/ui/src/root.rs:566`）。它的 `refine_style` 排在那句 `bg` 之后，所以 `root.bg(transparent_black())` 能覆盖掉。
-  2. 根视图自己的着色层要**很淡**。`BACKGROUND_OPACITY = 0.18` —— 主题背景是 `l ≈ 0.04` 的近黑色，叠在本来就暗的 material 上，稍微浓一点（试过 0.55）就把模糊压成纯黑，看起来和不透明一模一样。AppKit 自己的暗色面板也是只上很淡的一层色，主要靠 material。
+  2. 根视图自己的着色层浓度，深浅色分开定值。
+
+     深色 `BACKGROUND_OPACITY_DARK = 0.55`：主题背景是 `l ≈ 0.04` 的近黑，叠在本来就暗的 material 上，太浓会把模糊压成纯黑。
+
+     浅色 `BACKGROUND_OPACITY_LIGHT = 0.80`：比深色浓，因为浅色面板是深色文字——material 透得越多，桌面细节越会跟着穿上来跟字打架。0.8 是实测下来既看得出模糊、文字又不受干扰的点。
   3. material：gpui 硬编码 `NSVisualEffectMaterial::Selection`（选中高亮用的），`use_popover_material()` 在窗口首帧把它改成 `Popover`，也就是 AppKit 给菜单栏面板用的那个。
 - **无 Dock 图标**（`src/dock.rs`）：有**两个**独立来源会把图标放进 Dock，各治一个，少一个就会闪。
 
@@ -99,10 +105,18 @@ make release  # cargo build --release
 - 改用 StatusNotifierItem（KDE/GNOME 走 D-Bus 协议）的纯 Rust 实现，绕开 GTK；
 - 或在 Linux 上放弃托盘，退化成普通窗口应用（关窗即退出，即 `QuitMode::LastWindowClosed`）。
 
-### 非 macOS 平台多显示器不同 DPI 时托盘定位会偏
+### 多显示器：gpui 的 display bounds 不可用
 
-macOS 已经通过 AppKit 读到菜单栏那块屏的真实 scale factor，不受影响。其他平台还在用主窗口的 `window.scale_factor()` 兜底，窗口在 1x 屏、托盘在 2x 屏（或反过来）时换算会用错倍率。等真正支持 Windows / Linux 托盘时再补对应的平台实现。
+`gpui_macos` 的 `PlatformDisplay::bounds()` 拿到 `CGDisplayBounds`（全局坐标）后把 `origin` 丢掉设成 `Default::default()`，于是**所有显示器都报告为 `(0, 0)`**，多屏下彼此无法区分——它自己的注释还写着"0 is the top left of the primary display"。
 
-### 托盘图标是占位图形
+后果是按位置查找屏幕永远命中第一块，面板被钉死在主显示器上。所以 macOS 走 `window_ext::visible_bounds_containing()`，直接遍历 `NSScreen`。实测两块 4K 屏：gpui 报 `(0,0 1920x1080)` ×2，AppKit 报主屏 `(71,30 1849x1050)`、副屏 `(1920,30 1920x1050)`。
 
-`src/tray.rs` 的 `placeholder_icon()` 用代码画了一个 22×22 的柱状图，注册为 macOS template image（只用 alpha 通道，系统按明暗模式自动反色）。有真实图标后换成 `include_bytes!("../assets/icon.png")` + `image::load_from_memory`，并加上 `image` 依赖。
+其他平台仍用 `cx.displays()`。
+
+### 多显示器不同 DPI 时托盘定位会偏
+
+托盘报的是物理像素，换算成逻辑坐标需要 scale factor，而选哪块屏的 scale 又得先知道图标在哪块屏——互为前提。现在统一用 `screens()[0]`（菜单栏所在屏）的倍率，所以**多屏同 DPI 时正确**，混合 DPI（比如内置 Retina + 外接 1x）时托盘在副屏的定位会偏。彻底修需要按屏试算再回选。其他平台还在用主窗口的 `window.scale_factor()` 兜底。
+
+### 应用图标（.icns）仍是占位图形
+
+`icons/zstats.icns` 是脚本生成的柱状图占位（源文件 `icons/zstats-1024.png`），换成真实图标后 `make bundle` 会自动带上。托盘图标已改用 `assets/icons/trending-up.svg`。

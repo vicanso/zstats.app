@@ -3,11 +3,11 @@
 //! Excluded on Linux (see `README.md`): `tray-icon` drives its menu from a GTK
 //! main loop there, which can't coexist with gpui's own event loop.
 
-use crate::format;
 use crate::i18n;
 use crate::state::TrayAnchor;
 use crate::{APP_NAME, show_main_window, toggle_main_window};
 use gpui::{App, Global};
+use resvg::{tiny_skia, usvg};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -16,16 +16,31 @@ const MENU_ID_QUIT: &str = "quit";
 
 /// Keeps the tray alive for the process lifetime — dropping a `TrayIcon`
 /// removes it from the menu bar.
-struct TrayHandle(TrayIcon);
+struct TrayHandle {
+    icon: TrayIcon,
+    /// Last title actually pushed to AppKit, so an unchanged reading is not
+    /// re-applied — see `set_cpu_title`.
+    last_title: std::cell::RefCell<String>,
+}
 
 impl Global for TrayHandle {}
 
 /// Mirror the current CPU load next to the menu bar icon, which is what the
 /// design shows in its tray strip. A no-op if the tray failed to build.
 pub fn set_cpu_title(cx: &App, cpu_percent: f32) {
-    if let Some(handle) = cx.try_global::<TrayHandle>() {
-        handle.0.set_title(Some(format::pct(cpu_percent)));
+    let Some(handle) = cx.try_global::<TrayHandle>() else {
+        return;
+    };
+    // Whole percent: the menu bar is cramped, and a decimal would make the
+    // title twitch on every sample even when load is flat.
+    let title = format!("{cpu_percent:.0}%");
+    let mut last = handle.last_title.borrow_mut();
+    if *last == title {
+        // Setting a title re-lays out the menu bar, so skip the no-ops.
+        return;
     }
+    handle.icon.set_title(Some(&title));
+    *last = title;
 }
 
 enum TrayAction {
@@ -37,27 +52,65 @@ enum TrayAction {
     Quit,
 }
 
-/// Placeholder icon: a 22×22 bar chart drawn in code so there's no binary
-/// asset to carry yet. It's registered as a macOS template image, so only the
-/// alpha channel matters — the system recolours it for light / dark menu bars.
-/// Replace with `include_bytes!("../assets/icon.png")` + `image::load_from_memory`
-/// once there's real artwork.
-fn placeholder_icon() -> Option<Icon> {
-    const SIZE: u32 = 22;
-    const BASELINE: u32 = 18;
-    /// (left edge, width, top edge) — three bars of rising height.
-    const BARS: [(u32, u32, u32); 3] = [(4, 4, 12), (9, 4, 8), (14, 4, 4)];
+/// The menu bar icon, rasterised from the bundled SVG.
+///
+/// A CPU die rather than a trend arrow: an arrow makes a claim about the
+/// data ("the numbers are going up"), while the subject itself does not.
+///
+/// `tray-icon` takes raw RGBA only — it has no SVG support and just re-encodes
+/// whatever it is given as a PNG for `NSImage`. macOS then scales that to 18pt
+/// tall (`platform_impl/macos/mod.rs`), so the bitmap is produced at 2x to stay
+/// sharp on Retina.
+fn tray_icon() -> Option<Icon> {
+    Icon::from_rgba(rasterise_icon(ICON_SIZE)?, ICON_SIZE, ICON_SIZE).ok()
+}
 
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    for (x0, width, y0) in BARS {
-        for y in y0..BASELINE {
-            for x in x0..x0 + width {
-                let i = ((y * SIZE + x) * 4) as usize;
-                rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
-            }
-        }
+/// Rendered at 2x the 18pt macOS uses, so no upscaling happens.
+const ICON_SIZE: u32 = 36;
+
+/// Rasterise the bundled SVG to straight RGBA. Split out from [`tray_icon`]
+/// so the result can be inspected in a test — a silently empty bitmap would
+/// otherwise just look like a missing icon at runtime.
+fn rasterise_icon(size: u32) -> Option<Vec<u8>> {
+    rasterise_icon_scaled(size, GLYPH_SCALE)
+}
+
+/// Share of the canvas the glyph occupies; the rest is transparent margin.
+///
+/// lucide draws to the edges of its 24x24 viewBox, and macOS scales the whole
+/// bitmap to 18pt — so at 1.0 the glyph is a full 18pt tall and outweighs the
+/// ~12pt title beside it. System menu bar icons inset their artwork instead.
+const GLYPH_SCALE: f32 = 0.78;
+
+fn rasterise_icon_scaled(size: u32, glyph_scale: f32) -> Option<Vec<u8>> {
+    // lucide ships `stroke="currentColor"`, which is a CSS-context keyword
+    // usvg cannot resolve on its own. The colour is irrelevant anyway: as a
+    // template image only the alpha channel survives.
+    let svg = include_str!("../assets/icons/cpu.svg").replace("currentColor", "#000000");
+
+    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
+    let mut pixmap = tiny_skia::Pixmap::new(size, size)?;
+    let source = tree.size();
+    let longest = source.width().max(source.height());
+    let scale = size as f32 * glyph_scale / longest;
+    // Centre what is left over, so the margin is even on all four sides.
+    let inset = (size as f32 - longest * scale) / 2.0;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_translate(inset, inset).pre_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    let mut rgba = pixmap.take();
+    // Flatten to black and keep only alpha. tiny-skia hands back premultiplied
+    // colour, which `Icon::from_rgba` would read as straight — moot here,
+    // since a template image is recoloured by the system from alpha alone.
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel[0] = 0;
+        pixel[1] = 0;
+        pixel[2] = 0;
     }
-    Icon::from_rgba(rgba, SIZE, SIZE).ok()
+    Some(rgba)
 }
 
 fn build_menu() -> Menu {
@@ -88,7 +141,7 @@ pub fn init_tray(cx: &mut App) {
         // The `TrayIconEvent::Click` is emitted either way — this only stops
         // the menu from popping up over it.
         .with_menu_on_left_click(false);
-    if let Some(icon) = placeholder_icon() {
+    if let Some(icon) = tray_icon() {
         builder = builder.with_icon(icon);
         #[cfg(target_os = "macos")]
         {
@@ -104,7 +157,10 @@ pub fn init_tray(cx: &mut App) {
             return;
         }
     };
-    cx.set_global(TrayHandle(tray));
+    cx.set_global(TrayHandle {
+        icon: tray,
+        last_title: std::cell::RefCell::new(String::new()),
+    });
 
     // Both receivers only block, so park a dedicated thread on each (zero CPU
     // while idle) and funnel their events onto the main-thread executor.
@@ -165,4 +221,28 @@ pub fn init_tray(cx: &mut App) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_rasterises_to_a_visible_glyph() {
+        let rgba = rasterise_icon(ICON_SIZE).expect("icon should rasterise");
+        assert_eq!(rgba.len() as u32, ICON_SIZE * ICON_SIZE * 4);
+
+        let opaque = rgba.chunks_exact(4).filter(|px| px[3] > 32).count();
+        let total = (ICON_SIZE * ICON_SIZE) as usize;
+        let coverage = opaque as f32 / total as f32;
+
+        // A failed parse (lucide's `currentColor`, a bad viewBox, a scale of
+        // zero) yields a fully transparent bitmap that raises no error and
+        // simply shows as a missing icon. A stroke-only glyph covers a modest
+        // share of its box, so bracket it on both sides.
+        assert!(
+            (0.02..0.50).contains(&coverage),
+            "unexpected glyph coverage {coverage:.3} — SVG likely failed to render"
+        );
+    }
 }
