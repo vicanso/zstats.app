@@ -1,0 +1,290 @@
+name: "Publish"
+
+# Adapted from vicanso/zedis's publish workflow, trimmed to macOS only:
+# this app is a macOS menu-bar panel — the other platforms' cfg branches
+# have never been run (see CLAUDE.md "Platform reality"), so there is
+# nothing to ship for them.
+#
+# Required repository secrets:
+#   MACOS_CERTIFICATE       base64-encoded Developer ID Application .p12
+#   MACOS_CERTIFICATE_PWD   password of that .p12
+#   MACOS_CERTIFICATE_NAME  signing identity, e.g. "Developer ID Application: … (TEAMID)"
+#   AC_USERNAME             Apple ID used for notarization
+#   AC_PASSWORD             app-specific password for that Apple ID
+#   AC_TEAM_ID              Apple Developer team id
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  schedule:
+    # Daily nightly at 18:00 UTC (02:00 Beijing). Skipped when main has no
+    # new commits since the last nightly — see the gate in prepare_vars.
+    - cron: "0 18 * * *"
+  # Manual nightly (always builds, even without new commits).
+  workflow_dispatch:
+
+# The default GITHUB_TOKEN is enough for everything this workflow does
+# (create/delete releases and tags in this repo); no PAT needed.
+permissions:
+  contents: write
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.97.1
+  # [package.metadata.bundle] name in Cargo.toml — names the .app.
+  APP_NAME: zstats
+
+jobs:
+  prepare_vars:
+    runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.date.outputs.date }}
+      should_build: ${{ steps.gate.outputs.should_build }}
+    steps:
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d %H:%M')" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v7
+      - name: Check tag matches Cargo.toml version
+        # Catches a forgotten version bump before an hour of signing and
+        # notarization is spent on a release that claims the wrong version.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          ver="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          case "$GITHUB_REF_NAME" in
+            "v$ver"*) echo "tag $GITHUB_REF_NAME matches Cargo.toml version $ver" ;;
+            *) echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $ver" >&2; exit 1 ;;
+          esac
+      - name: Skip scheduled run when main has no new commits
+        id: gate
+        run: |
+          should_build=true
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # The nightly tag records the commit the previous nightly was
+            # built from (re-created below at $GITHUB_SHA on every build).
+            nightly_sha=$(gh api "repos/${{ github.repository }}/git/refs/tags/nightly" -q .object.sha 2>/dev/null || echo "")
+            if [ "$nightly_sha" = "${{ github.sha }}" ]; then
+              echo "main unchanged since last nightly ($nightly_sha); skipping build"
+              should_build=false
+            fi
+          fi
+          echo "should_build=$should_build" >> $GITHUB_OUTPUT
+      - name: Reset nightly release
+        # Sweep by id via the API, not `gh release delete nightly`: that
+        # removes only the published release, while GitHub allows any
+        # number of *drafts* to share a tag_name, and a job that died
+        # mid-publish can leave orphan drafts behind (this fed a zedis
+        # nightly failure). Then re-create the release up front, before
+        # any build job runs: `--target $GITHUB_SHA` re-points the
+        # nightly tag at today's commit (which is what the gate above
+        # compares against), and having the release exist first means the
+        # build jobs only ever `gh release upload` — no create race.
+        if: github.ref == 'refs/heads/main' && steps.gate.outputs.should_build == 'true'
+        run: |
+          ids="$(
+            gh api --paginate "repos/${{ github.repository }}/releases" \
+              -q '.[] | select(.tag_name == "nightly") | .id' 2>/dev/null || true
+          )"
+          for id in $ids; do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" || true
+          done
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/nightly" 2>/dev/null || true
+          gh release create nightly --prerelease --target "$GITHUB_SHA" \
+            --title "Development Build (Nightly)" \
+            --notes "Rolling build from the latest main branch. Build date: ${{ steps.date.outputs.date }}"
+      - name: Pre-create draft release for tag
+        # Two arch jobs upload in parallel; creating the release here,
+        # before either runs, removes the create race. Skip when ANY
+        # release for the tag already exists — including a hand-published
+        # one (releasing via the GitHub UI is what pushes the tag) and
+        # the draft of a re-run; `gh release create` alone would still
+        # add a draft next to a published release, and the uploads would
+        # land on that draft instead of the published release.
+        #
+        # Probe via the Releases API (paginated), not `gh release list |
+        # grep` — list+grep has missed published releases before and then
+        # left empty untagged drafts beside the real release.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="$GITHUB_REF_NAME"
+          ids="$(
+            gh api --paginate "repos/${{ github.repository }}/releases" \
+              -q ".[] | select(.tag_name == \"${tag}\") | .id" 2>/dev/null || true
+          )"
+          if [ -n "$ids" ]; then
+            echo "release for $tag already exists; skipping"
+          else
+            gh release create "$tag" --draft --title "$tag" --notes ""
+          fi
+
+  macos:
+    needs: prepare_vars
+    if: needs.prepare_vars.outputs.should_build == 'true'
+    name: macos-${{ matrix.dmg_suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            dmg_suffix: aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            dmg_suffix: x86_64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-build-${{ matrix.target }}
+      - name: install tools
+        # The cache restore above runs first so `cargo install` no-ops
+        # when rust-cache restored the same cargo-bundle version to
+        # ~/.cargo/bin.
+        #
+        # --locked + pinned version: an unlocked install resolves the
+        # tool's deps fresh, so a broken transitive release would break
+        # the nightly (a since-yanked zune-core release did exactly that
+        # to zedis).
+        run: |
+          cargo install --locked cargo-bundle@0.11.0
+          brew install create-dmg
+      - name: Import Code-Signing Certificates
+        env:
+          p12_certificate: ${{ secrets.MACOS_CERTIFICATE }}
+          p12_password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          # create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+
+          # import certificate
+          echo "$p12_certificate" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
+
+          # prevent system popup asking for password
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
+
+          # set as default keychain
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+      - name: release
+        run: cargo bundle --release --target ${{ matrix.target }}
+      - name: write LSUIElement into Info.plist
+        # `make bundle` does this for local builds but hard-codes the
+        # no-`--target` bundle path, so CI replicates it here. LSUIElement
+        # is what keeps the Dock icon from flashing on launch:
+        # hide_dock_icon() only runs ~50ms in, after gpui has built
+        # NSApplication and started the runloop, and the icon would sit
+        # in the Dock for all of it. Must happen BEFORE codesign — editing
+        # Info.plist afterwards invalidates the signature.
+        run: |
+          PLIST="target/${{ matrix.target }}/release/bundle/osx/${{ env.APP_NAME }}.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$PLIST" >/dev/null 2>&1 || true
+          /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST"
+          echo "LSUIElement=true -> $PLIST"
+      - name: sign app
+        env:
+          CERT_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+        run: |
+          echo "Signing App with identity: $CERT_NAME"
+          APP="target/${{ matrix.target }}/release/bundle/osx/${{ env.APP_NAME }}.app"
+          # --options runtime: enable Hardened Runtime (required for
+          # notarization). No entitlements file: the app needs none —
+          # no JIT, no Apple Events, plain Metal rendering.
+          # --timestamp contacts Apple's timestamp server, which is
+          # occasionally flaky ("A timestamp was expected but was not
+          # found"); retry before failing the whole release.
+          for attempt in 1 2 3 4 5; do
+            if codesign --force --deep --verbose --options runtime --timestamp \
+              --sign "$CERT_NAME" \
+              "$APP"; then
+              echo "codesign succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "codesign still failing after $attempt attempts" >&2
+              exit 1
+            fi
+            echo "codesign attempt $attempt failed (timestamp server?); retrying in 15s…"
+            sleep 15
+          done
+          # Fail fast if no secure timestamp was embedded (notarization needs it).
+          if ! codesign -dvv "$APP" 2>&1 | grep -q "^Timestamp="; then
+            echo "no secure timestamp embedded in the signature" >&2
+            exit 1
+          fi
+      - name: create dmg
+        run: |
+          mkdir -p release
+          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
+          APP_PATH="target/${{ matrix.target }}/release/bundle/osx/${{ env.APP_NAME }}.app"
+          create-dmg \
+            --volname "${{ env.APP_NAME }} Installer" \
+            --window-pos 200 120 \
+            --window-size 800 400 \
+            --icon-size 100 \
+            --icon "${{ env.APP_NAME }}.app" 200 190 \
+            --hide-extension "${{ env.APP_NAME }}.app" \
+            --app-drop-link 600 185 \
+            "$DMG_NAME" \
+            "$APP_PATH"
+      - name: notarize dmg
+        env:
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: |
+          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
+          echo "Submitting DMG for notarization..."
+          xcrun notarytool submit "$DMG_NAME" \
+            --apple-id "$AC_USERNAME" \
+            --password "$AC_PASSWORD" \
+            --team-id "$AC_TEAM_ID" \
+            --wait
+      - name: wait for propagation
+        run: sleep 30
+      - name: staple DMG
+        run: |
+          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
+          xcrun stapler staple "$DMG_NAME"
+      - name: upload asset (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        # The release (draft or hand-published) is guaranteed to exist —
+        # prepare_vars created it before this job started — so a plain
+        # upload is race-free. --clobber makes re-runs idempotent.
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg" --clobber
+      - name: upload asset (nightly)
+        # main pushes only — a tag build must not overwrite the nightly
+        # release with stable-build artifacts.
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release upload nightly \
+            "release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg" --clobber
+
+  # Aggregate both arches' hashes into a single SHA256SUMS on the tagged
+  # release. Pulls the dmgs back off the release rather than passing
+  # artifacts between jobs — what gets hashed is exactly what users will
+  # download.
+  checksums:
+    needs: [macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: build and upload SHA256SUMS
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --pattern '*.dmg' --dir assets
+          (cd assets && sha256sum *.dmg | sort -k2 > ../SHA256SUMS)
+          echo "--- SHA256SUMS ---"; cat SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
