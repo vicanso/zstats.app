@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 use zstats::Monitor;
+use zstats::settings::FileConfig;
 
 /// Set by the Alerts tab after it writes `[alerts]` overrides. The
 /// collector thread consumes it on the next loop so windows and
@@ -44,10 +45,10 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(5);
 /// cadence even with the panel closed.
 ///
 /// This can only react to *sustained* load. CPU percent is the average
-/// between two refreshes, so at the idle cadence a 3-second spike is
-/// flattened across 15 seconds and never reaches the bar — the mechanism
-/// suppresses its own trigger. Compilations and encodes are caught; brief
-/// spikes are not.
+/// between two refreshes, so at [`IDLE_INTERVAL`] a 3-second spike is
+/// flattened across the whole 5 seconds and may never reach the bar — the
+/// mechanism suppresses its own trigger. Compilations and encodes are caught;
+/// brief spikes are not.
 const BUSY_CPU_PERCENT: f32 = 30.0;
 
 /// How often to sweep for abnormal processes.
@@ -93,6 +94,20 @@ impl CollectorPace {
     }
 }
 
+/// Overrides the file applies only to this panel's collector.
+///
+/// `collect-process-disk-io` defaults off in zstats so the CLI stays
+/// cheap. The Apps tab is built around per-tree read/write rates, and
+/// painting `IO —` on every row reads as "these apps do no disk" rather
+/// than "we never asked". Forced on here, not written back — `zstats
+/// serve` keeps the file's own default.
+fn with_panel_collector_overrides(mut settings: FileConfig) -> FileConfig {
+    let mut collector = settings.collector.unwrap_or_default();
+    collector.collect_process_disk_io = true;
+    settings.collector = Some(collector);
+    settings
+}
+
 /// Spawn the collector and the task that folds its output into the store.
 pub fn start(cx: &mut App) {
     let dir = zstats::settings::default_dir();
@@ -104,6 +119,7 @@ pub fn start(cx: &mut App) {
     let mut interval = DEFAULT_INTERVAL;
     match zstats::settings::load(&dir) {
         Ok(settings) => {
+            let settings = with_panel_collector_overrides(settings);
             interval = settings.daemon.interval.unwrap_or(DEFAULT_INTERVAL);
             cx.global::<ZStatsGlobalStore>()
                 .clone()
@@ -126,30 +142,43 @@ pub fn start(cx: &mut App) {
         // Shared with the zstats CLI on purpose: same config.toml, same
         // thresholds, same history. See README about running `zstats serve`
         // at the same time.
-        let mut monitor = match Monitor::new(&dir) {
+        // `with_settings` is fallible since zstats 0.4: it also reads
+        // `<config-dir>/template.toml`, and a template that failed to load
+        // would be a rule set that silently did not apply — so refusing to
+        // collect is the correct posture, same as a malformed config.toml.
+        let mut monitor = match zstats::settings::load(&dir).and_then(|settings| {
+            Monitor::with_settings(&dir, with_panel_collector_overrides(settings))
+        }) {
             Ok(monitor) => monitor,
             Err(e) => {
                 eprintln!("metrics collection unavailable ({}): {e}", dir.display());
                 return;
             }
         };
-        let mut busy = false;
         loop {
             if RELOAD.swap(false, Ordering::AcqRel)
                 && let Err(e) = monitor.reload_settings()
             {
                 eprintln!("reload_settings failed: {e}");
             }
-            match monitor.tick() {
+            // Derived fresh every round rather than carried across: a failed
+            // sample says nothing about load, and a stale `true` would hold
+            // the fast cadence indefinitely on a collector that has stopped
+            // returning anything to be busy about.
+            let busy = match monitor.tick() {
                 Ok(tick) => {
-                    busy = tick.snapshot.cpu.usage_percent >= BUSY_CPU_PERCENT;
+                    let busy = tick.snapshot.cpu.usage_percent >= BUSY_CPU_PERCENT;
                     if tx.send_blocking(tick).is_err() {
                         return; // receiver dropped — the app is going away
                     }
+                    busy
                 }
                 // One failed sample shouldn't end sampling.
-                Err(e) => eprintln!("collect failed: {e}"),
-            }
+                Err(e) => {
+                    eprintln!("collect failed: {e}");
+                    false
+                }
+            };
             let wait = if busy || visible.load(Ordering::Relaxed) {
                 interval
             } else {

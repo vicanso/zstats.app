@@ -42,9 +42,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .iter()
         .enumerate()
         .map(|(i, d)| {
-            let total = d.total_bytes.max(1);
-            let used = total.saturating_sub(d.available_bytes);
-            let used_pct = used as f32 / total as f32 * 100.0;
+            // The library's own figure, not ours: it is what the CLI paints
+            // and what the disk alert fires on, so recomputing it here could
+            // only ever produce a number that disagrees with both.
+            let used_pct = d.used_percent;
             // A full removable drive is normal; a full boot volume is not.
             let hot = used_pct > FULL_PERCENT && !d.is_removable;
 
@@ -137,7 +138,6 @@ fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
             .pl(px(7.))
             .pr(px(4.))
             .py(px(1.))
-            .cursor_pointer()
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .hover(|d| {
                 d.bg(theme::surface_raised())

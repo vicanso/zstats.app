@@ -68,6 +68,23 @@ pub fn gb(bytes: u64) -> String {
     }
 }
 
+/// Single-core CPU time as an amount, not a rate.
+///
+/// The unit people actually reason in is core-minutes and core-hours: "this
+/// spent 40 minutes of a core today" lands where "2 400 000 ms" does not.
+/// Seconds below a minute, because a short-lived process reporting "0m" would
+/// look like a bug.
+pub fn core_time(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// Whether a process state is worth showing.
 ///
 /// At any instant almost every process is asleep — on a 12-core machine with
@@ -156,6 +173,21 @@ pub fn ago(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The History tab's unit. Core-hours is how you reason about a day's
+    /// spending; milliseconds is not.
+    #[test]
+    fn core_time_reads_as_an_amount_at_every_scale() {
+        assert_eq!(core_time(0), "0s");
+        assert_eq!(core_time(45_000), "45s");
+        // Rolls to minutes exactly at 60s, not at 59.
+        assert_eq!(core_time(59_999), "59s");
+        assert_eq!(core_time(60_000), "1m");
+        assert_eq!(core_time(45 * 60_000), "45m");
+        assert_eq!(core_time(3_600_000), "1h 0m");
+        // 3h 20m — the shape a real day's top spender takes.
+        assert_eq!(core_time(12_000_000), "3h 20m");
+    }
 
     #[test]
     fn percentages_drop_the_decimal_once_past_100() {

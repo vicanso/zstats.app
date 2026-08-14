@@ -138,7 +138,6 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
     }
     div()
         .id("net-more")
-        .cursor_pointer()
         .flex_none()
         .rounded_full()
         .border_1()
@@ -148,6 +147,11 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
             theme::border_subtle()
         })
         .when(showing, |d| d.bg(theme::chip()))
+        // Only while off: the "on" fill is the state, and a hover that
+        // repainted it would read as the toggle having flipped.
+        .when(!showing, |d| {
+            d.hover(|d| d.bg(theme::surface_raised()).border_color(theme::border()))
+        })
         .px(px(7.))
         .py(px(1.))
         .text_size(px(9.))

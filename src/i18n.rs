@@ -23,10 +23,13 @@ pub fn detect() -> &'static str {
     }
 }
 
-/// Pin rust-i18n to the system language. Call once at startup, before the
-/// first `t!` / tray menu is built.
+/// Pin rust-i18n to the preferred language: the `app.toml` override when
+/// one is set, the system language otherwise. Call once at startup before
+/// the first `t!` / tray menu is built, and again whenever the preference
+/// changes — the whole panel repaints per tick, so re-pinning is all a
+/// live switch needs.
 pub fn init() {
-    rust_i18n::set_locale(detect());
+    rust_i18n::set_locale(crate::prefs::language().locale().unwrap_or_else(detect));
 }
 
 /// Look up a key in the active locale, falling back to English.

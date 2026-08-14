@@ -134,6 +134,34 @@ mod tests {
         assert!(backend.translate("en", "common.__missing__").is_none());
     }
 
+    /// A key present in one locale and missing from another does not fail —
+    /// `rust_i18n` silently serves the fallback, so the only symptom is one
+    /// stray English string in an otherwise translated panel. That is not
+    /// something review catches, hence this.
+    #[test]
+    fn every_locale_defines_the_same_keys() {
+        let backend = runtime_backend();
+        let keys = |locale: &str| -> std::collections::BTreeSet<String> {
+            backend
+                .messages_for_locale(locale)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, _)| k.into_owned())
+                .collect()
+        };
+        let en = keys("en");
+        assert!(!en.is_empty(), "en should not be empty");
+        for locale in backend.available_locales() {
+            let other = keys(&locale);
+            let missing: Vec<_> = en.difference(&other).collect();
+            let extra: Vec<_> = other.difference(&en).collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "locale {locale}: missing {missing:?}, unexpected {extra:?}"
+            );
+        }
+    }
+
     #[test]
     fn parses_only_the_touched_locale() {
         let backend = runtime_backend();

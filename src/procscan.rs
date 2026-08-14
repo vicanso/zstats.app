@@ -5,8 +5,9 @@
 //! consumes neither. Measured on a live machine, the abnormal processes ranked
 //! 435th, 589th and 591st by CPU — nowhere near the top 50.
 //!
-//! So this walks the whole table separately. It is far cheaper than a full
-//! sample: one `proc_listallpids` plus a small `proc_pidinfo` per pid, no
+//! So this walks the whole table separately, through `sysctl(KERN_PROC_ALL)` —
+//! not libproc, for the reasons on [`all_processes`]. It is far cheaper than a
+//! full metrics sample: one syscall and a linear scan of the result, with no
 //! CPU/memory accounting and nothing to diff against a previous sample.
 //!
 //! A zombie is a child that exited and whose parent never called `wait()`. It

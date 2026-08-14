@@ -8,21 +8,29 @@ mod confirm;
 mod dock;
 mod font;
 mod format;
+mod fullscan;
+mod history;
 mod i18n;
 mod i18n_loader;
 mod metrics;
 mod notify;
+mod placement;
+mod prefs;
 #[cfg(target_os = "macos")]
 mod procscan;
 mod state;
+#[cfg(target_os = "macos")]
+mod terminate;
 mod theme;
 #[cfg(not(target_os = "linux"))]
 mod tray;
 mod views;
+mod watch;
 #[cfg(target_os = "macos")]
 mod window_ext;
 
 use crate::assets::Assets;
+use crate::placement::{DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 
 // Pointed at the empty `locales_stub/` so the macro embeds no translations.
@@ -33,9 +41,9 @@ rust_i18n::i18n!(
     backend = crate::i18n_loader::runtime_backend()
 );
 use gpui::{
-    App, Bounds, Context, KeyBinding, Menu, MenuItem, Pixels, Point, QuitMode, SharedString, Size,
-    Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, actions, div, point, prelude::*, px, size,
+    App, Bounds, Context, KeyBinding, Menu, MenuItem, QuitMode, SharedString, Subscription, Window,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, size,
 };
 // macOS deliberately runs with `titlebar: None` — see `open_main_window`.
 #[cfg(not(target_os = "macos"))]
@@ -46,19 +54,11 @@ use std::time::Duration;
 
 /// Shown in the app menu, the tray tooltip, the task switcher and the Linux
 /// title bar.
-pub const APP_NAME: &str = "ZStats";
+pub const APP_NAME: &str = "zstats";
 /// Wayland `app_id` / X11 WM_CLASS — task switchers group windows by it and
 /// resolve the icon from the installed `.desktop` entry.
 const LINUX_APP_ID: &str = "com.github.vicanso.zstats";
 
-/// Menu-bar panel: 320px matches Control Center / Stats combined popovers
-/// and lets eight icon tabs breathe. Height covers the icon strip,
-/// Processor + Top CPU + Memory, and the footer without clipping.
-const DEFAULT_WINDOW_SIZE: (f32, f32) = (320., 640.);
-/// Fixed width — the layout is built for exactly this and nothing reflows.
-const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
-/// Gap between the tray icon and the top of the window.
-const TRAY_GAP: f32 = 6.;
 /// Native vibrancy, but only on macOS: there gpui backs `Blurred` with an
 /// `NSVisualEffectView`. Elsewhere it's documented as "not always supported"
 /// and degrades to plain transparency, which would show the raw desktop.
@@ -133,7 +133,7 @@ impl ZStatsApp {
             window.remove_window();
         });
         let appearance = cx.observe_window_appearance(window, |_this, window, cx| {
-            apply_system_appearance(window.appearance(), cx);
+            apply_appearance(window.appearance(), cx);
             cx.notify();
         });
         let store = cx.global::<ZStatsGlobalStore>().clone();
@@ -199,12 +199,81 @@ fn theme_mode_for_appearance(appearance: WindowAppearance) -> ThemeMode {
 }
 
 /// gpui-component Theme plus our own tokens. `Theme::change` resets the
-/// mono family, so [`font::apply`] has to run every time.
-fn apply_system_appearance(appearance: WindowAppearance, cx: &mut App) {
-    let mode = theme_mode_for_appearance(appearance);
+/// mono family, so [`font::apply`] has to run every time. `appearance` is
+/// what the OS reports; a pinned theme preference wins over it.
+fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
+    let mode = match prefs::theme() {
+        prefs::ThemePref::System => theme_mode_for_appearance(appearance),
+        prefs::ThemePref::Light => ThemeMode::Light,
+        prefs::ThemePref::Dark => ThemeMode::Dark,
+    };
     Theme::change(mode, None, cx);
     font::apply(cx);
     theme::set_dark(matches!(mode, ThemeMode::Dark));
+}
+
+/// Pin (or release) AppKit's own appearance to match the theme preference.
+///
+/// Without this a forced theme would only recolour our tokens: the vibrancy
+/// material underneath follows the *window's* appearance, and dark type over
+/// a light Popover blur is exactly the grey fog the background opacities were
+/// tuned to avoid. Pinning `NSApp.appearance` makes every window — and any
+/// appearance AppKit resolves for it — agree with the forced theme; `None`
+/// hands control back to System Settings.
+#[cfg(target_os = "macos")]
+fn apply_ns_appearance() {
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    };
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let appearance = match prefs::theme() {
+        prefs::ThemePref::System => None,
+        // SAFETY: reading AppKit's exported appearance-name constants.
+        prefs::ThemePref::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
+        prefs::ThemePref::Dark => {
+            NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
+        }
+    };
+    app.setAppearance(appearance.as_deref());
+}
+
+/// The Config tab's theme picker: persist, re-pin AppKit, restyle, repaint.
+pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
+    prefs::set_theme(pref);
+    #[cfg(target_os = "macos")]
+    apply_ns_appearance();
+    apply_appearance(cx.window_appearance(), cx);
+    repaint(cx);
+}
+
+/// The Config tab's language picker: persist, re-pin the locale, and rebuild
+/// the chrome that snapshotted translated strings when it was built — the
+/// tray menu and the app menu. Everything else re-translates on repaint.
+pub fn set_language_pref(pref: prefs::LanguagePref, cx: &mut App) {
+    prefs::set_language(pref);
+    i18n::init();
+    install_menus(cx);
+    #[cfg(not(target_os = "linux"))]
+    tray::rebuild_menu(cx);
+    repaint(cx);
+}
+
+/// Nudge the store so the visible panel repaints with the new preference.
+fn repaint(cx: &mut App) {
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |_, cx| cx.notify());
+}
+
+fn install_menus(cx: &mut App) {
+    cx.set_menus(vec![Menu {
+        name: APP_NAME.into(),
+        items: vec![MenuItem::action(i18n::tr("common.quit"), Quit)],
+        disabled: false,
+    }]);
 }
 
 /// Fill in the app identity fields on a [`WindowOptions`] without clobbering
@@ -232,29 +301,6 @@ fn with_app_identity(mut options: WindowOptions) -> WindowOptions {
         _ => {}
     }
     options
-}
-
-/// Hang the window under the tray icon: horizontally centred on it, `TRAY_GAP`
-/// below it. Centring is the default; the clamp only kicks in when the window
-/// would run past a screen edge, in which case it sits flush against that edge.
-///
-/// Pure geometry, all in logical pixels, so it's testable without an `App`.
-fn anchored_origin(
-    icon: Bounds<Pixels>,
-    window_size: Size<Pixels>,
-    screen: Bounds<Pixels>,
-) -> Point<Pixels> {
-    let mut origin = point(
-        icon.origin.x + icon.size.width / 2. - window_size.width / 2.,
-        icon.origin.y + icon.size.height + px(TRAY_GAP),
-    );
-    // `.max(origin)` guards the degenerate case of a window wider than the
-    // screen, where the upper clamp bound would fall below the lower one.
-    let max_x = (screen.origin.x + screen.size.width - window_size.width).max(screen.origin.x);
-    let max_y = (screen.origin.y + screen.size.height - window_size.height).max(screen.origin.y);
-    origin.x = origin.x.clamp(screen.origin.x, max_x);
-    origin.y = origin.y.clamp(screen.origin.y, max_y);
-    origin
 }
 
 /// Retarget gpui's vibrancy view at the `Popover` material.
@@ -297,98 +343,6 @@ fn use_popover_material(window: &Window) {
             }
         }
     }
-}
-
-/// Scale factor of the display that owns the menu bar — `screens()[0]` is
-/// always that one, unlike `mainScreen`, which follows the key window.
-///
-/// gpui's `PlatformDisplay` exposes no scale factor, and mirroring the main
-/// window's isn't an option here: the tray fires with no window open at all.
-#[cfg(target_os = "macos")]
-fn menu_bar_scale_factor() -> Option<f32> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSScreen;
-
-    let mtm = MainThreadMarker::new()?;
-    let screen = NSScreen::screens(mtm).firstObject()?;
-    Some(screen.backingScaleFactor() as f32)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn menu_bar_scale_factor() -> Option<f32> {
-    None
-}
-
-/// [`anchored_origin`] plus the two things that need an `App`: converting the
-/// tray's physical pixels to logical ones, and finding the icon's display.
-fn bounds_below_tray(anchor: TrayAnchor, window_size: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
-    let scale = menu_bar_scale_factor()
-        // Fallback for platforms without the AppKit path: whatever the main
-        // window last reported.
-        .unwrap_or_else(|| cx.global::<ZStatsGlobalStore>().read(cx).scale_factor());
-    let scale = if scale > 0. { scale } else { 1. };
-    let to_px = |v: f64| px(v as f32 / scale);
-    let icon = Bounds {
-        origin: point(to_px(anchor.x), to_px(anchor.y)),
-        size: size(to_px(anchor.width), to_px(anchor.height)),
-    };
-
-    // Resolved through AppKit rather than `cx.displays()`, which reports
-    // every screen at the same origin — see `window_ext`.
-    #[cfg(target_os = "macos")]
-    let screen = window_ext::visible_bounds_containing(icon.origin);
-    #[cfg(not(target_os = "macos"))]
-    let screen = cx
-        .displays()
-        .into_iter()
-        .find(|d| d.bounds().contains(&icon.origin))
-        .or_else(|| cx.primary_display())
-        .map(|d| d.visible_bounds());
-    let origin = match screen {
-        Some(screen) => anchored_origin(icon, window_size, screen),
-        // No display info to clamp against — centre and hope for the best.
-        None => point(
-            icon.origin.x + icon.size.width / 2. - window_size.width / 2.,
-            icon.origin.y + icon.size.height + px(TRAY_GAP),
-        ),
-    };
-
-    let bounds = Bounds {
-        origin,
-        size: window_size,
-    };
-
-    // Multi-display positioning has several places to go wrong and no visible
-    // symptom beyond "it opened on the wrong screen". `ZSTATS_DEBUG_POSITION=1`
-    // prints the whole chain so a bad step can be identified rather than
-    // guessed at.
-    if std::env::var_os("ZSTATS_DEBUG_POSITION").is_some() {
-        eprintln!(
-            "POS tray_physical=({:.0},{:.0} {:.0}x{:.0}) scale={scale} \
-             icon_logical=({:.0},{:.0}) screen={} window=({:.0},{:.0} {:.0}x{:.0})",
-            anchor.x,
-            anchor.y,
-            anchor.width,
-            anchor.height,
-            f32::from(icon.origin.x),
-            f32::from(icon.origin.y),
-            match screen {
-                Some(s) => format!(
-                    "({:.0},{:.0} {:.0}x{:.0})",
-                    f32::from(s.origin.x),
-                    f32::from(s.origin.y),
-                    f32::from(s.size.width),
-                    f32::from(s.size.height)
-                ),
-                None => "none".to_string(),
-            },
-            f32::from(bounds.origin.x),
-            f32::from(bounds.origin.y),
-            f32::from(bounds.size.width),
-            f32::from(bounds.size.height),
-        );
-    }
-    bounds
 }
 
 /// Create the main window. With a tray `anchor` it opens under the tray icon;
@@ -609,10 +563,17 @@ fn main() {
         // Must run before touching any gpui-component feature.
         gpui_component::init(cx);
         font::register(cx);
+        // Feeds both the theme resolution and the locale pin below, so it
+        // has to precede them.
+        prefs::load();
+        // Pin AppKit before the first frame, so a forced theme's vibrancy
+        // material never briefly renders in the system appearance.
+        #[cfg(target_os = "macos")]
+        apply_ns_appearance();
         // Resolve light/dark against the OS appearance *before* the window
         // opens, so the first painted frame is already themed (otherwise the
         // stock theme shows for a frame and flashes).
-        apply_system_appearance(cx.window_appearance(), cx);
+        apply_appearance(cx.window_appearance(), cx);
         i18n::init();
         // The tray outlives the window. Without this, gpui's default quits the
         // process as soon as the last window closes on every platform except
@@ -632,11 +593,7 @@ fn main() {
             Quit,
             None,
         )]);
-        cx.set_menus(vec![Menu {
-            name: APP_NAME.into(),
-            items: vec![MenuItem::action(i18n::tr("common.quit"), Quit)],
-            disabled: false,
-        }]);
+        install_menus(cx);
 
         #[cfg(not(target_os = "linux"))]
         tray::init_tray(cx);
@@ -656,64 +613,4 @@ fn main() {
             open_main_window(cx, None);
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A 1440×900 display with the 38px menu bar taken off the top, i.e. what
-    /// `visible_bounds()` reports on macOS.
-    fn screen() -> Bounds<Pixels> {
-        Bounds {
-            origin: point(px(0.), px(38.)),
-            size: size(px(1440.), px(862.)),
-        }
-    }
-
-    /// A 24×24 menu bar icon with its left edge at `x`.
-    fn icon_at(x: f32) -> Bounds<Pixels> {
-        Bounds {
-            origin: point(px(x), px(0.)),
-            size: size(px(24.), px(24.)),
-        }
-    }
-
-    fn window() -> Size<Pixels> {
-        let (w, h) = DEFAULT_WINDOW_SIZE;
-        size(px(w), px(h))
-    }
-
-    #[test]
-    fn centers_under_the_icon_when_there_is_room() {
-        let icon = icon_at(700.);
-        let origin = anchored_origin(icon, window(), screen());
-        // Icon centre 712, window 320 wide → 712 - 160.
-        assert_eq!(origin.x, px(552.));
-        // Icon bottom 24 + 6px gap, which clears the 38px menu bar.
-        assert_eq!(origin.y, px(38.));
-    }
-
-    #[test]
-    fn sticks_to_the_right_edge_when_the_icon_is_near_it() {
-        // Centring would put the window at 1416 - 160 = 1256, whose right
-        // edge (1576) overflows the 1440 screen.
-        let origin = anchored_origin(icon_at(1404.), window(), screen());
-        assert_eq!(origin.x, px(1120.)); // 1440 - 320
-    }
-
-    #[test]
-    fn sticks_to_the_left_edge_when_the_icon_is_near_it() {
-        let origin = anchored_origin(icon_at(4.), window(), screen());
-        assert_eq!(origin.x, px(0.));
-    }
-
-    #[test]
-    fn never_overflows_the_bottom() {
-        let tall = size(px(320.), px(2000.));
-        let origin = anchored_origin(icon_at(700.), tall, screen());
-        // Taller than the screen: pinned to the top of the visible area rather
-        // than to a negative coordinate.
-        assert_eq!(origin.y, px(38.));
-    }
 }

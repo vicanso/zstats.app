@@ -110,23 +110,6 @@ pub fn outline_pill(text: impl Into<SharedString>) -> AnyElement {
         .into_any_element()
 }
 
-/// Outlined pill whose content is a ticking figure (`4.51 GHz`).
-pub fn metric_pill(text: impl Into<SharedString>) -> AnyElement {
-    div()
-        .flex_none()
-        .rounded_full()
-        .border_1()
-        .border_color(theme::border())
-        .px(px(7.))
-        .py(px(1.))
-        .font_family(font::MONO)
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::NORMAL)
-        .text_color(theme::text_muted())
-        .child(text.into())
-        .into_any_element()
-}
-
 /// Horizontal meter. `fraction` is clamped, so a process at 600% CPU fills
 /// the bar instead of overflowing it.
 pub fn meter(fraction: f32, fill: impl Into<gpui::Hsla>, height: f32) -> AnyElement {
@@ -165,32 +148,29 @@ pub fn stacked_meter(segments: Vec<(f32, gpui::Hsla)>, height: f32) -> AnyElemen
         .into_any_element()
 }
 
-/// Colour key under a stacked meter: a 6px swatch plus a caption.
+/// How a legend chip is drawn. Fill matches a painted meter slice;
+/// Hollow matches leftover track — empty, not another colour.
+pub enum LegendMark {
+    Fill(gpui::Hsla),
+    Hollow,
+}
+
+/// Colour key under a stacked meter: a short bar plus a caption.
 /// `tip` is shown on hover.
-pub fn legend(items: Vec<(gpui::Hsla, SharedString, SharedString)>) -> AnyElement {
+pub fn legend(items: Vec<(LegendMark, SharedString, SharedString)>) -> AnyElement {
     h_flex()
         .gap(px(12.))
         .children(
             items
                 .into_iter()
                 .enumerate()
-                .map(|(i, (color, label, tip))| {
+                .map(|(i, (mark, label, tip))| {
                     h_flex()
                         .id(("legend", i))
                         .items_center()
                         .gap(px(5.))
                         .tooltip(wrap_tooltip(tip))
-                        .child(
-                            // Short bar, same height as the meter, so a mid grey
-                            // and a dark grey stay distinguishable — 6px dots of
-                            // `text_dim` / `text_faint` collapsed into one.
-                            div()
-                                .w(px(10.))
-                                .h(px(6.))
-                                .rounded(px(2.))
-                                .flex_none()
-                                .bg(color),
-                        )
+                        .child(legend_swatch(mark))
                         .child(
                             div()
                                 .text_size(px(10.))
@@ -200,6 +180,26 @@ pub fn legend(items: Vec<(gpui::Hsla, SharedString, SharedString)>) -> AnyElemen
                 }),
         )
         .into_any_element()
+}
+
+fn legend_swatch(mark: LegendMark) -> AnyElement {
+    match mark {
+        LegendMark::Fill(color) => div()
+            .w(px(10.))
+            .h(px(6.))
+            .rounded(px(2.))
+            .flex_none()
+            .bg(color)
+            .into_any_element(),
+        LegendMark::Hollow => div()
+            .w(px(10.))
+            .h(px(6.))
+            .rounded(px(2.))
+            .flex_none()
+            .border_1()
+            .border_color(theme::text_dim())
+            .into_any_element(),
+    }
 }
 
 /// One "label ……… value" line with the design's hairline underneath.

@@ -3,6 +3,7 @@
 //! Excluded on Linux (see `README.md`): `tray-icon` drives its menu from a GTK
 //! main loop there, which can't coexist with gpui's own event loop.
 
+use crate::assets::{self, CustomIconName};
 use crate::i18n;
 use crate::state::TrayAnchor;
 use crate::{APP_NAME, show_main_window, toggle_main_window};
@@ -83,10 +84,15 @@ fn rasterise_icon(size: u32) -> Option<Vec<u8>> {
 const GLYPH_SCALE: f32 = 0.78;
 
 fn rasterise_icon_scaled(size: u32, glyph_scale: f32) -> Option<Vec<u8>> {
+    // From the shared embed rather than `include_str!`, which would compile a
+    // second, uncompressed copy of the same file into the binary.
+    let raw = assets::get(&CustomIconName::Cpu.path())?;
     // lucide ships `stroke="currentColor"`, which is a CSS-context keyword
     // usvg cannot resolve on its own. The colour is irrelevant anyway: as a
     // template image only the alpha channel survives.
-    let svg = include_str!("../assets/icons/cpu.svg").replace("currentColor", "#000000");
+    let svg = std::str::from_utf8(&raw)
+        .ok()?
+        .replace("currentColor", "#000000");
 
     let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(size, size)?;
@@ -111,6 +117,15 @@ fn rasterise_icon_scaled(size: u32, glyph_scale: f32) -> Option<Vec<u8>> {
         pixel[2] = 0;
     }
     Some(rgba)
+}
+
+/// Swap in a menu rebuilt in the active locale. The menu snapshots its item
+/// titles when built, so a language switch has to hand the tray a fresh one —
+/// the icon, tooltip and event threads stay put. A no-op without a tray.
+pub fn rebuild_menu(cx: &App) {
+    if let Some(handle) = cx.try_global::<TrayHandle>() {
+        handle.icon.set_menu(Some(Box::new(build_menu())));
+    }
 }
 
 fn build_menu() -> Menu {

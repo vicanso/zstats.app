@@ -11,7 +11,7 @@
 use super::widgets::{self, card};
 use crate::format;
 use crate::i18n;
-use crate::state::{ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{SeenAlert, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -39,8 +39,12 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let mut cards: Vec<AnyElement> = state
         .alerts()
         .iter()
-        .enumerate()
-        .map(|(i, seen)| {
+        .map(|seen| {
+            // Keyed by the episode's own id, never by position: the deque
+            // reorders whenever an episode resurfaces, and an index would hand
+            // this card's hover / expansion state to whichever alert took the
+            // slot.
+            let i = seen.seq as usize;
             let critical = seen.event.severity() == Severity::Critical;
             let line = if critical {
                 Hsla::from(theme::accent_wash(45))
@@ -57,7 +61,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id(card_id)
                 .border_color(line)
                 .when(critical, |d| d.bg(theme::accent_wash(7)))
-                .child(alert_head(i, target.clone(), critical, line, seen.age()))
+                .child(alert_head(i, target.clone(), critical, line, seen))
                 .child(alert_title(&seen.event.subject))
                 .child(
                     div()
@@ -96,7 +100,7 @@ fn alert_head(
     target: Option<OverrideTarget>,
     critical: bool,
     line: Hsla,
-    age: std::time::Duration,
+    seen: &SeenAlert,
 ) -> AnyElement {
     let row = h_flex().items_center().justify_between().gap(px(8.));
     row.child(
@@ -129,10 +133,22 @@ fn alert_head(
         h_flex()
             .items_center()
             .gap(px(6.))
-            .child(widgets::note(format::ago(age)))
+            // Two timestamps when they differ: when it was last reported, and
+            // how long the episode has been running. One card per episode
+            // means the second one has nowhere else to live.
+            .child(widgets::note(match seen.span() {
+                Some(span) => t!(
+                    "alerts.episode_span",
+                    ago = format::ago(seen.age()),
+                    span = format::uptime(span.as_secs())
+                )
+                .to_string(),
+                None => format::ago(seen.age()),
+            }))
             // An explicit control rather than a clickable card: macOS does
             // not change the pointer over clickable things, so "the whole row
             // does something" has no way to announce itself.
+            .children(quit_button(index, &seen.event))
             .children(target.map(|tgt| {
                 Button::new(("edit-threshold", index))
                     .icon(IconName::Settings2)
@@ -176,6 +192,59 @@ fn subject_label(subject: &AlertSubject) -> String {
         }
         AlertSubject::System => i18n::tr("alerts.system"),
     }
+}
+
+/// The quit button, on memory alerts only. Freeing memory means evicting
+/// the holder — unlike CPU spikes, which pass on their own often enough
+/// that eviction from an alert card would be premature. The decision that
+/// something is over the line stays zstats' (this consumes its event);
+/// the click, the confirm sheet and the delivery are `terminate`'s.
+#[cfg(target_os = "macos")]
+fn quit_button(index: usize, event: &AlertEvent) -> Option<Button> {
+    use crate::terminate::{self, QuitMethod};
+
+    let (pid, name) = match (&event.subject, event.kind()) {
+        (AlertSubject::Process { pid, name }, AlertKind::Memory) => (*pid, name.clone()),
+        (AlertSubject::App { root_pid, name, .. }, AlertKind::AppMemory) => {
+            (*root_pid, name.clone())
+        }
+        _ => return None,
+    };
+    // No control that could only fail: a subject this user cannot signal
+    // (root-owned, or already gone) simply gets no button.
+    if !terminate::can_quit(pid) {
+        return None;
+    }
+
+    Some(
+        Button::new(("quit-subject", index))
+            .icon(gpui_component::Icon::from(crate::assets::CustomIconName::Power))
+            .ghost()
+            .xsmall()
+            .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())
+            .on_click(move |_, window, cx| {
+                // Resolved at click time, not render time: whether the pid
+                // still counts as an application can change in between, and
+                // the sheet must describe what will actually be sent.
+                let body = match terminate::method_for(pid) {
+                    QuitMethod::App => t!("alerts.quit_body_app", name = name.clone()),
+                    QuitMethod::Term => t!("alerts.quit_body_term", name = name.clone()),
+                }
+                .to_string();
+                let title = t!("alerts.quit_title", name = name.clone()).to_string();
+                crate::confirm::ask(window, cx, title, body, i18n::tr("alerts.quit_ok"), move || {
+                    if !terminate::request_quit(pid) {
+                        eprintln!("quit request for pid {pid} was not delivered");
+                    }
+                });
+            }),
+    )
+}
+
+/// Never-run stub — see "Platform reality" in CLAUDE.md.
+#[cfg(not(target_os = "macos"))]
+fn quit_button(_index: usize, _event: &AlertEvent) -> Option<Button> {
+    None
 }
 
 /// The `[alerts]` key + override name this event writes when the user
@@ -275,7 +344,6 @@ fn threshold_editor(
                         } else {
                             theme::text()
                         })
-                        .cursor_pointer()
                         .hover(|d| d.bg(theme::surface_raised()))
                         .on_click(move |_, _window, cx| {
                             let key = key;

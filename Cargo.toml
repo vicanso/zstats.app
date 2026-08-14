@@ -3,10 +3,18 @@ name = "zstats-app"
 version = "0.1.0"
 edition = "2024"
 
+# The package cannot itself be called `zstats` — that name is taken by the
+# metrics crate it depends on — but the binary target can: bin names play no
+# part in dependency resolution. This is what names the executable inside
+# the bundle (Contents/MacOS/zstats).
+[[bin]]
+name = "zstats"
+path = "src/main.rs"
+
 # cargo-bundle has no field for `LSUIElement`, so `make bundle` writes it into
 # Info.plist afterwards — see the Makefile.
 [package.metadata.bundle]
-name = "ZStats"
+name = "zstats"
 identifier = "com.github.vicanso.zstats"
 icon = ["icons/zstats.icns"]
 copyright = "Copyright © 2026 Tree xie. All rights reserved."
@@ -45,18 +53,24 @@ gpui_macros = { git = "https://github.com/zed-industries/zed" }
 # Embedded metrics collection. `frontend` brings the alert rule engine,
 # rolling per-process averages and the settings model — and deliberately no
 # tokio. `client` (the daemon's unix-socket probe) is left off for that reason.
-zstats = { version = "0.2", default-features = false, features = ["frontend"] }
-# Same pin as zstats. Used only to read NIC lifetime counters — zstats
-# diffs them into rates and drops the totals, but we need "ever used
-# since boot" to hide unused interfaces.
+zstats = { version = "0.4", default-features = false, features = ["frontend"] }
+# Dates for `records::read_range`, whose parameters are `jiff::civil::Date`
+# and whose `MetricRecord::timestamp` is a `jiff::Timestamp`. Same version
+# zstats already pins, so this resolves to the one copy it is already
+# building — confirm with `cargo tree -i jiff` after any bump.
+jiff = "0.2.35"
 # Hands collected ticks (and tray events) from their blocking threads onto
 # gpui's main-thread executor. Already in the tree via gpui.
 smol = "2.0.2"
 # Embeds `assets/` (fonts now; locales next) and zstd-compresses them in
 # release. `default-features` off so debug builds embed too, instead of
 # reading the folder at runtime.
+# `include-exclude` powers the `#[include]` allowlist in `src/assets.rs`.
+# Declared here rather than relied on through feature unification with
+# gpui-component-assets, which is the only other crate turning it on.
 rust-embed = { version = "8.12.0", default-features = false, features = [
     "compression",
+    "include-exclude",
 ] }
 # Locale files live in `assets/locales/` (compressed by rust-embed). The
 # `i18n!` macro is pointed at the empty `locales_stub/` so it does not
@@ -67,6 +81,11 @@ toml = "1.1.4"
 # Desktop banners. Cross-platform; macOS uses NSUserNotification
 # (`set_application` + `wait_for_action` for the click that opens Alerts).
 notify-rust = "4.18"
+# `AssetSource` returns `gpui::Result`, which is anyhow's — gpui re-exports
+# the crate itself only under its `private` module ("here be dragons"), so
+# naming a missing asset in the error needs the direct dependency. Already in
+# the tree via gpui, so nothing extra gets built.
+anyhow = "1"
 
 # Tray. Linux is excluded on purpose — see "已知问题 / TODO" in README.md.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
@@ -81,13 +100,24 @@ resvg = "0.46"
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 objc2 = "0.6"
-# NSPoint / NSRect for positioning the panel window.
+# NSGeometry: NSPoint / NSRect for positioning the panel window.
+# NSUserNotification + NSString: notify.rs delivers banners through
+# NSUserNotificationCenter itself (fire-and-forget + resident delegate),
+# rather than notify-rust's blocking wait_for_action transport.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
+    "NSString",
+    "NSUserNotification",
 ] }
 raw-window-handle = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    # NSAppearance backs the theme override: prefs.rs pins NSApp.appearance
+    # so the vibrancy material follows a forced light/dark, not the system.
+    "NSAppearance",
     "NSApplication",
+    # The quit button on memory alert cards: terminate.rs sends the
+    # ⌘Q-equivalent request through NSRunningApplication.
+    "NSRunningApplication",
     "NSResponder",
     "NSScreen",
     "NSVisualEffectView",

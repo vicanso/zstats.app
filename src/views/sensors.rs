@@ -125,28 +125,32 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 (
                     i18n::tr("sensors.draw"),
                     b.power_watts
-                        .map_or("—".to_string(), |w| format!("{w:.1} W")),
+                        .map_or(format::PLACEHOLDER.to_string(), |w| format!("{w:.1} W")),
                 ),
                 (
                     i18n::tr("sensors.empty_in"),
-                    b.time_to_empty_secs.map_or("—".to_string(), format::uptime),
+                    b.time_to_empty_secs
+                        .map_or(format::PLACEHOLDER.to_string(), format::uptime),
                 ),
                 (
                     i18n::tr("sensors.health"),
-                    b.health_percent.map_or("—".into(), format::pct),
+                    b.health_percent
+                        .map_or(format::PLACEHOLDER.into(), format::pct),
                 ),
                 (
                     i18n::tr("sensors.cycles"),
-                    b.cycle_count.map_or("—".to_string(), |c| c.to_string()),
+                    b.cycle_count
+                        .map_or(format::PLACEHOLDER.to_string(), |c| c.to_string()),
                 ),
                 (
                     i18n::tr("sensors.cell_temp"),
                     b.temperature_celsius
-                        .map_or("—".to_string(), |c| format!("{c:.1} °C")),
+                        .map_or(format::PLACEHOLDER.to_string(), |c| format!("{c:.1} °C")),
                 ),
                 (
                     i18n::tr("sensors.to_full"),
-                    b.time_to_full_secs.map_or("—".to_string(), format::uptime),
+                    b.time_to_full_secs
+                        .map_or(format::PLACEHOLDER.to_string(), format::uptime),
                 ),
             ]))
             .into_any_element(),

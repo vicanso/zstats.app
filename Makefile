@@ -56,7 +56,7 @@ bundle:
 
 # Where the release binary's size goes, by crate.
 bloat:
-	cargo bloat --release --crates --bin zstats-app
+	cargo bloat --release --crates --bin zstats
 
 # Unused dependencies (nightly-only).
 udeps:

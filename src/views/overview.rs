@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
-use zstats::snapshot::{CpuSnapshot, MemorySnapshot};
+use zstats::snapshot::{CpuSnapshot, IoTotalsSnapshot, MemorySnapshot};
 
 /// How many processes the first panel names. Enough to answer "who's
 /// hot" without turning Overview into a second Processes tab.
@@ -34,7 +34,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     vec![
         processor(&snapshot.cpu),
         top_cpu(state),
-        memory(&snapshot.memory),
+        memory(&snapshot.memory, &snapshot.io_totals),
     ]
 }
 
@@ -101,7 +101,6 @@ fn top_cpu_all() -> AnyElement {
         .id("top-cpu-all")
         .items_center()
         .gap(px(1.))
-        .cursor_pointer()
         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
         .child(
             div()
@@ -125,10 +124,7 @@ fn top_cpu_all() -> AnyElement {
 }
 
 fn processor(cpu: &CpuSnapshot) -> AnyElement {
-    let header_right = match cpu.frequency_mhz {
-        Some(mhz) => widgets::metric_pill(format!("{:.2} GHz", mhz as f64 / 1000.0)),
-        None => widgets::note(i18n::tr("overview.freq_unknown")),
-    };
+    let header_right = processor_caption(cpu);
     let mut body = card()
         .child(widgets::card_header(
             i18n::tr("overview.processor"),
@@ -183,6 +179,34 @@ fn processor(cpu: &CpuSnapshot) -> AnyElement {
     body.into_any_element()
 }
 
+/// Brand plus the reported clock, e.g. "Apple M4 Pro (4.5 GHz)".
+///
+/// Apple Silicon does not expose live per-cluster MHz through sysinfo;
+/// this is the rated clock and usually never moves. zstats still only
+/// *asks* for it every 30s (cheaper than every usage sample) — that is
+/// a collect cadence, not a claim that the number changes.
+fn processor_caption(cpu: &CpuSnapshot) -> AnyElement {
+    let freq = cpu
+        .frequency_mhz
+        .map(|mhz| format!("{:.1} GHz", mhz as f64 / 1000.0));
+    let text = match (cpu.brand.as_deref(), freq.as_deref()) {
+        (Some(brand), Some(freq)) => {
+            t!("overview.brand_freq", brand = brand, freq = freq).to_string()
+        }
+        (Some(brand), None) => brand.to_string(),
+        (None, Some(freq)) => freq.to_string(),
+        (None, None) => i18n::tr("overview.freq_unknown"),
+    };
+    let tip = i18n::tr("overview.freq_tip");
+    div()
+        .id("cpu-brand")
+        .max_w(px(176.))
+        .truncate()
+        .tooltip(widgets::wrap_tooltip(tip))
+        .child(widgets::note(text))
+        .into_any_element()
+}
+
 /// Activity Monitor / Stats wording: "P-cores · 8", not "P·8".
 fn cluster_label(name: &str, cores: u32) -> String {
     let pretty = match name {
@@ -193,7 +217,7 @@ fn cluster_label(name: &str, cores: u32) -> String {
     format!("{pretty} · {cores}")
 }
 
-fn memory(mem: &MemorySnapshot) -> AnyElement {
+fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot) -> AnyElement {
     // The kernel's own verdict, not a number we derive: 1 normal, 2 warning,
     // 4 critical. Absent means the platform has no pressure API at all —
     // which the design is careful to word differently from "fine".
@@ -233,22 +257,10 @@ fn memory(mem: &MemorySnapshot) -> AnyElement {
     let resident = mem.used_bytes.saturating_sub(compressed);
     let resident_w = resident as f32 / total;
     let comp_w = compressed as f32 / total;
-    // Compressed is part of used, not a leftover. Accent only when the
-    // kernel says pressure is actually up — a red tail on a healthy Mac
-    // reads as an error.
-    let pressure_hot = mem.pressure_level.is_some_and(|l| l >= 2);
-    // Three rungs that stay distinct as both a 6px bar slice and a
-    // legend chip: ink (used) → muted (compressed) → faint (free).
-    // `text_dim` sat too close to `text_faint` and the two dots
-    // collapsed into one grey.
+    // Used and compressed are painted slices. Free is the unfilled
+    // trough — leftover, not a third colour that has to fight the badge.
     let used_fill = Hsla::from(theme::ink());
-    let compressed_fill = Hsla::from(if pressure_hot {
-        theme::accent()
-    } else {
-        theme::text_muted()
-    });
-    let free_fill = Hsla::from(theme::text_faint());
-    let free_w = (1.0 - resident_w - comp_w).max(0.0);
+    let compressed_fill = Hsla::from(theme::text_muted());
 
     let mut rows = vec![
         (i18n::tr("overview.used"), format::gb(mem.used_bytes)),
@@ -271,19 +283,19 @@ fn memory(mem: &MemorySnapshot) -> AnyElement {
     rows.push((i18n::tr("overview.total"), format::gb(mem.total_bytes)));
 
     let mut legend = vec![(
-        used_fill,
+        widgets::LegendMark::Fill(used_fill),
         i18n::tr("overview.used").into(),
         i18n::tr("overview.used_tip").into(),
     )];
     if compressed > 0 {
         legend.push((
-            compressed_fill,
+            widgets::LegendMark::Fill(compressed_fill),
             i18n::tr("overview.compressed").into(),
             i18n::tr("overview.compressed_tip").into(),
         ));
     }
     legend.push((
-        free_fill,
+        widgets::LegendMark::Hollow,
         i18n::tr("overview.free").into(),
         i18n::tr("overview.free_tip").into(),
     ));
@@ -320,27 +332,72 @@ fn memory(mem: &MemorySnapshot) -> AnyElement {
                         .text_size(px(20.))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(theme::text())
-                        .child(format::gb(mem.available_bytes)),
+                        .child(format::gb(mem.used_bytes)),
                 )
                 .child(
                     div()
                         .text_size(px(11.))
                         .text_color(theme::text_muted())
                         .child(
-                            t!("overview.available_of", total = format::gb(mem.total_bytes))
-                                .to_string(),
+                            t!("overview.used_of", total = format::gb(mem.total_bytes)).to_string(),
                         ),
                 ),
         )
         .child(div().mt(px(10.)).child(widgets::stacked_meter(
-            vec![
-                (resident_w, used_fill),
-                (comp_w, compressed_fill),
-                (free_w, free_fill),
-            ],
+            vec![(resident_w, used_fill), (comp_w, compressed_fill)],
             6.,
         )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
         .child(widgets::kv_columns(rows))
+        .child(io_strip(io))
+        .into_any_element()
+}
+
+/// Disk + net rates, summed by zstats after its own dedupe. Sat under
+/// Memory rather than as a fourth card.
+fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
+    let cells = [
+        (
+            i18n::tr("overview.io_disk"),
+            io.disk_read_bytes_per_sec,
+            io.disk_write_bytes_per_sec,
+        ),
+        (
+            i18n::tr("overview.io_net"),
+            io.network_received_bytes_per_sec,
+            io.network_transmitted_bytes_per_sec,
+        ),
+    ];
+    if cells.iter().all(|(_, r, w)| r.is_none() && w.is_none()) {
+        return div().into_any_element();
+    }
+
+    h_flex()
+        .mt(px(8.))
+        .pt(px(7.))
+        .gap(px(6.))
+        .border_t(px(1.))
+        .border_color(theme::border_subtle())
+        .children(cells.into_iter().map(|(label, read, write)| {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(theme::text_dim())
+                        .child(label),
+                )
+                .child(
+                    h_flex()
+                        .mt(px(1.))
+                        .gap(px(8.))
+                        .font_family(font::MONO)
+                        .text_size(px(10.))
+                        .text_color(theme::text())
+                        .child(format!("↓ {}", format::rate(read)))
+                        .child(format!("↑ {}", format::rate(write))),
+                )
+        }))
         .into_any_element()
 }

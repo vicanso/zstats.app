@@ -1,37 +1,148 @@
-//! Config: a read-only window onto config.toml.
+//! Config: the app's own two preferences, then a read-only window onto
+//! config.toml.
 //!
-//! Deliberately not editable. Two of the three sections could not be applied
-//! in place anyway: `reload_settings()` only re-reads `[alerts]`, while the
-//! `[collector]` switches are baked into a running collector whose rate
-//! baselines would be lost by rebuilding it. Changes go through the zstats
-//! CLI, or the file itself.
+//! The config.toml cards are deliberately not editable. Two of the three
+//! sections could not be applied in place anyway: `reload_settings()` only
+//! re-reads `[alerts]`, while the `[collector]` switches are baked into a
+//! running collector whose rate baselines would be lost by rebuilding it.
+//! Changes go through the zstats CLI, or the file itself.
+//!
+//! The interface card is the exception because it edits `app.toml` (see
+//! `prefs`), not config.toml — language and theme are this app's
+//! presentation and touch nothing the CLI reads.
 
 use super::widgets::{self, card};
 use crate::font;
 use crate::i18n;
+use crate::prefs::{self, LanguagePref, ThemePref};
 use crate::state::ZStatsAppState;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    AnyElement, App, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, px,
+};
 use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
 use zstats::CollectorConfig;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
-    let Some(file) = state.settings() else {
-        return vec![widgets::empty_card(
+    let mut cards = vec![interface_card()];
+    match state.settings() {
+        None => cards.push(widgets::empty_card(
             i18n::tr("config.unavailable"),
             i18n::tr("config.unavailable_body"),
-        )];
-    };
-    let collector = file.collector.clone().unwrap_or_default();
+        )),
+        Some(file) => {
+            let collector = file.collector.clone().unwrap_or_default();
+            cards.push(collection_card(&collector));
+            cards.push(cadence_card(&collector));
+            cards.push(thresholds_card(file));
+        }
+    }
+    cards
+}
 
-    vec![
-        collection_card(&collector),
-        cadence_card(&collector),
-        thresholds_card(file),
-    ]
+/// Language and theme. Selection reuses the accent chips of the Alerts
+/// threshold editor — in this app a picked value is accent, like a crossed
+/// threshold, and everything else stays neutral.
+fn interface_card() -> AnyElement {
+    widgets::list_shell()
+        .child(widgets::list_header(
+            i18n::tr("config.interface"),
+            // Mirrors "config.toml · read-only" on the collection card:
+            // says where these two settings actually live.
+            Some(widgets::note("app.toml")),
+        ))
+        .child(pref_row(
+            "pref-language",
+            i18n::tr("config.language"),
+            vec![
+                (i18n::tr("config.follow_system"), LanguagePref::System),
+                // Each language in its own name, so it stays findable from
+                // inside the other locale. Deliberately not translated.
+                ("English".into(), LanguagePref::English),
+                ("中文".into(), LanguagePref::Chinese),
+            ],
+            prefs::language(),
+            crate::set_language_pref,
+            false,
+        ))
+        .child(pref_row(
+            "pref-theme",
+            i18n::tr("config.theme"),
+            vec![
+                (i18n::tr("config.follow_system"), ThemePref::System),
+                (i18n::tr("config.theme_light"), ThemePref::Light),
+                (i18n::tr("config.theme_dark"), ThemePref::Dark),
+            ],
+            prefs::theme(),
+            crate::set_theme_pref,
+            true,
+        ))
+        .into_any_element()
+}
+
+/// One "label · option chips" row. `apply` is a plain fn pointer — both
+/// handlers just forward to `main`, nothing to capture.
+fn pref_row<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    label: String,
+    options: Vec<(String, T)>,
+    current: T,
+    apply: fn(T, &mut App),
+    last: bool,
+) -> AnyElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .px(px(13.))
+        .py(px(8.))
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(theme::ink())
+                .child(label),
+        )
+        .child(
+            h_flex()
+                .gap(px(4.))
+                .children(options.into_iter().enumerate().map(|(i, (text, value))| {
+                    let on = value == current;
+                    div()
+                        .id((id, i))
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if on {
+                            theme::accent_wash(45)
+                        } else {
+                            theme::border()
+                        })
+                        .bg(if on {
+                            theme::accent_wash(10)
+                        } else {
+                            theme::inset()
+                        })
+                        .px(px(8.))
+                        .py(px(2.))
+                        .text_size(px(10.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(if on {
+                            theme::accent_light()
+                        } else {
+                            theme::text()
+                        })
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .on_click(move |_, _window, cx| apply(value, cx))
+                        .child(text)
+                })),
+        )
+        .into_any_element()
 }
 
 /// The collect-* switches, rendered as the design's pill toggles but inert.
