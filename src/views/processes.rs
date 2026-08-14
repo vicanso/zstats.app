@@ -592,7 +592,10 @@ fn expand_block(
             p.phys_footprint_bytes
                 .map_or(format::PLACEHOLDER.into(), format::memory),
         ),
-        (i18n::tr("processes.mem_rss"), format::memory(p.memory_bytes)),
+        (
+            i18n::tr("processes.mem_rss"),
+            format::memory(p.memory_bytes),
+        ),
         (i18n::tr("processes.run"), format::uptime(p.run_time_secs)),
         (
             i18n::tr("processes.parent"),
@@ -706,7 +709,7 @@ fn kill_button(pid: u32, name: String) -> AnyElement {
                 i18n::tr("processes.kill_title"),
                 t!("processes.kill_body", name = name, pid = pid).to_string(),
                 i18n::tr("processes.kill_ok"),
-                move || kill(pid),
+                move |_| kill(pid),
             );
         })
         .child(

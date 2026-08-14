@@ -218,7 +218,9 @@ fn quit_button(index: usize, event: &AlertEvent) -> Option<Button> {
 
     Some(
         Button::new(("quit-subject", index))
-            .icon(gpui_component::Icon::from(crate::assets::CustomIconName::Power))
+            .icon(gpui_component::Icon::from(
+                crate::assets::CustomIconName::Power,
+            ))
             .ghost()
             .xsmall()
             .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())
@@ -232,11 +234,18 @@ fn quit_button(index: usize, event: &AlertEvent) -> Option<Button> {
                 }
                 .to_string();
                 let title = t!("alerts.quit_title", name = name.clone()).to_string();
-                crate::confirm::ask(window, cx, title, body, i18n::tr("alerts.quit_ok"), move || {
-                    if !terminate::request_quit(pid) {
-                        eprintln!("quit request for pid {pid} was not delivered");
-                    }
-                });
+                crate::confirm::ask(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    i18n::tr("alerts.quit_ok"),
+                    move |_| {
+                        if !terminate::request_quit(pid) {
+                            eprintln!("quit request for pid {pid} was not delivered");
+                        }
+                    },
+                );
             }),
     )
 }

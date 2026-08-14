@@ -171,9 +171,8 @@ fn read(dir: &Path) -> (LanguagePref, ThemePref) {
 }
 
 fn write(dir: &Path, language: LanguagePref, theme: ThemePref) -> std::io::Result<()> {
-    let mut out = String::from(
-        "# UI preferences for zstats.app. An absent key follows the system.\n",
-    );
+    let mut out =
+        String::from("# UI preferences for zstats.app. An absent key follows the system.\n");
     if let Some(key) = language.key() {
         out.push_str(&format!("language = \"{key}\"\n"));
     }

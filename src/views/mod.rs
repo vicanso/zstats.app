@@ -83,9 +83,8 @@ fn tab_icon(tab: Tab) -> Icon {
         Tab::Overview => Icon::new(IconName::LayoutDashboard),
         Tab::Processes => Icon::new(IconName::Cpu),
         Tab::Apps => CustomIconName::AppWindow.into(),
-        Tab::Disk => Icon::new(IconName::HardDrive),
+        Tab::Hardware => Icon::new(IconName::HardDrive),
         Tab::Net => Icon::new(IconName::Network),
-        Tab::Sensors => CustomIconName::Thermometer.into(),
         Tab::Alerts => Icon::new(IconName::Bell),
         Tab::History => CustomIconName::History.into(),
         Tab::Config => Icon::new(IconName::Settings2),
@@ -160,9 +159,15 @@ fn content(state: &ZStatsAppState) -> AnyElement {
         Tab::Overview => overview::render(state),
         Tab::Processes => processes::render(state),
         Tab::Apps => apps::render(state),
-        Tab::Disk => disk::render(state),
+        // One tab for the machine's physical substrate: volumes, then
+        // temperatures, then the battery. Both renderers return card
+        // stacks, so merging is concatenation — no layout marriage.
+        Tab::Hardware => {
+            let mut cards = disk::render(state);
+            cards.extend(sensors::render(state));
+            cards
+        }
         Tab::Net => net::render(state),
-        Tab::Sensors => sensors::render(state),
         Tab::Alerts => alerts::render(state),
         Tab::History => history::render(state),
         Tab::Config => config::render(state),

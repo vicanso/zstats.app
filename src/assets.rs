@@ -74,7 +74,6 @@ pub enum CustomIconName {
     Cpu,
     History,
     Power,
-    Thermometer,
 }
 
 impl CustomIconName {
@@ -84,7 +83,6 @@ impl CustomIconName {
             CustomIconName::Cpu => "icons/cpu.svg",
             CustomIconName::History => "icons/history.svg",
             CustomIconName::Power => "icons/power.svg",
-            CustomIconName::Thermometer => "icons/thermometer.svg",
         }
         .into()
     }
@@ -110,7 +108,6 @@ mod tests {
             CustomIconName::Cpu,
             CustomIconName::History,
             CustomIconName::Power,
-            CustomIconName::Thermometer,
         ] {
             let path = icon.path();
             assert!(get(&path).is_some(), "{path} is not embedded");

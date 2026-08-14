@@ -1,13 +1,17 @@
-//! Sensors: hardware temperatures, then the battery in full.
+//! Sensors: hardware temperatures, then the battery in full. Rendered as
+//! the lower half of the Hardware tab, after the disk cards.
 
 use super::widgets::{self, card};
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::ZStatsAppState;
+use crate::state::{ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Hsla, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, px,
+};
 use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
 
@@ -16,6 +20,12 @@ use rust_i18n::t;
 const HOT_CELSIUS: f32 = 80.0;
 /// Bar scale when a sensor reports no critical point of its own.
 const ASSUMED_MAX_CELSIUS: f32 = 110.0;
+/// Rows shown before "show more". Apple Silicon firmware exposes dozens of
+/// channels and most sit within a degree of each other; the hottest few
+/// carry the story, and the full list would bury the disk and battery
+/// cards that share this tab. Hot sensors are never hidden — the cap only
+/// ever swallows quiet ones.
+const SENSOR_PREVIEW: usize = 3;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(tick) = state.latest() else {
@@ -33,16 +43,32 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             i18n::tr("sensors.nothing"),
             i18n::tr("sensors.nothing_body"),
         ),
-        Some(temps) => widgets::list_shell()
-            .child(widgets::list_header(
-                i18n::tr("sensors.title"),
-                Some(widgets::note(i18n::tr("sensors.hottest_first"))),
-            ))
-            .children({
-                // No separator under the last row — it would land on the
-                // container's own edge and read as a stray line.
-                let total = temps.len();
-                temps.iter().enumerate().map(move |(i, t)| {
+        Some(temps) => {
+            // Hottest first, sorted here rather than trusted from the
+            // collector: the preview below is a prefix of this list, so
+            // the sort is what makes "the few that matter" and "the top
+            // of the list" the same set.
+            let mut sorted: Vec<_> = temps.iter().collect();
+            sorted.sort_by(|a, b| b.celsius.total_cmp(&a.celsius));
+            let show_all = state.show_all_sensors();
+            // How many the collapse would hide, independent of the current
+            // state — same rule as the Network chip, so the control stays
+            // a toggle instead of going inert once expanded.
+            let hot = sorted.iter().filter(|t| t.celsius > HOT_CELSIUS).count();
+            let hideable = sorted.len().saturating_sub(SENSOR_PREVIEW.max(hot));
+            if !show_all {
+                sorted.truncate(SENSOR_PREVIEW.max(hot));
+            }
+            widgets::list_shell()
+                .child(widgets::list_header(
+                    i18n::tr("sensors.title"),
+                    Some(more_chip(hideable, show_all)),
+                ))
+                .children({
+                    // No separator under the last row — it would land on the
+                    // container's own edge and read as a stray line.
+                    let total = sorted.len();
+                    sorted.into_iter().enumerate().map(move |(i, t)| {
                     let hot = t.celsius > HOT_CELSIUS;
                     let scale = t.critical_celsius.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0);
                     v_flex()
@@ -104,11 +130,62 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                     (None, None) => i18n::tr("sensors.no_limits"),
                                 }),
                         )
+                    })
                 })
-            })
-            .into_any_element(),
+                .into_any_element()
+        }
     };
 
+    with_battery_card(temps_card, tick)
+}
+
+/// The expand/collapse control in the header, borrowed from the Network
+/// tab's chip so the two filters read as the same idiom. `hideable` is how
+/// many rows the collapse *would* hide, whether or not they are currently
+/// on screen.
+fn more_chip(hideable: usize, showing: bool) -> AnyElement {
+    if hideable == 0 {
+        return widgets::note(i18n::tr("sensors.hottest_first"));
+    }
+    div()
+        .id("sensors-more")
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(if showing {
+            theme::border()
+        } else {
+            theme::border_subtle()
+        })
+        .when(showing, |d| d.bg(theme::chip()))
+        // Only while off: the "on" fill is the state, and a hover that
+        // repainted it would read as the toggle having flipped.
+        .when(!showing, |d| {
+            d.hover(|d| d.bg(theme::surface_raised()).border_color(theme::border()))
+        })
+        .px(px(7.))
+        .py(px(1.))
+        .text_size(px(9.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if showing {
+            theme::text()
+        } else {
+            theme::text_dim()
+        })
+        .child(if showing {
+            i18n::tr("sensors.hide_more")
+        } else {
+            t!("sensors.show_more", count = hideable).to_string()
+        })
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.toggle_all_sensors(cx));
+        })
+        .into_any_element()
+}
+
+fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElement> {
     let battery_card = match tick.snapshot.battery.as_ref() {
         None => widgets::empty_card(i18n::tr("sensors.battery"), i18n::tr("sensors.no_battery")),
         Some(b) => card()

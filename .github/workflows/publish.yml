@@ -134,6 +134,21 @@ jobs:
             target: x86_64-apple-darwin
             dmg_suffix: x86_64
     steps:
+      - name: preflight notary credentials
+        # A bad AC_* secret otherwise surfaces only after build, sign and
+        # dmg have spent their ten minutes — the same catch-it-early
+        # reasoning as the tag/version check in prepare_vars. `history`
+        # is the cheapest authenticated notarytool call; a stale
+        # app-specific password (revoked wholesale whenever the Apple ID
+        # password changes) fails here in seconds instead.
+        env:
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: |
+          xcrun notarytool history --apple-id "$AC_USERNAME" \
+            --password "$AC_PASSWORD" --team-id "$AC_TEAM_ID" >/dev/null
+          echo "notary credentials OK"
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -271,12 +286,126 @@ jobs:
           gh release upload nightly \
             "release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg" --clobber
 
-  # Aggregate both arches' hashes into a single SHA256SUMS on the tagged
+  # One DMG that fits both chips, published as plain `zstats.dmg` so it
+  # reads as the default download; the arch-suffixed DMGs stay for anyone
+  # who wants the smaller file. Pulls the per-arch DMGs back off the
+  # release (the same what-users-download principle as checksums) and
+  # `lipo`s the executables — no compilation happens here, so the two
+  # slices are byte-identical to what the per-arch DMGs ship. The binary
+  # changes, so the app must be re-signed and the DMG re-notarized.
+  universal:
+    needs: [prepare_vars, macos]
+    if: needs.prepare_vars.outputs.should_build == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install tools
+        run: brew install create-dmg
+      - name: Import Code-Signing Certificates
+        env:
+          p12_certificate: ${{ secrets.MACOS_CERTIFICATE }}
+          p12_password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          echo "$p12_certificate" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+      - name: download per-arch dmgs
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then tag="$GITHUB_REF_NAME"; else tag=nightly; fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          gh release download "$tag" --pattern '${{ env.APP_NAME }}-*.dmg' --dir dmgs
+          ls -l dmgs
+      - name: lipo into a universal app
+        run: |
+          set -euo pipefail
+          APP="${{ env.APP_NAME }}.app"
+          BIN="$APP/Contents/MacOS/${{ env.APP_NAME }}"
+          mkdir -p mnt-arm mnt-intel
+          hdiutil attach "dmgs/${{ env.APP_NAME }}-aarch64.dmg" -nobrowse -readonly -mountpoint "$PWD/mnt-arm"
+          hdiutil attach "dmgs/${{ env.APP_NAME }}-x86_64.dmg" -nobrowse -readonly -mountpoint "$PWD/mnt-intel"
+          # The arm bundle is the template; only the executable differs
+          # between the two (the assets are compiled in).
+          cp -R "mnt-arm/$APP" "$APP"
+          chmod -R u+w "$APP"
+          lipo -create "mnt-arm/$BIN" "mnt-intel/$BIN" -output "$BIN"
+          hdiutil detach mnt-arm
+          hdiutil detach mnt-intel
+          # A single-slice binary here would ship as a working DMG that
+          # silently dropped half its audience — fail instead.
+          archs="$(lipo -archs "$BIN")"
+          case "$archs" in
+            *arm64*x86_64*|*x86_64*arm64*) echo "universal: $archs" ;;
+            *) echo "not universal: $archs" >&2; exit 1 ;;
+          esac
+      - name: sign app
+        env:
+          CERT_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+        run: |
+          # Same retry story as the per-arch jobs: --timestamp talks to
+          # Apple's occasionally flaky timestamp server.
+          APP="${{ env.APP_NAME }}.app"
+          for attempt in 1 2 3 4 5; do
+            if codesign --force --deep --verbose --options runtime --timestamp \
+              --sign "$CERT_NAME" \
+              "$APP"; then
+              echo "codesign succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "codesign still failing after $attempt attempts" >&2
+              exit 1
+            fi
+            echo "codesign attempt $attempt failed (timestamp server?); retrying in 15s…"
+            sleep 15
+          done
+          if ! codesign -dvv "$APP" 2>&1 | grep -q "^Timestamp="; then
+            echo "no secure timestamp embedded in the signature" >&2
+            exit 1
+          fi
+      - name: create dmg
+        run: |
+          mkdir -p release
+          create-dmg \
+            --volname "${{ env.APP_NAME }} Installer" \
+            --window-pos 200 120 \
+            --window-size 800 400 \
+            --icon-size 100 \
+            --icon "${{ env.APP_NAME }}.app" 200 190 \
+            --hide-extension "${{ env.APP_NAME }}.app" \
+            --app-drop-link 600 185 \
+            "release/${{ env.APP_NAME }}.dmg" \
+            "${{ env.APP_NAME }}.app"
+      - name: notarize dmg
+        # No credential preflight here: the per-arch jobs notarized with
+        # the same secrets minutes ago.
+        env:
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "release/${{ env.APP_NAME }}.dmg" \
+            --apple-id "$AC_USERNAME" \
+            --password "$AC_PASSWORD" \
+            --team-id "$AC_TEAM_ID" \
+            --wait
+      - name: wait for propagation
+        run: sleep 30
+      - name: staple DMG
+        run: xcrun stapler staple "release/${{ env.APP_NAME }}.dmg"
+      - name: upload asset
+        run: gh release upload "$RELEASE_TAG" "release/${{ env.APP_NAME }}.dmg" --clobber
+
+  # Aggregate every dmg's hash into a single SHA256SUMS on the tagged
   # release. Pulls the dmgs back off the release rather than passing
   # artifacts between jobs — what gets hashed is exactly what users will
   # download.
   checksums:
-    needs: [macos]
+    needs: [macos, universal]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:

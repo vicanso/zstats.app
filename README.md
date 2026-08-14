@@ -18,7 +18,7 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 | `fullscan.rs` | 一次性全量进程扫描，只在点「全部」时执行 |
 | `history.rs` | 读当天历史文件，按累计 CPU 时间排名 |
 | `state.rs` | 全局状态：采集结果、告警 episode、窗口几何、UI 选择态 |
-| `views/` | 九个视图 + 共用控件 + 设计 token（`theme.rs`） |
+| `views/` | 八个视图 + 共用控件 + 设计 token（`theme.rs`） |
 | `format.rs` | 所有数字 → 字符串的规则，纯函数、有单测 |
 | `notify.rs` | 系统横幅：单线程有界队列 |
 
@@ -60,7 +60,7 @@ Config 页的「界面」卡片可以把语言（跟随系统 / English / 中文
 
 ## 界面
 
-九个视图：Overview / Processes / Apps / Disk / Network / Sensors / Alerts / History / Config，`src/views/` 一个文件一个。导航是单行图标 tab（Control Center / Stats 的做法），全名走 tooltip。设计 token 在 `src/theme.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
+八个视图：Overview / Processes / Apps / Hardware / Network / Alerts / History / Config，`src/views/` 一个文件一个（Hardware 由 `disk.rs` + `sensors.rs` 两个卡片栈拼接而成——磁盘、温度、电池同属机器的物理层，各占一个 tab 时后两者常年只有半屏内容）。传感器默认只显示最热的 3 个，头部的「显示更多」chip 展开全部（与 Network 的隐藏接口 chip 同一习语）；超过 80 °C 的传感器永远不会被折叠掉——截断只吞安静的那些。导航是单行图标 tab（Control Center / Stats 的做法），全名走 tooltip。设计 token 在 `src/theme.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
 
 贯穿全部视图的一条规则：**进度条、柱状图和数字默认中性色（`ink`），只有越过阈值才变品牌红（`accent`）**，由 `theme::fill_for()` / `theme::text_for()` 固化。
 
@@ -129,7 +129,7 @@ zstats 的告警是 episode 语义：跨越阈值报一次，30 分钟后若仍�
 - **毛玻璃**：设计稿是实心 `#09090b`，这里保留 vibrancy，观感更通透。
 - **导航**：设计稿是 4×2 缩写文字（Over / Sens / Conf）。320px 塞不下全名，缩写也不像 macOS，所以改成单行图标 + tooltip。
 - **字体**：系统字体做 UI，JetBrains Mono 做指标数字（等宽数位，跳动时不会左右抖）。设计指定的 Archivo 未采用。
-- **Config tab 只读**。`reload_settings()` 只对 `[alerts]` 生效，而 `[collector]` 开关必须重建 `Monitor`（速率基线会丢），所以不做成可写。改采集开关走 zstats CLI 或直接编辑 config.toml。
+- **Config tab 可写**。开关和间隔走 `apply_add` 后重建 `Monitor`（速率基线会丢，下一次采样的速率是 —）；告警基值走 `reload_settings()`，和 Alerts 卡片同一条路径。
 - **Apps 展开显示聚合详情而非成员进程列表**。`ProcessGroupSnapshot` 只给出整棵树的汇总，不返回成员清单。
 - 设计稿里的假菜单栏和右下角说明文字不实现 —— 那是设计稿自己的展示环境。
 

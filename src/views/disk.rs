@@ -151,7 +151,7 @@ fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
                     i18n::tr("disk.eject_title"),
                     t!("disk.eject_body", mount = mount.clone()).to_string(),
                     i18n::tr("disk.eject_ok"),
-                    move || eject(&mount),
+                    move |_| eject(&mount),
                 );
             })
             .child(

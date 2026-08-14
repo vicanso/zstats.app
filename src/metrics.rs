@@ -22,9 +22,57 @@ use zstats::settings::FileConfig;
 /// cooldowns stay intact (`Monitor::reload_settings`).
 static RELOAD: AtomicBool = AtomicBool::new(false);
 
+/// Set when `[collector]` (or `[daemon] interval`) changes. Those are
+/// baked into `LocalCollector` at construction, so the only honest
+/// apply is a new `Monitor`. Rate baselines start over; the first
+/// sample after a rebuild legitimately reads `—`.
+static REBUILD: AtomicBool = AtomicBool::new(false);
+
 /// Ask the collector to re-read `[alerts]` on its next pass.
 pub fn request_reload() {
     RELOAD.store(true, Ordering::Release);
+}
+
+/// Ask the collector thread to throw away the running `Monitor` and
+/// build another from the file.
+pub fn request_rebuild() {
+    REBUILD.store(true, Ordering::Release);
+}
+
+/// App defaults for channels the Config tab exposes as a cadence.
+/// zstats itself uses 0 (every tick); 0 in the file therefore means
+/// "this app's default", not "hammer the process table every 2s".
+pub(crate) const PANEL_PROCESS_INTERVAL: Duration = Duration::from_secs(15);
+pub(crate) const PANEL_DISK_IO_INTERVAL: Duration = Duration::from_secs(15);
+pub(crate) const PANEL_NETWORK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Sensors, per-core CPU, battery, process groups and process-disk-io
+/// have no off switch. CPU% and memory are already unconditional in
+/// zstats. A zero cadence in the file is this app's 15s default.
+fn with_always_on(mut settings: FileConfig) -> FileConfig {
+    let mut collector = settings.collector.unwrap_or_default();
+    collector.collect_temperatures = true;
+    collector.collect_battery = true;
+    collector.per_core_cpu = true;
+    collector.collect_processes = true;
+    collector.collect_process_groups = true;
+    collector.collect_process_disk_io = true;
+    collector.collect_disks = true;
+    collector.collect_networks = true;
+    collector.process_refresh_interval =
+        panel_interval(collector.process_refresh_interval, PANEL_PROCESS_INTERVAL);
+    collector.disk_io_refresh_interval =
+        panel_interval(collector.disk_io_refresh_interval, PANEL_DISK_IO_INTERVAL);
+    collector.network_refresh_interval =
+        panel_interval(collector.network_refresh_interval, PANEL_NETWORK_INTERVAL);
+    settings.collector = Some(collector);
+    settings
+}
+
+/// `0` in config.toml is zstats' "every collect". This panel treats that
+/// as unset and substitutes its own default.
+pub(crate) fn panel_interval(file: Duration, fallback: Duration) -> Duration {
+    if file.is_zero() { fallback } else { file }
 }
 
 /// Fallback cadence, used only when config.toml sets no `[daemon] interval`.
@@ -92,34 +140,26 @@ impl CollectorPace {
     pub fn is_visible(&self) -> bool {
         self.visible.load(Ordering::Relaxed)
     }
-}
 
-/// Overrides the file applies only to this panel's collector.
-///
-/// `collect-process-disk-io` defaults off in zstats so the CLI stays
-/// cheap. The Apps tab is built around per-tree read/write rates, and
-/// painting `IO —` on every row reads as "these apps do no disk" rather
-/// than "we never asked". Forced on here, not written back — `zstats
-/// serve` keeps the file's own default.
-fn with_panel_collector_overrides(mut settings: FileConfig) -> FileConfig {
-    let mut collector = settings.collector.unwrap_or_default();
-    collector.collect_process_disk_io = true;
-    settings.collector = Some(collector);
-    settings
+    /// Interrupt an idle wait so a just-written setting is picked up
+    /// on the next loop, not up to [`IDLE_INTERVAL`] later.
+    pub fn wake(&self) {
+        let _ = self.wake.send(());
+    }
 }
 
 /// Spawn the collector and the task that folds its output into the store.
 pub fn start(cx: &mut App) {
     let dir = zstats::settings::default_dir();
 
-    // Read the config once: it feeds the read-only Config tab, and it sets
-    // the sampling cadence. Sharing ~/.zstats with the CLI means sharing its
-    // `[daemon] interval` too — running at our own rate would have the two
-    // processes disagree about a setting the user wrote down once.
+    // Read the config once: it seeds the Config tab and the sampling
+    // cadence. Later writes go through `apply_setting` → rebuild / reload.
+    // Sharing ~/.zstats with the CLI means sharing its `[daemon] interval`
+    // too — running at our own rate would have the two processes disagree
+    // about a setting the user wrote down once.
     let mut interval = DEFAULT_INTERVAL;
     match zstats::settings::load(&dir) {
         Ok(settings) => {
-            let settings = with_panel_collector_overrides(settings);
             interval = settings.daemon.interval.unwrap_or(DEFAULT_INTERVAL);
             cx.global::<ZStatsGlobalStore>()
                 .clone()
@@ -146,9 +186,9 @@ pub fn start(cx: &mut App) {
         // `<config-dir>/template.toml`, and a template that failed to load
         // would be a rule set that silently did not apply — so refusing to
         // collect is the correct posture, same as a malformed config.toml.
-        let mut monitor = match zstats::settings::load(&dir).and_then(|settings| {
-            Monitor::with_settings(&dir, with_panel_collector_overrides(settings))
-        }) {
+        let mut monitor = match zstats::settings::load(&dir)
+            .and_then(|settings| Monitor::with_settings(&dir, with_always_on(settings)))
+        {
             Ok(monitor) => monitor,
             Err(e) => {
                 eprintln!("metrics collection unavailable ({}): {e}", dir.display());
@@ -156,7 +196,21 @@ pub fn start(cx: &mut App) {
             }
         };
         loop {
-            if RELOAD.swap(false, Ordering::AcqRel)
+            if REBUILD.swap(false, Ordering::AcqRel) {
+                // Rebuild wins over a pending reload: a new Monitor
+                // already re-reads [alerts] from the file.
+                let _ = RELOAD.swap(false, Ordering::AcqRel);
+                match zstats::settings::load(&dir) {
+                    Ok(settings) => {
+                        interval = settings.daemon.interval.unwrap_or(DEFAULT_INTERVAL);
+                        match Monitor::with_settings(&dir, with_always_on(settings)) {
+                            Ok(next) => monitor = next,
+                            Err(e) => eprintln!("rebuild collector failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("rebuild collector failed: {e}"),
+                }
+            } else if RELOAD.swap(false, Ordering::AcqRel)
                 && let Err(e) = monitor.reload_settings()
             {
                 eprintln!("reload_settings failed: {e}");
@@ -248,4 +302,44 @@ fn spawn_abnormal_scan(cx: &mut App) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zstats::CollectorConfig;
+
+    #[test]
+    fn zero_cadence_in_the_file_becomes_the_panel_default() {
+        let file = with_always_on(FileConfig::default());
+        let c = file.collector.unwrap();
+        assert_eq!(c.process_refresh_interval, PANEL_PROCESS_INTERVAL);
+        assert_eq!(c.disk_io_refresh_interval, PANEL_DISK_IO_INTERVAL);
+        assert_eq!(c.network_refresh_interval, PANEL_NETWORK_INTERVAL);
+        assert!(c.collect_processes);
+        assert!(c.collect_process_groups);
+        assert!(c.collect_process_disk_io);
+        assert!(c.collect_disks);
+        assert!(c.collect_networks);
+        assert!(c.collect_temperatures);
+        assert!(c.collect_battery);
+        assert!(c.per_core_cpu);
+    }
+
+    #[test]
+    fn an_explicit_cadence_is_kept() {
+        let file = with_always_on(FileConfig {
+            collector: Some(CollectorConfig {
+                process_refresh_interval: Duration::from_secs(5),
+                disk_io_refresh_interval: Duration::from_secs(30),
+                network_refresh_interval: Duration::from_secs(10),
+                ..CollectorConfig::default()
+            }),
+            ..FileConfig::default()
+        });
+        let c = file.collector.unwrap();
+        assert_eq!(c.process_refresh_interval, Duration::from_secs(5));
+        assert_eq!(c.disk_io_refresh_interval, Duration::from_secs(30));
+        assert_eq!(c.network_refresh_interval, Duration::from_secs(10));
+    }
 }

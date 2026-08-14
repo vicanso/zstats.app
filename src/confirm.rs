@@ -22,7 +22,7 @@ pub fn ask(
     title: impl Into<String>,
     body: impl Into<String>,
     ok: impl Into<String>,
-    on_ok: impl Fn() + 'static,
+    on_ok: impl Fn(&mut App) + 'static,
 ) {
     let title = title.into();
     let body = body.into();
@@ -71,7 +71,7 @@ pub fn ask(
                                 .danger()
                                 .label(ok)
                                 .on_click(move |_, window, cx| {
-                                    on_ok();
+                                    on_ok(cx);
                                     window.close_dialog(cx);
                                 }),
                         ),

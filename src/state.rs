@@ -98,22 +98,22 @@ pub enum Tab {
     Overview,
     Processes,
     Apps,
-    Disk,
+    /// Disks, temperature sensors and the battery in one place — the
+    /// machine's physical substrate, as opposed to the workload tabs.
+    Hardware,
     Net,
-    Sensors,
     Alerts,
     History,
     Config,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 9] = [
+    pub const ALL: [Tab; 8] = [
         Tab::Overview,
         Tab::Processes,
         Tab::Apps,
-        Tab::Disk,
+        Tab::Hardware,
         Tab::Net,
-        Tab::Sensors,
         Tab::Alerts,
         Tab::History,
         Tab::Config,
@@ -130,9 +130,8 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Processes => "Processes",
             Tab::Apps => "Apps",
-            Tab::Disk => "Disk",
+            Tab::Hardware => "Hardware",
             Tab::Net => "Network",
-            Tab::Sensors => "Sensors",
             Tab::Alerts => "Alerts",
             Tab::History => "History",
             Tab::Config => "Config",
@@ -145,9 +144,8 @@ impl Tab {
             Tab::Overview => "tabs.overview",
             Tab::Processes => "tabs.processes",
             Tab::Apps => "tabs.apps",
-            Tab::Disk => "tabs.disk",
+            Tab::Hardware => "tabs.hardware",
             Tab::Net => "tabs.network",
-            Tab::Sensors => "tabs.sensors",
             Tab::Alerts => "tabs.alerts",
             Tab::History => "tabs.history",
             Tab::Config => "tabs.config",
@@ -302,6 +300,8 @@ pub struct ZStatsAppState {
     only_abnormal: bool,
     /// UI filter: reveal the interfaces the recency filter would hide.
     show_unused_nets: bool,
+    /// UI filter: reveal every temperature sensor, not just the preview.
+    show_all_sensors: bool,
     proc_sort: ProcSort,
     /// The three observers that answer questions zstats' own rules cannot —
     /// see [`crate::watch`]. They own their clocks and thresholds; this type
@@ -356,6 +356,7 @@ impl Default for ZStatsAppState {
             settings: None,
             only_abnormal: false,
             show_unused_nets: false,
+            show_all_sensors: false,
             proc_sort: ProcSort::default(),
             sustained: SustainedWatch::default(),
             abnormal: AbnormalWatch::default(),
@@ -443,8 +444,9 @@ impl ZStatsAppState {
         &self.alerts
     }
 
-    /// What the collector is running with. Read once at startup — the Config
-    /// tab is read-only, so there is nothing to invalidate it.
+    /// What the collector is running with. Seeded at startup, then replaced
+    /// whenever the Config tab or an Alerts chip writes through
+    /// [`Self::apply_setting`].
     pub fn settings(&self) -> Option<&FileConfig> {
         self.settings.as_ref()
     }
@@ -518,6 +520,15 @@ impl ZStatsAppState {
         cx.notify();
     }
 
+    pub fn show_all_sensors(&self) -> bool {
+        self.show_all_sensors
+    }
+
+    pub fn toggle_all_sensors(&mut self, cx: &mut Context<Self>) {
+        self.show_all_sensors = !self.show_all_sensors;
+        cx.notify();
+    }
+
     /// How long we have observed this pid as abnormal. Always a lower bound:
     /// it may well have been in that state before the app started.
     pub fn abnormal_observed(&self, pid: u32) -> Option<Duration> {
@@ -526,6 +537,29 @@ impl ZStatsAppState {
 
     pub fn set_settings(&mut self, settings: FileConfig) {
         self.settings = Some(settings);
+    }
+
+    /// Persist one `zstats -add` key and tell the collector. `[alerts]`
+    /// reloads in place; everything else rebuilds the `Monitor` (rate
+    /// baselines start over).
+    pub fn apply_setting(
+        &mut self,
+        key: &str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let file = persist_setting(&zstats::settings::default_dir(), key, value)?;
+        self.settings = Some(file);
+        if setting_rebuilds_collector(key) {
+            crate::metrics::request_rebuild();
+        } else {
+            crate::metrics::request_reload();
+        }
+        if let Some(pace) = cx.try_global::<crate::metrics::CollectorPace>() {
+            pace.wake();
+        }
+        cx.notify();
+        Ok(())
     }
 
     /// Write a per-subject `[alerts]` override (or a global pressure
@@ -538,17 +572,24 @@ impl ZStatsAppState {
         value: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let dir = zstats::settings::default_dir();
-        let mut file = zstats::settings::load(&dir).map_err(|e| e.to_string())?;
         let payload = if name.is_empty() {
             value.to_string()
         } else {
             format!("{name}={value}")
         };
-        zstats::settings::apply_add(&mut file, key, &payload)?;
-        zstats::settings::save(&dir, &file).map_err(|e| e.to_string())?;
+        self.apply_setting(key, &payload, cx)
+    }
+
+    /// Replace `config.toml` with zstats builtins. Language and theme live
+    /// in `app.toml` and are left alone. Collector fields are baked in at
+    /// construction, so this rebuilds the `Monitor`.
+    pub fn reset_settings(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let file = reset_config(&zstats::settings::default_dir())?;
         self.settings = Some(file);
-        crate::metrics::request_reload();
+        crate::metrics::request_rebuild();
+        if let Some(pace) = cx.try_global::<crate::metrics::CollectorPace>() {
+            pace.wake();
+        }
         cx.notify();
         Ok(())
     }
@@ -918,6 +959,44 @@ impl Deref for ZStatsGlobalStore {
     }
 }
 
+/// Write one `zstats -add` key into `<dir>/config.toml` and return the
+/// saved file. The Config tab and the Alerts chips both go through this
+/// so they share the CLI's validation.
+pub(crate) fn persist_setting(
+    dir: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> Result<FileConfig, String> {
+    let mut file = zstats::settings::load(dir).map_err(|e| e.to_string())?;
+    zstats::settings::apply_add(&mut file, key, value)?;
+    zstats::settings::save(dir, &file).map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
+/// Write a default `config.toml`. Absent keys are zstats builtins; any
+/// per-subject override in the previous file is gone.
+pub(crate) fn reset_config(dir: &std::path::Path) -> Result<FileConfig, String> {
+    let file = FileConfig::default();
+    zstats::settings::save(dir, &file).map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
+/// `[collector]` and `[daemon]` are baked into `LocalCollector` at
+/// construction. `[alerts]` is the one section `reload_settings` re-reads.
+fn setting_rebuilds_collector(key: &str) -> bool {
+    !matches!(
+        key,
+        "alert-cpu"
+            | "alert-mem"
+            | "alert-app-cpu"
+            | "alert-app-mem"
+            | "alert-disk"
+            | "alert-cooldown"
+            | "alert-pressure"
+            | "alert-template"
+    )
+}
+
 /// Screen rectangle of the tray icon, in **physical** pixels with a top-left
 /// origin — that's what `tray_icon` reports. Converting to gpui's logical
 /// `Pixels` needs the scale factor, see [`ZStatsAppState::scale_factor`].
@@ -1084,5 +1163,80 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), Tab::ALL.len());
+    }
+
+    #[test]
+    fn collector_keys_rebuild_and_alert_keys_reload() {
+        assert!(setting_rebuilds_collector("collect-processes"));
+        assert!(setting_rebuilds_collector("process-disk-io"));
+        assert!(setting_rebuilds_collector("process-interval"));
+        assert!(setting_rebuilds_collector("max-processes"));
+        assert!(setting_rebuilds_collector("interval"));
+        assert!(!setting_rebuilds_collector("alert-cpu"));
+        assert!(!setting_rebuilds_collector("alert-mem"));
+        assert!(!setting_rebuilds_collector("alert-cooldown"));
+        assert!(!setting_rebuilds_collector("alert-pressure"));
+        assert!(!setting_rebuilds_collector("alert-template"));
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("zstats-app-settings-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn persist_setting_round_trips_collector_and_alerts() {
+        let dir = scratch("roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let file = persist_setting(&dir, "process-disk-io", "true").unwrap();
+        assert!(file.collector.as_ref().unwrap().collect_process_disk_io);
+
+        // A second write must not clobber the first section.
+        let file = persist_setting(&dir, "alert-cpu", "50").unwrap();
+        assert_eq!(file.alerts.cpu, Some(50.0));
+        assert!(file.collector.as_ref().unwrap().collect_process_disk_io);
+
+        persist_setting(&dir, "collect-processes", "false").unwrap();
+        let reloaded = zstats::settings::load(&dir).unwrap();
+        assert!(!reloaded.collector.as_ref().unwrap().collect_processes);
+        assert!(reloaded.collector.as_ref().unwrap().collect_process_disk_io);
+        assert_eq!(reloaded.alerts.cpu, Some(50.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_setting_rejects_unknown_keys() {
+        let dir = scratch("unknown");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(persist_setting(&dir, "not-a-key", "true").is_err());
+        assert!(
+            !dir.join("config.toml").exists(),
+            "a rejected key must not create the file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reset_config_clears_overrides_and_collector() {
+        let dir = scratch("reset");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        persist_setting(&dir, "process-disk-io", "true").unwrap();
+        persist_setting(&dir, "alert-cpu", "50").unwrap();
+        persist_setting(&dir, "alert-cpu", "ghostty=100").unwrap();
+        persist_setting(&dir, "collect-processes", "false").unwrap();
+
+        let file = reset_config(&dir).unwrap();
+        assert!(file.collector.is_none());
+        assert!(file.alerts.cpu.is_none());
+        assert!(file.alerts.cpu_overrides.is_empty());
+
+        let reloaded = zstats::settings::load(&dir).unwrap();
+        assert!(reloaded.collector.is_none());
+        assert!(reloaded.alerts.cpu.is_none());
+        assert!(reloaded.alerts.cpu_overrides.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
