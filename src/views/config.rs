@@ -588,8 +588,9 @@ fn default_at(value: String) -> String {
     t!("config.default_at", value = value).to_string()
 }
 
-/// Durations the way the config file writes them.
-fn humanize(d: Duration) -> String {
+/// Durations the way the config file writes them. Shared with the Alerts
+/// empty state, which quotes the effective cooldown.
+pub(super) fn humanize(d: Duration) -> String {
     let ms = d.as_millis();
     if ms >= 60_000 && ms.is_multiple_of(60_000) {
         format!("{}m", ms / 60_000)

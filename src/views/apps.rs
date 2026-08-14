@@ -71,16 +71,22 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     .gap(px(5.))
                     .child(processes::filter_chip(state))
                     .child(full_scan_chip(state))
-                    .child(widgets::note(i18n::tr("apps.tree_totals")))
+                    // The whole explanation — what a tree is, why `login`
+                    // can legitimately head the list, where the cap comes
+                    // from — lives on this label's tooltip instead of a
+                    // permanent note block: it is worth reading once, not
+                    // worth a paragraph of chrome on every open.
+                    .child(
+                        div()
+                            .id("apps-tree-totals")
+                            .text_size(px(10.))
+                            .text_color(theme::text_dim())
+                            .tooltip(widgets::wrap_tooltip(i18n::tr("apps.cap_note")))
+                            .child(i18n::tr("apps.tree_totals")),
+                    )
                     .into_any_element(),
             ),
         ))
-        .child(
-            div()
-                .px(px(13.))
-                .pb(px(8.))
-                .child(widgets::note(i18n::tr("apps.cap_note"))),
-        )
         .children(processes::filter_row(state))
         .children({
             rows.into_iter()
@@ -265,9 +271,11 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
                 .justify_between()
                 .gap(px(8.))
                 .mt(px(5.))
-                .child(widgets::outline_pill(
-                    t!("apps.n_processes", count = g.process_count).to_string(),
-                ))
+                .child(widgets::outline_pill(if g.process_count == 1 {
+                    i18n::tr("apps.one_process")
+                } else {
+                    t!("apps.n_processes", count = g.process_count).to_string()
+                }))
                 .child(
                     div()
                         .font_family(font::MONO)
@@ -288,7 +296,9 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
             (i18n::tr("apps.memory"), format::memory(g.memory_bytes)),
             (i18n::tr("apps.cpu"), format::pct(g.cpu_usage_percent)),
         ];
-        if io_line(g.read_bytes_per_sec, g.write_bytes_per_sec).is_some() {
+        // Real zeros still get rows here — the expansion is where "measured
+        // nothing" and "not collected" (both None) must stay distinguishable.
+        if g.read_bytes_per_sec.is_some() || g.write_bytes_per_sec.is_some() {
             detail.push((i18n::tr("apps.read"), format::rate(g.read_bytes_per_sec)));
             detail.push((i18n::tr("apps.write"), format::rate(g.write_bytes_per_sec)));
         }
@@ -298,21 +308,7 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
                 .p(px(10.))
                 .rounded(px(8.))
                 .bg(theme::inset())
-                .child(widgets::kv_columns(detail))
-                .child(
-                    div()
-                        .mt(px(6.))
-                        .pt(px(6.))
-                        .border_t(px(1.))
-                        .border_color(theme::border())
-                        .child(widgets::note(i18n::tr(
-                            if matches!(state.full_app_scan(), FullAppScan::Ready(_)) {
-                                "apps.tree_note_full"
-                            } else {
-                                "apps.tree_note"
-                            },
-                        ))),
-                ),
+                .child(widgets::kv_columns(detail)),
         );
     }
 
@@ -332,10 +328,17 @@ fn mem_io_line(memory: u64, read: Option<u64>, write: Option<u64>) -> String {
 }
 
 fn io_line(read: Option<u64>, write: Option<u64>) -> Option<String> {
-    match (read, write) {
-        (None, None) => None,
-        (r, w) => Some(format!("R {} · W {}", format::rate(r), format::rate(w))),
+    // Zero draws the same nothing as "not collected": most trees idle at
+    // R 0 B/s · W 0 B/s, and repeating that on every row is ink without
+    // information. The expanded detail keeps the explicit numbers.
+    if read.unwrap_or(0) == 0 && write.unwrap_or(0) == 0 {
+        return None;
     }
+    Some(format!(
+        "R {} · W {}",
+        format::rate(read),
+        format::rate(write)
+    ))
 }
 
 #[cfg(test)]
@@ -343,9 +346,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn io_line_stays_off_when_uncollected() {
+    fn io_line_stays_off_when_uncollected_or_idle() {
         assert_eq!(io_line(None, None), None);
-        assert_eq!(io_line(Some(0), Some(0)), Some("R 0 B/s · W 0 B/s".into()));
+        // Measured zero draws nothing on the row either — most trees idle,
+        // and "R 0 B/s · W 0 B/s" on each was ink without information.
+        assert_eq!(io_line(Some(0), Some(0)), None);
+        assert_eq!(io_line(Some(0), None), None);
+        // One live side brings the whole line back, zeros included.
+        assert_eq!(
+            io_line(Some(2048), Some(0)),
+            Some("R 2 kB/s · W 0 B/s".into())
+        );
         assert_eq!(mem_io_line(98 * 1024 * 1024, None, None), "98 MB");
+        assert_eq!(mem_io_line(98 * 1024 * 1024, Some(0), Some(0)), "98 MB");
     }
 }

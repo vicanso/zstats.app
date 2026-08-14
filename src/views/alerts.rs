@@ -27,10 +27,36 @@ use zstats::{AlertEvent, AlertKind, AlertSubject, Severity};
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     if state.alerts().is_empty() {
-        return vec![widgets::empty_card(
-            i18n::tr("alerts.empty_title"),
-            i18n::tr("alerts.empty_body"),
-        )];
+        // An empty list is indistinguishable from a broken watcher unless
+        // it says what it is armed with — so quote the thresholds in force.
+        return vec![
+            card()
+                .pt(px(16.))
+                .pb(px(16.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::text())
+                        .child(i18n::tr("alerts.empty_title")),
+                )
+                .child(
+                    div()
+                        .mt(px(6.))
+                        .text_size(px(11.))
+                        .text_color(theme::text_muted())
+                        .child(i18n::tr("alerts.empty_body")),
+                )
+                .children(armed_line(state).map(|line| {
+                    div()
+                        .mt(px(8.))
+                        .font_family(crate::font::MONO)
+                        .text_size(px(10.))
+                        .text_color(theme::text_dim())
+                        .child(line)
+                }))
+                .into_any_element(),
+        ];
     }
 
     let selected = state.selected_alert().cloned();
@@ -93,6 +119,37 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     cards.push(widgets::note(i18n::tr("alerts.footer_note")));
     cards
+}
+
+/// "CPU 30% · MEM 25% · disk 90% · cooldown 10m" — the rules the engine is
+/// armed with right now, resolved through zstats' own [`ActiveThresholds`]
+/// (same source as the Config tab, so the two can never disagree). `None`
+/// with no readable config: the body already covers the waiting state.
+fn armed_line(state: &ZStatsAppState) -> Option<String> {
+    let file = state.settings()?;
+    let eff = zstats::alerts::ActiveThresholds::from_config(&file.alerts);
+    let mut items = Vec::new();
+    if let Some(v) = eff.cpu.base() {
+        items.push(format!("{} {v:.0}%", i18n::tr("alerts.kind_cpu")));
+    }
+    if let Some(f) = eff.memory.base() {
+        items.push(format!("{} {:.0}%", i18n::tr("alerts.kind_mem"), f * 100.0));
+    }
+    if let Some(f) = eff.disk.base() {
+        items.push(format!(
+            "{} {:.0}%",
+            i18n::tr("alerts.kind_disk"),
+            f64::from(f) * 100.0
+        ));
+    }
+    items.push(
+        t!(
+            "alerts.empty_cooldown",
+            value = super::config::humanize(eff.cooldown)
+        )
+        .to_string(),
+    );
+    Some(t!("alerts.empty_watching", items = items.join(" · ")).to_string())
 }
 
 fn alert_head(
