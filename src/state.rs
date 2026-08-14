@@ -18,7 +18,7 @@ use gpui::{
     ScrollHandle, Window, px,
 };
 use gpui_component::input::{InputEvent, InputState};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -166,6 +166,14 @@ enum Episode {
     System(AlertKind),
 }
 
+/// One episode's quiet hours: banners are skipped until the deadline.
+struct Snooze {
+    until: Instant,
+    /// Wall-clock form of `until` ("14:32"), fixed at snooze time — the
+    /// deadline does not move, so neither should its label.
+    until_label: String,
+}
+
 impl Episode {
     fn of(event: &AlertEvent) -> Self {
         let kind = event.kind();
@@ -302,6 +310,11 @@ pub struct ZStatsAppState {
     show_unused_nets: bool,
     /// UI filter: reveal every temperature sensor, not just the preview.
     show_all_sensors: bool,
+    /// Banner snoozes by episode: the user asked for quiet on this subject
+    /// until a deadline. Delivery-layer only — events still land in the
+    /// alerts list and the engine's rules are untouched. Deliberately not
+    /// persisted: a snooze means "not now", and a restart is a new now.
+    snoozed: HashMap<Episode, Snooze>,
     proc_sort: ProcSort,
     /// The three observers that answer questions zstats' own rules cannot —
     /// see [`crate::watch`]. They own their clocks and thresholds; this type
@@ -357,6 +370,7 @@ impl Default for ZStatsAppState {
             only_abnormal: false,
             show_unused_nets: false,
             show_all_sensors: false,
+            snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
             sustained: SustainedWatch::default(),
             abnormal: AbnormalWatch::default(),
@@ -518,6 +532,46 @@ impl ZStatsAppState {
     pub fn toggle_unused_nets(&mut self, cx: &mut Context<Self>) {
         self.show_unused_nets = !self.show_unused_nets;
         cx.notify();
+    }
+
+    // ---- banner snooze -------------------------------------------------
+
+    /// Quiet this episode's banners for `hours`. Suppression is delivery-
+    /// layer only: the engine keeps evaluating and the Alerts list keeps
+    /// recording — the interruption is what stops.
+    pub fn snooze_banners(&mut self, event: &AlertEvent, hours: u64, cx: &mut Context<Self>) {
+        let until_label = jiff::Zoned::now()
+            .checked_add(jiff::Span::new().hours(hours as i64))
+            .map(|z| z.strftime("%H:%M").to_string())
+            .unwrap_or_default();
+        self.snoozed.insert(
+            Episode::of(event),
+            Snooze {
+                until: Instant::now() + Duration::from_secs(hours * 3600),
+                until_label,
+            },
+        );
+        cx.notify();
+    }
+
+    pub fn unsnooze_banners(&mut self, event: &AlertEvent, cx: &mut Context<Self>) {
+        self.snoozed.remove(&Episode::of(event));
+        cx.notify();
+    }
+
+    /// Whether this event's banner is muted right now. Runs on every fresh
+    /// event, which is also where expired entries get dropped — the map
+    /// never outlives its deadlines by more than one alert.
+    pub fn banner_snoozed(&mut self, event: &AlertEvent) -> bool {
+        let now = Instant::now();
+        self.snoozed.retain(|_, s| s.until > now);
+        self.snoozed.contains_key(&Episode::of(event))
+    }
+
+    /// The "muted until 14:32" label for a card, if its episode is muted.
+    pub fn snoozed_until(&self, event: &AlertEvent) -> Option<&str> {
+        let snooze = self.snoozed.get(&Episode::of(event))?;
+        (snooze.until > Instant::now()).then_some(snooze.until_label.as_str())
     }
 
     pub fn show_all_sensors(&self) -> bool {
@@ -1046,6 +1100,31 @@ mod tests {
         assert_eq!(filtered_indices(&procs, "wechat"), vec![0, 2]);
         assert_eq!(filtered_indices(&procs, "task"), vec![1]);
         assert!(filtered_indices(&procs, "xcode").is_empty());
+    }
+
+    #[test]
+    fn snooze_mutes_by_episode_and_expires() {
+        let mut state = ZStatsAppState::new();
+        let event = cpu_alert(7);
+
+        // Active snooze mutes this episode, and only this episode: the
+        // same pid's MEMORY alert is a different story and stays loud.
+        state.snoozed.insert(
+            Episode::of(&event),
+            Snooze {
+                until: Instant::now() + Duration::from_secs(3600),
+                until_label: "14:32".into(),
+            },
+        );
+        assert!(state.banner_snoozed(&event));
+        assert!(!state.banner_snoozed(&mem_alert(7)));
+        assert_eq!(state.snoozed_until(&event), Some("14:32"));
+
+        // Past the deadline the entry is pruned on the next check.
+        state.snoozed.get_mut(&Episode::of(&event)).unwrap().until =
+            Instant::now() - Duration::from_secs(1);
+        assert!(!state.banner_snoozed(&event));
+        assert!(state.snoozed.is_empty(), "expired snooze should be pruned");
     }
 
     fn cpu_alert(pid: u32) -> AlertEvent {

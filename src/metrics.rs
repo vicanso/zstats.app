@@ -263,6 +263,11 @@ pub fn start(cx: &mut App) {
                     .clone()
                     .update(cx, |state, cx| {
                         for event in state.ingest(tick, cx) {
+                            // Snoozed subjects still land in the Alerts
+                            // list above — only the banner stays quiet.
+                            if state.banner_snoozed(&event) {
+                                continue;
+                            }
                             notify::post(&event);
                         }
                         for notice in state.take_sustained_notices() {

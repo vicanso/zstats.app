@@ -87,7 +87,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id(card_id)
                 .border_color(line)
                 .when(critical, |d| d.bg(theme::accent_wash(7)))
-                .child(alert_head(i, target.clone(), critical, line, seen))
+                .child(alert_head(i, target.clone(), critical, line, seen, state))
                 .child(alert_title(&seen.event.subject))
                 .child(
                     div()
@@ -112,6 +112,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 })
                 .when_some(target.filter(|_| expanded), |d, tgt| {
                     d.child(threshold_editor(i, &tgt, settings))
+                        .child(snooze_row(i, &seen.event, state))
                 })
                 .into_any_element()
         })
@@ -158,6 +159,7 @@ fn alert_head(
     critical: bool,
     line: Hsla,
     seen: &SeenAlert,
+    state: &ZStatsAppState,
 ) -> AnyElement {
     let row = h_flex().items_center().justify_between().gap(px(8.));
     row.child(
@@ -202,6 +204,13 @@ fn alert_head(
                 .to_string(),
                 None => format::ago(seen.age()),
             }))
+            // A muted episode says so without being expanded — otherwise
+            // "why no banner?" has no visible answer on the card.
+            .children(
+                state
+                    .snoozed_until(&seen.event)
+                    .map(|_| widgets::outline_pill(i18n::tr("alerts.snoozed_pill"))),
+            )
             // An explicit control rather than a clickable card: macOS does
             // not change the pointer over clickable things, so "the whole row
             // does something" has no way to announce itself.
@@ -349,6 +358,61 @@ fn override_target(event: &AlertEvent) -> Option<OverrideTarget> {
         }),
         _ => None,
     }
+}
+
+/// Quiet hours for this episode's banners, below the threshold chips.
+/// Deliberately a delivery-layer control, not a rule change: the engine
+/// keeps evaluating, the list above keeps recording, config.toml is
+/// untouched — only the interruption stops, and only until the deadline.
+fn snooze_row(index: usize, event: &AlertEvent, state: &ZStatsAppState) -> AnyElement {
+    let active = state.snoozed_until(event);
+    let caption = match active {
+        Some(time) => t!("alerts.snoozed_until", time = time).to_string(),
+        None => i18n::tr("alerts.snooze_hint"),
+    };
+
+    let chip = |slug: &str, label: String| {
+        div()
+            .id(SharedString::from(format!("snooze-{index}-{slug}")))
+            .flex_none()
+            .rounded_full()
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::inset())
+            .px(px(8.))
+            .py(px(2.))
+            .text_size(px(10.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme::text())
+            .hover(|d| d.bg(theme::surface_raised()))
+            .child(label)
+    };
+
+    let mut row = h_flex()
+        .mt(px(8.))
+        .gap(px(4.))
+        .child(div().mr(px(2.)).child(widgets::note(caption)));
+    if active.is_none() {
+        for (slug, label_key, hours) in [("1h", "alerts.snooze_1h", 1), ("3h", "alerts.snooze_3h", 3)]
+        {
+            let event = event.clone();
+            row = row.child(chip(slug, i18n::tr(label_key)).on_click(move |_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.snooze_banners(&event, hours, cx));
+            }));
+        }
+    } else {
+        let event = event.clone();
+        row = row.child(chip("off", i18n::tr("alerts.snooze_off")).on_click(
+            move |_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.unsnooze_banners(&event, cx));
+            },
+        ));
+    }
+    row.into_any_element()
 }
 
 fn threshold_editor(
