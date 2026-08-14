@@ -44,6 +44,14 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let shown: Vec<_> = rows.iter().take(TOP_N).collect();
     let last = shown.len().saturating_sub(1);
 
+    // Two `yes` rows with different pids read as a duplicate at a squint;
+    // a repeated name gets its pid inline so identity is visible without
+    // reading the caption line.
+    let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for s in &shown {
+        *name_counts.entry(s.name.as_str()).or_default() += 1;
+    }
+
     let list = widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("history.title"),
@@ -62,23 +70,54 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .justify_between()
                         .gap(px(8.))
                         .child(
-                            div()
+                            h_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme::text())
-                                .truncate()
-                                .child(s.name.clone()),
+                                .items_baseline()
+                                .gap(px(5.))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(12.))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme::text())
+                                        .truncate()
+                                        .child(s.name.clone()),
+                                )
+                                .when(name_counts[s.name.as_str()] > 1, |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .font_family(font::MONO)
+                                            .text_size(px(9.5))
+                                            .text_color(theme::text_faint())
+                                            .child(s.pid.to_string()),
+                                    )
+                                }),
                         )
+                        // The headline figure is core-time, which shares a
+                        // unit *shape* with the wall-clock minutes below —
+                        // the CPU tag is what keeps "30m" from reading as a
+                        // duration of day.
                         .child(
-                            div()
+                            h_flex()
                                 .flex_none()
-                                .font_family(font::MONO)
-                                .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(theme::text())
-                                .child(format::core_time(s.cpu_time_ms)),
+                                .items_baseline()
+                                .gap(px(3.))
+                                .child(
+                                    div()
+                                        .font_family(font::MONO)
+                                        .text_size(px(12.))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme::text())
+                                        .child(format::core_time(s.cpu_time_ms)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(8.5))
+                                        .text_color(theme::text_dim())
+                                        .child(i18n::tr("alerts.kind_cpu")),
+                                ),
                         ),
                 )
                 .child(
