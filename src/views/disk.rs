@@ -4,12 +4,14 @@ use super::widgets::{self, card};
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::ZStatsAppState;
+use crate::state::{BigFiles, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, div, px,
 };
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex};
 use rust_i18n::t;
@@ -38,7 +40,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         )];
     }
 
-    disks
+    let cards: Vec<AnyElement> = disks
         .iter()
         .enumerate()
         .map(|(i, d)| {
@@ -65,6 +67,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                 .truncate()
                                 .child(d.mount_point.clone()),
                         )
+                        // The large-file entry lives on the volume that
+                        // holds ~ — a standing card of its own would be a
+                        // permanent block of chrome for a one-shot query.
+                        .when(d.mount_point == "/", |row| row.child(big_files_chip(state)))
                         .child(volume_badge(i, d)),
                 )
                 .child(
@@ -118,9 +124,212 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         )
                         .child(div().child(d.file_system.clone())),
                 )
+                // The query's results live inside the card of the volume
+                // they were asked about, as a section under a hairline —
+                // not a sibling card, which would separate the chip from
+                // its answer. Off renders nothing at all.
+                .when(
+                    d.mount_point == "/" && !matches!(state.big_files(), BigFiles::Off),
+                    |c| c.child(big_files_section(state)),
+                )
                 .into_any_element()
         })
-        .collect()
+        .collect();
+    cards
+}
+
+/// The one-shot Spotlight large-file query — plan step one of the disk
+/// cleanup story — rendered as a section of the boot volume's card.
+/// Everything here is a metadata lookup; the walk-based directory
+/// analyser is a separate, later feature.
+fn big_files_section(state: &ZStatsAppState) -> AnyElement {
+    div()
+        .mt(px(10.))
+        .pt(px(9.))
+        .border_t(px(1.))
+        .border_color(theme::border_subtle())
+        .child(big_files_body(state))
+        .into_any_element()
+}
+
+fn big_files_chip(state: &ZStatsAppState) -> AnyElement {
+    let label = match state.big_files() {
+        BigFiles::Running => i18n::tr("disk.big_scanning"),
+        BigFiles::Ready(_) => i18n::tr("disk.big_rescan"),
+        BigFiles::Off | BigFiles::Failed { .. } => i18n::tr("disk.big_scan"),
+    };
+    let running = matches!(state.big_files(), BigFiles::Running);
+    div()
+        .id("bigfiles-scan")
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::inset())
+        .px(px(8.))
+        .py(px(2.))
+        .tooltip(widgets::wrap_tooltip(i18n::tr("disk.big_hint")))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if running {
+            theme::text_dim()
+        } else {
+            theme::text()
+        })
+        .when(!running, |d| {
+            d.hover(|d| d.bg(theme::surface_raised()))
+                .on_click(|_, _window, cx| {
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.start_big_files(cx));
+                })
+        })
+        .child(label)
+        .into_any_element()
+}
+
+fn big_files_body(state: &ZStatsAppState) -> AnyElement {
+    // Inside the volume card, which already carries the padding.
+    let padded_note = |text: String| div().child(widgets::note(text)).into_any_element();
+    match state.big_files() {
+        BigFiles::Off => padded_note(i18n::tr("disk.big_hint")),
+        BigFiles::Running => padded_note(i18n::tr("disk.big_running")),
+        BigFiles::Failed { indexing_off: true } => padded_note(i18n::tr("disk.big_index_off")),
+        BigFiles::Failed {
+            indexing_off: false,
+        } => padded_note(i18n::tr("disk.big_failed")),
+        BigFiles::Ready(scan) if scan.files.is_empty() => padded_note(i18n::tr("disk.big_none")),
+        BigFiles::Ready(scan) => {
+            let caption = {
+                let mut text = t!(
+                    "disk.big_count",
+                    thr = format::memory(scan.threshold),
+                    count = scan.total
+                )
+                .to_string();
+                if scan.threshold == crate::bigfiles::FALLBACK_THRESHOLD {
+                    text.push_str(" · ");
+                    text.push_str(&i18n::tr("disk.big_fallback_note"));
+                }
+                if scan.total > scan.files.len() {
+                    text.push_str(" · ");
+                    text.push_str(t!("disk.big_shown", shown = scan.files.len()).as_ref());
+                }
+                text
+            };
+            let total = scan.files.len();
+            div()
+                .child(div().pb(px(4.)).child(widgets::note(caption)))
+                .children(
+                    scan.files
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| big_file_row(i, f, i + 1 == total)),
+                )
+                .into_any_element()
+        }
+    }
+}
+
+/// `/Users/you/…` collapses to `~/…` — the shared prefix every row would
+/// otherwise spend its tooltip width repeating. Pure so it can be tested
+/// without touching the real environment.
+fn tilde_path(path: &str, home: &str) -> String {
+    match path.strip_prefix(home) {
+        // Component boundary required: /Users/xy must not collapse under
+        // a /Users/x home.
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("~{rest}")
+        }
+        _ => path.to_string(),
+    }
+}
+
+fn big_file_row(index: usize, file: &crate::bigfiles::BigFile, last: bool) -> AnyElement {
+    let name = file
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file.path.display().to_string());
+    // The full location rides the name's tooltip instead of a second line:
+    // most rows never need it (the Finder button answers "where" better),
+    // and a 320px column has no honest way to show a deep path anyway.
+    let full = tilde_path(
+        &file.path.display().to_string(),
+        &std::env::var("HOME").unwrap_or_default(),
+    );
+    let path = file.path.clone();
+    let confirm_name = name.clone();
+
+    h_flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .py(px(8.))
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .child(
+            div()
+                .id(("bigfile-name", index))
+                .flex_1()
+                .min_w_0()
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text())
+                .truncate()
+                .tooltip(widgets::wrap_tooltip(full))
+                .child(name),
+        )
+        .child(
+            div()
+                .flex_none()
+                .font_family(font::MONO)
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(theme::text())
+                .child(format::memory(file.size)),
+        )
+        .child(
+            // Navigation, not an action — no confirm, just Finder with the
+            // file selected. Sits left of the destructive control so the
+            // "look first" option comes before the "remove" one.
+            Button::new(("bigfile-reveal", index))
+                .icon(IconName::Folder)
+                .ghost()
+                .xsmall()
+                .tooltip(i18n::tr("disk.big_reveal"))
+                .on_click({
+                    let path = file.path.clone();
+                    move |_, _window, _cx| crate::bigfiles::reveal(&path)
+                }),
+        )
+        .child(
+            // An explicit control with confirm, and the request is Finder's
+            // own recoverable move-to-Trash — never a direct unlink.
+            Button::new(("bigfile-trash", index))
+                .icon(IconName::Delete)
+                .ghost()
+                .xsmall()
+                .tooltip(i18n::tr("disk.big_trash"))
+                .on_click(move |_, window, cx| {
+                    let path = path.clone();
+                    crate::confirm::ask(
+                        window,
+                        cx,
+                        i18n::tr("disk.big_trash_title"),
+                        t!("disk.big_trash_body", name = confirm_name.clone()).to_string(),
+                        i18n::tr("disk.big_trash_ok"),
+                        move |cx| {
+                            let path = path.clone();
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| state.trash_big_file(&path, cx));
+                        },
+                    );
+                }),
+        )
+        .into_any_element()
 }
 
 fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
@@ -217,5 +426,18 @@ mod tests {
         assert!(!safe_to_eject("/"));
         assert!(!safe_to_eject("/System/Volumes/Data"));
         assert!(safe_to_eject("/Volumes/Zedis Installer"));
+    }
+
+    #[test]
+    fn tilde_path_collapses_home_only() {
+        assert_eq!(
+            tilde_path("/Users/x/Movies/a.mkv", "/Users/x"),
+            "~/Movies/a.mkv"
+        );
+        assert_eq!(tilde_path("/tmp/a", "/Users/x"), "/tmp/a");
+        // An empty home must not turn every path into "~<path>".
+        assert_eq!(tilde_path("/tmp/a", ""), "/tmp/a");
+        // Prefix only counts on a component boundary.
+        assert_eq!(tilde_path("/Users/xy/f", "/Users/x"), "/Users/xy/f");
     }
 }

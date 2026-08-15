@@ -108,6 +108,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
     "NSString",
     "NSUserNotification",
+    # NSFileManager.trashItemAtURL — the Hardware tab's delete button is
+    # Finder's own recoverable move-to-Trash, never a direct unlink.
+    "NSError",
+    "NSFileManager",
+    "NSURL",
 ] }
 raw-window-handle = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [

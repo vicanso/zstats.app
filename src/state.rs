@@ -8,6 +8,7 @@
 //! scroll offsets. Collected metrics are the main tenant, and sampling runs
 //! whether or not a window exists at all.
 
+use crate::bigfiles::BigFilesScan;
 use crate::fullscan::{GroupScan, Scan};
 use crate::history::Spender;
 use crate::i18n;
@@ -166,6 +167,21 @@ enum Episode {
     System(AlertKind),
 }
 
+/// The Hardware tab's one-shot large-file query, same lifecycle shape as
+/// the full process scans: `Off → Running → Ready/Failed`, reset on hide.
+#[derive(Default)]
+pub enum BigFiles {
+    #[default]
+    Off,
+    Running,
+    Ready(BigFilesScan),
+    /// `indexing_off` selects the honest message: a disabled Spotlight
+    /// index would otherwise masquerade as "no big files".
+    Failed {
+        indexing_off: bool,
+    },
+}
+
 /// One episode's quiet hours: banners are skipped until the deadline.
 struct Snooze {
     until: Instant,
@@ -310,6 +326,8 @@ pub struct ZStatsAppState {
     show_unused_nets: bool,
     /// UI filter: reveal every temperature sensor, not just the preview.
     show_all_sensors: bool,
+    /// The Hardware tab's large-file query. Query-like state: reset on hide.
+    big_files: BigFiles,
     /// Banner snoozes by episode: the user asked for quiet on this subject
     /// until a deadline. Delivery-layer only — events still land in the
     /// alerts list and the engine's rules are untouched. Deliberately not
@@ -376,6 +394,7 @@ impl Default for ZStatsAppState {
             only_abnormal: false,
             show_unused_nets: false,
             show_all_sensors: false,
+            big_files: BigFiles::default(),
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
             sustained: SustainedWatch::default(),
@@ -668,6 +687,63 @@ impl ZStatsAppState {
         &self.scroll[tab.index()]
     }
 
+    // ---- large files ---------------------------------------------------
+
+    pub fn big_files(&self) -> &BigFiles {
+        &self.big_files
+    }
+
+    /// Run (or re-run) the large-file query on the background executor.
+    pub fn start_big_files(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.big_files, BigFiles::Running) {
+            return;
+        }
+        self.big_files = BigFiles::Running;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let scanned = cx
+                .background_executor()
+                .spawn(async { crate::bigfiles::scan() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                // Same landing guard as the full scans: a hide mid-query
+                // reset this to Off, and the result must not undo that.
+                if !matches!(state.big_files, BigFiles::Running) {
+                    return;
+                }
+                state.big_files = match scanned {
+                    Ok(scan) => BigFiles::Ready(scan),
+                    Err(crate::bigfiles::ScanError::IndexingOff) => {
+                        BigFiles::Failed { indexing_off: true }
+                    }
+                    Err(crate::bigfiles::ScanError::Other(e)) => {
+                        eprintln!("large-file query failed: {e}");
+                        BigFiles::Failed {
+                            indexing_off: false,
+                        }
+                    }
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The delete button's confirmed action: move to the Trash, then drop
+    /// the row. A failed trash leaves the row — a file that is still there
+    /// must not vanish from the list.
+    pub fn trash_big_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if let Err(e) = crate::bigfiles::trash(path) {
+            eprintln!("trash {}: {e}", path.display());
+            return;
+        }
+        if let BigFiles::Ready(scan) = &mut self.big_files {
+            scan.files.retain(|f| f.path != path);
+            scan.total = scan.total.saturating_sub(1);
+        }
+        cx.notify();
+    }
+
     /// Back to a clean slate for the next open. The name filter and the
     /// one-shot full listings are "looking at something right now" state:
     /// a panel reopened hours later with yesterday's query looks broken,
@@ -681,6 +757,7 @@ impl ZStatsAppState {
         }
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
+        self.big_files = BigFiles::Off;
         cx.notify();
     }
 

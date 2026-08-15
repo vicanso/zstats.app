@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod bigfiles;
 mod confirm;
 #[cfg(target_os = "macos")]
 mod dock;
