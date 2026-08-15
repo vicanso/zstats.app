@@ -4,6 +4,7 @@
 
 mod assets;
 mod bigfiles;
+mod cleanhints;
 mod confirm;
 mod diskscan;
 #[cfg(target_os = "macos")]

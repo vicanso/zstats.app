@@ -111,6 +111,7 @@ pub enum HitKind {
     Plain,
 }
 
+#[derive(Clone)]
 pub struct DirHit {
     pub path: PathBuf,
     pub bytes: u64,
@@ -145,6 +146,13 @@ pub struct ScanResult {
     pub dirs: Vec<DirHit>,
     /// Walk-only big files (Spotlight blind spots), largest first.
     pub files: Vec<FileHit>,
+    /// The one-click cleanup set: every signature-checked CACHEDIR.TAG
+    /// tree plus every hint-trashable cache directory, nested entries
+    /// folded into their listed ancestor, largest first. The FULL set —
+    /// the bulk clear acts on all of it, so it is deliberately uncapped
+    /// (the view shows the head and states the total). Empty on partial
+    /// snapshots.
+    pub suggestions: Vec<DirHit>,
     /// The pruned totals the drill-downs are served from. `Some` only on
     /// a finished scan (partials skip the cost); drill-derived results
     /// share their parent's index, so deeper levels stay instant.
@@ -379,6 +387,15 @@ fn snapshot(
     let (totals, children) = rollup(root, own_bytes, plain_dirs, fold);
     let (regenerable, dirs) = tables(root, &totals, &children, fold);
     files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
+    // Suggestions only on the finished result: a partial's lower-bound
+    // set would invite trashing while the walker is inside the trees.
+    let suggestions = if build_index {
+        suggest(&totals, fold, &|p| {
+            crate::cleanhints::lookup(p).is_some_and(|h| h.trashable)
+        })
+    } else {
+        Vec::new()
+    };
     // The index keeps the FULL blind-spot file list; the table cap below
     // only trims what one card can show.
     let index = build_index.then(|| {
@@ -403,8 +420,48 @@ fn snapshot(
         regenerable,
         dirs,
         files,
+        suggestions,
         index,
     }
+}
+
+/// Build the cleanup-suggestion set from the rolled-up totals: TAG folds
+/// carry the owner's own declaration, `trashable` hint matches carry
+/// ours. Pure — the trashable check is injected so tests need no hint
+/// file. Nested picks fold into their listed ancestor: trashing the
+/// ancestor takes the descendant with it, and keeping both would leave
+/// a ghost row after the bulk clear.
+fn suggest(
+    totals: &HashMap<PathBuf, u64>,
+    fold: &HashMap<PathBuf, HitKind>,
+    trashable: &dyn Fn(&Path) -> bool,
+) -> Vec<DirHit> {
+    let mut picks: Vec<DirHit> = fold
+        .iter()
+        .filter(|(_, kind)| **kind == HitKind::Tag)
+        .map(|(path, _)| DirHit {
+            bytes: totals.get(path).copied().unwrap_or(0),
+            path: path.clone(),
+            kind: HitKind::Tag,
+        })
+        .collect();
+    for (path, bytes) in totals {
+        if !fold.contains_key(path) && trashable(path) {
+            picks.push(DirHit {
+                path: path.clone(),
+                bytes: *bytes,
+                kind: HitKind::Plain,
+            });
+        }
+    }
+    picks.sort_by_key(|d| std::cmp::Reverse(d.bytes));
+    let mut kept: Vec<DirHit> = Vec::new();
+    for hit in picks {
+        if !kept.iter().any(|k| hit.path.starts_with(&k.path)) {
+            kept.push(hit);
+        }
+    }
+    kept
 }
 
 /// Serve a drill-down from a finished scan's retained index — instant,
@@ -454,6 +511,12 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
         regenerable,
         dirs,
         files,
+        suggestions: parent
+            .suggestions
+            .iter()
+            .filter(|d| d.path.starts_with(root))
+            .cloned()
+            .collect(),
         index: Some(index.clone()),
     })
 }
@@ -728,8 +791,10 @@ mod tests {
         assert!(paths.iter().any(|d| d.ends_with("plain")), "{paths:?}");
         assert!(!paths.iter().any(|d| d.ends_with("deep")), "{paths:?}");
         // A finished run carries the drill index (fold roots survive the
-        // byte floor unconditionally).
+        // byte floor unconditionally), and the tagged tree lands in the
+        // one-click suggestion set.
         assert!(result.index.is_some());
+        assert!(result.suggestions.iter().any(|d| d.path.ends_with("cache")));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -839,6 +904,7 @@ mod tests {
             regenerable: Vec::new(),
             dirs: Vec::new(),
             files: Vec::new(),
+            suggestions: Vec::new(),
             index: Some(Arc::new(DirIndex {
                 totals,
                 fold,
@@ -863,6 +929,33 @@ mod tests {
         // index floor has nothing retained. Both decline → live walk.
         assert!(drill(&parent, &p("/r/Library/Caches/big")).is_none());
         assert!(drill(&parent, &p("/r/docs/sub")).is_none());
+    }
+
+    #[test]
+    fn suggest_unions_tags_and_trashable_hints_folding_nested_picks() {
+        let totals: HashMap<PathBuf, u64> = [
+            (p("/r"), 400u64),
+            (p("/r/proj/target"), 200),
+            (p("/r/npm-cache"), 120),
+            (p("/r/npm-cache/sub"), 90),
+            (p("/r/data"), 80),
+        ]
+        .into();
+        let fold: HashMap<PathBuf, HitKind> = [(p("/r/proj/target"), HitKind::Tag)].into();
+        let hints = [p("/r/npm-cache"), p("/r/npm-cache/sub")];
+        let got = suggest(&totals, &fold, &|path| hints.iter().any(|h| h == path));
+        let paths: Vec<&Path> = got.iter().map(|d| d.path.as_path()).collect();
+        // The Tag tree and the hint dir make the set; the nested hint
+        // folds into its listed ancestor; plain data never qualifies.
+        assert_eq!(
+            paths,
+            [p("/r/proj/target"), p("/r/npm-cache")]
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(got[0].kind, HitKind::Tag);
+        assert_eq!(got[1].kind, HitKind::Plain);
     }
 
     #[test]

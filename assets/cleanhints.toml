@@ -1,0 +1,177 @@
+# Clean-up hints for the directory analyser — annotation, not action.
+#
+# Each entry states two facts about a well-known cache location: which
+# tool owns it, and (when the tool documents one) the tool's own cleanup
+# command. The app only ever *shows* these on matching rows; it never
+# runs a command or deletes anything based on this file.
+#
+# Written clean-room from each tool's own documentation. This is NOT a
+# conversion of any third-party rule set.
+#
+# match semantics:
+#   "~/path"  — exact directory, ~ expands to the user's home
+#   "name"    — any directory whose last path component equals `name`
+# command is optional — omit it when the tool has no documented cleanup
+# command (the row is then labelled regenerable only).
+# trashable = true marks a directory whose whole content is derived and
+# safe to move to the Trash (the tool re-creates it) — these join the
+# analyser's cleanup suggestions. Leave it off for anything holding user
+# data (Docker volumes, simulator devices, pulled models) or living
+# inside working trees (node_modules): those stay annotation-only.
+#
+# A user copy at ~/.zstats/cleanhints.toml replaces this list wholesale
+# (read once at launch).
+
+# --- package managers -------------------------------------------------
+
+[[hint]]
+match = "~/.npm"
+owner = "npm"
+command = "npm cache clean --force"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/Yarn"
+owner = "Yarn"
+command = "yarn cache clean"
+trashable = true
+
+[[hint]]
+match = "~/Library/pnpm/store"
+owner = "pnpm"
+command = "pnpm store prune"
+trashable = true
+
+[[hint]]
+match = "~/.bun/install/cache"
+owner = "Bun"
+command = "bun pm cache rm"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/Homebrew"
+owner = "Homebrew"
+command = "brew cleanup"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/pip"
+owner = "pip"
+command = "pip cache purge"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/pypoetry"
+owner = "Poetry"
+command = "poetry cache clear --all ."
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/CocoaPods"
+owner = "CocoaPods"
+command = "pod cache clean --all"
+trashable = true
+
+[[hint]]
+match = "~/.m2/repository"
+owner = "Maven"
+command = "mvn dependency:purge-local-repository"
+trashable = true
+
+[[hint]]
+match = "~/.gradle/caches"
+owner = "Gradle"
+
+trashable = true
+
+# --- language toolchains ----------------------------------------------
+
+[[hint]]
+match = "~/.cargo/registry"
+owner = "Cargo"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/go-build"
+owner = "Go"
+command = "go clean -cache"
+trashable = true
+
+[[hint]]
+match = "~/go/pkg/mod"
+owner = "Go"
+command = "go clean -modcache"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/deno"
+owner = "Deno"
+command = "deno clean"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/node-gyp"
+owner = "node-gyp"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/electron"
+owner = "Electron"
+
+trashable = true
+
+# --- Apple toolchain --------------------------------------------------
+
+[[hint]]
+match = "~/Library/Developer/Xcode/DerivedData"
+owner = "Xcode"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/com.apple.dt.Xcode"
+owner = "Xcode"
+trashable = true
+
+[[hint]]
+match = "~/Library/Developer/CoreSimulator"
+owner = "Simulator"
+command = "xcrun simctl delete unavailable"
+
+# --- containers & ML --------------------------------------------------
+
+[[hint]]
+match = "~/Library/Containers/com.docker.docker"
+owner = "Docker Desktop"
+command = "docker system prune"
+
+[[hint]]
+match = "~/.cache/huggingface"
+owner = "Hugging Face"
+command = "huggingface-cli delete-cache"
+trashable = true
+
+[[hint]]
+match = "~/.ollama/models"
+owner = "Ollama"
+command = "ollama rm <model>"
+
+[[hint]]
+match = "~/Library/Caches/ms-playwright"
+owner = "Playwright"
+command = "npx playwright uninstall --all"
+
+trashable = true
+
+# --- per-project artifacts (matched anywhere by component) ------------
+
+[[hint]]
+match = "node_modules"
+owner = "npm / pnpm / yarn"
+
+[[hint]]
+match = "Pods"
+owner = "CocoaPods"
+
+[[hint]]
+match = ".terraform"
+owner = "Terraform"

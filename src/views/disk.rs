@@ -254,11 +254,14 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
                 .child(
                     // A view action: drops the whole result (and its
                     // drill index), touches nothing on disk. Cancels the
-                    // walk too if one is still running.
+                    // walk too if one is still running. Icon-only — the
+                    // tooltip carries the words, and Close (not Delete)
+                    // keeps it visually apart from the file-trashing
+                    // controls below.
                     Button::new("ana-dismiss")
+                        .icon(IconName::Close)
                         .ghost()
                         .xsmall()
-                        .label(i18n::tr("disk.ana_dismiss"))
                         .tooltip(i18n::tr("disk.ana_dismiss_hint"))
                         .on_click(|_, _window, cx| {
                             cx.global::<ZStatsGlobalStore>()
@@ -382,11 +385,21 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
             )
         };
 
+    // The head of the suggestion set; the title carries the full count
+    // and total, and the bulk button acts on the whole set — honest,
+    // because unlike the capped tables the full list is retained.
+    let sug_head = &result.suggestions[..result.suggestions.len().min(crate::diskscan::TABLE_CAP)];
+    let sug_total: u64 = result.suggestions.iter().map(|d| d.bytes).sum();
     div()
         .children(section(
-            i18n::tr("disk.ana_regen"),
-            dir_rows(&result.regenerable, "ana-regen", actions),
-            actions.then(|| clear_listed_button(&result.regenerable)),
+            t!(
+                "disk.sug_title",
+                n = result.suggestions.len(),
+                bytes = format::memory(sug_total)
+            )
+            .to_string(),
+            dir_rows(sug_head, "ana-sug", actions),
+            actions.then(|| suggest_clear_button(&result.suggestions, sug_total)),
         ))
         .children(section(
             i18n::tr("disk.ana_dirs"),
@@ -407,25 +420,24 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// "Trash the N listed" — the regenerable table's bulk action. "Listed"
-/// is the honest word: the ranking is capped at `TABLE_CAP`, so this can
-/// only ever clear the rows on screen, not every tagged tree on disk.
-fn clear_listed_button(hits: &[DirHit]) -> AnyElement {
+/// "Trash all" for the suggestion set — acts on the FULL set (TAG trees
+/// plus hint-trashable caches), not just the rendered head; the confirm
+/// restates the count and total so nothing moves that was not announced.
+fn suggest_clear_button(hits: &[DirHit], total: u64) -> AnyElement {
     let n = hits.len();
-    let total: u64 = hits.iter().map(|h| h.bytes).sum();
     let paths: Vec<std::path::PathBuf> = hits.iter().map(|h| h.path.clone()).collect();
-    Button::new("ana-regen-clear")
+    Button::new("ana-sug-clear")
         .icon(IconName::Delete)
         .ghost()
         .xsmall()
-        .label(t!("disk.ana_clear_all", n = n).to_string())
+        .label(i18n::tr("disk.sug_clear"))
         .on_click(move |_, window, cx| {
             let paths = paths.clone();
             crate::confirm::ask(
                 window,
                 cx,
-                i18n::tr("disk.ana_clear_title"),
-                t!("disk.ana_clear_body", n = n, bytes = format::memory(total)).to_string(),
+                i18n::tr("disk.sug_clear_title"),
+                t!("disk.sug_clear_body", n = n, bytes = format::memory(total)).to_string(),
                 i18n::tr("disk.big_trash_ok"),
                 move |cx| {
                     let paths = paths.clone();
@@ -484,10 +496,19 @@ fn analysis_row(
         .strip_prefix(root)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| path.display().to_string());
-    let full = tilde_path(
+    let mut full = tilde_path(
         &path.display().to_string(),
         &std::env::var("HOME").unwrap_or_default(),
     );
+    // Annotation, not action: a matching clean-hint rides the tooltip —
+    // owner tool plus its own cleanup command, never run by us.
+    if let Some(hint) = crate::cleanhints::lookup(path) {
+        full.push_str(" — ");
+        full.push_str(&match &hint.command {
+            Some(cmd) => t!("disk.hint_cmd", owner = &hint.owner, cmd = cmd).to_string(),
+            None => t!("disk.hint_owner", owner = &hint.owner).to_string(),
+        });
+    }
     let reveal_path = path.to_path_buf();
     let trash_path = path.to_path_buf();
     let drill_path = path.to_path_buf();

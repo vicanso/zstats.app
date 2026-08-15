@@ -943,7 +943,9 @@ impl ZStatsAppState {
         if gone.is_empty() {
             return;
         }
-        if let DiskAnalysis::Ready(result) = &mut self.disk_analysis {
+        // Prune every level, not just the visible one — a parked outer
+        // result restored via "back" must not resurrect trashed rows.
+        let prune = |result: &mut crate::diskscan::ScanResult| {
             result.regenerable.retain(|h| !gone.contains(&&h.path));
             // A dominance chase can land the same tree in the directory
             // table, and blind-spot files inside a trashed tree went with
@@ -952,6 +954,15 @@ impl ZStatsAppState {
             result
                 .files
                 .retain(|f| !gone.iter().any(|g| f.path.starts_with(g)));
+            result
+                .suggestions
+                .retain(|h| !gone.iter().any(|g| h.path.starts_with(g)));
+        };
+        if let DiskAnalysis::Ready(result) = &mut self.disk_analysis {
+            prune(result);
+        }
+        for parked in &mut self.disk_analysis_stack {
+            prune(parked);
         }
         cx.notify();
     }
