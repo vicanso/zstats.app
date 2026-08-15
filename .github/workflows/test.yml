@@ -1,0 +1,51 @@
+name: "Test"
+
+# Every push runs the same three gates the Makefile enforces locally:
+# rustfmt, clippy with warnings denied, and the test suite.
+#
+# A macOS runner on purpose: this is a macOS-only app (see CLAUDE.md
+# "Platform reality") — the other platforms' cfg branches have never been
+# run, so a cheaper Linux runner would be testing paths nobody ships
+# while missing the ones everybody does.
+
+on:
+  push:
+    # All branches; tag pushes are publish.yml's business, and the commit
+    # behind a tag was already tested when its branch was pushed.
+    branches: ["**"]
+  workflow_dispatch:
+
+# A push superseded by a newer one on the same ref has nothing left to
+# prove — cancel it instead of queueing macOS minutes behind it.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.97.1
+
+jobs:
+  test:
+    runs-on: macos-latest
+    # Generous because a cold gpui build is slow; warm-cache runs are
+    # minutes. The ceiling exists so a hung build cannot sit for six hours.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - name: rust cache
+        # Debug artifacts, so deliberately not sharing publish.yml's
+        # release-profile cache key.
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-test
+      - name: fmt
+        run: cargo fmt --check
+      - name: lint
+        run: make lint
+      - name: test
+        run: make test

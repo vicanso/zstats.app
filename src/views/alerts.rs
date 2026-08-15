@@ -393,14 +393,17 @@ fn snooze_row(index: usize, event: &AlertEvent, state: &ZStatsAppState) -> AnyEl
         .gap(px(4.))
         .child(div().mr(px(2.)).child(widgets::note(caption)));
     if active.is_none() {
-        for (slug, label_key, hours) in [("1h", "alerts.snooze_1h", 1), ("3h", "alerts.snooze_3h", 3)]
+        for (slug, label_key, hours) in
+            [("1h", "alerts.snooze_1h", 1), ("3h", "alerts.snooze_3h", 3)]
         {
             let event = event.clone();
-            row = row.child(chip(slug, i18n::tr(label_key)).on_click(move |_, _window, cx| {
-                cx.global::<ZStatsGlobalStore>()
-                    .clone()
-                    .update(cx, |state, cx| state.snooze_banners(&event, hours, cx));
-            }));
+            row = row.child(
+                chip(slug, i18n::tr(label_key)).on_click(move |_, _window, cx| {
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.snooze_banners(&event, hours, cx));
+                }),
+            );
         }
     } else {
         let event = event.clone();

@@ -9,8 +9,8 @@ use crate::state::{ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, div, px,
+    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, div, px,
 };
 use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
@@ -69,67 +69,68 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     // container's own edge and read as a stray line.
                     let total = sorted.len();
                     sorted.into_iter().enumerate().map(move |(i, t)| {
-                    let hot = t.celsius > HOT_CELSIUS;
-                    let scale = t.critical_celsius.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0);
-                    v_flex()
-                        .px(px(13.))
-                        .py(px(10.))
-                        .when(i + 1 != total, |d| {
-                            d.border_b(px(1.)).border_color(theme::border_subtle())
-                        })
-                        .child(
-                            h_flex()
-                                .items_baseline()
-                                .justify_between()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(11.))
-                                        .text_color(theme::text_muted())
-                                        .truncate()
-                                        // Raw firmware labels; deliberately not
-                                        // prettified, so they match other tools.
-                                        .child(t.label.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .font_family(font::MONO)
-                                        .text_size(px(13.))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(theme::text_for(hot))
-                                        .child(format!("{:.1} °C", t.celsius)),
-                                ),
-                        )
-                        .child(div().mt(px(5.)).child(widgets::meter(
-                            t.celsius / scale,
-                            Hsla::from(theme::fill_for(hot)),
-                            4.,
-                        )))
-                        .child(
-                            div()
-                                .mt(px(4.))
-                                .text_size(px(10.))
-                                .text_color(theme::text_faint())
-                                .child(match (t.max_celsius, t.critical_celsius) {
-                                    (Some(m), Some(c)) => t!(
-                                        "sensors.max_crit",
-                                        max = format!("{m:.0}"),
-                                        crit = format!("{c:.0}")
+                        let hot = t.celsius > HOT_CELSIUS;
+                        let scale = t.critical_celsius.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0);
+                        v_flex()
+                            .px(px(13.))
+                            .py(px(10.))
+                            .when(i + 1 != total, |d| {
+                                d.border_b(px(1.)).border_color(theme::border_subtle())
+                            })
+                            .child(
+                                h_flex()
+                                    .items_baseline()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(11.))
+                                            .text_color(theme::text_muted())
+                                            .truncate()
+                                            // Raw firmware labels; deliberately not
+                                            // prettified, so they match other tools.
+                                            .child(t.label.clone()),
                                     )
-                                    .to_string(),
-                                    (Some(m), None) => {
-                                        t!("sensors.max_only", max = format!("{m:.0}")).to_string()
-                                    }
-                                    (None, Some(c)) => {
-                                        t!("sensors.crit_only", crit = format!("{c:.0}"))
-                                            .to_string()
-                                    }
-                                    (None, None) => i18n::tr("sensors.no_limits"),
-                                }),
-                        )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .font_family(font::MONO)
+                                            .text_size(px(13.))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme::text_for(hot))
+                                            .child(format!("{:.1} °C", t.celsius)),
+                                    ),
+                            )
+                            .child(div().mt(px(5.)).child(widgets::meter(
+                                t.celsius / scale,
+                                Hsla::from(theme::fill_for(hot)),
+                                4.,
+                            )))
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .text_size(px(10.))
+                                    .text_color(theme::text_faint())
+                                    .child(match (t.max_celsius, t.critical_celsius) {
+                                        (Some(m), Some(c)) => t!(
+                                            "sensors.max_crit",
+                                            max = format!("{m:.0}"),
+                                            crit = format!("{c:.0}")
+                                        )
+                                        .to_string(),
+                                        (Some(m), None) => {
+                                            t!("sensors.max_only", max = format!("{m:.0}"))
+                                                .to_string()
+                                        }
+                                        (None, Some(c)) => {
+                                            t!("sensors.crit_only", crit = format!("{c:.0}"))
+                                                .to_string()
+                                        }
+                                        (None, None) => i18n::tr("sensors.no_limits"),
+                                    }),
+                            )
                     })
                 })
                 .into_any_element()

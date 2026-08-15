@@ -388,7 +388,11 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
             fmt_pct_setting(a.disk, eff.disk.base().map(|f| f64::from(f) * 100.0)),
             a.disk_overrides.len(),
         ),
-        ("alert-pressure", pressure_setting(a.pressure, eff.pressure), 0),
+        (
+            "alert-pressure",
+            pressure_setting(a.pressure, eff.pressure),
+            0,
+        ),
         (
             "alert-cooldown",
             match a.cooldown {
