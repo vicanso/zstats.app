@@ -5,6 +5,7 @@
 mod assets;
 mod bigfiles;
 mod confirm;
+mod diskscan;
 #[cfg(target_os = "macos")]
 mod dock;
 mod font;

@@ -154,6 +154,20 @@ pub fn uptime(secs: u64) -> String {
     }
 }
 
+/// A finished operation's duration. Seconds stay visible at minute scale
+/// ("2m 34s") — that is the resolution a person compares two runs at,
+/// which is what this figure is for.
+pub fn took(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// How long ago something happened. Copy comes from the active locale.
 pub fn ago(elapsed: Duration) -> String {
     use rust_i18n::t;

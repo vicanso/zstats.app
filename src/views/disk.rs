@@ -1,15 +1,16 @@
 //! Disk: one card per volume — capacity, then IO rates.
 
 use super::widgets::{self, card};
+use crate::diskscan::{DirHit, FileHit, ScanResult};
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::{BigFiles, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{BigFiles, DiskAnalysis, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, div, px,
+    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::tooltip::Tooltip;
@@ -40,7 +41,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         )];
     }
 
-    let cards: Vec<AnyElement> = disks
+    let mut cards: Vec<AnyElement> = disks
         .iter()
         .enumerate()
         .map(|(i, d)| {
@@ -70,7 +71,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         // The large-file entry lives on the volume that
                         // holds ~ — a standing card of its own would be a
                         // permanent block of chrome for a one-shot query.
-                        .when(d.mount_point == "/", |row| row.child(big_files_chip(state)))
+                        .when(d.mount_point == "/", |row| {
+                            row.child(big_files_chip(state)).child(analysis_chip(state))
+                        })
                         .child(volume_badge(i, d)),
                 )
                 .child(
@@ -135,7 +138,380 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .into_any_element()
         })
         .collect();
+    // The analyser gets a card of its own (three tables do not fit a
+    // section), right under the volume whose chip launches it.
+    if !matches!(state.disk_analysis(), DiskAnalysis::Off) {
+        let at = disks
+            .iter()
+            .position(|d| d.mount_point == "/")
+            .map_or(cards.len(), |i| i + 1);
+        cards.insert(at, analysis_card(state));
+    }
     cards
+}
+
+/// Trigger / cancel for the directory analyser. Unlike the large-file
+/// chip, Running stays clickable — it IS the explicit cancel, the only
+/// way a walk stops early (hide deliberately does not, see state.rs).
+fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
+    let running = matches!(state.disk_analysis(), DiskAnalysis::Running { .. });
+    let label = if running {
+        i18n::tr("disk.ana_cancel")
+    } else if matches!(state.disk_analysis(), DiskAnalysis::Ready(_)) {
+        i18n::tr("disk.ana_rescan")
+    } else {
+        i18n::tr("disk.ana_scan")
+    };
+    div()
+        .id("diskscan-chip")
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::inset())
+        .px(px(8.))
+        .py(px(2.))
+        .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_hint")))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text())
+        .hover(|d| d.bg(theme::surface_raised()))
+        .on_click(move |_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| {
+                    if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
+                        state.cancel_disk_analysis(cx);
+                    } else {
+                        state.start_disk_analysis(cx);
+                    }
+                });
+        })
+        .child(label)
+        .into_any_element()
+}
+
+fn analysis_card(state: &ZStatsAppState) -> AnyElement {
+    let body = match state.disk_analysis() {
+        DiskAnalysis::Off => div().into_any_element(),
+        DiskAnalysis::Running {
+            dirs_done, partial, ..
+        } => div()
+            .child(div().px(px(13.)).pt(px(2.)).pb(px(8.)).child(widgets::note(
+                t!("disk.ana_running", dirs = dirs_done).to_string(),
+            )))
+            // Whatever has been aggregated so far, rendered with the same
+            // tables as the final result — figures are lower bounds and
+            // the ranking reshuffles as data lands, which the running
+            // banner above frames. No delete controls mid-scan: the
+            // walker may still be inside any of these trees.
+            .children(partial.as_ref().map(|r| analysis_tables(r, false)))
+            .into_any_element(),
+        DiskAnalysis::Failed(e) => div()
+            .px(px(13.))
+            .pt(px(2.))
+            .pb(px(11.))
+            .child(widgets::note(
+                t!("disk.ana_failed", e = e.clone()).to_string(),
+            ))
+            .into_any_element(),
+        DiskAnalysis::Ready(result) => analysis_tables(result, true),
+    };
+    widgets::list_shell()
+        .child(analysis_header(state))
+        .child(body)
+        .into_any_element()
+}
+
+/// Title on its own row. The meta string is too long to sit in
+/// [`widgets::list_header`]'s right slot — at 320px it overflowed
+/// the panel ("6 protec…") instead of wrapping.
+fn analysis_header(state: &ZStatsAppState) -> AnyElement {
+    let caption = analysis_caption(state);
+    div()
+        .px(px(13.))
+        .pt(px(11.))
+        .pb(px(9.))
+        .child(
+            div()
+                .text_size(px(12.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::text())
+                .child(i18n::tr("disk.ana_title")),
+        )
+        .when(!caption.is_empty(), |d| {
+            d.child(
+                div()
+                    .mt(px(3.))
+                    .min_w_0()
+                    .text_size(px(10.))
+                    .line_height(relative(1.35))
+                    .text_color(theme::text_dim())
+                    .whitespace_normal()
+                    .child(caption),
+            )
+        })
+        .into_any_element()
+}
+
+/// Age, how many directories were walked, and every honesty counter
+/// that is non-zero. The scan root is omitted when it is just `~` —
+/// that is the only root this card has, and it burned four characters
+/// for nothing next to the title.
+fn analysis_caption(state: &ZStatsAppState) -> String {
+    let DiskAnalysis::Ready(result) = state.disk_analysis() else {
+        return String::new();
+    };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut extras = Vec::new();
+    if result.skipped_protected > 0 {
+        extras.push(t!("disk.ana_skip_protected", n = result.skipped_protected).to_string());
+    }
+    if result.skipped_denied > 0 {
+        extras.push(t!("disk.ana_skip_denied", n = result.skipped_denied).to_string());
+    }
+    if result.skipped_dataless > 0 {
+        extras.push(t!("disk.ana_skip_dataless", n = result.skipped_dataless).to_string());
+    }
+    analysis_caption_parts(
+        &result.root.display().to_string(),
+        &home,
+        format::ago(result.scanned_at.elapsed()),
+        t!("disk.ana_took", t = format::took(result.took)).to_string(),
+        t!("disk.ana_dirs_seen", n = result.dirs_seen).to_string(),
+        extras,
+    )
+}
+
+fn analysis_caption_parts(
+    root_display: &str,
+    home: &str,
+    ago: String,
+    took: String,
+    dirs_seen: String,
+    extras: Vec<String>,
+) -> String {
+    let root = tilde_path(root_display, home);
+    let mut parts = Vec::new();
+    if root != "~" {
+        parts.push(root);
+    }
+    parts.push(ago);
+    parts.push(took);
+    parts.push(dirs_seen);
+    parts.extend(extras);
+    parts.join(" · ")
+}
+
+fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
+    let root = result.root.clone();
+    let dir_rows = |hits: &[DirHit], id: &'static str, deletable: bool| -> Vec<AnyElement> {
+        let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
+        hits.iter()
+            .enumerate()
+            .map(|(i, h)| analysis_row(id, i, &h.path, h.bytes, max, &root, deletable))
+            .collect()
+    };
+    let file_rows = |hits: &[FileHit]| -> Vec<AnyElement> {
+        let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
+        hits.iter()
+            .enumerate()
+            .map(|(i, h)| analysis_row("ana-file", i, &h.path, h.bytes, max, &root, false))
+            .collect()
+    };
+
+    let section =
+        |title: String, rows: Vec<AnyElement>, control: Option<AnyElement>| -> Option<AnyElement> {
+            if rows.is_empty() {
+                return None;
+            }
+            Some(
+                div()
+                    .px(px(13.))
+                    .pb(px(8.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .pb(px(4.))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme::text_dim())
+                                    .child(title),
+                            )
+                            .children(control),
+                    )
+                    .children(rows)
+                    .into_any_element(),
+            )
+        };
+
+    div()
+        .children(section(
+            i18n::tr("disk.ana_regen"),
+            dir_rows(&result.regenerable, "ana-regen", actions),
+            actions.then(|| clear_listed_button(&result.regenerable)),
+        ))
+        .children(section(
+            i18n::tr("disk.ana_dirs"),
+            dir_rows(&result.dirs, "ana-dir", false),
+            None,
+        ))
+        .children(section(
+            i18n::tr("disk.ana_files"),
+            file_rows(&result.files),
+            None,
+        ))
+        .child(
+            div()
+                .px(px(13.))
+                .pb(px(10.))
+                .child(widgets::note(i18n::tr("disk.ana_note"))),
+        )
+        .into_any_element()
+}
+
+/// "Trash the N listed" — the regenerable table's bulk action. "Listed"
+/// is the honest word: the ranking is capped at `TABLE_CAP`, so this can
+/// only ever clear the rows on screen, not every tagged tree on disk.
+fn clear_listed_button(hits: &[DirHit]) -> AnyElement {
+    let n = hits.len();
+    let total: u64 = hits.iter().map(|h| h.bytes).sum();
+    let paths: Vec<std::path::PathBuf> = hits.iter().map(|h| h.path.clone()).collect();
+    Button::new("ana-regen-clear")
+        .icon(IconName::Delete)
+        .ghost()
+        .xsmall()
+        .label(t!("disk.ana_clear_all", n = n).to_string())
+        .on_click(move |_, window, cx| {
+            let paths = paths.clone();
+            crate::confirm::ask(
+                window,
+                cx,
+                i18n::tr("disk.ana_clear_title"),
+                t!("disk.ana_clear_body", n = n, bytes = format::memory(total)).to_string(),
+                i18n::tr("disk.big_trash_ok"),
+                move |cx| {
+                    let paths = paths.clone();
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.trash_regenerable(&paths, cx));
+                },
+            );
+        })
+        .into_any_element()
+}
+
+/// One ranked row: path relative to the scan root, physical size, a meter
+/// against the group's largest, and Finder Reveal. `deletable` adds the
+/// confirm-gated move-to-Trash — passed only for the regenerable table,
+/// whose rows are all signature-checked `CACHEDIR.TAG` trees; heuristic
+/// and plain rows never get the control.
+#[allow(clippy::too_many_arguments)]
+fn analysis_row(
+    id: &'static str,
+    index: usize,
+    path: &std::path::Path,
+    bytes: u64,
+    group_max: u64,
+    root: &std::path::Path,
+    deletable: bool,
+) -> AnyElement {
+    let label = path
+        .strip_prefix(root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string());
+    let full = tilde_path(
+        &path.display().to_string(),
+        &std::env::var("HOME").unwrap_or_default(),
+    );
+    let reveal_path = path.to_path_buf();
+    let trash_path = path.to_path_buf();
+    let confirm_label = label.clone();
+
+    div()
+        .py(px(4.))
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{id}-{index}")))
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(11.))
+                        .text_color(theme::text())
+                        .truncate()
+                        .tooltip(widgets::wrap_tooltip(full))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(font::MONO)
+                        .text_size(px(10.5))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme::text())
+                        .child(format::memory(bytes)),
+                )
+                .child(
+                    // Look-first before remove, same order as the
+                    // large-file rows.
+                    Button::new(SharedString::from(format!("{id}-reveal-{index}")))
+                        .icon(IconName::Folder)
+                        .ghost()
+                        .xsmall()
+                        .tooltip(i18n::tr("disk.big_reveal"))
+                        .on_click(move |_, _window, _cx| {
+                            crate::bigfiles::reveal(&reveal_path);
+                        }),
+                )
+                .when(deletable, |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("{id}-trash-{index}")))
+                            .icon(IconName::Delete)
+                            .ghost()
+                            .xsmall()
+                            .tooltip(i18n::tr("disk.big_trash"))
+                            .on_click({
+                                let bytes_str = format::memory(bytes);
+                                move |_, window, cx| {
+                                    let path = trash_path.clone();
+                                    crate::confirm::ask(
+                                        window,
+                                        cx,
+                                        i18n::tr("disk.big_trash_title"),
+                                        t!(
+                                            "disk.ana_trash_body",
+                                            name = confirm_label.clone(),
+                                            bytes = bytes_str.clone()
+                                        )
+                                        .to_string(),
+                                        i18n::tr("disk.big_trash_ok"),
+                                        move |cx| {
+                                            let paths = vec![path.clone()];
+                                            cx.global::<ZStatsGlobalStore>()
+                                                .clone()
+                                                .update(cx, |state, cx| {
+                                                    state.trash_regenerable(&paths, cx)
+                                                });
+                                        },
+                                    );
+                                }
+                            }),
+                    )
+                }),
+        )
+        .child(div().mt(px(3.)).child(widgets::meter(
+            bytes as f32 / group_max as f32,
+            Hsla::from(theme::ink()),
+            3.,
+        )))
+        .into_any_element()
 }
 
 /// The one-shot Spotlight large-file query — plan step one of the disk
@@ -490,5 +866,30 @@ mod tests {
         assert_eq!(tilde_path("/tmp/a", ""), "/tmp/a");
         // Prefix only counts on a component boundary.
         assert_eq!(tilde_path("/Users/xy/f", "/Users/x"), "/Users/xy/f");
+    }
+
+    #[test]
+    fn analysis_caption_omits_a_bare_home_root() {
+        let home = analysis_caption_parts(
+            "/Users/x",
+            "/Users/x",
+            "3m ago".into(),
+            "took 2m 34s".into(),
+            "12 directories".into(),
+            vec!["2 protected skipped".into()],
+        );
+        assert_eq!(
+            home,
+            "3m ago · took 2m 34s · 12 directories · 2 protected skipped"
+        );
+        let nested = analysis_caption_parts(
+            "/Users/x/Library",
+            "/Users/x",
+            "just now".into(),
+            "took 41s".into(),
+            "3 directories".into(),
+            vec![],
+        );
+        assert_eq!(nested, "~/Library · just now · took 41s · 3 directories");
     }
 }

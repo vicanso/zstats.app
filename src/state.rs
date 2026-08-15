@@ -9,6 +9,7 @@
 //! whether or not a window exists at all.
 
 use crate::bigfiles::BigFilesScan;
+use crate::diskscan::{ScanEvent, ScanResult};
 use crate::fullscan::{GroupScan, Scan};
 use crate::history::Spender;
 use crate::i18n;
@@ -165,6 +166,27 @@ enum Episode {
     App(u32, AlertKind),
     Volume(String, AlertKind),
     System(AlertKind),
+}
+
+/// The directory analyser (docs/disk-analysis.md). Deliberately NOT reset
+/// on hide, unlike every other one-shot: a `~/Library` walk is minutes,
+/// and the panel auto-hides on any focus loss — hide-resets would mean no
+/// scan ever finishes. Only the explicit cancel stops one.
+#[derive(Default)]
+pub enum DiskAnalysis {
+    #[default]
+    Off,
+    Running {
+        run_id: u64,
+        dirs_done: usize,
+        /// The latest mid-walk snapshot — lower bounds that only grow,
+        /// rendered under the running banner so minutes-long walks pay
+        /// out from their first seconds.
+        partial: Option<ScanResult>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    },
+    Ready(ScanResult),
+    Failed(String),
 }
 
 /// The Hardware tab's one-shot large-file query, same lifecycle shape as
@@ -328,6 +350,11 @@ pub struct ZStatsAppState {
     show_all_sensors: bool,
     /// The Hardware tab's large-file query. Query-like state: reset on hide.
     big_files: BigFiles,
+    /// The directory analyser. Survives hide (see [`DiskAnalysis`]).
+    disk_analysis: DiskAnalysis,
+    /// Monotonic id for analyser runs, so a stale run's channel events
+    /// can never land into a newer run's state.
+    disk_analysis_runs: u64,
     /// Banner snoozes by episode: the user asked for quiet on this subject
     /// until a deadline. Delivery-layer only — events still land in the
     /// alerts list and the engine's rules are untouched. Deliberately not
@@ -395,6 +422,8 @@ impl Default for ZStatsAppState {
             show_unused_nets: false,
             show_all_sensors: false,
             big_files: BigFiles::default(),
+            disk_analysis: DiskAnalysis::default(),
+            disk_analysis_runs: 0,
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
             sustained: SustainedWatch::default(),
@@ -559,6 +588,94 @@ impl ZStatsAppState {
     pub fn toggle_unused_nets(&mut self, cx: &mut Context<Self>) {
         self.show_unused_nets = !self.show_unused_nets;
         cx.notify();
+    }
+
+    // ---- directory analyser --------------------------------------------
+
+    pub fn disk_analysis(&self) -> &DiskAnalysis {
+        &self.disk_analysis
+    }
+
+    /// Start (or restart) the analyser. The walk runs on its own thread;
+    /// everything this state learns — progress, completion, failure —
+    /// arrives over the channel drained below, guarded by `run_id` so a
+    /// superseded run's late events fall on the floor.
+    pub fn start_disk_analysis(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = crate::diskscan::default_root() else {
+            self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
+            cx.notify();
+            return;
+        };
+        self.cancel_disk_analysis_walk();
+        self.disk_analysis_runs += 1;
+        let run_id = self.disk_analysis_runs;
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.disk_analysis = DiskAnalysis::Running {
+            run_id,
+            dirs_done: 0,
+            partial: None,
+            cancel: cancel.clone(),
+        };
+        cx.notify();
+
+        let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
+        crate::diskscan::spawn(root, cancel, tx);
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                let done = matches!(event, ScanEvent::Done(_) | ScanEvent::Failed(_));
+                let _ = this.update(cx, |state, cx| {
+                    // Only the run that owns the current Running state may
+                    // write; a cancelled or superseded run stays silent.
+                    let owns = matches!(
+                        state.disk_analysis,
+                        DiskAnalysis::Running { run_id: id, .. } if id == run_id
+                    );
+                    if !owns {
+                        return;
+                    }
+                    match event {
+                        ScanEvent::Progress { dirs_done } => {
+                            if let DiskAnalysis::Running { dirs_done: d, .. } =
+                                &mut state.disk_analysis
+                            {
+                                *d = dirs_done;
+                            }
+                        }
+                        ScanEvent::Partial(result) => {
+                            if let DiskAnalysis::Running { partial, .. } = &mut state.disk_analysis
+                            {
+                                *partial = Some(*result);
+                            }
+                        }
+                        ScanEvent::Done(result) => {
+                            state.disk_analysis = DiskAnalysis::Ready(*result);
+                        }
+                        ScanEvent::Failed(e) => {
+                            state.disk_analysis = DiskAnalysis::Failed(e);
+                        }
+                    }
+                    cx.notify();
+                });
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The explicit cancel — the only way a walk stops early. Back to Off;
+    /// partial results are never shown (or, in P2b, cached).
+    pub fn cancel_disk_analysis(&mut self, cx: &mut Context<Self>) {
+        self.cancel_disk_analysis_walk();
+        self.disk_analysis = DiskAnalysis::Off;
+        cx.notify();
+    }
+
+    fn cancel_disk_analysis_walk(&self) {
+        if let DiskAnalysis::Running { cancel, .. } = &self.disk_analysis {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     // ---- banner snooze -------------------------------------------------
@@ -740,6 +857,36 @@ impl ZStatsAppState {
         if let BigFiles::Ready(scan) = &mut self.big_files {
             scan.files.retain(|f| f.path != path);
             scan.total = scan.total.saturating_sub(1);
+        }
+        cx.notify();
+    }
+
+    /// The analyser's confirmed clear action: move each listed
+    /// CACHEDIR.TAG tree to the Trash, then drop the rows that actually
+    /// went. A failed trash leaves its row — a directory still on disk
+    /// must not vanish from the list. Only rows are touched; every other
+    /// figure stays as scanned, with `scanned_at` as the staleness
+    /// boundary.
+    pub fn trash_regenerable(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        let mut gone: Vec<&std::path::PathBuf> = Vec::new();
+        for path in paths {
+            match crate::bigfiles::trash(path) {
+                Ok(()) => gone.push(path),
+                Err(e) => eprintln!("trash {}: {e}", path.display()),
+            }
+        }
+        if gone.is_empty() {
+            return;
+        }
+        if let DiskAnalysis::Ready(result) = &mut self.disk_analysis {
+            result.regenerable.retain(|h| !gone.contains(&&h.path));
+            // A dominance chase can land the same tree in the directory
+            // table, and blind-spot files inside a trashed tree went with
+            // it — those rows would dangle.
+            result.dirs.retain(|h| !gone.contains(&&h.path));
+            result
+                .files
+                .retain(|f| !gone.iter().any(|g| f.path.starts_with(g)));
         }
         cx.notify();
     }

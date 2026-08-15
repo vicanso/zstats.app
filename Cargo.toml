@@ -81,6 +81,11 @@ toml = "1.1.4"
 # Desktop banners. Cross-platform; macOS uses NSUserNotification
 # (`set_application` + `wait_for_action` for the click that opens Alerts).
 notify-rust = "4.18"
+# Parallel directory walk for the Hardware tab's analyser (docs/
+# disk-analysis.md). Same engine diskonaut uses; pinned to a dedicated
+# 3-thread rayon pool at the call site so the resident collector's 2s
+# disk-IO sampling never competes with a default-parallelism walk.
+jwalk = "0.8"
 # `AssetSource` returns `gpui::Result`, which is anyhow's — gpui re-exports
 # the crate itself only under its `private` module ("here be dragons"), so
 # naming a missing asset in the error needs the direct dependency. Already in
