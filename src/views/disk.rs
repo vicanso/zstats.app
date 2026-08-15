@@ -72,7 +72,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         // holds ~ — a standing card of its own would be a
                         // permanent block of chrome for a one-shot query.
                         .when(d.mount_point == "/", |row| {
-                            row.child(big_files_chip(state)).child(analysis_chip(state))
+                            row.child(big_files_chip(state))
+                                .child(analysis_chip(state))
+                                .child(analysis_pick_chip())
                         })
                         .child(volume_badge(i, d)),
                 )
@@ -188,6 +190,40 @@ fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
                 });
         })
         .child(label)
+        .into_any_element()
+}
+
+/// Pick a folder to analyze instead of the default home tree — the
+/// native directory panel, and choosing starts the walk immediately.
+/// The panel takes key focus, so the popover may auto-hide behind it;
+/// the walk survives hide by design, and the result is waiting on the
+/// next open.
+fn analysis_pick_chip() -> AnyElement {
+    Button::new("ana-pick")
+        .icon(IconName::FolderOpen)
+        .ghost()
+        .xsmall()
+        .tooltip(i18n::tr("disk.ana_pick_hint"))
+        .on_click(|_, _window, cx| {
+            let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some(i18n::tr("disk.ana_pick_go").into()),
+            });
+            cx.spawn(async move |cx| {
+                if let Ok(Ok(Some(paths))) = rx.await
+                    && let Some(root) = paths.into_iter().next()
+                {
+                    cx.update(|cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.start_disk_analysis_at(root, cx));
+                    });
+                }
+            })
+            .detach();
+        })
         .into_any_element()
 }
 

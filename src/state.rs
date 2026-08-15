@@ -356,6 +356,11 @@ pub struct ZStatsAppState {
     /// a finished `ScanResult` (a few KB), so "back" restores instantly
     /// instead of re-walking the parent for half a minute.
     disk_analysis_stack: Vec<crate::diskscan::ScanResult>,
+    /// The user-picked analysis root for this session; `None` means the
+    /// default (~). The re-analyze chip re-walks whatever this says, so
+    /// picking a folder once makes the chip mean that folder until the
+    /// results are cleared.
+    disk_analysis_root: Option<std::path::PathBuf>,
     /// Monotonic id for analyser runs, so a stale run's channel events
     /// can never land into a newer run's state.
     disk_analysis_runs: u64,
@@ -428,6 +433,7 @@ impl Default for ZStatsAppState {
             big_files: BigFiles::default(),
             disk_analysis: DiskAnalysis::default(),
             disk_analysis_stack: Vec::new(),
+            disk_analysis_root: None,
             disk_analysis_runs: 0,
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
@@ -601,15 +607,37 @@ impl ZStatsAppState {
         &self.disk_analysis
     }
 
-    /// Start (or restart) the top-level analysis of the home tree. The
-    /// chip always means this — a drill-down is left via "back", not by
-    /// rescanning, so the stack is dropped here.
+    /// Start (or restart) the top-level analysis — of the session's
+    /// picked root, or the home tree by default. A drill-down is left
+    /// via "back", not by rescanning, so the stack is dropped here.
     pub fn start_disk_analysis(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = crate::diskscan::default_root() else {
+        let Some(root) = self
+            .disk_analysis_root
+            .clone()
+            .or_else(crate::diskscan::default_root)
+        else {
             self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
             cx.notify();
             return;
         };
+        self.disk_analysis_stack.clear();
+        self.launch_disk_analysis(root, cx);
+    }
+
+    /// Analyze a user-chosen root — the folder picker's entry point.
+    /// The bare root volume is refused rather than walked: firmlinks
+    /// double-count, and /System plus TCC would distort every figure
+    /// (docs/disk-analysis.md's scope table) — the answer would be
+    /// wrong, not merely slow.
+    pub fn start_disk_analysis_at(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        if root == std::path::Path::new("/") {
+            self.cancel_disk_analysis_walk();
+            self.disk_analysis_stack.clear();
+            self.disk_analysis = DiskAnalysis::Failed(crate::i18n::tr("disk.ana_root_unsupported"));
+            cx.notify();
+            return;
+        }
+        self.disk_analysis_root = Some(root.clone());
         self.disk_analysis_stack.clear();
         self.launch_disk_analysis(root, cx);
     }
@@ -658,6 +686,9 @@ impl ZStatsAppState {
     pub fn clear_disk_analysis(&mut self, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
         self.disk_analysis_stack.clear();
+        // Clean slate includes the picked root: the next "Analyze" means
+        // the default home tree again.
+        self.disk_analysis_root = None;
         self.disk_analysis = DiskAnalysis::Off;
         cx.notify();
     }
