@@ -352,6 +352,10 @@ pub struct ZStatsAppState {
     big_files: BigFiles,
     /// The directory analyser. Survives hide (see [`DiskAnalysis`]).
     disk_analysis: DiskAnalysis,
+    /// Outer results parked while drilled into a subtree — each level is
+    /// a finished `ScanResult` (a few KB), so "back" restores instantly
+    /// instead of re-walking the parent for half a minute.
+    disk_analysis_stack: Vec<crate::diskscan::ScanResult>,
     /// Monotonic id for analyser runs, so a stale run's channel events
     /// can never land into a newer run's state.
     disk_analysis_runs: u64,
@@ -423,6 +427,7 @@ impl Default for ZStatsAppState {
             show_all_sensors: false,
             big_files: BigFiles::default(),
             disk_analysis: DiskAnalysis::default(),
+            disk_analysis_stack: Vec::new(),
             disk_analysis_runs: 0,
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
@@ -596,16 +601,51 @@ impl ZStatsAppState {
         &self.disk_analysis
     }
 
-    /// Start (or restart) the analyser. The walk runs on its own thread;
-    /// everything this state learns — progress, completion, failure —
-    /// arrives over the channel drained below, guarded by `run_id` so a
-    /// superseded run's late events fall on the floor.
+    /// Start (or restart) the top-level analysis of the home tree. The
+    /// chip always means this — a drill-down is left via "back", not by
+    /// rescanning, so the stack is dropped here.
     pub fn start_disk_analysis(&mut self, cx: &mut Context<Self>) {
         let Some(root) = crate::diskscan::default_root() else {
             self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
             cx.notify();
             return;
         };
+        self.disk_analysis_stack.clear();
+        self.launch_disk_analysis(root, cx);
+    }
+
+    /// Drill into one ranked directory: park the current result on the
+    /// stack and walk that path as the new root. Only a finished result
+    /// can be drilled — the rows are inert while a walk is running.
+    pub fn drill_disk_analysis(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        let DiskAnalysis::Ready(_) = &self.disk_analysis else {
+            return;
+        };
+        if let DiskAnalysis::Ready(current) = std::mem::take(&mut self.disk_analysis) {
+            self.disk_analysis_stack.push(current);
+        }
+        self.launch_disk_analysis(root, cx);
+    }
+
+    /// Leave the current drill level and restore the parked outer result.
+    pub fn pop_disk_analysis(&mut self, cx: &mut Context<Self>) {
+        let Some(prev) = self.disk_analysis_stack.pop() else {
+            return;
+        };
+        self.cancel_disk_analysis_walk();
+        self.disk_analysis = DiskAnalysis::Ready(prev);
+        cx.notify();
+    }
+
+    pub fn disk_analysis_can_back(&self) -> bool {
+        !self.disk_analysis_stack.is_empty()
+    }
+
+    /// The walk itself. Runs on its own thread; everything this state
+    /// learns — progress, completion, failure — arrives over the channel
+    /// drained below, guarded by `run_id` so a superseded run's late
+    /// events fall on the floor.
+    fn launch_disk_analysis(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
         self.disk_analysis_runs += 1;
         let run_id = self.disk_analysis_runs;
@@ -664,11 +704,15 @@ impl ZStatsAppState {
         .detach();
     }
 
-    /// The explicit cancel — the only way a walk stops early. Back to Off;
-    /// partial results are never shown (or, in P2b, cached).
+    /// The explicit cancel — the only way a walk stops early. Partial
+    /// results are never kept. A cancelled drill falls back to the outer
+    /// result it came from; a cancelled top-level run goes to Off.
     pub fn cancel_disk_analysis(&mut self, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
-        self.disk_analysis = DiskAnalysis::Off;
+        self.disk_analysis = match self.disk_analysis_stack.pop() {
+            Some(prev) => DiskAnalysis::Ready(prev),
+            None => DiskAnalysis::Off,
+        };
         cx.notify();
     }
 

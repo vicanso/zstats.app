@@ -208,14 +208,21 @@ fn analysis_card(state: &ZStatsAppState) -> AnyElement {
             .children(partial.as_ref().map(|r| analysis_tables(r, false)))
             .into_any_element(),
         DiskAnalysis::Failed(e) => div()
-            .px(px(13.))
-            .pt(px(2.))
-            .pb(px(11.))
-            .child(widgets::note(
-                t!("disk.ana_failed", e = e.clone()).to_string(),
-            ))
+            .children(back_chip(state))
+            .child(
+                div()
+                    .px(px(13.))
+                    .pt(px(2.))
+                    .pb(px(11.))
+                    .child(widgets::note(
+                        t!("disk.ana_failed", e = e.clone()).to_string(),
+                    )),
+            )
             .into_any_element(),
-        DiskAnalysis::Ready(result) => analysis_tables(result, true),
+        DiskAnalysis::Ready(result) => div()
+            .children(back_chip(state))
+            .child(analysis_tables(result, true))
+            .into_any_element(),
     };
     widgets::list_shell()
         .child(analysis_header(state))
@@ -309,14 +316,16 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
         let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
         hits.iter()
             .enumerate()
-            .map(|(i, h)| analysis_row(id, i, &h.path, h.bytes, max, &root, deletable))
+            // Directory rows drill on click (actions = a finished result;
+            // mid-scan tables are inert), file rows never do.
+            .map(|(i, h)| analysis_row(id, i, &h.path, h.bytes, max, &root, deletable, actions))
             .collect()
     };
     let file_rows = |hits: &[FileHit]| -> Vec<AnyElement> {
         let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
         hits.iter()
             .enumerate()
-            .map(|(i, h)| analysis_row("ana-file", i, &h.path, h.bytes, max, &root, false))
+            .map(|(i, h)| analysis_row("ana-file", i, &h.path, h.bytes, max, &root, false, false))
             .collect()
     };
 
@@ -404,11 +413,37 @@ fn clear_listed_button(hits: &[DirHit]) -> AnyElement {
         .into_any_element()
 }
 
+/// "← back" — exists only while a drill-down is showing; restores the
+/// parked outer result instantly instead of re-walking it.
+fn back_chip(state: &ZStatsAppState) -> Option<AnyElement> {
+    state.disk_analysis_can_back().then(|| {
+        div()
+            .px(px(13.))
+            .pt(px(2.))
+            .pb(px(2.))
+            .child(
+                Button::new("ana-back")
+                    .ghost()
+                    .xsmall()
+                    .label(i18n::tr("disk.ana_back"))
+                    .on_click(|_, _window, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.pop_disk_analysis(cx));
+                    }),
+            )
+            .into_any_element()
+    })
+}
+
 /// One ranked row: path relative to the scan root, physical size, a meter
 /// against the group's largest, and Finder Reveal. `deletable` adds the
 /// confirm-gated move-to-Trash — passed only for the regenerable table,
 /// whose rows are all signature-checked `CACHEDIR.TAG` trees; heuristic
-/// and plain rows never get the control.
+/// and plain rows never get the control. `drillable` makes the row itself
+/// clickable: no tree is retained, so "expand" honestly means re-walking
+/// that path as the new root (seconds for a subtree), with "back" holding
+/// the parked outer result.
 #[allow(clippy::too_many_arguments)]
 fn analysis_row(
     id: &'static str,
@@ -418,6 +453,7 @@ fn analysis_row(
     group_max: u64,
     root: &std::path::Path,
     deletable: bool,
+    drillable: bool,
 ) -> AnyElement {
     let label = path
         .strip_prefix(root)
@@ -429,10 +465,27 @@ fn analysis_row(
     );
     let reveal_path = path.to_path_buf();
     let trash_path = path.to_path_buf();
+    let drill_path = path.to_path_buf();
     let confirm_label = label.clone();
 
     div()
+        .id(SharedString::from(format!("{id}-row-{index}")))
         .py(px(4.))
+        .px(px(4.))
+        .mx(px(-4.))
+        .rounded(px(5.))
+        .when(drillable, |row| {
+            // The hover fill is the affordance (see views/mod.rs — no
+            // hand cursor on in-app controls).
+            row.hover(|s| s.bg(theme::surface_raised()))
+                .on_click(move |_, _window, cx| {
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| {
+                            state.drill_disk_analysis(drill_path.clone(), cx)
+                        });
+                })
+        })
         .child(
             h_flex()
                 .items_center()
@@ -466,7 +519,9 @@ fn analysis_row(
                         .ghost()
                         .xsmall()
                         .tooltip(i18n::tr("disk.big_reveal"))
-                        .on_click(move |_, _window, _cx| {
+                        .on_click(move |_, _window, cx| {
+                            // The row itself drills; the button must not.
+                            cx.stop_propagation();
                             crate::bigfiles::reveal(&reveal_path);
                         }),
                 )
@@ -480,6 +535,7 @@ fn analysis_row(
                             .on_click({
                                 let bytes_str = format::memory(bytes);
                                 move |_, window, cx| {
+                                    cx.stop_propagation();
                                     let path = trash_path.clone();
                                     crate::confirm::ask(
                                         window,
