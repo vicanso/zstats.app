@@ -352,6 +352,12 @@ pub struct ZStatsAppState {
     /// each switch — holding the handles across frames is what actually
     /// remembers the position.
     scroll: [ScrollHandle; Tab::ALL.len()],
+    /// Scroll for the rows region *inside* the Processes top-N card — the
+    /// rows scroll under a pinned header, so they need a handle of their
+    /// own, held here for the same reason as the per-tab ones above.
+    proc_rows_scroll: ScrollHandle,
+    /// Same, for the Applications card.
+    app_rows_scroll: ScrollHandle,
 }
 
 impl Default for ZStatsAppState {
@@ -383,6 +389,8 @@ impl Default for ZStatsAppState {
             proc_filter_text: String::new(),
             next_seq: 0,
             scroll: std::array::from_fn(|_| ScrollHandle::new()),
+            proc_rows_scroll: ScrollHandle::new(),
+            app_rows_scroll: ScrollHandle::new(),
         }
     }
 }
@@ -660,6 +668,30 @@ impl ZStatsAppState {
         &self.scroll[tab.index()]
     }
 
+    /// Back to a clean slate for the next open. The name filter and the
+    /// one-shot full listings are "looking at something right now" state:
+    /// a panel reopened hours later with yesterday's query looks broken,
+    /// not remembered. Scroll positions and the selected tab survive —
+    /// those are orientation, not a question being asked.
+    pub fn reset_transient_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.proc_filter_open {
+            // The close arm clears the input, the lowercased mirror and
+            // the full-scan cuts in one place.
+            self.toggle_proc_filter(window, cx);
+        }
+        self.full_scan = FullScan::Off;
+        self.full_app_scan = FullAppScan::Off;
+        cx.notify();
+    }
+
+    pub fn proc_rows_scroll(&self) -> &ScrollHandle {
+        &self.proc_rows_scroll
+    }
+
+    pub fn app_rows_scroll(&self) -> &ScrollHandle {
+        &self.app_rows_scroll
+    }
+
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
@@ -746,6 +778,13 @@ impl ZStatsAppState {
                 .spawn(async { crate::fullscan::scan_groups() })
                 .await;
             let _ = this.update(cx, |state, cx| {
+                // Land only into a scan someone is still waiting for — the
+                // panel hiding mid-scan resets to Off, and a result nobody
+                // asked for anymore must not push the tab back into the
+                // full listing on the next open.
+                if !matches!(state.full_app_scan, FullAppScan::Running) {
+                    return;
+                }
                 state.full_app_scan = match scanned {
                     Ok(GroupScan {
                         groups,
@@ -785,6 +824,11 @@ impl ZStatsAppState {
                 .spawn(async { crate::fullscan::scan() })
                 .await;
             let _ = this.update(cx, |state, cx| {
+                // Same landing guard as the app scan: a hide mid-scan reset
+                // this to Off, and the result must not undo that.
+                if !matches!(state.full_scan, FullScan::Running) {
+                    return;
+                }
                 state.full_scan = match scanned {
                     Ok(Scan {
                         processes,

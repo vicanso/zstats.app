@@ -71,6 +71,20 @@ fn shown_memory(p: &ProcessSnapshot) -> u64 {
     p.phys_footprint_bytes.unwrap_or(p.memory_bytes)
 }
 
+/// Height budget for the scrolling rows region of the top-N card: the
+/// body, minus the pinned header (36 — same figure FULL_CHROME_HEIGHT
+/// breaks down) and the filter row when open. Shared with the Apps card,
+/// whose chrome is identical.
+pub(super) fn rows_height(state: &ZStatsAppState) -> f32 {
+    let chrome = 36.
+        + if state.proc_filter_open() {
+            FILTER_ROW_HEIGHT
+        } else {
+            0.
+        };
+    (super::body_height(state).unwrap_or(FULL_LIST_FALLBACK) - chrome).max(FULL_LIST_MIN)
+}
+
 /// Ranked by the 60s rolling average so the order is stable enough to read.
 pub(super) fn ranked(tick: &Tick) -> Option<Vec<(&ProcessSnapshot, f64)>> {
     ranked_by(tick, true)
@@ -191,29 +205,42 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             ),
         ))
         .children(filter_row(state))
-        .children(abnormal_rows(
-            state,
-            &abnormal,
-            !only_abnormal && !rows.is_empty(),
-        ))
-        .children({
-            let shown = if only_abnormal { 0 } else { rows.len() };
-            rows.into_iter()
-                .take(shown)
-                .enumerate()
-                .map(move |(i, (p, avg))| {
-                    let parent_name = p.parent_pid.and_then(|pp| name_by_pid.get(&pp).copied());
-                    process_row(p, avg, bar_full, i + 1 == shown, state, parent_name)
+        .child(
+            // Rows scroll inside the card while the header, chips and
+            // filter row stay pinned — the full listing's model, minus the
+            // virtualisation (at most max-processes rows, all of which the
+            // old whole-panel scroll built per frame anyway). `max_h`, not
+            // `h`, so a short list keeps a short card.
+            v_flex()
+                .id("proc-rows")
+                .track_scroll(state.proc_rows_scroll())
+                .overflow_y_scroll()
+                .max_h(px(rows_height(state)))
+                .children(abnormal_rows(
+                    state,
+                    &abnormal,
+                    !only_abnormal && !rows.is_empty(),
+                ))
+                .children({
+                    let shown = if only_abnormal { 0 } else { rows.len() };
+                    rows.into_iter()
+                        .take(shown)
+                        .enumerate()
+                        .map(move |(i, (p, avg))| {
+                            let parent_name =
+                                p.parent_pid.and_then(|pp| name_by_pid.get(&pp).copied());
+                            process_row(p, avg, bar_full, i + 1 == shown, state, parent_name)
+                        })
                 })
-        })
-        .when(no_match, |d| {
-            d.child(
-                div()
-                    .px(px(13.))
-                    .py(px(10.))
-                    .child(widgets::note(i18n::tr("processes.filter_no_match"))),
-            )
-        });
+                .when(no_match, |d| {
+                    d.child(
+                        div()
+                            .px(px(13.))
+                            .py(px(10.))
+                            .child(widgets::note(i18n::tr("processes.filter_no_match"))),
+                    )
+                }),
+        );
 
     let mut cards = Vec::with_capacity(2);
     // A scan that failed says so here rather than through the chip alone: a

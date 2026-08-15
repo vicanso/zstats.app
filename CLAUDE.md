@@ -28,7 +28,7 @@ macOS is the only supported target. Other platforms compile but the `#[cfg(not(t
 
 ## Architecture
 
-**One root view, one global store.** `views/` modules are plain functions that read `ZStatsGlobalStore` (a `Global` wrapper around `Entity<ZStatsAppState>`) and return elements — they are *not* gpui views. The whole panel repaints per tick. Anything that must survive hide → re-show goes in `state.rs`, including per-tab `ScrollHandle`s: gpui discards element state for anything not painted, and only the active tab is painted.
+**One root view, one global store.** `views/` modules are plain functions that read `ZStatsGlobalStore` (a `Global` wrapper around `Entity<ZStatsAppState>`) and return elements — they are *not* gpui views. The whole panel repaints per tick. Anything that must survive hide → re-show goes in `state.rs`, including per-tab `ScrollHandle`s: gpui discards element state for anything not painted, and only the active tab is painted. The deliberate exception is query-like state — the name filter and the one-shot full listings — which both hide paths reset via `reset_transient_views`: a panel reopened hours later with yesterday's query looks broken, not remembered.
 
 **Collection is a resident background thread** (`metrics.rs`) running `zstats::Monitor::tick()`, handing `Tick`s to the main thread over a `smol::channel`. It must outlive the window — `Monitor` holds the previous-sample baselines that every rate is diffed against. Cadence is adaptive (config `interval` when visible or busy, 5s idle) and waits with `recv_timeout` so opening the panel samples immediately. First-sample rate metrics are legitimately `None` → UI shows `—`.
 

@@ -29,7 +29,10 @@ const HOT_PERCENT: f32 = 200.0;
 /// Header + caveat line. Same budget as the process full-scan card so
 /// the list fills the panel instead of leaving a strip of empty card.
 const FULL_CHROME_HEIGHT: f32 = 70.;
-const FILTER_ROW_HEIGHT: f32 = 28.;
+// Same value as processes::FILTER_ROW_HEIGHT — the row itself is shared
+// (`processes::filter_row`), so a smaller budget here made the full list
+// overflow by the difference and the header slid before pinning.
+const FILTER_ROW_HEIGHT: f32 = 34.;
 const FULL_LIST_FALLBACK: f32 = 480.;
 const FULL_LIST_MIN: f32 = 120.;
 
@@ -88,19 +91,28 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             ),
         ))
         .children(processes::filter_row(state))
-        .children({
-            rows.into_iter()
-                .enumerate()
-                .map(move |(i, g)| app_row(g, i + 1 == shown, state))
-        })
-        .when(no_match, |d| {
-            d.child(
-                div()
-                    .px(px(13.))
-                    .py(px(10.))
-                    .child(widgets::note(i18n::tr("apps.filter_no_match"))),
-            )
-        });
+        .child(
+            // Same pinned-header model as the Processes top-N card; the
+            // height budget is shared because the chrome is identical.
+            v_flex()
+                .id("app-rows")
+                .track_scroll(state.app_rows_scroll())
+                .overflow_y_scroll()
+                .max_h(px(processes::rows_height(state)))
+                .children({
+                    rows.into_iter()
+                        .enumerate()
+                        .map(move |(i, g)| app_row(g, i + 1 == shown, state))
+                })
+                .when(no_match, |d| {
+                    d.child(
+                        div()
+                            .px(px(13.))
+                            .py(px(10.))
+                            .child(widgets::note(i18n::tr("apps.filter_no_match"))),
+                    )
+                }),
+        );
 
     let mut cards = Vec::with_capacity(2);
     if matches!(state.full_app_scan(), FullAppScan::Failed) {

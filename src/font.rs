@@ -2,6 +2,19 @@
 //!
 //! Registered at startup via [`register`] so Regular/Bold resolve the same
 //! on every platform, instead of leaning on Menlo / Consolas / DejaVu.
+//!
+//! **Where MONO goes** — the rule, since font choice is per-element:
+//! standalone data values (percentages, bytes, temperatures, rates,
+//! core-time, current thresholds) and code-like identifiers (a pid tag
+//! beside a duplicated name). Mono earns its place by keeping a ticking
+//! figure from changing width and by lining values up across rows —
+//! reasons that only apply to numbers standing on their own.
+//!
+//! Everything else stays on the UI face: names, labels, and sentences
+//! that happen to contain numbers ("pid 51244 · peak 1.2 GB"). Names in
+//! mono run ~25% wider — fatal at 320px — and a caption that switches
+//! face mid-sentence is noise without an alignment payoff. The split is
+//! also what keeps the panel reading as a native card, not a terminal.
 
 use gpui::{App, SharedString};
 use gpui_component::Theme;

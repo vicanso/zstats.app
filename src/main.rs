@@ -121,7 +121,10 @@ impl ZStatsApp {
             }
             cx.global::<ZStatsGlobalStore>()
                 .clone()
-                .update(cx, |state, _| state.mark_auto_hidden());
+                .update(cx, |state, cx| {
+                    state.mark_auto_hidden();
+                    state.reset_transient_views(window, cx);
+                });
             // Order it off screen rather than destroy it — rebuilding the
             // window on every toggle is what leaked ~1 MB a cycle.
             #[cfg(target_os = "macos")]
@@ -487,7 +490,12 @@ pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
 pub fn hide_main_window(cx: &mut App) {
     #[cfg(target_os = "macos")]
     if let Some(handle) = cx.windows().first().copied() {
-        let _ = handle.update(cx, |_, window, _| window_ext::hide(window));
+        let _ = handle.update(cx, |_, window, cx| {
+            window_ext::hide(window);
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.reset_transient_views(window, cx));
+        });
         cx.global::<metrics::CollectorPace>().hidden();
     }
     let _ = cx;
