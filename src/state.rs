@@ -1274,6 +1274,7 @@ mod tests {
                 avg_bytes: 1 << 30,
                 share_percent: 40.0,
                 threshold_percent: 25.0,
+                threshold_bytes: 4 << 30,
                 window: Duration::from_secs(60),
             },
             repeat_after: None,

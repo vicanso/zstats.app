@@ -361,7 +361,7 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
     // independent of the template layer (templates only refine per-name
     // overrides), so the builtin-template variant is exact and costs no IO.
     let eff = ActiveThresholds::from_config(a);
-    let rows: [(&'static str, String, usize); 7] = [
+    let rows: [(&'static str, String, usize); 8] = [
         (
             "alert-cpu",
             fmt_pct_setting(a.cpu, eff.cpu.base().map(f64::from)),
@@ -372,6 +372,13 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
             // Effective memory shares are fractions; the file speaks percent.
             fmt_pct_setting(a.mem, eff.memory.base().map(|f| f * 100.0)),
             a.mem_overrides.len(),
+        ),
+        (
+            // The absolute half of the memory bar (zstats 0.5): the rule
+            // fires on the LOWER of the share above and this ceiling.
+            "alert-mem-bytes",
+            fmt_bytes_setting(a.mem_bytes, eff.memory_bytes),
+            0,
         ),
         (
             "alert-app-cpu",
@@ -483,6 +490,14 @@ fn threshold_chips(key: &'static str, current: &str) -> AnyElement {
             ("60%".into(), "60"),
             (off, "0"),
         ],
+        // `g` = GiB in zstats' size parser; the decimal `gb` would store
+        // values the "4 GB" display form (GiB-multiples) can't round-trip.
+        "alert-mem-bytes" => vec![
+            ("2 GB".into(), "2g"),
+            ("4 GB".into(), "4g"),
+            ("8 GB".into(), "8g"),
+            (off, "0"),
+        ],
         "alert-app-cpu" => vec![
             ("200%".into(), "200"),
             ("400%".into(), "400"),
@@ -570,6 +585,28 @@ fn fmt_pct_setting<T: Into<f64> + Copy>(file: Option<T>, effective_pct: Option<f
         }),
         Some(v) if v.into() == 0.0 => i18n::tr("alerts.off"),
         Some(v) => format!("{:.0}%", v.into()),
+    }
+}
+
+/// The memory rule's absolute ceiling. Values are whole GiB in practice
+/// (the chips only offer those), so the clean "4 GB" form applies; a
+/// hand-edited odd value falls back to the byte formatter.
+fn fmt_bytes_setting(file: Option<u64>, effective: Option<u64>) -> String {
+    const GIB: u64 = 1 << 30;
+    let clean = |v: u64| {
+        if v.is_multiple_of(GIB) {
+            format!("{} GB", v / GIB)
+        } else {
+            crate::format::memory(v)
+        }
+    };
+    match file {
+        None => default_at(match effective {
+            Some(v) => clean(v),
+            None => i18n::tr("alerts.off"),
+        }),
+        Some(0) => i18n::tr("alerts.off"),
+        Some(v) => clean(v),
     }
 }
 

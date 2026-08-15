@@ -1,0 +1,266 @@
+# 磁盘目录分析 · 设计方案（P2）
+
+第一步「大文件秒查」已落地（`bigfiles.rs`，Spotlight 索引 + 启动卷卡片内分区）。本方案是第二步：
+**点了才走树的目录聚合**，给 Spotlight 看不见的那一块（`~/Library`、点目录、海量小文件）一张排名，
+不是袖珍 diskonaut。
+
+产品形状是三组排名 + Finder Reveal，不是 320px 里的文件管理器。下钻若做，是对那一条路径再扫一次，
+不常驻全树。
+
+## 定位与先例
+
+- 一次性、后台线程、与采集无关，不动 `Monitor`。归入 `procscan` / `fullscan` / `bigfiles`
+  一类「面板自查 OS」的例外：不产生告警、不产生指标、纯查看。CLAUDE.md 补记一行。
+- 状态拆成两件事，不要一个 chip 三步走：
+  - **打开 Disk / 点「上次」**：只渲染缓存，标「上次分析于 X」。没有缓存就空着。
+  - **「重新分析」**：才走树。`Off → Running → Ready/Failed`。
+- **hide 不取消走树——这是对 `fullscan` 先例的一次有理由的偏离**。release 构建里
+  面板失焦即隐藏，而一趟 `~/Library` 是分钟级：若 hide 即取消，几乎没有一次扫描能
+  跑完，功能等于不存在。所以：**扫描的产物是缓存文件，不是活着的 UI**——hide 重置
+  UI 会话（landing guard 只拦 UI 状态），走树继续，完成时**照常写缓存**；重新打开
+  即见「上次分析于 X」。`fullscan` 之所以能 hide 即弃，是因为它只要 600ms。
+- 取消只有一种：**显式**。Running 态的 chip 变「取消」；再点「重新分析」也先取消
+  上一趟。被取消（或失败）的**部分结果不写缓存**——半张表覆盖上一次的完整结果是倒退。
+- 引擎 `jwalk`，独立线程，`smol` channel 回主线程。约束写死：
+  - `follow_links(false)`，禁止跟随符号链接（环、跨卷、扫到网络盘）。
+  - `skip_hidden(false)`——盲区正在点目录里。
+  - **`Parallelism::RayonNewPool(2..4)` 专用池**，不要 `num_cpus`，也不要全局
+    rayon 池（防止与未来共享全局池的依赖互相拖累）。常驻 `Monitor` 还在 2s tick
+    上采磁盘 IO，默认并行会把它打成「机器在拷盘」。
+- hide 重置的是 **UI 会话**，不是缓存文件。下次打开 Disk 仍可直接看「上次」。
+
+## 和第一步怎么分工
+
+同一张启动卷卡片上已经有 Spotlight 大文件（默认 ≥500 MB，不足则 ≥100 MB）。
+分析器 **主攻目录和索引盲区**，不再列一份更矮阈值的「大文件」——两份名单、两种口径
+（索引逻辑大小 vs `st_blocks`）会读成功能坏了。
+
+分析器产出的文件行，只保留 Spotlight **不会**报到的：点路径、`~/Library` 下、
+或被走树折叠成叶子的包。≥ `BIG_FILE_IN_TREE` 且已经能被 `bigfiles` 看见的，不进这张表。
+
+跨目录加总 **不等于** 卷上「已用」。系统、其他用户、VM、本地快照都不在 `~` 里。
+UI 不得暗示「这些文件夹 = 这块盘」。
+
+## 数据模型
+
+内存里 **不持有全树**。一次扫描（整根或某一下钻路径）的结果是三张排名表，外加扫描元数据：
+
+```
+ScanResult {
+    root,                 // 绝对路径；缓存按它分档
+    scanned_at,
+    skipped_denied,       // 无权限目录数；如实展示，不弹窗索权
+    skipped_protected,    // TCC deny-list 主动跳过数
+    skipped_dataless,     // iCloud / 网盘占位跳过数
+    cancelled,            // 用户显式取消（不写缓存）
+
+    // 签名校验过的 CACHEDIR.TAG 目录，按 bytes 降序
+    regenerable: Vec<DirHit>,
+    // 大目录排名（折叠后的叶子 + 普通目录），按 bytes 降序，封顶 PERSIST_TOP_DIRS。
+    // 入榜前必须过「支配过滤」，见下。
+    dirs: Vec<DirHit>,
+    // 走树才看得到的大文件（见「和第一步怎么分工」）
+    files: Vec<FileHit>,
+}
+
+DirHit  { path, bytes, kind }   // kind: Tag | Heuristic | Plain
+FileHit { path, bytes }
+```
+
+`bytes` 一律物理块：`st_blocks × 512`，与 `du`、卷量表、`bigfiles` 同行同一口径。
+APFS 克隆和硬链接会被重复计；跨目录求和大于卷用量是正常现象，进 tooltip，不当 bug。
+
+一次扫描的工作集是「当前根下、折叠之后的直接排名」，不是每个目录挂 `children`。
+需要看某目录里面有什么 → 以它为根再跑一轮同样的扫描（见「下钻」）。
+
+### 支配过滤（排名的成立前提）
+
+每个祖先 ≥ 它的任何后代，所以「全体目录按 bytes 降序」的 top-100 会是从根往下的
+一条嵌套链（`Application Support` 31 GB → `MobileSync` 28 GB → `Backup` 28 GB →
+…），信息量为零。入榜规则：
+
+1. **链式穿透**：某目录 ≥ `DOMINANCE_PERCENT`（90%）的体量来自单一子目录时，
+   由那个子目录代表它，一直穿透到第一个「分叉点」；
+2. **祖先与后代不同榜**：后代已入榜时，祖先只有在**独占余量**
+   （自身 bytes 减去已入榜后代之和）自己够格时才另外成行，且行上标注的是独占余量
+   的语义（展示时写清，避免两行数字对不上被当 bug）。
+
+聚合期本来就要为每个在途目录维护累计值，穿透与独占余量都是回溯时的减法，
+不需要保留全树。
+
+### 走树时当成叶子（停止下降）
+
+进入目录后按下面顺序判断，**命中即累计总量、不再往下记结构**。
+这是可用性约束，不是优化可选项：开发者家目录里不折叠 `node_modules` / `.git`，
+一次 `~` 是几百万 inode。
+
+1. **`CACHEDIR.TAG` + 签名行**（`Signature: 8a477f597d28d172789f06886806bc55`，
+   规范 43 字节，防同名文件误判）。记 `kind = Tag`。
+   第一方声明可再生，内部构成对首屏没有价值；若用户点这一行，再以它为根扫一层
+   （`debug` vs `release` 往往在这里）。
+2. **包 / 文库**，整份当一个文件式叶子：`*.app`、`*.photoslibrary`、`*.sparsebundle`
+   以及同类 bundle。否则 Photos 库会被拆成几千个小文件，全部进「其他」，用户看不见
+   「这一份占了 80 GB」。
+3. **病态目录**（路径 **后缀**，禁止光比 basename，避免误伤名叫 `target` 的普通文件夹）：
+   `…/node_modules`、`…/.git`、`…/.pnpm`、`…/DerivedData`、`…/Pods`。
+   记 `kind = Heuristic`。清单的准入标准是 **inode 病态**（十万级小文件），
+   不是「有趣的缓存根」——`…/Library/Caches` 明确**不在**清单里：root = `~/Library`
+   时它正是最需要逐子目录分解的对象，折叠它等于把最有价值的答案装进黑箱。
+   另一条通用防护：**扫描根自身与它的直接子级不适用启发式折叠**
+   （Tag 折叠不受此限——所有者声明的语义与深度无关）。
+4. **TCC 受保护子树主动跳过**：`~/Library/Mail`、`Messages`、`Safari`、`HomeKit`
+   等（与病态后缀同格式的一张 deny-list）。不跳的话首次访问会由 **macOS 弹出**
+   「zstats 想访问来自邮件的数据」——弹窗不是我们发的，但用户看到的就是弹窗，
+   「不弹窗索权」的承诺被打破。计入 `skipped_protected` 如实展示；
+   要完整覆盖的用户自行在系统设置里给完全磁盘访问权限。
+5. **iCloud / 网盘占位**：`UF_DATALESS`（`std::os::macos::fs::MetadataExt::st_flags`，
+   标准库即有）或 ubiquitous 未下载项 **跳过**，计入 `skipped_dataless`。
+   对占位做普通 `metadata` 会触发下载，这比扫得慢更糟。
+   只用不过度物化的 stat（`symlink_metadata` / `DirEntry` 自带的，不 follow）。
+
+其余目录继续下降。该层的普通文件：
+
+- ≥ `BIG_FILE_IN_TREE` **且** 落在 Spotlight 盲区 → `files`。
+  「盲区」用**路径近似**判定：路径含点开头的段、或位于 `~/Library` 前缀下。
+  root = `~/Library` 时全体通过（零成本）；root = `~` 时生效。这是近似——
+  逐文件问 `mdls` 是每行一个子进程，不可取；近似的偏差方向是多列不是漏列，可接受。
+- 其余文件大小与个数汇入该层的 others 计数，**只用于这一层的展示**，不写进持久化键名
+  （不再发明 `.zstats.others` 这种会漏到 UI 或文件里的内部名字）
+
+无权限：跳过并计数。符号链接：不当目录下降。
+
+## 扫描范围
+
+| 预设 | 何时 | 说明 |
+|---|---|---|
+| `~/Library` | **P2a 默认** | Spotlight 最大的盲区，比整份 `$HOME` 便宜，也更接近「磁盘去哪了」 |
+| `~` | P2c 可选 | 含家目录其它部分；仍应用上面的叶子规则 |
+| 缓存根集合 | P2c 可选 | `~/Library/Caches`、`~/.cache`、`~/Library/Developer` 等若干条显式路径 |
+| `/` | **不做**，至少不进 P2 | firmlink 双计、`/System`、TCC、网络卷、可能几十分钟 I/O。要做必须单独确认，且不能和 `~/Library` 并列成第三个 chip |
+
+范围写进 `ScanResult.root`。换根等于换一份缓存，对不上就当没有。
+
+## 扫描流程
+
+```
+打开 Disk 页
+   │
+   └─ 有这份 root 的缓存？渲染「上次分析于 X」+ 三张表。不做任何 stat。
+
+「重新分析」
+   │
+   ├─ 取消上一趟（如果还在跑）
+   ├─ Running：节流上报当前路径 + 已处理目录数（不要「已扫 N 个文件」——
+   │            那个数字涨得又快又吓人，没有信息量）；chip 变「取消」
+   ├─ jwalk 按数据模型聚合；叶子规则见上
+   ├─ 期间 hide：UI 会话重置，走树继续（见「定位与先例」）
+   └─ 完成：按 root 写回缓存 → Ready（面板已隐藏时只写缓存）
+```
+
+无缓存时「上次」是空态，唯一出路是「重新分析」。v1 不做边扫边浏览。
+
+**快速重验（P2b，有缓存时的可选按钮，不是自动）**
+
+| 缓存行 | 做什么 | 不是什么 |
+|---|---|---|
+| `files` | `stat` 文件：没了剔除，大小变了更新 | — |
+| `regenerable`（Tag） | `stat` 那个 `CACHEDIR.TAG`：还在？签名还对？ | **不**重走子树。总量标成「未重算」，或等用户点进该行再扫 |
+| `dirs` | 不动 | 目录 inode 的 stat 不是子树大小；mtime 看不见孙辈。排名只信 `scanned_at` |
+
+「秒级」只适用于文件行和 TAG 是否还在。把「重算该目录总量」写成秒级是错的——
+20 GB 的 `cargo-target` 再走一遍可以是十几秒。
+
+## 持久化
+
+单独文件，不进 `config.toml`（`settings::save` 会丢未知键，与 `app.toml` 同一先例）。
+权限 **`0600`**：路径会泄漏项目名。
+
+按 root 分档，定为 **`~/.zstats/diskscan/<root-slug>.toml`**（每根一个文件）——
+比单文件表数组的合并语义简单：写 = 整文件覆盖，读 = **root 对不上就丢**。
+
+只存三张排名 + 元数据，不存树。体量按 `PERSIST_TOP_DIRS` 封顶，预期远小于 200 KB：
+
+```toml
+version = 1
+root = "~/Library"
+scanned_at = "2026-08-15T10:30:00Z"
+skipped_denied = 3
+skipped_protected = 4
+skipped_dataless = 12
+
+[[regenerable]]
+path = "~/Library/Caches/org.example"
+bytes = 19800000000
+kind = "tag"
+
+[[dir]]
+path = "~/Library/Application Support"
+bytes = 31000000000
+kind = "plain"
+
+[[file]]
+path = "~/Library/some-dot-path/blob.bin"
+bytes = 4200000000
+```
+
+诚实性边界：缓存只服务「先看到上次的数」，**不做正确性声明**。
+新增的大目录 / 大文件只有「重新分析」能发现。时间戳就是这条边界的表达。
+
+## 展示
+
+**独立卡片**，位于启动卷卡片之下——三组列表塞不进卷卡片的分区（那个先例适合
+「大文件」那样的单列表）。标题 caption 带 root 与「上次分析于 X」，为 P2c 换根做准备。
+
+320px 里三组列表，每组按大小降序 + meter（相对该组最大值），不是一层层的子目录浏览器。
+
+- **可再生**（`kind = Tag`）：标签用「缓存」或「可再生」，**v1 不写「可清除」**——
+  那是动作，v1 没有这个动作；而且 TAG 只保证可再生，不保证此刻删了也没事
+  （`target` 里可能有 rustc 在写）。
+- **猜测**（`kind = Heuristic`）：另一套更淡的标签，和 TAG 必须能分开。
+- **大目录**、**走树才见到的文件**。
+- 行尾：「在 Finder 中显示」（`bigfiles::reveal`）。
+- 口径进 tooltip：物理块；克隆 / 硬链接会重复计；加总不是卷用量。
+
+点某一行「看里面」→ 以该 path 为 root 再扫（Running 态只覆盖这一层的结果区，
+缓存仍是外层那份，除非用户对这一层也点「记住」—— v1 不记子扫描）。
+
+## 删除（分期）
+
+- **v1 不做删除**：展示 + Reveal。
+- v2：仅 `kind = Tag`（签名校验过的 `CACHEDIR.TAG`）提供删除。走 `confirm.rs` +
+  `bigfiles::trash`（`NSFileManager.trashItemAtURL` 对目录同样有效，进废纸篓，可恢复）。
+  绝不 `rm -rf`。与 `terminate.rs` 同一哲学：可拒绝、可撤销。
+  文案此时才用「可清除」。
+- `kind = Heuristic` **永不**附删除按钮，只指路。
+
+## 明确不做
+
+- Mole 式规则清理（15,000 行策划清单 + 保护层是「判断什么该删」的真实成本，超出面板姿态）；
+- FSEvents 增量监控（「持续看哪里在涨」是另一个功能）；
+- 常驻全树、边扫边浏览、basename 启发式、跟随符号链接、物化 iCloud 占位；
+- 把 `/` 做成和 `~/Library` 并列的预设；
+- 在分析卡里重复 Spotlight 已经列出的大文件；
+- 不进 zstats CLI——纯面板能力。
+
+## 常量表
+
+| 常量 | 值 | 依据 |
+|---|---|---|
+| `BIG_FILE_IN_TREE` | 50 MB | 走树时「值不值得单独成行」的分界；展示时还要再滤掉 Spotlight 能看到的 |
+| `DOMINANCE_PERCENT` | 90% | 支配过滤的穿透阈值（单一子目录占比） |
+| `CACHE_TAG_SIGNATURE` | `Signature: 8a477f…bc55` | bford.info/cachedir 规范 |
+| `PERSIST_TOP_DIRS` | 100 | 每张排名表写入缓存的上限 |
+| 进度上报节流 | ~0.5 s | 当前路径 + 已处理目录数 |
+| jwalk 并行 | 2–4，专用 `RayonNewPool` | 给常驻采集器留盘；不碰全局池 |
+
+病态后缀、bundle 后缀、TCC deny-list 做成代码里的三张表，改表不改扫描循环。
+
+## 分期
+
+| 期 | 内容 |
+|---|---|
+| P2a | 扫描引擎 + 叶子规则 + 支配过滤 + 显式取消（hide 不取消）+ 默认扫 `~/Library` + 三组排名 + Reveal。无缓存，无下钻 |
+| P2b | 按 root 持久化（0600）+ 「上次分析于 X」+ 可选的文件/TAG 重验（不做目录总量重算） |
+| P2c | 点行再扫一层、启发式标签、范围切到 `~` / 缓存根集合 |
+
+新增依赖：`jwalk`（P2a）。

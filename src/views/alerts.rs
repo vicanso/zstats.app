@@ -19,11 +19,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::h_flex;
 use gpui_component::{IconName, Sizable};
+use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
 use zstats::settings::{FileConfig, PressureAlert};
-use zstats::{AlertEvent, AlertKind, AlertSubject, Severity};
+use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity};
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     if state.alerts().is_empty() {
@@ -98,6 +98,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         // evaluated, so no numbers are re-derived here.
                         .child(seen.event.summary()),
                 )
+                .children(consumer_rows(i, &seen.event))
                 .when_some(seen.event.repeat_after, |d, after| {
                     d.child(div().mt(px(8.)).child(widgets::note(
                         t!("alerts.follow_up", when = format::uptime(after.as_secs())).to_string(),
@@ -267,7 +268,7 @@ fn subject_label(subject: &AlertSubject) -> String {
 /// the click, the confirm sheet and the delivery are `terminate`'s.
 #[cfg(target_os = "macos")]
 fn quit_button(index: usize, event: &AlertEvent) -> Option<Button> {
-    use crate::terminate::{self, QuitMethod};
+    use crate::terminate;
 
     let (pid, name) = match (&event.subject, event.kind()) {
         (AlertSubject::Process { pid, name }, AlertKind::Memory) => (*pid, name.clone()),
@@ -281,44 +282,127 @@ fn quit_button(index: usize, event: &AlertEvent) -> Option<Button> {
     if !terminate::can_quit(pid) {
         return None;
     }
+    Some(quit_request_button(
+        ("quit-subject", index).into(),
+        pid,
+        name,
+    ))
+}
 
-    Some(
-        Button::new(("quit-subject", index))
-            .icon(gpui_component::Icon::from(
-                crate::assets::CustomIconName::Power,
-            ))
-            .ghost()
-            .xsmall()
-            .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())
-            .on_click(move |_, window, cx| {
-                // Resolved at click time, not render time: whether the pid
-                // still counts as an application can change in between, and
-                // the sheet must describe what will actually be sent.
-                let body = match terminate::method_for(pid) {
-                    QuitMethod::App => t!("alerts.quit_body_app", name = name.clone()),
-                    QuitMethod::Term => t!("alerts.quit_body_term", name = name.clone()),
-                }
-                .to_string();
-                let title = t!("alerts.quit_title", name = name.clone()).to_string();
-                crate::confirm::ask(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    i18n::tr("alerts.quit_ok"),
-                    move |_| {
-                        if !terminate::request_quit(pid) {
-                            eprintln!("quit request for pid {pid} was not delivered");
-                        }
-                    },
-                );
-            }),
-    )
+/// The refusable-quit control itself, shared between the memory alert's
+/// head and the pressure card's consumer rows. Callers gate on
+/// `terminate::can_quit` first.
+#[cfg(target_os = "macos")]
+fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
+    use crate::terminate::{self, QuitMethod};
+
+    Button::new(id)
+        .icon(gpui_component::Icon::from(
+            crate::assets::CustomIconName::Power,
+        ))
+        .ghost()
+        .xsmall()
+        .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())
+        .on_click(move |_, window, cx| {
+            // Resolved at click time, not render time: whether the pid
+            // still counts as an application can change in between, and
+            // the sheet must describe what will actually be sent.
+            let body = match terminate::method_for(pid) {
+                QuitMethod::App => t!("alerts.quit_body_app", name = name.clone()),
+                QuitMethod::Term => t!("alerts.quit_body_term", name = name.clone()),
+            }
+            .to_string();
+            let title = t!("alerts.quit_title", name = name.clone()).to_string();
+            crate::confirm::ask(
+                window,
+                cx,
+                title,
+                body,
+                i18n::tr("alerts.quit_ok"),
+                move |_| {
+                    if !terminate::request_quit(pid) {
+                        eprintln!("quit request for pid {pid} was not delivered");
+                    }
+                },
+            );
+        })
 }
 
 /// Never-run stub — see "Platform reality" in CLAUDE.md.
 #[cfg(not(target_os = "macos"))]
 fn quit_button(_index: usize, _event: &AlertEvent) -> Option<Button> {
+    None
+}
+
+/// The engine's answer to "who is holding the RAM" when pressure fires,
+/// as rows with the same refusable-quit control the memory cards carry.
+/// Attribution is zstats' (`top_consumers`, snapshotted at the crossing);
+/// this renders and offers the exit, nothing more — pressure goes from
+/// "machine state, nothing to act on" to "these are holding it, you pick".
+fn consumer_rows(index: usize, event: &AlertEvent) -> Option<AnyElement> {
+    let AlertDetail::Pressure { top_consumers, .. } = &event.detail else {
+        return None;
+    };
+    if top_consumers.is_empty() {
+        return None;
+    }
+    Some(
+        v_flex()
+            .mt(px(8.))
+            .gap(px(2.))
+            .child(widgets::note(i18n::tr("alerts.top_consumers")))
+            .children(top_consumers.iter().enumerate().map(|(i, c)| {
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(theme::text())
+                            .truncate()
+                            .child(c.name.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .font_family(crate::font::MONO)
+                                    .text_size(px(10.))
+                                    .text_color(theme::text_muted())
+                                    .child(format::memory(c.bytes)),
+                            )
+                            .children(consumer_quit(index, i, c)),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn consumer_quit(index: usize, row: usize, c: &zstats::alerts::MemoryConsumer) -> Option<Button> {
+    if !crate::terminate::can_quit(c.pid) {
+        return None;
+    }
+    Some(quit_request_button(
+        SharedString::from(format!("quit-consumer-{index}-{row}")).into(),
+        c.pid,
+        c.name.clone(),
+    ))
+}
+
+/// Never-run stub — see "Platform reality" in CLAUDE.md.
+#[cfg(not(target_os = "macos"))]
+fn consumer_quit(
+    _index: usize,
+    _row: usize,
+    _c: &zstats::alerts::MemoryConsumer,
+) -> Option<Button> {
     None
 }
 
@@ -667,6 +751,7 @@ mod tests {
                 swap_used_bytes: 0,
                 swap_total_bytes: 0,
                 compressed_bytes: None,
+                top_consumers: Vec::new(),
             },
             repeat_after: None,
         };

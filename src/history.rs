@@ -81,7 +81,11 @@ pub fn rank(mut records: Vec<MetricRecord>) -> Vec<Spender> {
                     .fold(0.0, f32::max),
                 peak_memory_bytes: samples
                     .iter()
-                    .map(|r| r.memory_avg_bytes)
+                    // Footprint when the record carries it (zstats ≥ 0.5;
+                    // "RSS could not explain its own alerts"), RSS for
+                    // older lines — same preference the process rows use,
+                    // so the two tabs speak one dialect.
+                    .map(|r| r.memory_footprint_bytes.unwrap_or(r.memory_avg_bytes))
                     .max()
                     .unwrap_or(0),
                 minutes: samples.len(),
@@ -109,6 +113,7 @@ mod tests {
             name: name.into(),
             cpu_avg_percent: cpu,
             memory_avg_bytes: 1 << 20,
+            memory_footprint_bytes: None,
             memory_share_percent: 1.0,
             cpu_time_ms,
         }
