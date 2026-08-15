@@ -180,7 +180,7 @@ pub fn start(cx: &mut App) {
     // `tick()` is a pile of syscalls and blocks — keep it off the UI thread.
     std::thread::spawn(move || {
         // Shared with the zstats CLI on purpose: same config.toml, same
-        // thresholds, same history. See README about running `zstats serve`
+        // thresholds, same history. See docs/design.md about running `zstats serve`
         // at the same time.
         // `with_settings` is fallible since zstats 0.4: it also reads
         // `<config-dir>/template.toml`, and a template that failed to load

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 macOS menu-bar metrics panel: gpui + gpui-component for the UI, the `zstats` crate (`frontend` feature, no tokio) for collection and alerting.
 
-`README.md` is the design record — it explains *why* nearly every non-obvious decision here is the way it is (window reuse, Dock suppression, tray rasterisation, vibrancy layering, the multi-display workarounds). Read the relevant section before changing any of that machinery; the odd-looking code is usually load-bearing.
+`docs/design.md` is the design record (README.md is the user-facing GitHub page, README-zh.md its Chinese twin — keep the pair in sync when editing either) — it explains *why* nearly every non-obvious decision here is the way it is (window reuse, Dock suppression, tray rasterisation, vibrancy layering, the multi-display workarounds). Read the relevant section before changing any of that machinery; the odd-looking code is usually load-bearing.
 
 ## Commands
 

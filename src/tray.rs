@@ -1,6 +1,6 @@
 //! System tray icon and menu.
 //!
-//! Excluded on Linux (see `README.md`): `tray-icon` drives its menu from a GTK
+//! Excluded on Linux (see `docs/design.md`): `tray-icon` drives its menu from a GTK
 //! main loop there, which can't coexist with gpui's own event loop.
 
 use crate::assets::{self, CustomIconName};
