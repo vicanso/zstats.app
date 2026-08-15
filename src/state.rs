@@ -615,16 +615,26 @@ impl ZStatsAppState {
     }
 
     /// Drill into one ranked directory: park the current result on the
-    /// stack and walk that path as the new root. Only a finished result
-    /// can be drilled — the rows are inert while a walk is running.
+    /// stack and show that path as the new root. Served instantly from
+    /// the finished scan's retained index when it can honestly answer;
+    /// only folded interiors and below-floor corners fall back to a live
+    /// walk. Only a finished result can be drilled — the rows are inert
+    /// while a walk is running.
     pub fn drill_disk_analysis(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
-        let DiskAnalysis::Ready(_) = &self.disk_analysis else {
+        let DiskAnalysis::Ready(current) = &self.disk_analysis else {
             return;
         };
+        let derived = crate::diskscan::drill(current, &root);
         if let DiskAnalysis::Ready(current) = std::mem::take(&mut self.disk_analysis) {
             self.disk_analysis_stack.push(current);
         }
-        self.launch_disk_analysis(root, cx);
+        match derived {
+            Some(result) => {
+                self.disk_analysis = DiskAnalysis::Ready(result);
+                cx.notify();
+            }
+            None => self.launch_disk_analysis(root, cx),
+        }
     }
 
     /// Leave the current drill level and restore the parked outer result.

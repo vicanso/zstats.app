@@ -39,6 +39,10 @@ pub const TABLE_CAP: usize = 8;
 const TABLE_CAP_EXTENDED: usize = 10;
 /// Binary 500 MB, the same convention as `bigfiles`' thresholds.
 const TABLE_EXTEND_MIN: u64 = 500 * 1024 * 1024;
+/// Directories below this never reach any table, so the retained index
+/// drops them: ~10 MiB keeps a home tree's index at a few thousand
+/// entries (low MBs resident) instead of the walk's tens of MB.
+const INDEX_FLOOR: u64 = 10 * 1024 * 1024;
 /// The spec's fixed signature line — content-checked so a stray file
 /// merely *named* CACHEDIR.TAG cannot mark a tree regenerable.
 const CACHE_TAG_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
@@ -141,6 +145,21 @@ pub struct ScanResult {
     pub dirs: Vec<DirHit>,
     /// Walk-only big files (Spotlight blind spots), largest first.
     pub files: Vec<FileHit>,
+    /// The pruned totals the drill-downs are served from. `Some` only on
+    /// a finished scan (partials skip the cost); drill-derived results
+    /// share their parent's index, so deeper levels stay instant.
+    pub index: Option<Arc<DirIndex>>,
+}
+
+/// What survives a finished scan for instant drill-downs: subtree totals
+/// for every directory that cleared `INDEX_FLOOR` (plus all fold roots),
+/// the fold classifications, and the full blind-spot file list. A few
+/// thousand entries — low MBs — deliberately not the tree; folded
+/// interiors were never recorded and still take a live walk.
+pub struct DirIndex {
+    totals: HashMap<PathBuf, u64>,
+    fold: HashMap<PathBuf, HitKind>,
+    files: Vec<FileHit>,
 }
 
 pub enum ScanEvent {
@@ -277,6 +296,7 @@ fn run(
                     denied,
                     protected.load(Ordering::Relaxed),
                     dataless,
+                    false,
                 );
                 let _ = tx.try_send(ScanEvent::Partial(Box::new(partial)));
             }
@@ -335,6 +355,7 @@ fn run(
         denied,
         protected.load(Ordering::Relaxed),
         dataless,
+        true,
     )))
 }
 
@@ -353,9 +374,23 @@ fn snapshot(
     skipped_denied: usize,
     skipped_protected: usize,
     skipped_dataless: usize,
+    build_index: bool,
 ) -> ScanResult {
-    let (regenerable, dirs) = rank(root, own_bytes, plain_dirs, fold);
+    let (totals, children) = rollup(root, own_bytes, plain_dirs, fold);
+    let (regenerable, dirs) = tables(root, &totals, &children, fold);
     files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
+    // The index keeps the FULL blind-spot file list; the table cap below
+    // only trims what one card can show.
+    let index = build_index.then(|| {
+        Arc::new(DirIndex {
+            totals: totals
+                .into_iter()
+                .filter(|(p, b)| *b >= INDEX_FLOOR || fold.contains_key(p))
+                .collect(),
+            fold: fold.clone(),
+            files: files.clone(),
+        })
+    });
     cap_table(&mut files, |f| f.bytes);
     ScanResult {
         root: root.to_path_buf(),
@@ -368,20 +403,85 @@ fn snapshot(
         regenerable,
         dirs,
         files,
+        index,
     }
 }
 
-/// Roll direct bytes up into totals, then build the two directory tables.
-/// Pure — the walk hands in flat collections, tests hand in fabricated
-/// ones.
+/// Serve a drill-down from a finished scan's retained index — instant,
+/// no I/O, same `tables()` as a live run. `None` means the index cannot
+/// honestly answer — the target is a folded leaf (its interior was never
+/// recorded) or nothing under it cleared `INDEX_FLOOR` — and the caller
+/// falls back to a live walk of that subtree.
+pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
+    let index = parent.index.as_ref()?;
+    if index.fold.contains_key(root) {
+        return None;
+    }
+    let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for path in index.totals.keys() {
+        if path != root
+            && path.starts_with(root)
+            && let Some(up) = path.parent()
+        {
+            children
+                .entry(up.to_path_buf())
+                .or_default()
+                .push(path.clone());
+        }
+    }
+    let (regenerable, dirs) = tables(root, &index.totals, &children, &index.fold);
+    let mut files: Vec<FileHit> = index
+        .files
+        .iter()
+        .filter(|f| f.path.starts_with(root))
+        .cloned()
+        .collect();
+    files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
+    cap_table(&mut files, |f| f.bytes);
+    if regenerable.is_empty() && dirs.is_empty() && files.is_empty() {
+        return None;
+    }
+    // The derived result inherits the parent's vintage — scanned_at and
+    // took describe the walk this data actually came from.
+    Some(ScanResult {
+        root: root.to_path_buf(),
+        scanned_at: parent.scanned_at,
+        took: parent.took,
+        dirs_seen: parent.dirs_seen,
+        skipped_denied: parent.skipped_denied,
+        skipped_protected: parent.skipped_protected,
+        skipped_dataless: parent.skipped_dataless,
+        regenerable,
+        dirs,
+        files,
+        index: Some(index.clone()),
+    })
+}
+
+/// Roll direct bytes up into totals, then build the two directory tables
+/// in one call — the tests' entry point; the walk goes through
+/// `rollup` + `tables` directly so it can also feed the index.
+#[cfg(test)]
 fn rank(
     root: &Path,
     own_bytes: HashMap<PathBuf, u64>,
     plain_dirs: &[PathBuf],
     fold: &HashMap<PathBuf, HitKind>,
 ) -> (Vec<DirHit>, Vec<DirHit>) {
-    // Totals: every candidate dir starts from its direct bytes, then
-    // deepest-first each adds itself into its parent.
+    let (totals, children) = rollup(root, own_bytes, plain_dirs, fold);
+    tables(root, &totals, &children, fold)
+}
+
+/// Totals: every candidate dir starts from its direct bytes, then
+/// deepest-first each adds itself into its parent. The child map is the
+/// same keys grouped by parent.
+type Rollup = (HashMap<PathBuf, u64>, HashMap<PathBuf, Vec<PathBuf>>);
+fn rollup(
+    root: &Path,
+    own_bytes: HashMap<PathBuf, u64>,
+    plain_dirs: &[PathBuf],
+    fold: &HashMap<PathBuf, HitKind>,
+) -> Rollup {
     let mut totals = own_bytes;
     for d in plain_dirs {
         totals.entry(d.clone()).or_default();
@@ -413,10 +513,21 @@ fn rank(
                 .push(path.clone());
         }
     }
+    (totals, children)
+}
 
+/// The two directory tables for `root`, from rolled-up totals — shared
+/// by the walk's snapshots and by index-served drill-downs, so the two
+/// can never disagree about what a breakdown looks like.
+fn tables(
+    root: &Path,
+    totals: &HashMap<PathBuf, u64>,
+    children: &HashMap<PathBuf, Vec<PathBuf>>,
+    fold: &HashMap<PathBuf, HitKind>,
+) -> (Vec<DirHit>, Vec<DirHit>) {
     let mut regenerable: Vec<DirHit> = fold
         .iter()
-        .filter(|(_, kind)| **kind == HitKind::Tag)
+        .filter(|(path, kind)| **kind == HitKind::Tag && path.starts_with(root))
         .map(|(path, _)| DirHit {
             bytes: totals.get(path).copied().unwrap_or(0),
             path: path.clone(),
@@ -437,7 +548,7 @@ fn rank(
             level1
                 .iter()
                 .map(|d| {
-                    let rep = chase_dominant(d, &totals, &children);
+                    let rep = chase_dominant(d, totals, children);
                     DirHit {
                         bytes: totals.get(&rep).copied().unwrap_or(0),
                         kind: fold.get(&rep).copied().unwrap_or(HitKind::Plain),
@@ -616,6 +727,9 @@ mod tests {
         assert!(paths.iter().any(|d| d.ends_with("cache")), "{paths:?}");
         assert!(paths.iter().any(|d| d.ends_with("plain")), "{paths:?}");
         assert!(!paths.iter().any(|d| d.ends_with("deep")), "{paths:?}");
+        // A finished run carries the drill index (fold roots survive the
+        // byte floor unconditionally).
+        assert!(result.index.is_some());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -695,6 +809,60 @@ mod tests {
         // The root's direct children never fold on a guess.
         assert_eq!(classify(&p("/r/node_modules"), true), None);
         assert_eq!(classify(&p("/r/x/ordinary"), false), None);
+    }
+
+    #[test]
+    fn drill_serves_level_one_from_the_index_and_declines_folds() {
+        let mb = |n: u64| n * 1024 * 1024;
+        let totals: HashMap<PathBuf, u64> = [
+            (p("/r"), mb(300)),
+            (p("/r/Library"), mb(200)),
+            (p("/r/Library/Caches"), mb(150)),
+            (p("/r/Library/Caches/big"), mb(100)),
+            (p("/r/Library/Logs"), mb(40)),
+            (p("/r/docs"), mb(90)),
+        ]
+        .into();
+        let fold: HashMap<PathBuf, HitKind> = [(p("/r/Library/Caches/big"), HitKind::Tag)].into();
+        let files = vec![FileHit {
+            path: p("/r/Library/Logs/huge.log"),
+            bytes: mb(60),
+        }];
+        let parent = ScanResult {
+            root: p("/r"),
+            scanned_at: Instant::now(),
+            took: Duration::ZERO,
+            dirs_seen: 6,
+            skipped_denied: 0,
+            skipped_protected: 0,
+            skipped_dataless: 0,
+            regenerable: Vec::new(),
+            dirs: Vec::new(),
+            files: Vec::new(),
+            index: Some(Arc::new(DirIndex {
+                totals,
+                fold,
+                files,
+            })),
+        };
+
+        let lib = drill(&parent, &p("/r/Library")).expect("the index covers Library");
+        let dir_paths: Vec<&Path> = lib.dirs.iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(
+            dir_paths,
+            [p("/r/Library/Caches"), p("/r/Library/Logs")]
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(lib.regenerable.len(), 1, "the tagged tree stays listed");
+        assert_eq!(lib.files.len(), 1, "blind-spot files follow the root");
+        assert!(lib.index.is_some(), "deeper drills stay instant");
+
+        // A folded leaf's interior was never recorded; a corner below the
+        // index floor has nothing retained. Both decline → live walk.
+        assert!(drill(&parent, &p("/r/Library/Caches/big")).is_none());
+        assert!(drill(&parent, &p("/r/docs/sub")).is_none());
     }
 
     #[test]
