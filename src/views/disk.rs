@@ -201,12 +201,22 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
         BigFiles::Ready(scan) if scan.files.is_empty() => padded_note(i18n::tr("disk.big_none")),
         BigFiles::Ready(scan) => {
             let caption = {
-                let mut text = t!(
-                    "disk.big_count",
-                    thr = format::memory(scan.threshold),
-                    count = scan.total
-                )
-                .to_string();
+                // The bar describes what the rows actually show — the
+                // smallest displayed PHYSICAL size, floored to a clean
+                // step. Quoting the query threshold here was a lie in
+                // both directions: sparse files enter on logical size and
+                // display far below it.
+                let bar = display_bar(scan.files.iter().map(|f| f.size).min().unwrap_or(0));
+                let mut text = if bar == 0 {
+                    t!("disk.big_count_plain", count = scan.total).to_string()
+                } else {
+                    t!(
+                        "disk.big_count",
+                        thr = format::memory(bar),
+                        count = scan.total
+                    )
+                    .to_string()
+                };
                 if scan.threshold == crate::bigfiles::FALLBACK_THRESHOLD {
                     text.push_str(" · ");
                     text.push_str(&i18n::tr("disk.big_fallback_note"));
@@ -229,6 +239,22 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
                 .into_any_element()
         }
     }
+}
+
+/// Floor a size to the step a caption can claim with a straight face:
+/// 100 MB granularity above 100 MB (220 → 200), 10 MB in the tens,
+/// 1 MB in the ones. Below 1 MB returns 0 — the caller drops the "≥"
+/// clause entirely rather than round a sparse sliver up into a lie.
+fn display_bar(bytes: u64) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    let step = if bytes >= 100 * MIB {
+        100 * MIB
+    } else if bytes >= 10 * MIB {
+        10 * MIB
+    } else {
+        MIB
+    };
+    (bytes / step) * step
 }
 
 /// `/Users/you/…` collapses to `~/…` — the shared prefix every row would
@@ -254,10 +280,24 @@ fn big_file_row(index: usize, file: &crate::bigfiles::BigFile, last: bool) -> An
     // The full location rides the name's tooltip instead of a second line:
     // most rows never need it (the Finder button answers "where" better),
     // and a 320px column has no honest way to show a deep path anyway.
-    let full = tilde_path(
+    let mut full = tilde_path(
         &file.path.display().to_string(),
         &std::env::var("HOME").unwrap_or_default(),
     );
+    // Sparse and compressed files qualify by logical size but display
+    // physical — without both figures a "300 MB" row under a "≥ 500 MB"
+    // caption reads as the list breaking its own bar.
+    if format::memory(file.size) != format::memory(file.logical) {
+        full.push_str(" — ");
+        full.push_str(
+            t!(
+                "disk.big_sizes",
+                phys = format::memory(file.size),
+                logical = format::memory(file.logical)
+            )
+            .as_ref(),
+        );
+    }
     let path = file.path.clone();
     let confirm_name = name.clone();
 
@@ -426,6 +466,17 @@ mod tests {
         assert!(!safe_to_eject("/"));
         assert!(!safe_to_eject("/System/Volumes/Data"));
         assert!(safe_to_eject("/Volumes/Zedis Installer"));
+    }
+
+    #[test]
+    fn display_bar_floors_to_a_clean_step() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(display_bar(220 * MIB), 200 * MIB);
+        assert_eq!(display_bar(1433 * MIB), 1400 * MIB);
+        assert_eq!(display_bar(95 * MIB), 90 * MIB);
+        assert_eq!(display_bar(5 * MIB + 1), 5 * MIB);
+        // Below a megabyte the caption drops its claim instead of lying.
+        assert_eq!(display_bar(500 * 1024), 0);
     }
 
     #[test]

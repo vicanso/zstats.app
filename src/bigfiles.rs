@@ -18,13 +18,17 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Primary bar: what most people mean by "a big file". Decimal bytes,
-/// matching how Spotlight's `kMDItemFSSize` comparisons count.
-pub const PRIMARY_THRESHOLD: u64 = 500_000_000;
+/// Primary query bar: what most people mean by "a big file". Compared
+/// against LOGICAL size (all Spotlight has) and re-verified after stat.
+/// The caption deliberately does not quote this figure — it states the
+/// floored minimum of what the rows actually display (see
+/// `disk::display_bar`), because sparse files enter on logical size and
+/// show far smaller physical numbers.
+pub const PRIMARY_THRESHOLD: u64 = 500 * 1024 * 1024;
 /// When the primary query returns almost nothing the bar drops here — an
 /// empty card reads as "the feature is broken", a handful of 100 MB files
 /// reads as an answer.
-pub const FALLBACK_THRESHOLD: u64 = 100_000_000;
+pub const FALLBACK_THRESHOLD: u64 = 100 * 1024 * 1024;
 /// Fewer primary hits than this triggers the fallback query.
 pub const FALLBACK_BELOW: usize = 5;
 /// Rows the card keeps; the caption still reports the full count.
@@ -35,6 +39,12 @@ pub struct BigFile {
     /// Physical bytes on disk (`st_blocks`) — the same coin the volume
     /// gauges above the card count, not the logical length.
     pub size: u64,
+    /// Logical length. The query threshold compares against this (it is
+    /// all Spotlight has), so a sparse or compressed file can sit in the
+    /// "≥ 500 MB" list while its physical row reads far smaller — the two
+    /// figures surface together whenever they disagree, or the list looks
+    /// like it broke its own bar.
+    pub logical: u64,
 }
 
 pub struct BigFilesScan {
@@ -62,27 +72,15 @@ pub fn scan() -> Result<BigFilesScan, ScanError> {
     }
 
     let mut threshold = PRIMARY_THRESHOLD;
-    let mut paths = query(&home, threshold)?;
-    if paths.len() < FALLBACK_BELOW {
+    let mut files = collect(query(&home, threshold)?, threshold);
+    // Decided on the SURVIVING count, not raw index hits: the index can
+    // hold vanished files and sizes that shrank since indexing, and a
+    // caption promising five entries over a lie is the bug this exists
+    // to avoid.
+    if files.len() < FALLBACK_BELOW {
         threshold = FALLBACK_THRESHOLD;
-        paths = query(&home, threshold)?;
+        files = collect(query(&home, threshold)?, threshold);
     }
-
-    let mut files: Vec<BigFile> = paths
-        .into_iter()
-        .filter_map(|path| {
-            // Stat again rather than trusting the index: the reported size
-            // is logical and possibly stale, and the file may be gone.
-            let meta = std::fs::symlink_metadata(&path).ok()?;
-            if !meta.is_file() {
-                return None;
-            }
-            Some(BigFile {
-                size: physical_size(&meta),
-                path,
-            })
-        })
-        .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.size));
     let total = files.len();
     files.truncate(SHOWN);
@@ -91,6 +89,28 @@ pub fn scan() -> Result<BigFilesScan, ScanError> {
         threshold,
         total,
     })
+}
+
+/// Stat each hit and keep only what still honours the bar. The index is a
+/// tip, not a fact: files vanish, and a file truncated since indexing can
+/// sit in the result set at a fraction of the queried size — re-checking
+/// `len()` against the threshold is what lets the caption say "≥ 500 MB"
+/// and be telling the truth about every row under it.
+fn collect(paths: Vec<PathBuf>, threshold: u64) -> Vec<BigFile> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            if !meta.is_file() || meta.len() < threshold {
+                return None;
+            }
+            Some(BigFile {
+                size: physical_size(&meta),
+                logical: meta.len(),
+                path,
+            })
+        })
+        .collect()
 }
 
 /// Move a file to the Trash. Fast regardless of size — on the same volume
@@ -200,6 +220,26 @@ mod tests {
         );
         assert!(split_null(b"").is_empty());
         assert!(split_null(b"\0\0").is_empty());
+    }
+
+    #[test]
+    fn collect_reverifies_against_the_bar() {
+        let dir = std::env::temp_dir().join(format!("zstats-bigcollect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small");
+        let big = dir.join("big");
+        let gone = dir.join("gone");
+        std::fs::write(&small, vec![0u8; 1_000]).unwrap();
+        std::fs::write(&big, vec![0u8; 64_000]).unwrap();
+
+        // A stale index hands back all three; only the one still over the
+        // bar survives — vanished and shrunk-below entries both drop.
+        let kept = collect(vec![small, big.clone(), gone], 32_000);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, big);
+        assert_eq!(kept[0].logical, 64_000);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
