@@ -154,6 +154,20 @@ pub fn uptime(secs: u64) -> String {
     }
 }
 
+/// Digit grouping for counts ("48213" → "48,213") — past four digits a
+/// bare run of digits stops being readable at a glance.
+pub fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// A finished operation's duration. Seconds stay visible at minute scale
 /// ("2m 34s") — that is the resolution a person compares two runs at,
 /// which is what this figure is for.
@@ -187,6 +201,15 @@ pub fn ago(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thousands_groups_digits() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(48_213), "48,213");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
 
     /// The History tab's unit. Core-hours is how you reason about a day's
     /// spending; milliseconds is not.

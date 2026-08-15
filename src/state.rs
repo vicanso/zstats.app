@@ -651,6 +651,17 @@ impl ZStatsAppState {
         !self.disk_analysis_stack.is_empty()
     }
 
+    /// Dismiss the analysis entirely — straight to Off, whatever level
+    /// is showing. This is a view action, not a disk one: nothing is
+    /// touched on disk, and dropping the results also releases the
+    /// retained drill index.
+    pub fn clear_disk_analysis(&mut self, cx: &mut Context<Self>) {
+        self.cancel_disk_analysis_walk();
+        self.disk_analysis_stack.clear();
+        self.disk_analysis = DiskAnalysis::Off;
+        cx.notify();
+    }
+
     /// The walk itself. Runs on its own thread; everything this state
     /// learns — progress, completion, failure — arrives over the channel
     /// drained below, guarded by `run_id` so a superseded run's late

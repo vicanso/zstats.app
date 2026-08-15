@@ -198,7 +198,7 @@ fn analysis_card(state: &ZStatsAppState) -> AnyElement {
             dirs_done, partial, ..
         } => div()
             .child(div().px(px(13.)).pt(px(2.)).pb(px(8.)).child(widgets::note(
-                t!("disk.ana_running", dirs = dirs_done).to_string(),
+                t!("disk.ana_running", dirs = format::thousands(*dirs_done)).to_string(),
             )))
             // Whatever has been aggregated so far, rendered with the same
             // tables as the final result — figures are lower bounds and
@@ -240,11 +240,32 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
         .pt(px(11.))
         .pb(px(9.))
         .child(
-            div()
-                .text_size(px(12.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(i18n::tr("disk.ana_title")),
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::text())
+                        .child(i18n::tr("disk.ana_title")),
+                )
+                .child(
+                    // A view action: drops the whole result (and its
+                    // drill index), touches nothing on disk. Cancels the
+                    // walk too if one is still running.
+                    Button::new("ana-dismiss")
+                        .ghost()
+                        .xsmall()
+                        .label(i18n::tr("disk.ana_dismiss"))
+                        .tooltip(i18n::tr("disk.ana_dismiss_hint"))
+                        .on_click(|_, _window, cx| {
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| state.clear_disk_analysis(cx));
+                        }),
+                ),
         )
         .when(!caption.is_empty(), |d| {
             d.child(
@@ -285,7 +306,11 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
         &home,
         format::ago(result.scanned_at.elapsed()),
         t!("disk.ana_took", t = format::took(result.took)).to_string(),
-        t!("disk.ana_dirs_seen", n = result.dirs_seen).to_string(),
+        t!(
+            "disk.ana_dirs_seen",
+            n = format::thousands(result.dirs_seen)
+        )
+        .to_string(),
         extras,
     )
 }
