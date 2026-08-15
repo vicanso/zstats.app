@@ -11,6 +11,10 @@
 //! Language and theme stay in `app.toml` (`prefs`): `zstats::settings::save`
 //! would drop any extra key in config.toml. Reset writes a default
 //! `config.toml` (confirm first) and rebuilds; it does not touch `app.toml`.
+//!
+//! The settings window has three left-nav pages: Interface (`app.toml`),
+//! Config (`config.toml`), and About (version, commit, arch from
+//! `crate::about`).
 
 use super::widgets::{self, card};
 use crate::font;
@@ -20,18 +24,62 @@ use crate::state::{ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, div, px,
+    AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, img, px,
 };
-use gpui_component::{h_flex, v_flex};
+use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
 use zstats::CollectorConfig;
 use zstats::alerts::ActiveThresholds;
 use zstats::settings::PressureAlert;
 
-pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
-    let mut cards = vec![interface_card()];
+/// Left-nav sections of the settings window.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsSection {
+    /// Language and theme — `app.toml`, not shared with the CLI.
+    #[default]
+    Interface,
+    Config,
+    About,
+}
+
+impl SettingsSection {
+    pub const ALL: [SettingsSection; 3] = [
+        SettingsSection::Interface,
+        SettingsSection::Config,
+        SettingsSection::About,
+    ];
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            SettingsSection::Interface => "config.nav_interface",
+            SettingsSection::Config => "config.nav_config",
+            SettingsSection::About => "config.nav_about",
+        }
+    }
+
+    /// The nav row's icon. Settings2 deliberately matches the footer
+    /// gear that opens this window — same symbol, same meaning.
+    pub fn icon(self) -> IconName {
+        match self {
+            SettingsSection::Interface => IconName::Palette,
+            SettingsSection::Config => IconName::Settings2,
+            SettingsSection::About => IconName::Info,
+        }
+    }
+}
+
+pub fn render(state: &ZStatsAppState, section: SettingsSection) -> Vec<AnyElement> {
+    match section {
+        SettingsSection::Interface => vec![interface_card()],
+        SettingsSection::Config => render_config(state),
+        SettingsSection::About => vec![about_card()],
+    }
+}
+
+fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
+    let mut cards = Vec::new();
     match state.settings() {
         None => cards.push(widgets::empty_card(
             i18n::tr("config.unavailable"),
@@ -45,6 +93,71 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
     cards.push(reset_card());
     cards
+}
+
+fn about_card() -> AnyElement {
+    let rows = [
+        (
+            i18n::tr("config.about_version"),
+            crate::about::version().to_string(),
+        ),
+        (
+            i18n::tr("config.about_commit"),
+            crate::about::commit().to_string(),
+        ),
+        (i18n::tr("config.about_arch"), crate::about::architecture()),
+    ];
+    widgets::list_shell()
+        // The identity block a macOS About view leads with: the app icon
+        // over the app name. The icon is the real bundle artwork (a
+        // 256px cut of icons/zstats-1024.png, embedded), so this view
+        // can never drift from what the Dock and Finder show.
+        .child(
+            v_flex()
+                .items_center()
+                .gap(px(8.))
+                .pt(px(18.))
+                .pb(px(12.))
+                .border_b(px(1.))
+                .border_color(theme::border_subtle())
+                .child(img("zstats-icon.png").w(px(64.)).h(px(64.)))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::text())
+                        .child(crate::APP_NAME),
+                ),
+        )
+        .children({
+            let total = rows.len();
+            rows.into_iter()
+                .enumerate()
+                .map(move |(i, (label, value))| {
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(13.))
+                        .py(px(8.))
+                        .when(i + 1 != total, |d| {
+                            d.border_b(px(1.)).border_color(theme::border_subtle())
+                        })
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme::ink())
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .font_family(font::MONO)
+                                .text_size(px(11.))
+                                .text_color(theme::text())
+                                .child(value),
+                        )
+                })
+        })
+        .into_any_element()
 }
 
 /// Persist one `zstats -add` key. Errors stay in the log — there is no
@@ -156,8 +269,90 @@ fn interface_card() -> AnyElement {
             ],
             prefs::theme(),
             crate::set_theme_pref,
-            true,
+            false,
         ))
+        .child(opacity_row())
+        .into_any_element()
+}
+
+/// Panel wash. Chips write `app.toml` only — the painted value is
+/// whatever `prefs::load` froze at launch.
+fn opacity_row() -> AnyElement {
+    let current = prefs::opacity();
+    let chips: [(String, Option<f32>); 7] = [
+        (i18n::tr("config.opacity_default"), None),
+        ("50%".into(), Some(0.50)),
+        ("60%".into(), Some(0.60)),
+        ("70%".into(), Some(0.70)),
+        ("80%".into(), Some(0.80)),
+        ("90%".into(), Some(0.90)),
+        ("100%".into(), Some(1.00)),
+    ];
+    v_flex()
+        .px(px(13.))
+        .py(px(8.))
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("config.opacity")),
+                )
+                .child(
+                    div()
+                        .id("pref-opacity-info")
+                        .flex_none()
+                        .p(px(1.))
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.opacity_tip")))
+                        .child(
+                            Icon::new(IconName::Info)
+                                .with_size(Size::Size(px(12.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        ),
+                ),
+        )
+        .child(
+            h_flex()
+                .mt(px(6.))
+                .gap(px(4.))
+                .children(chips.into_iter().enumerate().map(|(i, (text, value))| {
+                    let on = match (current, value) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => (a - b).abs() < 0.001,
+                        _ => false,
+                    };
+                    div()
+                        .id(("pref-opacity", i))
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if on {
+                            theme::accent_wash(45)
+                        } else {
+                            theme::border()
+                        })
+                        .bg(if on {
+                            theme::accent_wash(10)
+                        } else {
+                            theme::inset()
+                        })
+                        .px(px(8.))
+                        .py(px(2.))
+                        .text_size(px(10.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(if on {
+                            theme::accent_light()
+                        } else {
+                            theme::text()
+                        })
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .on_click(move |_, _window, cx| crate::set_opacity_pref(value, cx))
+                        .child(text)
+                })),
+        )
         .into_any_element()
 }
 

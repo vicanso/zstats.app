@@ -30,6 +30,7 @@ use std::borrow::Cow;
 #[include = "fonts/*.ttf"]
 #[include = "locales/*.toml"]
 #[include = "cleanhints.toml"]
+#[include = "zstats-icon.png"]
 pub struct Assets;
 
 /// Bytes for an embedded path (`fonts/JetBrainsMono-Regular.ttf`).
@@ -122,6 +123,7 @@ mod tests {
         assert!(get("fonts/JetBrainsMono-Regular.ttf").is_some());
         assert!(get("locales/en.toml").is_some());
         assert!(get("cleanhints.toml").is_some());
+        assert!(get("zstats-icon.png").is_some());
         assert!(
             !Assets::iter().any(|p| p.ends_with(".DS_Store")),
             "the allowlist let a dotfile through"

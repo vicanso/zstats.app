@@ -93,7 +93,9 @@ impl ProcSort {
     }
 }
 
-/// The panel's views, in tab-strip order.
+/// The panel's views, in tab-strip order. Config is not here: it lives
+/// in its own window (the footer's gear), where a settings session is
+/// not cut short by the popover auto-hiding on focus loss.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Tab {
     #[default]
@@ -106,11 +108,10 @@ pub enum Tab {
     Net,
     Alerts,
     History,
-    Config,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [
+    pub const ALL: [Tab; 7] = [
         Tab::Overview,
         Tab::Processes,
         Tab::Apps,
@@ -118,7 +119,6 @@ impl Tab {
         Tab::Net,
         Tab::Alerts,
         Tab::History,
-        Tab::Config,
     ];
 
     /// Stable index, used to key per-tab UI state such as scroll position.
@@ -136,7 +136,6 @@ impl Tab {
             Tab::Net => "Network",
             Tab::Alerts => "Alerts",
             Tab::History => "History",
-            Tab::Config => "Config",
         }
     }
 
@@ -150,7 +149,6 @@ impl Tab {
             Tab::Net => "tabs.network",
             Tab::Alerts => "tabs.alerts",
             Tab::History => "tabs.history",
-            Tab::Config => "tabs.config",
         })
     }
 }
@@ -361,6 +359,10 @@ pub struct ZStatsAppState {
     /// picking a folder once makes the chip mean that folder until the
     /// results are cleared.
     disk_analysis_root: Option<std::path::PathBuf>,
+    /// The settings window, if one was ever opened. Kept so a second
+    /// click focuses the existing window; a handle whose window the user
+    /// closed fails its update and a fresh window is built instead.
+    settings_window: Option<gpui::AnyWindowHandle>,
     /// Monotonic id for analyser runs, so a stale run's channel events
     /// can never land into a newer run's state.
     disk_analysis_runs: u64,
@@ -434,6 +436,7 @@ impl Default for ZStatsAppState {
             disk_analysis: DiskAnalysis::default(),
             disk_analysis_stack: Vec::new(),
             disk_analysis_root: None,
+            settings_window: None,
             disk_analysis_runs: 0,
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
@@ -892,6 +895,14 @@ impl ZStatsAppState {
 
     pub fn tab(&self) -> Tab {
         self.tab
+    }
+
+    pub fn settings_window(&self) -> Option<gpui::AnyWindowHandle> {
+        self.settings_window
+    }
+
+    pub fn set_settings_window(&mut self, handle: gpui::AnyWindowHandle) {
+        self.settings_window = Some(handle);
     }
 
     /// This tab's scroll offset, held across frames so switching away and

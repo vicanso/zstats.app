@@ -23,7 +23,8 @@
 
 mod alerts;
 mod apps;
-mod config;
+// Public: rendered by the settings window (main.rs), not by a tab.
+pub mod config;
 mod disk;
 mod history;
 mod net;
@@ -87,7 +88,6 @@ fn tab_icon(tab: Tab) -> Icon {
         Tab::Net => Icon::new(IconName::Network),
         Tab::Alerts => Icon::new(IconName::Bell),
         Tab::History => CustomIconName::History.into(),
-        Tab::Config => Icon::new(IconName::Settings2),
     }
 }
 
@@ -170,7 +170,6 @@ fn content(state: &ZStatsAppState) -> AnyElement {
         Tab::Net => net::render(state),
         Tab::Alerts => alerts::render(state),
         Tab::History => history::render(state),
-        Tab::Config => config::render(state),
     };
 
     let tab = state.tab();
@@ -192,8 +191,9 @@ fn content(state: &ZStatsAppState) -> AnyElement {
 
 const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
 
-/// GitHub and Quit sit together on the right — a lone icon on the left
-/// read as an unfinished row.
+/// GitHub, Config and Quit sit together on the right — a lone icon on
+/// the left read as an unfinished row. Quit stays last so it is the
+/// edge action.
 fn footer() -> AnyElement {
     let github_tip = i18n::tr("common.github");
     h_flex()
@@ -226,6 +226,25 @@ fn footer() -> AnyElement {
                     cx.open_url(REPO_URL);
                 }),
         )
+        .child({
+            // Config lives in its own window, not a tab: a settings
+            // session should not be cut short by the popover auto-hiding
+            // on focus loss. The gear opens (or refocuses) it.
+            let settings_tip = i18n::tr("tabs.config");
+            div()
+                .id("settings")
+                .flex_none()
+                .p(px(4.))
+                .rounded(px(6.))
+                .tooltip(move |window, cx| Tooltip::new(settings_tip.clone()).build(window, cx))
+                .hover(|d| d.bg(theme::surface_raised()))
+                .child(
+                    Icon::new(IconName::Settings2)
+                        .with_size(Size::Size(px(14.)))
+                        .text_color(Hsla::from(theme::text_dim())),
+                )
+                .on_click(|_, _window, cx| crate::open_settings_window(cx))
+        })
         .child({
             let quit_tip = i18n::tr("common.quit");
             div()

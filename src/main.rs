@@ -2,6 +2,7 @@
 // app pops an empty terminal behind the window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod assets;
 mod bigfiles;
 mod cleanhints;
@@ -44,14 +45,11 @@ rust_i18n::i18n!(
     backend = crate::i18n_loader::runtime_backend()
 );
 use gpui::{
-    App, Bounds, Context, KeyBinding, Menu, MenuItem, QuitMode, SharedString, Subscription, Window,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, size,
+    App, Bounds, Context, KeyBinding, Menu, MenuItem, QuitMode, ScrollHandle, SharedString,
+    Subscription, TitlebarOptions, Window, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
-// macOS deliberately runs with `titlebar: None` — see `open_main_window`.
-#[cfg(not(target_os = "macos"))]
-use gpui::TitlebarOptions;
-use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
+use gpui_component::{ActiveTheme, Icon, Root, Sizable, Size, Theme, ThemeMode};
 
 use std::time::Duration;
 
@@ -178,11 +176,11 @@ impl Render for ZStatsApp {
             state.set_window_metrics(bounds, scale_factor, cx)
         });
 
-        let tint = if theme::is_dark() {
+        let tint = prefs::applied_opacity().unwrap_or(if theme::is_dark() {
             BACKGROUND_OPACITY_DARK
         } else {
             BACKGROUND_OPACITY_LIGHT
-        };
+        });
         div()
             .relative()
             .size_full()
@@ -267,6 +265,13 @@ pub fn set_language_pref(pref: prefs::LanguagePref, cx: &mut App) {
     repaint(cx);
 }
 
+/// The Interface page's opacity picker: persist only. The wash is
+/// sampled at launch, so a change sits in `app.toml` until the next start.
+pub fn set_opacity_pref(value: Option<f32>, cx: &mut App) {
+    prefs::set_opacity(value);
+    repaint(cx);
+}
+
 /// Nudge the store so the visible panel repaints with the new preference.
 fn repaint(cx: &mut App) {
     cx.global::<ZStatsGlobalStore>()
@@ -348,6 +353,177 @@ fn use_popover_material(window: &Window) {
                 let _: () = objc2::msg_send![view, setMaterial: NSVisualEffectMaterial::Popover];
             }
         }
+    }
+}
+
+/// The settings window: a left nav (Config / About) and a scrolling
+/// body. A separate window rather than a tab so a settings session is
+/// not cut short by the popover auto-hiding on focus loss — and it is a
+/// *standard* window (title bar, traffic lights, opaque background), not
+/// a second popover. Repaints are driven by observing the store, the
+/// same signal the panel's per-tick repaint rides on.
+struct SettingsWindow {
+    section: views::config::SettingsSection,
+    scroll: ScrollHandle,
+}
+
+impl SettingsWindow {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let store = cx.global::<ZStatsGlobalStore>().clone();
+        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        Self {
+            section: views::config::SettingsSection::Interface,
+            scroll: ScrollHandle::new(),
+        }
+    }
+}
+
+impl Render for SettingsWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The confirm sheet (config reset) needs the dialog layer, same
+        // as the main window's root.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+        let bg = cx.theme().background;
+        let fg = cx.theme().foreground;
+        let state = cx.global::<ZStatsGlobalStore>().read(cx);
+        let section = self.section;
+        let body = gpui_component::v_flex()
+            .gap(px(8.))
+            .children(views::config::render(state, section));
+        div()
+            .relative()
+            .size_full()
+            .bg(bg)
+            .text_color(fg)
+            .child(
+                gpui_component::h_flex()
+                    .size_full()
+                    .child(settings_nav(section, cx))
+                    .child(
+                        div()
+                            .id("settings-body")
+                            .track_scroll(&self.scroll)
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .px(px(16.))
+                            .py(px(14.))
+                            .child(body),
+                    ),
+            )
+            .children(dialog_layer)
+            .children(notification_layer)
+    }
+}
+
+fn settings_nav(
+    current: views::config::SettingsSection,
+    cx: &mut Context<SettingsWindow>,
+) -> gpui::AnyElement {
+    use views::config::SettingsSection;
+    gpui_component::v_flex()
+        .id("settings-nav")
+        .flex_none()
+        .w(px(132.))
+        .h_full()
+        .px(px(10.))
+        .py(px(12.))
+        .gap(px(2.))
+        .border_r(px(1.))
+        .border_color(theme::border_subtle())
+        .bg(theme::trough())
+        .children(
+            SettingsSection::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let on = item == current;
+                    div()
+                        .id(("settings-nav-item", i))
+                        .w_full()
+                        .rounded(px(6.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .bg(if on {
+                            theme::surface()
+                        } else {
+                            gpui::rgba(0x00000000)
+                        })
+                        .when(!on, |d| d.hover(|d| d.bg(theme::surface_raised())))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            if this.section != item {
+                                this.section = item;
+                                this.scroll = ScrollHandle::new();
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            gpui_component::h_flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    Icon::new(item.icon())
+                                        .with_size(Size::Size(px(13.)))
+                                        .text_color(gpui::Hsla::from(if on {
+                                            theme::ink()
+                                        } else {
+                                            theme::text_dim()
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(if on {
+                                            gpui::FontWeight::MEDIUM
+                                        } else {
+                                            gpui::FontWeight::NORMAL
+                                        })
+                                        .text_color(if on { theme::ink() } else { theme::text() })
+                                        .child(i18n::tr(item.label_key())),
+                                ),
+                        )
+                }),
+        )
+        .into_any_element()
+}
+
+/// Open the settings window, or focus the one already open. Closing it
+/// really closes (the main window's own stance); the stored handle then
+/// fails its update and the next click builds a fresh window.
+pub fn open_settings_window(cx: &mut App) {
+    let existing = cx.global::<ZStatsGlobalStore>().read(cx).settings_window();
+    if let Some(handle) = existing
+        && handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+    {
+        return;
+    }
+    let bounds = Bounds::centered(None, size(px(520.), px(620.)), cx);
+    let opened = cx.open_window(
+        with_app_identity(WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(460.), px(420.))),
+            // A real title bar on purpose — this window closes with its
+            // own traffic lights, unlike the chromeless panel.
+            titlebar: Some(TitlebarOptions {
+                title: Some(SharedString::from(i18n::tr("tabs.config"))),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        |window, cx| {
+            window.activate_window();
+            let view = cx.new(SettingsWindow::new);
+            cx.new(|cx| Root::new(view, window, cx))
+        },
+    );
+    if let Ok(handle) = opened {
+        cx.global::<ZStatsGlobalStore>()
+            .clone()
+            .update(cx, |state, _| state.set_settings_window(handle.into()));
     }
 }
 
