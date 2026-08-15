@@ -5,8 +5,8 @@
 # command. The app only ever *shows* these on matching rows; it never
 # runs a command or deletes anything based on this file.
 #
-# Written clean-room from each tool's own documentation. This is NOT a
-# conversion of any third-party rule set.
+# Entries come only from each tool's own documentation. Do not collect
+# or import data from third-party cleanup rule sets.
 #
 # match semantics:
 #   "~/path"  — exact directory, ~ expands to the user's home
@@ -16,8 +16,9 @@
 # trashable = true marks a directory whose whole content is derived and
 # safe to move to the Trash (the tool re-creates it) — these join the
 # analyser's cleanup suggestions. Leave it off for anything holding user
-# data (Docker volumes, simulator devices, pulled models) or living
-# inside working trees (node_modules): those stay annotation-only.
+# data (Docker volumes, simulator devices, pulled models, installed
+# toolchains) or living inside working trees (node_modules, target):
+# those stay annotation-only.
 #
 # A user copy at ~/.zstats/cleanhints.toml replaces this list wholesale
 # (read once at launch).
@@ -37,7 +38,19 @@ command = "yarn cache clean"
 trashable = true
 
 [[hint]]
+match = "~/.yarn/berry/cache"
+owner = "Yarn"
+command = "yarn cache clean"
+trashable = true
+
+[[hint]]
 match = "~/Library/pnpm/store"
+owner = "pnpm"
+command = "pnpm store prune"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/pnpm"
 owner = "pnpm"
 command = "pnpm store prune"
 trashable = true
@@ -51,7 +64,7 @@ trashable = true
 [[hint]]
 match = "~/Library/Caches/Homebrew"
 owner = "Homebrew"
-command = "brew cleanup"
+command = "brew cleanup --prune=all"
 trashable = true
 
 [[hint]]
@@ -61,7 +74,27 @@ command = "pip cache purge"
 trashable = true
 
 [[hint]]
+match = "~/.cache/pip"
+owner = "pip"
+command = "pip cache purge"
+trashable = true
+
+[[hint]]
+match = "~/.cache/uv"
+owner = "uv"
+command = "uv cache clean"
+
+# uv's cache is hard-linked into environments (docs.astral.sh/uv/concepts/cache:
+# "clearing the cache will break all installed packages"). Annotation only.
+
+[[hint]]
 match = "~/Library/Caches/pypoetry"
+owner = "Poetry"
+command = "poetry cache clear --all ."
+trashable = true
+
+[[hint]]
+match = "~/.cache/pypoetry"
 owner = "Poetry"
 command = "poetry cache clear --all ."
 trashable = true
@@ -73,6 +106,12 @@ command = "pod cache clean --all"
 trashable = true
 
 [[hint]]
+match = "~/.cocoapods/repos"
+owner = "CocoaPods"
+command = "pod repo update"
+trashable = true
+
+[[hint]]
 match = "~/.m2/repository"
 owner = "Maven"
 command = "mvn dependency:purge-local-repository"
@@ -81,7 +120,34 @@ trashable = true
 [[hint]]
 match = "~/.gradle/caches"
 owner = "Gradle"
+trashable = true
 
+[[hint]]
+match = "~/.gradle/wrapper/dists"
+owner = "Gradle"
+trashable = true
+
+[[hint]]
+match = "~/.gradle/daemon"
+owner = "Gradle"
+trashable = true
+
+[[hint]]
+match = "~/.composer/cache"
+owner = "Composer"
+command = "composer clear-cache"
+trashable = true
+
+[[hint]]
+match = "~/.nuget/packages"
+owner = "NuGet"
+command = "dotnet nuget locals all --clear"
+trashable = true
+
+[[hint]]
+match = "~/.pub-cache"
+owner = "Dart / Flutter"
+command = "dart pub cache clean"
 trashable = true
 
 # --- language toolchains ----------------------------------------------
@@ -89,6 +155,48 @@ trashable = true
 [[hint]]
 match = "~/.cargo/registry"
 owner = "Cargo"
+trashable = true
+
+[[hint]]
+match = "~/.cargo/git"
+owner = "Cargo"
+trashable = true
+
+[[hint]]
+match = "~/.rustup/downloads"
+owner = "rustup"
+trashable = true
+
+[[hint]]
+match = "~/.rustup/tmp"
+owner = "rustup"
+trashable = true
+
+[[hint]]
+match = "~/.rustup/toolchains"
+owner = "rustup"
+command = "rustup toolchain uninstall <toolchain>"
+
+[[hint]]
+match = "~/Library/Caches/Mozilla.sccache"
+owner = "sccache"
+trashable = true
+
+[[hint]]
+match = "~/.cache/sccache"
+owner = "sccache"
+trashable = true
+
+[[hint]]
+match = "~/.ccache"
+owner = "ccache"
+command = "ccache -C"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/ccache"
+owner = "ccache"
+command = "ccache -C"
 trashable = true
 
 [[hint]]
@@ -110,6 +218,12 @@ command = "deno clean"
 trashable = true
 
 [[hint]]
+match = "~/.cache/deno"
+owner = "Deno"
+command = "deno clean"
+trashable = true
+
+[[hint]]
 match = "~/Library/Caches/node-gyp"
 owner = "node-gyp"
 trashable = true
@@ -117,7 +231,48 @@ trashable = true
 [[hint]]
 match = "~/Library/Caches/electron"
 owner = "Electron"
+trashable = true
 
+[[hint]]
+match = "~/Library/Caches/typescript"
+owner = "TypeScript"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/mise"
+owner = "mise"
+command = "mise cache clear"
+trashable = true
+
+[[hint]]
+match = "~/.cache/mise"
+owner = "mise"
+command = "mise cache clear"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/org.swift.swiftpm"
+owner = "SwiftPM"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/org.carthage.CarthageKit"
+owner = "Carthage"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/Coursier"
+owner = "Coursier"
+trashable = true
+
+[[hint]]
+match = "~/.cache/coursier"
+owner = "Coursier"
+trashable = true
+
+[[hint]]
+match = "~/.android/build-cache"
+owner = "Android SDK"
 trashable = true
 
 # --- Apple toolchain --------------------------------------------------
@@ -133,11 +288,85 @@ owner = "Xcode"
 trashable = true
 
 [[hint]]
+match = "~/Library/Developer/Xcode/iOS DeviceSupport"
+owner = "Xcode"
+trashable = true
+
+[[hint]]
+match = "~/Library/Developer/CoreSimulator/Caches"
+owner = "Simulator"
+trashable = true
+
+[[hint]]
 match = "~/Library/Developer/CoreSimulator"
 owner = "Simulator"
 command = "xcrun simctl delete unavailable"
 
-# --- containers & ML --------------------------------------------------
+# --- editors ----------------------------------------------------------
+
+[[hint]]
+match = "~/Library/Application Support/Code/Cache"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Code/CachedData"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Code/CachedExtensionVSIXs"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Code/GPUCache"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Cursor/Cache"
+owner = "Cursor"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Cursor/CachedData"
+owner = "Cursor"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Cursor/GPUCache"
+owner = "Cursor"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/dev.zed.Zed"
+owner = "Zed"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/JetBrains"
+owner = "JetBrains"
+trashable = true
+
+# --- browsers for tests, containers, ML -------------------------------
+
+[[hint]]
+match = "~/Library/Caches/ms-playwright"
+owner = "Playwright"
+command = "npx playwright uninstall --all"
+trashable = true
+
+[[hint]]
+match = "~/.cache/ms-playwright"
+owner = "Playwright"
+command = "npx playwright uninstall --all"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/Cypress"
+owner = "Cypress"
+trashable = true
 
 [[hint]]
 match = "~/Library/Containers/com.docker.docker"
@@ -148,21 +377,19 @@ command = "docker system prune"
 match = "~/.cache/huggingface"
 owner = "Hugging Face"
 command = "huggingface-cli delete-cache"
-trashable = true
+
+[[hint]]
+match = "~/Library/Caches/huggingface"
+owner = "Hugging Face"
+command = "huggingface-cli delete-cache"
 
 [[hint]]
 match = "~/.ollama/models"
 owner = "Ollama"
 command = "ollama rm <model>"
 
-[[hint]]
-match = "~/Library/Caches/ms-playwright"
-owner = "Playwright"
-command = "npx playwright uninstall --all"
-
-trashable = true
-
 # --- per-project artifacts (matched anywhere by component) ------------
+# Never trashable: they live inside working trees.
 
 [[hint]]
 match = "node_modules"
@@ -173,5 +400,65 @@ match = "Pods"
 owner = "CocoaPods"
 
 [[hint]]
+match = "target"
+owner = "Cargo"
+
+[[hint]]
+match = "DerivedData"
+owner = "Xcode"
+
+[[hint]]
 match = ".terraform"
 owner = "Terraform"
+
+[[hint]]
+match = ".next"
+owner = "Next.js"
+
+[[hint]]
+match = ".nuxt"
+owner = "Nuxt"
+
+[[hint]]
+match = ".turbo"
+owner = "Turborepo"
+
+[[hint]]
+match = ".parcel-cache"
+owner = "Parcel"
+
+[[hint]]
+match = ".vercel"
+owner = "Vercel"
+
+[[hint]]
+match = ".build"
+owner = "SwiftPM"
+
+[[hint]]
+match = ".dart_tool"
+owner = "Dart"
+
+[[hint]]
+match = ".nx"
+owner = "Nx"
+
+[[hint]]
+match = "__pycache__"
+owner = "Python"
+
+[[hint]]
+match = ".pytest_cache"
+owner = "pytest"
+
+[[hint]]
+match = ".mypy_cache"
+owner = "mypy"
+
+[[hint]]
+match = ".ruff_cache"
+owner = "Ruff"
+
+[[hint]]
+match = ".tox"
+owner = "tox"

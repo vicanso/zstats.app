@@ -7,10 +7,9 @@
 //! runs a command or deletes anything on the strength of a hint — the
 //! only acting paths remain the two confirm-gated ones (CLAUDE.md).
 //!
-//! The embedded defaults (`assets/cleanhints.toml`) are written
-//! clean-room from each tool's documentation — deliberately NOT a
-//! conversion of any third-party (GPL) rule set; only the facts, in our
-//! own words and selection. A user copy at `~/.zstats/cleanhints.toml`
+//! The embedded defaults (`assets/cleanhints.toml`) come only from each
+//! tool's own documentation. Third-party cleanup rule sets must not be
+//! collected or copied into this file. A user copy at `~/.zstats/cleanhints.toml`
 //! replaces the embedded list wholesale when it parses to at least one
 //! entry — "read = whole file, write = whole file" like the other
 //! side-files — so an external puller can drop updates there. Read once
@@ -211,5 +210,40 @@ owner = "skipped too"
         let hints = parse(content, &p("/Users/x"));
         assert_eq!(hints.len(), entry_count, "an embedded entry was dropped");
         assert!(entry_count >= 20, "the shipped list lost its substance");
+    }
+
+    /// Working trees, pulled models and uv's hard-linked cache must stay
+    /// annotation-only — trashable here would put a delete button on
+    /// user data (docs/disk-analysis.md).
+    #[test]
+    fn annotation_only_locations_are_not_trashable() {
+        let home = p("/Users/x");
+        let raw = crate::assets::get("cleanhints.toml").expect("embedded");
+        let hints = parse(std::str::from_utf8(&raw).unwrap(), &home);
+        let must_not_trash = [
+            "/Users/x/.cache/huggingface",
+            "/Users/x/.ollama/models",
+            "/Users/x/.cache/uv",
+            "/Users/x/dev/proj/node_modules",
+            "/Users/x/dev/proj/target",
+            "/Users/x/.rustup/toolchains",
+            "/Users/x/Library/Developer/CoreSimulator",
+            "/Users/x/Library/Containers/com.docker.docker",
+        ];
+        for path in must_not_trash {
+            let hint = hints
+                .iter()
+                .find(|h| h.matches(&p(path)))
+                .unwrap_or_else(|| panic!("no hint for {path}"));
+            assert!(
+                !hint.trashable,
+                "{path} is user data / a working tree and must not be trashable"
+            );
+        }
+        let npm = hints
+            .iter()
+            .find(|h| h.matches(&p("/Users/x/.npm")))
+            .expect("npm cache");
+        assert!(npm.trashable, "pure caches stay on the cleanup list");
     }
 }
