@@ -67,3 +67,4 @@ clean:
 
 version:
 	@echo $(VERSION)
+	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
