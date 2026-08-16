@@ -12,13 +12,15 @@
 //! collected or copied into this file. A user copy at `~/.zstats/cleanhints.toml`
 //! replaces the embedded list wholesale when it parses to at least one
 //! entry — "read = whole file, write = whole file" like the other
-//! side-files — so an external puller can drop updates there. Read once
-//! per launch; a mid-session update lands on the next start.
+//! side-files — so an external puller can drop updates there. Cached on
+//! first use; the Config page's reload control ([`reload`]) drops the
+//! cache, so a pulled update takes effect without a restart.
 
 use crate::assets;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
+#[derive(Clone)]
 pub struct CleanHint {
     pub owner: String,
     /// The owner tool's documented cleanup command, verbatim — display
@@ -32,6 +34,7 @@ pub struct CleanHint {
     rule: Rule,
 }
 
+#[derive(Clone)]
 enum Rule {
     /// `~/…` in the file — one specific directory.
     Exact(PathBuf),
@@ -49,23 +52,57 @@ impl CleanHint {
     }
 }
 
-/// The hint for a path, if any. Exact entries win over component ones
-/// (the load sorts them first); within a group, file order decides.
-pub fn lookup(path: &Path) -> Option<&'static CleanHint> {
-    static HINTS: OnceLock<Vec<CleanHint>> = OnceLock::new();
-    let hints = HINTS.get_or_init(|| {
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-        load(&zstats::settings::default_dir(), &home)
-    });
-    hints.iter().find(|h| h.matches(path))
+/// The rules, cached after first load. Not a `OnceLock`: [`reload`]
+/// has to be able to drop this so a pulled update to the user file
+/// lands without a restart.
+static CACHE: RwLock<Option<Arc<Loaded>>> = RwLock::new(None);
+
+struct Loaded {
+    hints: Vec<CleanHint>,
+    /// Whether the user file at ~/.zstats/cleanhints.toml won — the
+    /// Config page's source line says which list is live.
+    from_user_file: bool,
 }
 
-fn load(dir: &Path, home: &Path) -> Vec<CleanHint> {
+fn current() -> Arc<Loaded> {
+    if let Some(loaded) = CACHE.read().unwrap().as_ref() {
+        return loaded.clone();
+    }
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let loaded = Arc::new(load(&zstats::settings::default_dir(), &home));
+    *CACHE.write().unwrap() = Some(loaded.clone());
+    loaded
+}
+
+/// Drop the cached rules; the next lookup re-reads the user file or the
+/// built-ins. Wired to the Config page's reload control.
+pub fn reload() {
+    *CACHE.write().unwrap() = None;
+}
+
+/// `(from user file, entry count)` — the Config page's source line.
+pub fn info() -> (bool, usize) {
+    let loaded = current();
+    (loaded.from_user_file, loaded.hints.len())
+}
+
+/// The hint for a path, if any. Exact entries win over component ones
+/// (the load sorts them first); within a group, file order decides.
+/// Returns a clone — the backing list can be swapped out by [`reload`]
+/// at any time, so no borrow may outlive it.
+pub fn lookup(path: &Path) -> Option<CleanHint> {
+    current().hints.iter().find(|h| h.matches(path)).cloned()
+}
+
+fn load(dir: &Path, home: &Path) -> Loaded {
     let user = dir.join("cleanhints.toml");
     if let Ok(content) = std::fs::read_to_string(&user) {
         let hints = parse(&content, home);
         if !hints.is_empty() {
-            return hints;
+            return Loaded {
+                hints,
+                from_user_file: true,
+            };
         }
         // A present-but-broken file falls back rather than silently
         // stripping every row of its hint.
@@ -77,7 +114,10 @@ fn load(dir: &Path, home: &Path) -> Vec<CleanHint> {
     let embedded = assets::get("cleanhints.toml")
         .and_then(|bytes| String::from_utf8(bytes.into_owned()).ok())
         .unwrap_or_default();
-    parse(&embedded, home)
+    Loaded {
+        hints: parse(&embedded, home),
+        from_user_file: false,
+    }
 }
 
 /// Parse a hints file. Entries missing `match` or `owner` are skipped —
@@ -180,7 +220,13 @@ owner = "skipped too"
 
         // No user file → embedded defaults.
         let built_in = load(&dir, &home);
-        assert!(built_in.iter().any(|h| h.matches(&p("/Users/x/.npm"))));
+        assert!(!built_in.from_user_file);
+        assert!(
+            built_in
+                .hints
+                .iter()
+                .any(|h| h.matches(&p("/Users/x/.npm")))
+        );
 
         // A valid user file wins outright — the built-in npm entry is gone.
         std::fs::write(
@@ -189,13 +235,23 @@ owner = "skipped too"
         )
         .unwrap();
         let user = load(&dir, &home);
-        assert_eq!(user.len(), 1);
-        assert!(user[0].matches(&p("/Users/x/custom")));
+        assert!(user.from_user_file);
+        assert_eq!(user.hints.len(), 1);
+        assert!(user.hints[0].matches(&p("/Users/x/custom")));
 
         // A broken user file falls back instead of emptying the list.
         std::fs::write(dir.join("cleanhints.toml"), "not toml [[").unwrap();
         let fallback = load(&dir, &home);
-        assert!(fallback.iter().any(|h| h.matches(&p("/Users/x/.npm"))));
+        assert!(
+            !fallback.from_user_file,
+            "broken file falls back to built-ins"
+        );
+        assert!(
+            fallback
+                .hints
+                .iter()
+                .any(|h| h.matches(&p("/Users/x/.npm")))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

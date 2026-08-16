@@ -20,6 +20,7 @@ use super::widgets::{self, card};
 use crate::about;
 use crate::assets;
 use crate::autostart;
+use crate::cleanhints;
 use crate::confirm;
 use crate::font;
 use crate::format;
@@ -175,6 +176,7 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
             cards.push(thresholds_card(file));
         }
     }
+    cards.push(hints_card());
     cards.push(reset_card());
     cards
 }
@@ -546,6 +548,62 @@ fn pref_row<T: Copy + PartialEq + 'static>(
 
 /// Cadences the user can pick. Off-switches for these channels are gone:
 /// they stay collected, and a zero in the file means this app's 15s default.
+/// The clean-hint rule set: which list is live (built-in vs the user
+/// file) and a reload that takes effect immediately — the missing half
+/// of the pull-update path: an external tool drops a new
+/// ~/.zstats/cleanhints.toml, one click here and the annotations and
+/// suggestions follow, no restart.
+fn hints_card() -> AnyElement {
+    let (from_user, count) = cleanhints::info();
+    let source = if from_user {
+        t!("config.hints_user", n = count)
+    } else {
+        t!("config.hints_builtin", n = count)
+    };
+    widgets::list_shell()
+        .child(widgets::list_header(
+            i18n::tr("config.hints"),
+            Some(widgets::note(source.to_string())),
+        ))
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .px(px(13.))
+                .py(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::note(i18n::tr("config.hints_note"))),
+                )
+                .child(
+                    div()
+                        .id("cfg-hints-reload")
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::inset())
+                        .px(px(10.))
+                        .py(px(3.))
+                        .text_size(px(11.))
+                        .text_color(theme::text())
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .on_click(|_, _window, cx| {
+                            cleanhints::reload();
+                            // The counts and tooltips re-read on repaint.
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |_, cx| cx.notify());
+                        })
+                        .child(i18n::tr("config.hints_reload")),
+                ),
+        )
+        .into_any_element()
+}
+
 fn collection_card(c: &CollectorConfig) -> AnyElement {
     use crate::metrics::{
         PANEL_DISK_IO_INTERVAL, PANEL_NETWORK_INTERVAL, PANEL_PROCESS_INTERVAL, panel_interval,
