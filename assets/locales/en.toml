@@ -248,6 +248,7 @@ empty_body = "No threshold has been crossed since this app started. Alerts appea
 empty_watching = "Watching: %{items}"
 empty_cooldown = "cooldown %{value}"
 edit_threshold = "Adjust threshold"
+goto_hardware = "Open Hardware — the disks and cleanup tools"
 top_consumers = "Holding the most memory"
 quit_tip = "Ask %{name} to quit"
 quit_title = "Quit %{name}?"

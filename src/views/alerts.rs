@@ -300,6 +300,7 @@ fn alert_head(
             // not change the pointer over clickable things, so "the whole row
             // does something" has no way to announce itself.
             .children(quit_button(index, &seen.event))
+            .children(hardware_button(index, &seen.event))
             .children(target.map(|tgt| {
                 Button::new(("edit-threshold", index))
                     .icon(IconName::Settings2)
@@ -314,6 +315,27 @@ fn alert_head(
             })),
     )
     .into_any_element()
+}
+
+/// Disk alerts jump to the Hardware tab: the volume cards and the
+/// space tooling (large files, the analyser) live there, and without
+/// this the two halves of the story were disconnected — an alert said
+/// "full" while the remedy sat two tabs away.
+fn hardware_button(index: usize, event: &AlertEvent) -> Option<Button> {
+    matches!(event.kind(), AlertKind::Disk).then(|| {
+        Button::new(("goto-hardware", index))
+            .icon(IconName::HardDrive)
+            .ghost()
+            .xsmall()
+            .tooltip(i18n::tr("alerts.goto_hardware"))
+            .on_click(|_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| {
+                        state.set_tab(crate::state::Tab::Hardware, cx)
+                    });
+            })
+    })
 }
 
 fn alert_title(subject: &AlertSubject) -> AnyElement {
