@@ -68,3 +68,9 @@ clean:
 version:
 	@echo $(VERSION)
 	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
+
+# Regenerate CHANGELOG.md from conventional commits (git-cliff, cliff.toml).
+# Run it in the version-bump commit, before tagging — CI does not write
+# back to main, so the file is only ever updated here.
+changelog:
+	git cliff -o CHANGELOG.md

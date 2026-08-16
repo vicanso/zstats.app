@@ -99,6 +99,11 @@ jobs:
           gh release create nightly --prerelease --target "$GITHUB_SHA" \
             --title "Development Build (Nightly)" \
             --notes "Rolling build from the latest main branch. Build date: ${{ steps.date.outputs.date }}"
+      - name: Install git-cliff
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
       - name: Pre-create draft release for tag
         # Two arch jobs upload in parallel; creating the release here,
         # before either runs, removes the create race. Skip when ANY
@@ -118,18 +123,29 @@ jobs:
             gh api --paginate "repos/${{ github.repository }}/releases" \
               -q ".[] | select(.tag_name == \"${tag}\") | .id" 2>/dev/null || true
           )"
+          # Notes come from git-cliff (commit-based, cliff.toml — the
+          # same source and format as CHANGELOG.md). Not GitHub's
+          # generator: that one lists merged PRs, and this repo pushes
+          # to main directly, so it emits nothing but a compare link.
+          # --latest = the most recent tag's section; cliff.toml's
+          # tag_pattern (v[0-9].*) already keeps the rolling `nightly`
+          # tag out of the picture.
+          git cliff --latest --strip header > /tmp/notes.md || true
           if [ -n "$ids" ]; then
-            echo "release for $tag already exists; skipping"
+            # Publishing through the GitHub UI is what pushes the tag, so
+            # this branch IS the normal release path — and that release
+            # usually has an empty body. Backfill into an empty body
+            # only; hand-written notes are never overwritten.
+            body="$(gh release view "$tag" --json body -q .body 2>/dev/null || true)"
+            if [ -z "$body" ] && [ -s /tmp/notes.md ]; then
+              echo "backfilling git-cliff notes for $tag"
+              gh release edit "$tag" --notes-file /tmp/notes.md
+            else
+              echo "release for $tag already has notes; leaving them"
+            fi
           else
-            # Changelog bounded at the previous release tag, found by
-            # matching v* only — the rolling `nightly` tag is newer than
-            # any release and would otherwise be picked as the baseline
-            # (or break auto-detection into "every commit ever"). First
-            # release: no previous tag, and full history is then correct.
-            prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${tag}^" 2>/dev/null || true)"
-            echo "generating notes since: ${prev:-<repository start>}"
             gh release create "$tag" --draft --title "$tag" \
-              --generate-notes ${prev:+--notes-start-tag "$prev"}
+              --notes-file /tmp/notes.md
           fi
 
   macos:
