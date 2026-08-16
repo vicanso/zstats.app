@@ -191,7 +191,7 @@ fn content(state: &ZStatsAppState) -> AnyElement {
 
 const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
 
-/// GitHub, Config and Quit sit together on the right — a lone icon on
+/// Config, GitHub and Quit sit together on the right — a lone icon on
 /// the left read as an unfinished row. Quit stays last so it is the
 /// edge action.
 fn footer() -> AnyElement {
@@ -207,25 +207,6 @@ fn footer() -> AnyElement {
         .pb(px(6.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
-        .child(
-            div()
-                .id("github")
-                .cursor_pointer()
-                .flex_none()
-                .p(px(4.))
-                .rounded(px(6.))
-                .text_color(theme::text_muted())
-                .tooltip(move |window, cx| Tooltip::new(github_tip.clone()).build(window, cx))
-                .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
-                .child(
-                    Icon::new(IconName::Github)
-                        .with_size(Size::Size(px(14.)))
-                        .text_color(Hsla::from(theme::text_dim())),
-                )
-                .on_click(|_, _window, cx| {
-                    cx.open_url(REPO_URL);
-                }),
-        )
         .child({
             // Config lives in its own window, not a tab: a settings
             // session should not be cut short by the popover auto-hiding
@@ -245,6 +226,25 @@ fn footer() -> AnyElement {
                 )
                 .on_click(|_, _window, cx| crate::open_settings_window(cx))
         })
+        .child(
+            div()
+                .id("github")
+                .cursor_pointer()
+                .flex_none()
+                .p(px(4.))
+                .rounded(px(6.))
+                .text_color(theme::text_muted())
+                .tooltip(move |window, cx| Tooltip::new(github_tip.clone()).build(window, cx))
+                .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+                .child(
+                    Icon::new(IconName::Github)
+                        .with_size(Size::Size(px(14.)))
+                        .text_color(Hsla::from(theme::text_dim())),
+                )
+                .on_click(|_, _window, cx| {
+                    cx.open_url(REPO_URL);
+                }),
+        )
         .child({
             let quit_tip = i18n::tr("common.quit");
             div()

@@ -12,9 +12,9 @@
 //! would drop any extra key in config.toml. Reset writes a default
 //! `config.toml` (confirm first) and rebuilds; it does not touch `app.toml`.
 //!
-//! The settings window has three left-nav pages: Interface (`app.toml`),
-//! Config (`config.toml`), and About (version, commit, arch from
-//! `crate::about`).
+//! The settings window has four left-nav pages: Interface (`app.toml`),
+//! Config (`config.toml`), Permissions (Full Disk Access status + deep
+//! link), and About (version, commit, arch from `crate::about`).
 
 use super::widgets::{self, card};
 use crate::font;
@@ -41,13 +41,17 @@ pub enum SettingsSection {
     #[default]
     Interface,
     Config,
+    /// Full Disk Access: live status plus a deep link into System
+    /// Settings. Status only — granting stays a user act there.
+    Permissions,
     About,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 3] = [
+    pub const ALL: [SettingsSection; 4] = [
         SettingsSection::Interface,
         SettingsSection::Config,
+        SettingsSection::Permissions,
         SettingsSection::About,
     ];
 
@@ -55,17 +59,20 @@ impl SettingsSection {
         match self {
             SettingsSection::Interface => "config.nav_interface",
             SettingsSection::Config => "config.nav_config",
+            SettingsSection::Permissions => "config.nav_permissions",
             SettingsSection::About => "config.nav_about",
         }
     }
 
     /// The nav row's icon. Settings2 deliberately matches the footer
     /// gear that opens this window — same symbol, same meaning.
-    pub fn icon(self) -> IconName {
+    pub fn icon(self) -> Icon {
         match self {
-            SettingsSection::Interface => IconName::Palette,
-            SettingsSection::Config => IconName::Settings2,
-            SettingsSection::About => IconName::Info,
+            SettingsSection::Interface => Icon::new(IconName::Palette),
+            SettingsSection::Config => Icon::new(IconName::Settings2),
+            // gpui-component ships no shield; ours rides CustomIconName.
+            SettingsSection::Permissions => crate::assets::CustomIconName::Shield.into(),
+            SettingsSection::About => Icon::new(IconName::Info),
         }
     }
 }
@@ -74,8 +81,79 @@ pub fn render(state: &ZStatsAppState, section: SettingsSection) -> Vec<AnyElemen
     match section {
         SettingsSection::Interface => vec![interface_card()],
         SettingsSection::Config => render_config(state),
+        SettingsSection::Permissions => vec![permissions_card()],
         SettingsSection::About => vec![about_card()],
     }
+}
+
+/// Full Disk Access, the one switch that covers every prompt the disk
+/// analysis can trigger. Shows live status and deep-links to the pane;
+/// the app never touches the permission itself.
+fn permissions_card() -> AnyElement {
+    let granted = full_disk_access_granted();
+    let status = div()
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(if granted {
+            theme::text()
+        } else {
+            Hsla::from(theme::ink()).into()
+        })
+        .child(i18n::tr(if granted {
+            "config.perm_granted"
+        } else {
+            "config.perm_missing"
+        }))
+        .into_any_element();
+    widgets::list_shell()
+        .child(widgets::list_header(
+            i18n::tr("config.perm_fda"),
+            Some(status),
+        ))
+        .child(
+            div()
+                .px(px(13.))
+                .pb(px(11.))
+                .child(widgets::note(i18n::tr("config.perm_fda_note")))
+                .when(!granted, |d| {
+                    d.child(
+                        h_flex().mt(px(8.)).child(
+                            div()
+                                .id("perm-fda-open")
+                                .flex_none()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(theme::border())
+                                .bg(theme::inset())
+                                .px(px(10.))
+                                .py(px(3.))
+                                .text_size(px(11.))
+                                .text_color(theme::text())
+                                .hover(|d| d.bg(theme::surface_raised()))
+                                .on_click(|_, _window, _cx| super::disk::open_full_disk_access())
+                                .child(i18n::tr("config.perm_open")),
+                        ),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+/// The probe: opening the TCC database itself requires Full Disk Access
+/// and — unlike probing user data — never shows a prompt. The failed
+/// attempt has a side effect we want: macOS registers this app in the
+/// Full Disk Access list, so the Settings pane offers a ready-made
+/// toggle instead of demanding a manual "+". Re-checked per render
+/// while the window is open (one failed open() per tick), so flipping
+/// the switch shows up live.
+fn full_disk_access_granted() -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    std::fs::File::open(
+        std::path::Path::new(&home).join("Library/Application Support/com.apple.TCC/TCC.db"),
+    )
+    .is_ok()
 }
 
 fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {

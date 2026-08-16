@@ -318,7 +318,49 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
                     .child(caption),
             )
         })
+        .children(fda_hint(state))
         .into_any_element()
+}
+
+/// When permission gaps hid part of the tree, say so and offer the one
+/// switch that covers them all. macOS 15+ gates every other app's
+/// container behind its own per-app prompt; Full Disk Access supersedes
+/// the whole category — the standard, proportionate ask for a disk
+/// scanner. Tied to `skipped_denied` only: the TCC deny-list skips are
+/// deliberate zero-touch and no permission would change them.
+fn fda_hint(state: &ZStatsAppState) -> Option<AnyElement> {
+    let DiskAnalysis::Ready(result) = state.disk_analysis() else {
+        return None;
+    };
+    if result.skipped_denied == 0 {
+        return None;
+    }
+    Some(
+        h_flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .mt(px(4.))
+            .child(div().flex_1().min_w_0().child(widgets::note(
+                t!("disk.ana_fda_note", n = result.skipped_denied).to_string(),
+            )))
+            .child(
+                Button::new("ana-fda")
+                    .ghost()
+                    .xsmall()
+                    .label(i18n::tr("disk.ana_fda_open"))
+                    .on_click(|_, _window, _cx| open_full_disk_access()),
+            )
+            .into_any_element(),
+    )
+}
+
+/// Deep-link into System Settings → Privacy & Security → Full Disk
+/// Access. Navigation only — granting stays a user act in the system UI.
+pub(super) fn open_full_disk_access() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn();
 }
 
 /// Age, how many directories were walked, and every honesty counter

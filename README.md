@@ -6,15 +6,15 @@ A macOS menu-bar system monitor: live CPU in the tray; process monitoring, thres
 
 **A menu-bar monitor for macOS.** See what the machine is doing, get told when it matters, take the disk back.
 
-The tray shows live CPU. Click for the panel — it tucks away when you look elsewhere. Collection, alerts and history all come from [zstats](https://crates.io/crates/zstats) in-process, so the panel and the CLI never disagree: they share `~/.zstats`.
+The tray shows live CPU. Click for the panel — it tucks away when you look elsewhere. Collection, alerts and history run in-process on the [zstats](https://crates.io/crates/zstats) engine.
 
 > macOS only · Apple Silicon and Intel · Universal, signed and notarized
 
-<img width="718" height="1356" alt="Image" src="https://github.com/user-attachments/assets/09bd8ca5-eef5-4360-b527-8502a0e52148" />
+<img src="docs/screenshot.png" width="359" alt="zstats panel" />
 
 ## Why this one
 
-Most menu-bar monitors either paint pretty numbers or nag you. zstats does both, and then helps you act: find the 20 GB cache, trash it the way Finder would, ask the memory hog to quit. The numbers are the same ones the `zstats` CLI would print — not a second, slightly different collector.
+Most menu-bar monitors either paint pretty numbers or nag you. zstats does both, and then helps you act — disk full: find the 20 GB build cache and trash it the way Finder would (recoverable); memory tight: ask the biggest consumer to quit politely (⌘Q-equivalent).
 
 ## Watch
 
@@ -27,10 +27,10 @@ Most menu-bar monitors either paint pretty numbers or nag you. zstats does both,
 
 ## Alert
 
-Thresholds (CPU, memory, disk, memory pressure) are evaluated by zstats' rule engine and can be edited on the panel.
+The headline feature is **per-program thresholds**: on one machine a browser may be allowed 200% CPU while a background daemon should speak up at 30% — every program can carry its own line, edited right on the panel. Built-in templates cover the common cases with sensible defaults, so **alerts are meaningful out of the box, before you configure anything**.
 
-- Native notification banners
-- Snooze one episode for 1 or 3 hours
+- CPU, memory, disk and memory-pressure thresholds, evaluated by zstats' rule engine
+- Native notification banners; snooze an episode for 1 or 3 hours
 - Memory-pressure cards list the top consumers and offer a polite quit (⌘Q / SIGTERM — never SIGKILL)
 
 ## Reclaim disk
@@ -59,8 +59,6 @@ Download `zstats.dmg` from [Releases](../../releases) and drag it into Applicati
 ```bash
 make bundle          # or build from source (needs cargo-bundle)
 ```
-
-Don't run `zstats serve` alongside the app — that collects everything twice.
 
 Language, theme and panel opacity live in a settings window. The UI is fully bilingual; dark and light modes use native vibrancy.
 
