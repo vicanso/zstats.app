@@ -15,6 +15,7 @@
 //! through shared state. Cancellation is a flag the walk polls; a
 //! cancelled run says nothing at all (the UI has already moved on).
 
+use crate::cleanhints;
 use jwalk::{Parallelism, WalkDirGeneric};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -130,7 +131,9 @@ pub struct FileHit {
 
 pub struct ScanResult {
     pub root: PathBuf,
-    pub scanned_at: Instant,
+    /// Wall clock, not monotonic: a cached result must still know its
+    /// age after a restart.
+    pub scanned_at: std::time::SystemTime,
     /// Wall clock from walk start to this snapshot — on `Done`, the
     /// whole run's cost, shown so the user can decide whether a re-scan
     /// is a "wait for it" or a "come back later".
@@ -391,7 +394,7 @@ fn snapshot(
     // set would invite trashing while the walker is inside the trees.
     let suggestions = if build_index {
         suggest(&totals, fold, &|p| {
-            crate::cleanhints::lookup(p).is_some_and(|h| h.trashable)
+            cleanhints::lookup(p).is_some_and(|h| h.trashable)
         })
     } else {
         Vec::new()
@@ -411,7 +414,7 @@ fn snapshot(
     cap_table(&mut files, |f| f.bytes);
     ScanResult {
         root: root.to_path_buf(),
-        scanned_at: Instant::now(),
+        scanned_at: std::time::SystemTime::now(),
         took,
         dirs_seen,
         skipped_denied,
@@ -626,6 +629,231 @@ fn tables(
     cap_table(&mut dirs, |d| d.bytes);
 
     (regenerable, dirs)
+}
+
+// ---- result cache (docs/disk-analysis.md, P2b) -------------------------
+//
+// One file per root under ~/.zstats/diskscan/: write = whole file, read =
+// wrong root or version → discarded. Only finished top-level walks are
+// written (a cancelled or failed run's half-table overwriting a full one
+// would be a regression), and only the tables — the drill index is not
+// persisted, so a drill on a loaded result re-walks that subtree. The
+// honesty boundary is the timestamp: a cache serves "see last time's
+// numbers first" and claims nothing about now.
+
+/// Suggestion rows kept in the file. Bounds the file size, and a
+/// reloaded "Trash all N" honestly matches what it lists.
+const PERSIST_SUGGESTIONS: usize = 500;
+const CACHE_VERSION: i64 = 1;
+
+fn cache_dir() -> PathBuf {
+    zstats::settings::default_dir().join("diskscan")
+}
+
+/// Readable slug plus a short FNV hash, so `/a/b` and `/a-b` cannot
+/// collide on the same filename.
+fn cache_path_in(dir: &Path, root: &Path) -> PathBuf {
+    let display = root.display().to_string();
+    let mut slug: String = display
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    slug.truncate(60);
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in display.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    dir.join(format!("{slug}-{hash:08x}.toml"))
+}
+
+pub fn save_cache(result: &ScanResult) {
+    save_cache_in(&cache_dir(), result);
+}
+
+pub fn load_cache(root: &Path) -> Option<ScanResult> {
+    load_cache_in(&cache_dir(), root)
+}
+
+/// The default root's cache — what a fresh launch opens with.
+pub fn load_default_cache() -> Option<ScanResult> {
+    load_cache(&default_root()?)
+}
+
+pub fn delete_cache(root: &Path) {
+    let _ = std::fs::remove_file(cache_path_in(&cache_dir(), root));
+}
+
+/// Rewrite the cache after rows were pruned — but only where this exact
+/// root already has one, so drill-derived subroots never gain a file.
+pub fn resave_if_cached(result: &ScanResult) {
+    if cache_path_in(&cache_dir(), &result.root).exists() {
+        save_cache(result);
+    }
+}
+
+fn save_cache_in(dir: &Path, result: &ScanResult) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let path = cache_path_in(dir, &result.root);
+    let tmp = path.with_extension("toml.tmp");
+    if std::fs::write(&tmp, serialise(result)).is_err() {
+        return;
+    }
+    // 0600: the paths in here leak project names.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    let _ = std::fs::rename(&tmp, &path);
+}
+
+fn serialise(result: &ScanResult) -> String {
+    use toml::Value;
+    use toml::value::Table;
+    let clamp = |n: u64| Value::Integer(n.min(i64::MAX as u64) as i64);
+    let dir_row = |h: &DirHit| -> Value {
+        let mut t = Table::new();
+        t.insert("path".into(), Value::String(h.path.display().to_string()));
+        t.insert("bytes".into(), clamp(h.bytes));
+        t.insert(
+            "kind".into(),
+            Value::String(
+                match h.kind {
+                    HitKind::Tag => "tag",
+                    HitKind::Heuristic => "heuristic",
+                    HitKind::Plain => "plain",
+                }
+                .into(),
+            ),
+        );
+        Value::Table(t)
+    };
+    let mut doc = Table::new();
+    doc.insert("version".into(), Value::Integer(CACHE_VERSION));
+    doc.insert(
+        "root".into(),
+        Value::String(result.root.display().to_string()),
+    );
+    let unix_secs = result
+        .scanned_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    doc.insert("scanned_at_unix".into(), clamp(unix_secs));
+    doc.insert("took_secs".into(), clamp(result.took.as_secs()));
+    doc.insert("dirs_seen".into(), clamp(result.dirs_seen as u64));
+    doc.insert("skipped_denied".into(), clamp(result.skipped_denied as u64));
+    doc.insert(
+        "skipped_protected".into(),
+        clamp(result.skipped_protected as u64),
+    );
+    doc.insert(
+        "skipped_dataless".into(),
+        clamp(result.skipped_dataless as u64),
+    );
+    doc.insert(
+        "regenerable".into(),
+        Value::Array(result.regenerable.iter().map(dir_row).collect()),
+    );
+    doc.insert(
+        "dir".into(),
+        Value::Array(result.dirs.iter().map(dir_row).collect()),
+    );
+    doc.insert(
+        "file".into(),
+        Value::Array(
+            result
+                .files
+                .iter()
+                .map(|f| {
+                    let mut t = Table::new();
+                    t.insert("path".into(), Value::String(f.path.display().to_string()));
+                    t.insert("bytes".into(), clamp(f.bytes));
+                    Value::Table(t)
+                })
+                .collect(),
+        ),
+    );
+    doc.insert(
+        "suggestion".into(),
+        Value::Array(
+            result
+                .suggestions
+                .iter()
+                .take(PERSIST_SUGGESTIONS)
+                .map(dir_row)
+                .collect(),
+        ),
+    );
+    toml::to_string(&Value::Table(doc)).unwrap_or_default()
+}
+
+fn load_cache_in(dir: &Path, root: &Path) -> Option<ScanResult> {
+    let text = std::fs::read_to_string(cache_path_in(dir, root)).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    if doc.get("version")?.as_integer()? != CACHE_VERSION {
+        return None;
+    }
+    if doc.get("root")?.as_str()? != root.display().to_string() {
+        return None;
+    }
+    let int = |key: &str| {
+        doc.get(key)
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(0)
+            .max(0) as u64
+    };
+    let dirs_of = |key: &str| -> Vec<DirHit> {
+        doc.get(key)
+            .and_then(toml::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        Some(DirHit {
+                            path: PathBuf::from(row.get("path")?.as_str()?),
+                            bytes: row.get("bytes")?.as_integer()?.max(0) as u64,
+                            kind: match row.get("kind").and_then(toml::Value::as_str) {
+                                Some("tag") => HitKind::Tag,
+                                Some("heuristic") => HitKind::Heuristic,
+                                _ => HitKind::Plain,
+                            },
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let files = doc
+        .get("file")
+        .and_then(toml::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(FileHit {
+                        path: PathBuf::from(row.get("path")?.as_str()?),
+                        bytes: row.get("bytes")?.as_integer()?.max(0) as u64,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ScanResult {
+        root: root.to_path_buf(),
+        scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(int("scanned_at_unix")),
+        took: Duration::from_secs(int("took_secs")),
+        dirs_seen: int("dirs_seen") as usize,
+        skipped_denied: int("skipped_denied") as usize,
+        skipped_protected: int("skipped_protected") as usize,
+        skipped_dataless: int("skipped_dataless") as usize,
+        regenerable: dirs_of("regenerable"),
+        dirs: dirs_of("dir"),
+        files,
+        suggestions: dirs_of("suggestion"),
+        index: None,
+    })
 }
 
 /// Cap a descending-sorted table at `TABLE_CAP`, admitting rows 9–10
@@ -895,7 +1123,7 @@ mod tests {
         }];
         let parent = ScanResult {
             root: p("/r"),
-            scanned_at: Instant::now(),
+            scanned_at: std::time::SystemTime::now(),
             took: Duration::ZERO,
             dirs_seen: 6,
             skipped_denied: 0,
@@ -956,6 +1184,69 @@ mod tests {
         );
         assert_eq!(got[0].kind, HitKind::Tag);
         assert_eq!(got[1].kind, HitKind::Plain);
+    }
+
+    #[test]
+    fn cache_round_trips_and_rejects_mismatches() {
+        let dir = std::env::temp_dir().join(format!("zstats-diskcache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = ScanResult {
+            root: p("/r"),
+            scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            took: Duration::from_secs(31),
+            dirs_seen: 42,
+            skipped_denied: 1,
+            skipped_protected: 2,
+            skipped_dataless: 3,
+            regenerable: vec![DirHit {
+                path: p("/r/cache"),
+                bytes: 10,
+                kind: HitKind::Tag,
+            }],
+            dirs: vec![DirHit {
+                path: p("/r/big"),
+                bytes: 20,
+                kind: HitKind::Plain,
+            }],
+            files: vec![FileHit {
+                path: p("/r/.blob"),
+                bytes: 30,
+            }],
+            suggestions: vec![DirHit {
+                path: p("/r/cache"),
+                bytes: 10,
+                kind: HitKind::Tag,
+            }],
+            index: None,
+        };
+        save_cache_in(&dir, &result);
+
+        let loaded = load_cache_in(&dir, &p("/r")).expect("round trip");
+        assert_eq!(loaded.scanned_at, result.scanned_at);
+        assert_eq!(loaded.took, result.took);
+        assert_eq!(loaded.dirs_seen, 42);
+        assert_eq!(loaded.skipped_protected, 2);
+        assert_eq!(loaded.regenerable.len(), 1);
+        assert_eq!(loaded.regenerable[0].kind, HitKind::Tag);
+        assert_eq!(loaded.dirs[0].path, p("/r/big"));
+        assert_eq!(loaded.files[0].bytes, 30);
+        assert_eq!(loaded.suggestions.len(), 1);
+        assert!(loaded.index.is_none(), "the drill index is never persisted");
+
+        // A different root must never read someone else's file.
+        assert!(load_cache_in(&dir, &p("/other")).is_none());
+
+        // 0600 on purpose: the paths in here leak project names.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(cache_path_in(&dir, &p("/r")))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

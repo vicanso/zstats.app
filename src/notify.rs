@@ -22,6 +22,7 @@
 
 use crate::format;
 use crate::i18n;
+use crate::state;
 use rust_i18n::t;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -259,7 +260,7 @@ pub fn post(event: &AlertEvent) {
 /// be: alerting asks whether something is over the line right now, and this
 /// is by definition always under it. Without a banner the finding would only
 /// exist inside a panel nobody has a reason to open.
-pub fn post_sustained(notice: &crate::state::SustainedNotice) {
+pub fn post_sustained(notice: &state::SustainedNotice) {
     dispatch(Banner {
         title: notice.name.clone(),
         subtitle: t!(

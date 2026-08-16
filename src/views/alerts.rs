@@ -9,9 +9,13 @@
 //! collector reloads `[alerts]` in place.
 
 use super::widgets::{self, card};
+use crate::assets;
+use crate::confirm;
+use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::state::{SeenAlert, ZStatsAppState, ZStatsGlobalStore};
+use crate::terminate;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -50,7 +54,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .children(armed_line(state).map(|line| {
                     div()
                         .mt(px(8.))
-                        .font_family(crate::font::MONO)
+                        .font_family(font::MONO)
                         .text_size(px(10.))
                         .text_color(theme::text_dim())
                         .child(line)
@@ -297,9 +301,7 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
     use crate::terminate::{self, QuitMethod};
 
     Button::new(id)
-        .icon(gpui_component::Icon::from(
-            crate::assets::CustomIconName::Power,
-        ))
+        .icon(gpui_component::Icon::from(assets::CustomIconName::Power))
         .ghost()
         .xsmall()
         .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())
@@ -313,7 +315,7 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
             }
             .to_string();
             let title = t!("alerts.quit_title", name = name.clone()).to_string();
-            crate::confirm::ask(
+            confirm::ask(
                 window,
                 cx,
                 title,
@@ -371,7 +373,7 @@ fn consumer_rows(index: usize, event: &AlertEvent) -> Option<AnyElement> {
                             .gap(px(4.))
                             .child(
                                 div()
-                                    .font_family(crate::font::MONO)
+                                    .font_family(font::MONO)
                                     .text_size(px(10.))
                                     .text_color(theme::text_muted())
                                     .child(format::memory(c.bytes)),
@@ -386,7 +388,7 @@ fn consumer_rows(index: usize, event: &AlertEvent) -> Option<AnyElement> {
 
 #[cfg(target_os = "macos")]
 fn consumer_quit(index: usize, row: usize, c: &zstats::alerts::MemoryConsumer) -> Option<Button> {
-    if !crate::terminate::can_quit(c.pid) {
+    if !terminate::can_quit(c.pid) {
         return None;
     }
     Some(quit_request_button(

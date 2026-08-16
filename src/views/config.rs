@@ -17,7 +17,11 @@
 //! link), and About (version, commit, arch from `crate::about`).
 
 use super::widgets::{self, card};
+use crate::about;
+use crate::assets;
+use crate::confirm;
 use crate::font;
+use crate::format;
 use crate::i18n;
 use crate::prefs::{self, LanguagePref, ThemePref};
 use crate::state::{ZStatsAppState, ZStatsGlobalStore};
@@ -71,7 +75,7 @@ impl SettingsSection {
             SettingsSection::Interface => Icon::new(IconName::Palette),
             SettingsSection::Config => Icon::new(IconName::Settings2),
             // gpui-component ships no shield; ours rides CustomIconName.
-            SettingsSection::Permissions => crate::assets::CustomIconName::Shield.into(),
+            SettingsSection::Permissions => assets::CustomIconName::Shield.into(),
             SettingsSection::About => Icon::new(IconName::Info),
         }
     }
@@ -177,13 +181,10 @@ fn about_card() -> AnyElement {
     let rows = [
         (
             i18n::tr("config.about_version"),
-            crate::about::version().to_string(),
+            about::version().to_string(),
         ),
-        (
-            i18n::tr("config.about_commit"),
-            crate::about::commit().to_string(),
-        ),
-        (i18n::tr("config.about_arch"), crate::about::architecture()),
+        (i18n::tr("config.about_commit"), about::commit().to_string()),
+        (i18n::tr("config.about_arch"), about::architecture()),
     ];
     widgets::list_shell()
         // The identity block a macOS About view leads with: the app icon
@@ -277,7 +278,7 @@ fn reset_card() -> AnyElement {
                         .justify_center()
                         .hover(|d| d.bg(theme::accent_wash(10)))
                         .on_click(move |_, window, cx| {
-                            crate::confirm::ask(
+                            confirm::ask(
                                 window,
                                 cx,
                                 i18n::tr("config.reset_title"),
@@ -870,7 +871,7 @@ fn fmt_bytes_setting(file: Option<u64>, effective: Option<u64>) -> String {
         if v.is_multiple_of(GIB) {
             format!("{} GB", v / GIB)
         } else {
-            crate::format::memory(v)
+            format::memory(v)
         }
     };
     match file {

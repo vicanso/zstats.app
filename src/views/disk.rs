@@ -1,7 +1,10 @@
 //! Disk: one card per volume — capacity, then IO rates.
 
 use super::widgets::{self, card};
-use crate::diskscan::{DirHit, FileHit, ScanResult};
+use crate::bigfiles;
+use crate::cleanhints;
+use crate::confirm;
+use crate::diskscan::{self, DirHit, FileHit, ScanResult};
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -367,11 +370,20 @@ pub(super) fn open_full_disk_access() {
 /// that is non-zero. The scan root is omitted when it is just `~` —
 /// that is the only root this card has, and it burned four characters
 /// for nothing next to the title.
+/// Results older than this get a "consider re-analyzing" nudge appended
+/// to the caption. Display only, like every threshold in views/ —
+/// nothing refreshes itself: a minutes-long walk must never
+/// self-trigger, so a nudge is where staleness honesty ends. A day is
+/// when "the numbers are from earlier" stops going without saying —
+/// mostly reached through the persisted cache surviving a restart.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 fn analysis_caption(state: &ZStatsAppState) -> String {
     let DiskAnalysis::Ready(result) = state.disk_analysis() else {
         return String::new();
     };
     let home = std::env::var("HOME").unwrap_or_default();
+    let age = result.scanned_at.elapsed().unwrap_or_default();
     let mut extras = Vec::new();
     if result.skipped_protected > 0 {
         extras.push(t!("disk.ana_skip_protected", n = result.skipped_protected).to_string());
@@ -382,10 +394,13 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
     if result.skipped_dataless > 0 {
         extras.push(t!("disk.ana_skip_dataless", n = result.skipped_dataless).to_string());
     }
+    if age > STALE_AFTER {
+        extras.push(i18n::tr("disk.ana_stale"));
+    }
     analysis_caption_parts(
         &result.root.display().to_string(),
         &home,
-        format::ago(result.scanned_at.elapsed()),
+        format::ago(age),
         t!("disk.ana_took", t = format::took(result.took)).to_string(),
         t!(
             "disk.ana_dirs_seen",
@@ -466,7 +481,7 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
     // The head of the suggestion set; the title carries the full count
     // and total, and the bulk button acts on the whole set — honest,
     // because unlike the capped tables the full list is retained.
-    let sug_head = &result.suggestions[..result.suggestions.len().min(crate::diskscan::TABLE_CAP)];
+    let sug_head = &result.suggestions[..result.suggestions.len().min(diskscan::TABLE_CAP)];
     let sug_total: u64 = result.suggestions.iter().map(|d| d.bytes).sum();
     div()
         .children(section(
@@ -511,7 +526,7 @@ fn suggest_clear_button(hits: &[DirHit], total: u64) -> AnyElement {
         .label(i18n::tr("disk.sug_clear"))
         .on_click(move |_, window, cx| {
             let paths = paths.clone();
-            crate::confirm::ask(
+            confirm::ask(
                 window,
                 cx,
                 i18n::tr("disk.sug_clear_title"),
@@ -580,7 +595,7 @@ fn analysis_row(
     );
     // Annotation, not action: a matching clean-hint rides the tooltip —
     // owner tool plus its own cleanup command, never run by us.
-    if let Some(hint) = crate::cleanhints::lookup(path) {
+    if let Some(hint) = cleanhints::lookup(path) {
         full.push_str(" — ");
         full.push_str(&match &hint.command {
             Some(cmd) => t!("disk.hint_cmd", owner = &hint.owner, cmd = cmd).to_string(),
@@ -646,7 +661,7 @@ fn analysis_row(
                         .on_click(move |_, _window, cx| {
                             // The row itself drills; the button must not.
                             cx.stop_propagation();
-                            crate::bigfiles::reveal(&reveal_path);
+                            bigfiles::reveal(&reveal_path);
                         }),
                 )
                 .when(deletable, |row| {
@@ -661,7 +676,7 @@ fn analysis_row(
                                 move |_, window, cx| {
                                     cx.stop_propagation();
                                     let path = trash_path.clone();
-                                    crate::confirm::ask(
+                                    confirm::ask(
                                         window,
                                         cx,
                                         i18n::tr("disk.big_trash_title"),
@@ -773,7 +788,7 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
                     )
                     .to_string()
                 };
-                if scan.threshold == crate::bigfiles::FALLBACK_THRESHOLD {
+                if scan.threshold == bigfiles::FALLBACK_THRESHOLD {
                     text.push_str(" · ");
                     text.push_str(&i18n::tr("disk.big_fallback_note"));
                 }
@@ -827,7 +842,7 @@ fn tilde_path(path: &str, home: &str) -> String {
     }
 }
 
-fn big_file_row(index: usize, file: &crate::bigfiles::BigFile, last: bool) -> AnyElement {
+fn big_file_row(index: usize, file: &bigfiles::BigFile, last: bool) -> AnyElement {
     let name = file
         .path
         .file_name()
@@ -897,7 +912,7 @@ fn big_file_row(index: usize, file: &crate::bigfiles::BigFile, last: bool) -> An
                 .tooltip(i18n::tr("disk.big_reveal"))
                 .on_click({
                     let path = file.path.clone();
-                    move |_, _window, _cx| crate::bigfiles::reveal(&path)
+                    move |_, _window, _cx| bigfiles::reveal(&path)
                 }),
         )
         .child(
@@ -910,7 +925,7 @@ fn big_file_row(index: usize, file: &crate::bigfiles::BigFile, last: bool) -> An
                 .tooltip(i18n::tr("disk.big_trash"))
                 .on_click(move |_, window, cx| {
                     let path = path.clone();
-                    crate::confirm::ask(
+                    confirm::ask(
                         window,
                         cx,
                         i18n::tr("disk.big_trash_title"),
@@ -950,7 +965,7 @@ fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
             })
             .on_click(move |_, window, cx| {
                 let mount = mount.clone();
-                crate::confirm::ask(
+                confirm::ask(
                     window,
                     cx,
                     i18n::tr("disk.eject_title"),

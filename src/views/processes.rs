@@ -7,9 +7,11 @@
 //! then a meter — the trough is what keeps each row from floating.
 
 use super::widgets;
+use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::procscan;
 use crate::procscan::ProcState;
 use crate::state::{FullScan, FullScanData, ProcSort, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
@@ -730,7 +732,7 @@ fn kill_button(pid: u32, name: String) -> AnyElement {
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             let name = name.clone();
-            crate::confirm::ask(
+            confirm::ask(
                 window,
                 cx,
                 i18n::tr("processes.kill_title"),
@@ -844,7 +846,7 @@ fn abnormal_filter(state: &ZStatsAppState, count: usize) -> AnyElement {
 /// far it is scrolled.
 fn abnormal_rows(
     state: &ZStatsAppState,
-    found: &[&crate::procscan::AbnormalProcess],
+    found: &[&procscan::AbnormalProcess],
     more_follows: bool,
 ) -> Vec<AnyElement> {
     let total = found.len();

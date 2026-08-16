@@ -8,11 +8,15 @@
 //! scroll offsets. Collected metrics are the main tenant, and sampling runs
 //! whether or not a window exists at all.
 
+use crate::bigfiles;
 use crate::bigfiles::BigFilesScan;
-use crate::diskscan::{ScanEvent, ScanResult};
-use crate::fullscan::{GroupScan, Scan};
+use crate::diskscan::{self, ScanEvent, ScanResult};
+use crate::fullscan::{self, GroupScan, Scan};
+use crate::history;
 use crate::history::Spender;
 use crate::i18n;
+use crate::metrics;
+use crate::procscan;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedWatch};
 use gpui::{
@@ -181,6 +185,11 @@ pub enum DiskAnalysis {
         /// rendered under the running banner so minutes-long walks pay
         /// out from their first seconds.
         partial: Option<ScanResult>,
+        /// Whether a finished result is written to the per-root cache.
+        /// True for top-level analyses (the "last analysed X" a fresh
+        /// launch opens with); false for drill-fallback subwalks, which
+        /// the design keeps out of the cache.
+        persist: bool,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     },
     Ready(ScanResult),
@@ -353,7 +362,7 @@ pub struct ZStatsAppState {
     /// Outer results parked while drilled into a subtree — each level is
     /// a finished `ScanResult` (a few KB), so "back" restores instantly
     /// instead of re-walking the parent for half a minute.
-    disk_analysis_stack: Vec<crate::diskscan::ScanResult>,
+    disk_analysis_stack: Vec<diskscan::ScanResult>,
     /// The user-picked analysis root for this session; `None` means the
     /// default (~). The re-analyze chip re-walks whatever this says, so
     /// picking a folder once makes the chip mean that folder until the
@@ -433,7 +442,11 @@ impl Default for ZStatsAppState {
             show_unused_nets: false,
             show_all_sensors: false,
             big_files: BigFiles::default(),
-            disk_analysis: DiskAnalysis::default(),
+            // A fresh launch opens with the last finished analysis, if
+            // one was cached — "see last time's numbers first".
+            disk_analysis: diskscan::load_default_cache()
+                .map(DiskAnalysis::Ready)
+                .unwrap_or_default(),
             disk_analysis_stack: Vec::new(),
             disk_analysis_root: None,
             settings_window: None,
@@ -536,17 +549,13 @@ impl ZStatsAppState {
     }
 
     /// Replace the abnormal-process list from a fresh scan.
-    pub fn set_abnormal(
-        &mut self,
-        found: Vec<crate::procscan::AbnormalProcess>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_abnormal(&mut self, found: Vec<procscan::AbnormalProcess>, cx: &mut Context<Self>) {
         self.abnormal.replace(found, Instant::now());
         cx.notify();
     }
 
     /// Abnormal processes that have stayed that way long enough to matter.
-    pub fn abnormal(&self) -> Vec<&crate::procscan::AbnormalProcess> {
+    pub fn abnormal(&self) -> Vec<&procscan::AbnormalProcess> {
         self.abnormal.persistent()
     }
 
@@ -617,14 +626,14 @@ impl ZStatsAppState {
         let Some(root) = self
             .disk_analysis_root
             .clone()
-            .or_else(crate::diskscan::default_root)
+            .or_else(diskscan::default_root)
         else {
             self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
             cx.notify();
             return;
         };
         self.disk_analysis_stack.clear();
-        self.launch_disk_analysis(root, cx);
+        self.launch_disk_analysis(root, true, cx);
     }
 
     /// Analyze a user-chosen root — the folder picker's entry point.
@@ -636,13 +645,13 @@ impl ZStatsAppState {
         if root == std::path::Path::new("/") {
             self.cancel_disk_analysis_walk();
             self.disk_analysis_stack.clear();
-            self.disk_analysis = DiskAnalysis::Failed(crate::i18n::tr("disk.ana_root_unsupported"));
+            self.disk_analysis = DiskAnalysis::Failed(i18n::tr("disk.ana_root_unsupported"));
             cx.notify();
             return;
         }
         self.disk_analysis_root = Some(root.clone());
         self.disk_analysis_stack.clear();
-        self.launch_disk_analysis(root, cx);
+        self.launch_disk_analysis(root, true, cx);
     }
 
     /// Drill into one ranked directory: park the current result on the
@@ -655,7 +664,7 @@ impl ZStatsAppState {
         let DiskAnalysis::Ready(current) = &self.disk_analysis else {
             return;
         };
-        let derived = crate::diskscan::drill(current, &root);
+        let derived = diskscan::drill(current, &root);
         if let DiskAnalysis::Ready(current) = std::mem::take(&mut self.disk_analysis) {
             self.disk_analysis_stack.push(current);
         }
@@ -664,7 +673,7 @@ impl ZStatsAppState {
                 self.disk_analysis = DiskAnalysis::Ready(result);
                 cx.notify();
             }
-            None => self.launch_disk_analysis(root, cx),
+            None => self.launch_disk_analysis(root, false, cx),
         }
     }
 
@@ -688,6 +697,21 @@ impl ZStatsAppState {
     /// retained drill index.
     pub fn clear_disk_analysis(&mut self, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
+        // Clean slate includes the saved result — otherwise the next
+        // launch would resurrect what the user just dismissed. The
+        // session's top-level root is the outermost parked result, or
+        // the current one when nothing is parked.
+        let top_root = self
+            .disk_analysis_stack
+            .first()
+            .map(|r| r.root.clone())
+            .or_else(|| match &self.disk_analysis {
+                DiskAnalysis::Ready(r) => Some(r.root.clone()),
+                _ => None,
+            });
+        if let Some(root) = top_root {
+            diskscan::delete_cache(&root);
+        }
         self.disk_analysis_stack.clear();
         // Clean slate includes the picked root: the next "Analyze" means
         // the default home tree again.
@@ -700,7 +724,12 @@ impl ZStatsAppState {
     /// learns — progress, completion, failure — arrives over the channel
     /// drained below, guarded by `run_id` so a superseded run's late
     /// events fall on the floor.
-    fn launch_disk_analysis(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+    fn launch_disk_analysis(
+        &mut self,
+        root: std::path::PathBuf,
+        persist: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel_disk_analysis_walk();
         self.disk_analysis_runs += 1;
         let run_id = self.disk_analysis_runs;
@@ -709,12 +738,13 @@ impl ZStatsAppState {
             run_id,
             dirs_done: 0,
             partial: None,
+            persist,
             cancel: cancel.clone(),
         };
         cx.notify();
 
         let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
-        crate::diskscan::spawn(root, cancel, tx);
+        diskscan::spawn(root, cancel, tx);
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 let done = matches!(event, ScanEvent::Done(_) | ScanEvent::Failed(_));
@@ -743,6 +773,13 @@ impl ZStatsAppState {
                             }
                         }
                         ScanEvent::Done(result) => {
+                            // Only finished top-level walks reach the cache;
+                            // cancelled and failed runs never get here, so a
+                            // half table cannot overwrite a full one.
+                            if let DiskAnalysis::Running { persist: true, .. } = state.disk_analysis
+                            {
+                                diskscan::save_cache(&result);
+                            }
                             state.disk_analysis = DiskAnalysis::Ready(*result);
                         }
                         ScanEvent::Failed(e) => {
@@ -848,11 +885,11 @@ impl ZStatsAppState {
         let file = persist_setting(&zstats::settings::default_dir(), key, value)?;
         self.settings = Some(file);
         if setting_rebuilds_collector(key) {
-            crate::metrics::request_rebuild();
+            metrics::request_rebuild();
         } else {
-            crate::metrics::request_reload();
+            metrics::request_reload();
         }
-        if let Some(pace) = cx.try_global::<crate::metrics::CollectorPace>() {
+        if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
             pace.wake();
         }
         cx.notify();
@@ -883,8 +920,8 @@ impl ZStatsAppState {
     pub fn reset_settings(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let file = reset_config(&zstats::settings::default_dir())?;
         self.settings = Some(file);
-        crate::metrics::request_rebuild();
-        if let Some(pace) = cx.try_global::<crate::metrics::CollectorPace>() {
+        metrics::request_rebuild();
+        if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
             pace.wake();
         }
         cx.notify();
@@ -927,7 +964,7 @@ impl ZStatsAppState {
         cx.spawn(async move |this, cx| {
             let scanned = cx
                 .background_executor()
-                .spawn(async { crate::bigfiles::scan() })
+                .spawn(async { bigfiles::scan() })
                 .await;
             let _ = this.update(cx, |state, cx| {
                 // Same landing guard as the full scans: a hide mid-query
@@ -937,10 +974,10 @@ impl ZStatsAppState {
                 }
                 state.big_files = match scanned {
                     Ok(scan) => BigFiles::Ready(scan),
-                    Err(crate::bigfiles::ScanError::IndexingOff) => {
+                    Err(bigfiles::ScanError::IndexingOff) => {
                         BigFiles::Failed { indexing_off: true }
                     }
-                    Err(crate::bigfiles::ScanError::Other(e)) => {
+                    Err(bigfiles::ScanError::Other(e)) => {
                         eprintln!("large-file query failed: {e}");
                         BigFiles::Failed {
                             indexing_off: false,
@@ -957,7 +994,7 @@ impl ZStatsAppState {
     /// the row. A failed trash leaves the row — a file that is still there
     /// must not vanish from the list.
     pub fn trash_big_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Err(e) = crate::bigfiles::trash(path) {
+        if let Err(e) = bigfiles::trash(path) {
             eprintln!("trash {}: {e}", path.display());
             return;
         }
@@ -977,7 +1014,7 @@ impl ZStatsAppState {
     pub fn trash_regenerable(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
         let mut gone: Vec<&std::path::PathBuf> = Vec::new();
         for path in paths {
-            match crate::bigfiles::trash(path) {
+            match bigfiles::trash(path) {
                 Ok(()) => gone.push(path),
                 Err(e) => eprintln!("trash {}: {e}", path.display()),
             }
@@ -987,7 +1024,7 @@ impl ZStatsAppState {
         }
         // Prune every level, not just the visible one — a parked outer
         // result restored via "back" must not resurrect trashed rows.
-        let prune = |result: &mut crate::diskscan::ScanResult| {
+        let prune = |result: &mut diskscan::ScanResult| {
             result.regenerable.retain(|h| !gone.contains(&&h.path));
             // A dominance chase can land the same tree in the directory
             // table, and blind-spot files inside a trashed tree went with
@@ -1002,9 +1039,13 @@ impl ZStatsAppState {
         };
         if let DiskAnalysis::Ready(result) = &mut self.disk_analysis {
             prune(result);
+            // Keep the on-disk copy in step with the pruned rows — only
+            // where this root already has one (drill views never do).
+            diskscan::resave_if_cached(result);
         }
         for parked in &mut self.disk_analysis_stack {
             prune(parked);
+            diskscan::resave_if_cached(parked);
         }
         cx.notify();
     }
@@ -1059,7 +1100,7 @@ impl ZStatsAppState {
             let rows = cx
                 .background_executor()
                 .spawn(async {
-                    crate::history::today(&zstats::settings::default_dir()).unwrap_or_else(|e| {
+                    history::today(&zstats::settings::default_dir()).unwrap_or_else(|e| {
                         eprintln!("could not read history: {e}");
                         Vec::new()
                     })
@@ -1117,7 +1158,7 @@ impl ZStatsAppState {
         cx.spawn(async move |this, cx| {
             let scanned = cx
                 .background_executor()
-                .spawn(async { crate::fullscan::scan_groups() })
+                .spawn(async { fullscan::scan_groups() })
                 .await;
             let _ = this.update(cx, |state, cx| {
                 // Land only into a scan someone is still waiting for — the
@@ -1163,7 +1204,7 @@ impl ZStatsAppState {
         cx.spawn(async move |this, cx| {
             let scanned = cx
                 .background_executor()
-                .spawn(async { crate::fullscan::scan() })
+                .spawn(async { fullscan::scan() })
                 .await;
             let _ = this.update(cx, |state, cx| {
                 // Same landing guard as the app scan: a hide mid-scan reset

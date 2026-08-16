@@ -1,5 +1,6 @@
 //! Process locale: detect the OS language, pin rust-i18n, look up keys.
 
+use crate::prefs;
 use rust_i18n::t;
 
 /// Supported locales. Anything else (ja, fr, `C`) falls back to English.
@@ -29,7 +30,7 @@ pub fn detect() -> &'static str {
 /// changes — the whole panel repaints per tick, so re-pinning is all a
 /// live switch needs.
 pub fn init() {
-    rust_i18n::set_locale(crate::prefs::language().locale().unwrap_or_else(detect));
+    rust_i18n::set_locale(prefs::language().locale().unwrap_or_else(detect));
 }
 
 /// Look up a key in the active locale, falling back to English.

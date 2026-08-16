@@ -5,6 +5,7 @@
 //! gpui app, while this is arithmetic on rectangles.
 
 use crate::state::{TrayAnchor, ZStatsGlobalStore};
+use crate::window_ext;
 use gpui::{App, Bounds, Pixels, Point, Size, point, px, size};
 
 /// Menu-bar panel: 320px matches Control Center / Stats combined popovers
@@ -79,7 +80,7 @@ pub fn bounds_below_tray(
     // Resolved through AppKit rather than `cx.displays()`, which reports
     // every screen at the same origin — see `window_ext`.
     #[cfg(target_os = "macos")]
-    let screen = crate::window_ext::visible_bounds_containing(icon.origin);
+    let screen = window_ext::visible_bounds_containing(icon.origin);
     #[cfg(not(target_os = "macos"))]
     let screen = cx
         .displays()

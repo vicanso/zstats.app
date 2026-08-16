@@ -174,41 +174,37 @@ APFS 克隆和硬链接会被重复计；跨目录求和大于卷用量是正常
 「秒级」只适用于文件行和 TAG 是否还在。把「重算该目录总量」写成秒级是错的——
 20 GB 的 `cargo-target` 再走一遍可以是十几秒。
 
-## 持久化
+## 持久化（已落地）
 
 单独文件，不进 `config.toml`（`settings::save` 会丢未知键，与 `app.toml` 同一先例）。
-权限 **`0600`**：路径会泄漏项目名。
+权限 **`0600`**（写临时文件后 rename）：路径会泄漏项目名。
 
-按 root 分档，定为 **`~/.zstats/diskscan/<root-slug>.toml`**（每根一个文件）——
-比单文件表数组的合并语义简单：写 = 整文件覆盖，读 = **root 对不上就丢**。
+按 root 分档：**`~/.zstats/diskscan/<root-slug>-<fnv32>.toml`**（slug 加短哈希，
+防 `/a/b` 与 `/a-b` 撞名）——写 = 整文件覆盖，读 = **root 或 version 对不上就丢**。
 
-只存三张排名 + 元数据，不存树。体量按 `PERSIST_TOP_DIRS` 封顶，预期远小于 200 KB：
+只存四张表 + 元数据，不存树、**不存下钻索引**（低 MB 级不值得落盘；对加载结果下钻
+会回落为对那棵子树实扫）。`scanned_at` 存 Unix 秒（`SystemTime`，跨重启仍能算
+「多久前」）；建议表封顶 `PERSIST_SUGGESTIONS`（500）——重载后「全部清除 N 项」
+的 N 与所列如实一致。
 
-```toml
-version = 1
-root = "~/Library"
-scanned_at = "2026-08-15T10:30:00Z"
-skipped_denied = 3
-skipped_protected = 4
-skipped_dataless = 12
+写入规则：
 
-[[regenerable]]
-path = "~/Library/Caches/org.example"
-bytes = 19800000000
-kind = "tag"
-
-[[dir]]
-path = "~/Library/Application Support"
-bytes = 31000000000
-kind = "plain"
-
-[[file]]
-path = "~/Library/some-dot-path/blob.bin"
-bytes = 4200000000
-```
+- **只有完成的顶层扫描**写缓存（`Running.persist` 标记）；取消、失败、下钻回落的
+  子扫描一概不写——半张表覆盖完整结果是倒退，子扫描按设计不进缓存。
+- 启动时加载默认根（`~`）的缓存直接进 `Ready`——打开硬件页即见「上次分析于 X」，
+  不做任何 stat。
+- 「清除结果」同时删除本会话顶层 root 的缓存文件（否则下次启动会复活刚被清掉的
+  结果）；tooltip 如实写明。
+- 废纸篓删除摘行后，对**已有缓存文件的 root** 重写缓存（当前视图与返回栈逐层），
+  磁盘上的副本与内存保持一致；下钻派生视图永远不会因此获得文件。
 
 诚实性边界：缓存只服务「先看到上次的数」，**不做正确性声明**。
-新增的大目录 / 大文件只有「重新分析」能发现。时间戳就是这条边界的表达。
+新增的大目录 / 大文件只有「重新分析」能发现。时间戳就是这条边界的表达；
+超过 24 小时（`STALE_AFTER`，展示性阈值）时 caption 尾部追加「数据较旧，建议
+重新分析」——**只提示，绝不自动重扫**，分钟级的走树自触发违背「点了才走树」。
+
+**快速重验**（有缓存时的可选按钮：stat 文件行、验 TAG 是否还在，不重走子树）
+仍未实现，留作后续可选项。
 
 ## 展示
 

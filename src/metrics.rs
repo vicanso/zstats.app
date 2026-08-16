@@ -6,6 +6,7 @@
 //! with the popover would reset every rate to "unknown" on each reopen.
 
 use crate::notify;
+use crate::procscan;
 use crate::state::ZStatsGlobalStore;
 #[cfg(not(target_os = "linux"))]
 use crate::tray;
@@ -294,7 +295,7 @@ fn spawn_abnormal_scan(cx: &mut App) {
             // thread even though it is cheap.
             let found = cx
                 .background_executor()
-                .spawn(async { crate::procscan::scan() })
+                .spawn(async { procscan::scan() })
                 .await;
             // `update` returns `()` in this gpui pin; a dropped app simply
             // stops polling this task.

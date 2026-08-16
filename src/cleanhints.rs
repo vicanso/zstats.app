@@ -15,6 +15,7 @@
 //! side-files — so an external puller can drop updates there. Read once
 //! per launch; a mid-session update lands on the next start.
 
+use crate::assets;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -73,7 +74,7 @@ fn load(dir: &Path, home: &Path) -> Vec<CleanHint> {
             user.display()
         );
     }
-    let embedded = crate::assets::get("cleanhints.toml")
+    let embedded = assets::get("cleanhints.toml")
         .and_then(|bytes| String::from_utf8(bytes.into_owned()).ok())
         .unwrap_or_default();
     parse(&embedded, home)
@@ -204,7 +205,7 @@ owner = "skipped too"
     /// the entry at runtime.
     #[test]
     fn embedded_defaults_all_parse() {
-        let raw = crate::assets::get("cleanhints.toml").expect("embedded");
+        let raw = assets::get("cleanhints.toml").expect("embedded");
         let content = std::str::from_utf8(&raw).unwrap();
         let entry_count = content.matches("[[hint]]").count();
         let hints = parse(content, &p("/Users/x"));
@@ -218,7 +219,7 @@ owner = "skipped too"
     #[test]
     fn annotation_only_locations_are_not_trashable() {
         let home = p("/Users/x");
-        let raw = crate::assets::get("cleanhints.toml").expect("embedded");
+        let raw = assets::get("cleanhints.toml").expect("embedded");
         let hints = parse(std::str::from_utf8(&raw).unwrap(), &home);
         let must_not_trash = [
             "/Users/x/.cache/huggingface",
