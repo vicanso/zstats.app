@@ -4,7 +4,7 @@ use super::widgets::{self, card};
 use crate::bigfiles;
 use crate::cleanhints;
 use crate::confirm;
-use crate::diskscan::{self, DirHit, FileHit, HitKind, ScanResult};
+use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult};
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -279,11 +279,13 @@ fn analysis_card(state: &ZStatsAppState) -> AnyElement {
         // same renderer as the final result, figures are lower bounds
         // that only grow. No delete controls mid-scan: the walker may
         // still be inside any of these trees.
+        // No deltas mid-scan either: partial figures are lower bounds,
+        // and comparing them to a finished run would read as shrinkage.
         DiskAnalysis::Running { partial, .. } => div()
             .children(
                 partial
                     .as_ref()
-                    .map(|r| analysis_tables(r, false, state.analysis_show_all_dirs())),
+                    .map(|r| analysis_tables(r, false, state.analysis_show_all_dirs(), None)),
             )
             .into_any_element(),
         DiskAnalysis::Failed(e) => div()
@@ -304,6 +306,7 @@ fn analysis_card(state: &ZStatsAppState) -> AnyElement {
                 result,
                 true,
                 state.analysis_show_all_dirs(),
+                state.analysis_diff_for(result),
             ))
             .into_any_element(),
     };
@@ -476,6 +479,17 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
     if result.skipped_dataless > 0 {
         extras.push(t!("disk.ana_skip_dataless", n = result.skipped_dataless).to_string());
     }
+    // Names what the per-row ± compares against. Its absence when no
+    // row moved is itself the answer: nothing big changed.
+    if let Some(diff) = state.analysis_diff_for(result) {
+        extras.push(
+            t!(
+                "disk.ana_diff_base",
+                ago = format::ago(diff.scanned_at().elapsed().unwrap_or_default())
+            )
+            .to_string(),
+        );
+    }
     if age > STALE_AFTER {
         extras.push(i18n::tr("disk.ana_stale"));
     }
@@ -513,7 +527,12 @@ fn analysis_caption_parts(
     parts.join(" · ")
 }
 
-fn analysis_tables(result: &ScanResult, actions: bool, show_all_dirs: bool) -> AnyElement {
+fn analysis_tables(
+    result: &ScanResult,
+    actions: bool,
+    show_all_dirs: bool,
+    diff: Option<&DiffBaseline>,
+) -> AnyElement {
     let root = result.root.clone();
     let dir_rows = |hits: &[DirHit], id: &'static str, deletable: bool| -> Vec<AnyElement> {
         let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
@@ -527,6 +546,7 @@ fn analysis_tables(result: &ScanResult, actions: bool, show_all_dirs: bool) -> A
                     index: i,
                     path: &h.path,
                     bytes: h.bytes,
+                    prev_bytes: diff.and_then(|d| d.bytes_for(&h.path)),
                     kind: Some(h.kind),
                     group_max: max,
                     root: &root,
@@ -546,6 +566,7 @@ fn analysis_tables(result: &ScanResult, actions: bool, show_all_dirs: bool) -> A
                     index: i,
                     path: &h.path,
                     bytes: h.bytes,
+                    prev_bytes: diff.and_then(|d| d.bytes_for(&h.path)),
                     kind: None,
                     group_max: max,
                     root: &root,
@@ -748,6 +769,10 @@ struct AnalysisRow<'a> {
     index: usize,
     path: &'a std::path::Path,
     bytes: u64,
+    /// This path's figure in the previous run, when it ranked there —
+    /// `None` renders no delta (absence proves nothing, see
+    /// [`DiffBaseline`]).
+    prev_bytes: Option<u64>,
     kind: Option<HitKind>,
     /// The group's largest row, the meter's 100%.
     group_max: u64,
@@ -756,12 +781,31 @@ struct AnalysisRow<'a> {
     drillable: bool,
 }
 
+/// Below this a row shows no delta: the tables rank hundreds of MB and
+/// up, so a ±few-MB drift on every row would be noise dressed as
+/// signal. 2% of `TABLE_EXTEND_MIN`, the smallest figure the extended
+/// table admits.
+const DIFF_FLOOR: u64 = 10 * 1024 * 1024;
+
+/// `+1.2 GB` / `-340.0 MB` against the previous run, or `None` when
+/// there is nothing honest to say (no baseline row, or under the floor).
+fn delta_label(bytes: u64, prev_bytes: Option<u64>) -> Option<String> {
+    let prev = prev_bytes?;
+    let (sign, diff) = if bytes >= prev {
+        ("+", bytes - prev)
+    } else {
+        ("-", prev - bytes)
+    };
+    (diff >= DIFF_FLOOR).then(|| format!("{sign}{}", format::memory(diff)))
+}
+
 fn analysis_row(row: AnalysisRow) -> AnyElement {
     let AnalysisRow {
         id,
         index,
         path,
         bytes,
+        prev_bytes,
         kind,
         group_max,
         root,
@@ -830,6 +874,16 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                         .child(label),
                 )
                 .children(kind.and_then(|kind| kind_pill(id, index, kind)))
+                .children(delta_label(bytes, prev_bytes).map(|delta| {
+                    // Quiet on purpose: the sign carries the meaning, and
+                    // accent is reserved for over-threshold (views/mod.rs).
+                    div()
+                        .flex_none()
+                        .font_family(font::MONO)
+                        .text_size(px(9.5))
+                        .text_color(theme::text_muted())
+                        .child(delta)
+                }))
                 .child(
                     div()
                         .flex_none()
@@ -1275,5 +1329,18 @@ mod tests {
             vec![],
         );
         assert_eq!(nested, "~/Library · just now · took 41s · 3 directories");
+    }
+
+    #[test]
+    fn delta_speaks_only_when_it_clears_the_floor() {
+        let gib = 1024 * 1024 * 1024;
+        // Growth and shrinkage, signed.
+        assert_eq!(delta_label(3 * gib, Some(2 * gib)), Some("+1.0 GB".into()));
+        assert_eq!(delta_label(2 * gib, Some(3 * gib)), Some("-1.0 GB".into()));
+        // No baseline row → silence, not "new".
+        assert_eq!(delta_label(3 * gib, None), None);
+        // Under the floor either way → unchanged for table purposes.
+        assert_eq!(delta_label(gib + DIFF_FLOOR - 1, Some(gib)), None);
+        assert_eq!(delta_label(gib, Some(gib)), None);
     }
 }

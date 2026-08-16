@@ -687,8 +687,16 @@ fn cache_path_in(dir: &Path, root: &Path) -> PathBuf {
     dir.join(format!("{slug}-{hash:08x}.toml"))
 }
 
+/// The previous run's file, next to the current one — what row deltas
+/// are measured against. Rotated into place by [`save_cache`] just
+/// before the new result lands, so it always holds the last *finished*
+/// walk of the same root, surviving restarts like the cache itself.
+fn prev_cache_path_in(dir: &Path, root: &Path) -> PathBuf {
+    cache_path_in(dir, root).with_extension("prev.toml")
+}
+
 pub fn save_cache(result: &ScanResult) {
-    save_cache_in(&cache_dir(), result);
+    save_cache_in(&cache_dir(), result, true);
 }
 
 pub fn load_cache(root: &Path) -> Option<ScanResult> {
@@ -700,19 +708,27 @@ pub fn load_default_cache() -> Option<ScanResult> {
     load_cache(&default_root()?)
 }
 
+/// The run before the cached one, if two have finished — the Δ baseline.
+pub fn load_prev_cache(root: &Path) -> Option<ScanResult> {
+    load_cache_file(&prev_cache_path_in(&cache_dir(), root), root)
+}
+
 pub fn delete_cache(root: &Path) {
     let _ = std::fs::remove_file(cache_path_in(&cache_dir(), root));
+    let _ = std::fs::remove_file(prev_cache_path_in(&cache_dir(), root));
 }
 
 /// Rewrite the cache after rows were pruned — but only where this exact
 /// root already has one, so drill-derived subroots never gain a file.
+/// No rotation: pruning is an edit to the *current* result, and letting
+/// it displace the `.prev` file would erase the baseline mid-cycle.
 pub fn resave_if_cached(result: &ScanResult) {
     if cache_path_in(&cache_dir(), &result.root).exists() {
-        save_cache(result);
+        save_cache_in(&cache_dir(), result, false);
     }
 }
 
-fn save_cache_in(dir: &Path, result: &ScanResult) {
+fn save_cache_in(dir: &Path, result: &ScanResult, rotate: bool) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
@@ -726,6 +742,11 @@ fn save_cache_in(dir: &Path, result: &ScanResult) {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    if rotate {
+        // The displaced current becomes the next comparison's baseline
+        // (a silent no-op on a first-ever save).
+        let _ = std::fs::rename(&path, prev_cache_path_in(dir, &result.root));
     }
     let _ = std::fs::rename(&tmp, &path);
 }
@@ -812,7 +833,11 @@ fn serialise(result: &ScanResult) -> String {
 }
 
 fn load_cache_in(dir: &Path, root: &Path) -> Option<ScanResult> {
-    let text = std::fs::read_to_string(cache_path_in(dir, root)).ok()?;
+    load_cache_file(&cache_path_in(dir, root), root)
+}
+
+fn load_cache_file(path: &Path, root: &Path) -> Option<ScanResult> {
+    let text = std::fs::read_to_string(path).ok()?;
     let doc: toml::Value = toml::from_str(&text).ok()?;
     if doc.get("version")?.as_integer()? != CACHE_VERSION {
         return None;
@@ -874,6 +899,57 @@ fn load_cache_in(dir: &Path, root: &Path) -> Option<ScanResult> {
         suggestions: dirs_of("suggestion"),
         index: None,
     })
+}
+
+/// The previous run flattened to path → bytes, for per-row deltas.
+/// Built from every retained table at once (a path can sit in two —
+/// a tagged cache is both a suggestion and a big directory), so a row
+/// finds its old figure wherever it ranked last time. Absence proves
+/// nothing: the path may simply have fallen below last run's retention
+/// cut — which is why rows without a match show no delta rather than
+/// claiming "new".
+pub struct DiffBaseline {
+    root: PathBuf,
+    scanned_at: std::time::SystemTime,
+    bytes: std::collections::HashMap<PathBuf, u64>,
+}
+
+impl DiffBaseline {
+    pub fn from_result(result: &ScanResult) -> Self {
+        let mut bytes = std::collections::HashMap::new();
+        for hit in result
+            .regenerable
+            .iter()
+            .chain(&result.dirs)
+            .chain(&result.suggestions)
+        {
+            bytes.insert(hit.path.clone(), hit.bytes);
+        }
+        for hit in &result.files {
+            bytes.insert(hit.path.clone(), hit.bytes);
+        }
+        Self {
+            root: result.root.clone(),
+            scanned_at: result.scanned_at,
+            bytes,
+        }
+    }
+
+    /// The root this baseline compares against — deltas only make sense
+    /// on a result of the same root (drill tables sit mostly below last
+    /// run's retention cut, and a half-comparable table reads as
+    /// "nothing else changed").
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn scanned_at(&self) -> std::time::SystemTime {
+        self.scanned_at
+    }
+
+    pub fn bytes_for(&self, path: &Path) -> Option<u64> {
+        self.bytes.get(path).copied()
+    }
 }
 
 /// Default rows shown for a descending-sorted table: `TABLE_CAP`, rows
@@ -1240,7 +1316,7 @@ mod tests {
             }],
             index: None,
         };
-        save_cache_in(&dir, &result);
+        save_cache_in(&dir, &result, true);
 
         let loaded = load_cache_in(&dir, &p("/r")).expect("round trip");
         assert_eq!(loaded.scanned_at, result.scanned_at);
@@ -1268,6 +1344,66 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn run_with(bytes: u64, secs: u64) -> ScanResult {
+        ScanResult {
+            root: p("/r"),
+            scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(secs),
+            took: Duration::from_secs(1),
+            dirs_seen: 1,
+            skipped_denied: 0,
+            skipped_protected: 0,
+            skipped_dataless: 0,
+            regenerable: vec![DirHit {
+                path: p("/r/cache"),
+                bytes: 10,
+                kind: HitKind::Tag,
+            }],
+            dirs: vec![DirHit {
+                path: p("/r/big"),
+                bytes,
+                kind: HitKind::Plain,
+            }],
+            files: vec![FileHit {
+                path: p("/r/.blob"),
+                bytes: 30,
+            }],
+            suggestions: vec![],
+            index: None,
+        }
+    }
+
+    #[test]
+    fn save_rotates_the_displaced_run_into_the_delta_baseline() {
+        let dir = std::env::temp_dir().join(format!("zstats-diskprev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prev_path = prev_cache_path_in(&dir, &p("/r"));
+        // First-ever save: nothing to rotate, no baseline yet.
+        save_cache_in(&dir, &run_with(100, 1), true);
+        assert!(load_cache_file(&prev_path, &p("/r")).is_none());
+        // Second save: the displaced first run becomes the baseline.
+        save_cache_in(&dir, &run_with(250, 2), true);
+        let prev = load_cache_file(&prev_path, &p("/r")).expect("baseline");
+        assert_eq!(prev.dirs[0].bytes, 100);
+        // A pruning resave edits the current file only — displacing the
+        // baseline mid-cycle would erase what deltas compare against.
+        save_cache_in(&dir, &run_with(240, 2), false);
+        let kept = load_cache_file(&prev_path, &p("/r")).expect("kept");
+        assert_eq!(kept.dirs[0].bytes, 100);
+        assert_eq!(load_cache_in(&dir, &p("/r")).unwrap().dirs[0].bytes, 240);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diff_baseline_flattens_every_table_and_claims_nothing_more() {
+        let base = DiffBaseline::from_result(&run_with(20, 1));
+        assert_eq!(base.bytes_for(&p("/r/cache")), Some(10));
+        assert_eq!(base.bytes_for(&p("/r/big")), Some(20));
+        assert_eq!(base.bytes_for(&p("/r/.blob")), Some(30));
+        // Absent ≠ new: the path may have fallen below retention.
+        assert_eq!(base.bytes_for(&p("/r/unseen")), None);
+        assert_eq!(base.root(), p("/r"));
     }
 
     #[test]

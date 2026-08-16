@@ -11,7 +11,7 @@
 use crate::bigfiles;
 use crate::bigfiles::BigFilesScan;
 use crate::cleanhints;
-use crate::diskscan::{self, ScanEvent, ScanResult};
+use crate::diskscan::{self, DiffBaseline, ScanEvent, ScanResult};
 use crate::fullscan::{self, GroupScan, Scan};
 use crate::history;
 use crate::history::Spender;
@@ -475,6 +475,10 @@ pub struct ZStatsAppState {
     /// picking a folder once makes the chip mean that folder until the
     /// results are cleared.
     disk_analysis_root: Option<std::path::PathBuf>,
+    /// The run before the current result, flattened for per-row Δs —
+    /// rebuilt from the rotated `.prev` cache file whenever a top-level
+    /// walk finishes (and once at launch), never during drills.
+    analysis_diff: Option<DiffBaseline>,
     /// The boot volume's purgeable-space / snapshot readout, refreshed
     /// lazily while Hardware is the visible tab (throttled below) — a
     /// panel-owned query, deliberately not a Monitor metric.
@@ -581,6 +585,11 @@ impl Default for ZStatsAppState {
                 .unwrap_or_default(),
             disk_analysis_stack: Vec::new(),
             disk_analysis_root: None,
+            // The baseline outlives restarts the same way the result
+            // does: through its file.
+            analysis_diff: diskscan::default_root()
+                .and_then(|root| diskscan::load_prev_cache(&root))
+                .map(|prev| DiffBaseline::from_result(&prev)),
             disk_analysis_expanded: false,
             analysis_show_all_dirs: false,
             space: None,
@@ -809,6 +818,15 @@ impl ZStatsAppState {
         &self.disk_analysis
     }
 
+    /// The Δ baseline for `result` — present only when a previous run of
+    /// the *same root* exists, so drill views and freshly-picked roots
+    /// never show half-comparable deltas.
+    pub fn analysis_diff_for(&self, result: &ScanResult) -> Option<&DiffBaseline> {
+        self.analysis_diff
+            .as_ref()
+            .filter(|diff| diff.root() == result.root)
+    }
+
     /// Start (or restart) the top-level analysis — of the session's
     /// picked root, or the home tree by default. A drill-down is left
     /// via "back", not by rescanning, so the stack is dropped here.
@@ -923,6 +941,9 @@ impl ZStatsAppState {
         if let Some(root) = top_root {
             diskscan::delete_cache(&root);
         }
+        // The baseline's file went with the cache; the flattened copy
+        // must not outlive it.
+        self.analysis_diff = None;
         self.disk_analysis_stack.clear();
         // Clean slate includes the picked root: the next "Analyze" means
         // the default home tree again.
@@ -989,7 +1010,11 @@ impl ZStatsAppState {
                             // half table cannot overwrite a full one.
                             if let DiskAnalysis::Running { persist: true, .. } = state.disk_analysis
                             {
+                                // The save rotated the displaced run into
+                                // `.prev` — read it back as the Δ baseline.
                                 diskscan::save_cache(&result);
+                                state.analysis_diff = diskscan::load_prev_cache(&result.root)
+                                    .map(|prev| DiffBaseline::from_result(&prev));
                             }
                             state.disk_analysis = DiskAnalysis::Ready(*result);
                         }
