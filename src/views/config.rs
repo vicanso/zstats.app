@@ -26,13 +26,15 @@ use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs::{self, LanguagePref, ThemePref};
-use crate::state::{ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{HintsSync, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
+use gpui::Entity;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, div, img, px,
 };
+use gpui_component::input::{Input, InputState};
 use gpui_component::switch::Switch;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
@@ -84,9 +86,14 @@ impl SettingsSection {
     }
 }
 
-pub fn render(state: &ZStatsAppState, section: SettingsSection) -> Vec<AnyElement> {
+pub fn render(
+    state: &ZStatsAppState,
+    section: SettingsSection,
+    proxy_input: &Entity<InputState>,
+    proxy_valid: bool,
+) -> Vec<AnyElement> {
     match section {
-        SettingsSection::Interface => vec![interface_card()],
+        SettingsSection::Interface => vec![interface_card(proxy_input, proxy_valid)],
         SettingsSection::Config => render_config(state),
         SettingsSection::Permissions => vec![permissions_card()],
         SettingsSection::About => vec![about_card()],
@@ -176,7 +183,7 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
             cards.push(thresholds_card(file));
         }
     }
-    cards.push(hints_card());
+    cards.push(hints_card(state));
     cards.push(reset_card());
     cards
 }
@@ -320,7 +327,7 @@ fn reset_card() -> AnyElement {
 /// Language and theme. Selection reuses the accent chips of the Alerts
 /// threshold editor — in this app a picked value is accent, like a crossed
 /// threshold, and everything else stays neutral.
-fn interface_card() -> AnyElement {
+fn interface_card(proxy_input: &Entity<InputState>, proxy_valid: bool) -> AnyElement {
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("config.interface"),
@@ -355,7 +362,55 @@ fn interface_card() -> AnyElement {
             false,
         ))
         .child(autostart_row())
+        .child(proxy_row(proxy_input, proxy_valid))
         .child(opacity_row())
+        .into_any_element()
+}
+
+/// Outbound proxy for the clean-hints fetch — the app's only network
+/// call. Free text because proxies are arbitrary URIs; only values the
+/// resolver can act on are persisted, and the inline warning says when
+/// the field holds something else. "" follows the environment / system
+/// proxy, "none" forces direct.
+fn proxy_row(input: &Entity<InputState>, valid: bool) -> AnyElement {
+    v_flex()
+        .px(px(13.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("config.proxy")),
+                )
+                .child(
+                    div()
+                        .id("pref-proxy-info")
+                        .flex_none()
+                        .p(px(1.))
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.proxy_tip")))
+                        .child(
+                            Icon::new(IconName::Info)
+                                .with_size(Size::Size(px(12.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        ),
+                ),
+        )
+        .child(div().mt(px(6.)).child(Input::new(input).xsmall()))
+        .when(!valid, |d| {
+            d.child(
+                div()
+                    .mt(px(4.))
+                    .text_size(px(10.))
+                    .text_color(Hsla::from(theme::accent_light()))
+                    .child(i18n::tr("config.proxy_invalid")),
+            )
+        })
         .into_any_element()
 }
 
@@ -553,7 +608,7 @@ fn pref_row<T: Copy + PartialEq + 'static>(
 /// of the pull-update path: an external tool drops a new
 /// ~/.zstats/cleanhints.toml, one click here and the annotations and
 /// suggestions follow, no restart.
-fn hints_card() -> AnyElement {
+fn hints_card(state: &ZStatsAppState) -> AnyElement {
     let (from_user, count) = cleanhints::info();
     let source = if from_user {
         t!("config.hints_user", n = count)
@@ -578,6 +633,7 @@ fn hints_card() -> AnyElement {
                         .min_w_0()
                         .child(widgets::note(i18n::tr("config.hints_note"))),
                 )
+                .child(hints_update_chip(state))
                 .child(
                     div()
                         .id("cfg-hints-reload")
@@ -601,7 +657,65 @@ fn hints_card() -> AnyElement {
                         .child(i18n::tr("config.hints_reload")),
                 ),
         )
+        .children(hints_sync_note(state))
         .into_any_element()
+}
+
+/// "Update from GitHub" — the app's only network action, user-triggered
+/// and one-at-a-time. The chip goes inert while a fetch runs.
+fn hints_update_chip(state: &ZStatsAppState) -> AnyElement {
+    let running = matches!(state.hints_sync(), Some(HintsSync::Running));
+    let chip = div()
+        .id("cfg-hints-update")
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::inset())
+        .px(px(10.))
+        .py(px(3.))
+        .text_size(px(11.))
+        .text_color(if running {
+            theme::text_dim()
+        } else {
+            theme::text()
+        })
+        .child(i18n::tr(if running {
+            "config.hints_updating"
+        } else {
+            "config.hints_update"
+        }));
+    if running {
+        return chip.into_any_element();
+    }
+    chip.hover(|d| d.bg(theme::surface_raised()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.update_cleanhints(cx));
+        })
+        .into_any_element()
+}
+
+/// The last fetch's outcome, in one honest line under the row.
+fn hints_sync_note(state: &ZStatsAppState) -> Option<AnyElement> {
+    let Some(HintsSync::Done(outcome)) = state.hints_sync() else {
+        return None;
+    };
+    use crate::cleanhints::RemoteUpdate;
+    let text = match outcome {
+        RemoteUpdate::Updated(n) => t!("config.hints_updated", n = n).to_string(),
+        RemoteUpdate::AlreadyCurrent => i18n::tr("config.hints_current"),
+        RemoteUpdate::Invalid => i18n::tr("config.hints_remote_invalid"),
+        RemoteUpdate::Failed(e) => t!("config.hints_update_failed", e = e.as_str()).to_string(),
+    };
+    Some(
+        div()
+            .px(px(13.))
+            .pb(px(9.))
+            .child(widgets::note(text))
+            .into_any_element(),
+    )
 }
 
 fn collection_card(c: &CollectorConfig) -> AnyElement {

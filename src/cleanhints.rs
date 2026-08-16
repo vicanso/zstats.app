@@ -16,7 +16,9 @@
 //! first use; the Config page's reload control ([`reload`]) drops the
 //! cache, so a pulled update takes effect without a restart.
 
+use crate::about;
 use crate::assets;
+use crate::proxy;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -72,6 +74,72 @@ fn current() -> Arc<Loaded> {
     let loaded = Arc::new(load(&zstats::settings::default_dir(), &home));
     *CACHE.write().unwrap() = Some(loaded.clone());
     loaded
+}
+
+/// The published copy of the built-in list; the Config page's update
+/// button fetches it. raw.githubusercontent.com, not /blob/ — the
+/// latter is the HTML page.
+const REMOTE_URL: &str =
+    "https://raw.githubusercontent.com/vicanso/zstats.app/main/assets/cleanhints.toml";
+/// Generous for a ~10 KB file: the point is not hanging a thread when a
+/// proxy blackholes the connection.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the update button's press came to.
+pub enum RemoteUpdate {
+    /// The published list differed and now lives in the user file;
+    /// carries the entry count. Already reloaded.
+    Updated(usize),
+    /// Byte-identical with what is live locally — nothing written.
+    AlreadyCurrent,
+    /// Downloaded fine but parsed to zero entries — never written, the
+    /// working local list stays untouched.
+    Invalid,
+    Failed(String),
+}
+
+/// Fetch the published list and, when it differs from what is live
+/// locally (the user file if present, the embedded built-ins otherwise),
+/// replace `~/.zstats/cleanhints.toml` with it and reload. Validated
+/// before a byte lands: content that does not parse to at least one
+/// entry never overwrites a working file. The app's only network call,
+/// strictly user-triggered; goes through [`proxy::app_proxy`]. Blocking
+/// — call on the background executor.
+pub fn update_from_remote() -> RemoteUpdate {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(FETCH_TIMEOUT))
+        .proxy(proxy::app_proxy())
+        .build()
+        .new_agent();
+    let text = match agent
+        .get(REMOTE_URL)
+        .header("User-Agent", format!("zstats/{}", about::version()))
+        .call()
+    {
+        Ok(response) => match response.into_body().read_to_string() {
+            Ok(text) => text,
+            Err(e) => return RemoteUpdate::Failed(e.to_string()),
+        },
+        Err(e) => return RemoteUpdate::Failed(e.to_string()),
+    };
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let parsed = parse(&text, &home);
+    if parsed.is_empty() {
+        return RemoteUpdate::Invalid;
+    }
+    let dir = zstats::settings::default_dir();
+    let user = dir.join("cleanhints.toml");
+    let live = std::fs::read_to_string(&user).ok().or_else(|| {
+        assets::get("cleanhints.toml").and_then(|bytes| String::from_utf8(bytes.into_owned()).ok())
+    });
+    if live.as_deref() == Some(text.as_str()) {
+        return RemoteUpdate::AlreadyCurrent;
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&user, &text)) {
+        return RemoteUpdate::Failed(e.to_string());
+    }
+    reload();
+    RemoteUpdate::Updated(parsed.len())
 }
 
 /// Drop the cached rules; the next lookup re-reads the user file or the

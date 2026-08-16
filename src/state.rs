@@ -10,6 +10,7 @@
 
 use crate::bigfiles;
 use crate::bigfiles::BigFilesScan;
+use crate::cleanhints;
 use crate::diskscan::{self, ScanEvent, ScanResult};
 use crate::fullscan::{self, GroupScan, Scan};
 use crate::history;
@@ -251,6 +252,12 @@ pub enum BigFiles {
     },
 }
 
+/// The clean-hints update fetch, for the Config page's status line.
+pub enum HintsSync {
+    Running,
+    Done(cleanhints::RemoteUpdate),
+}
+
 /// One episode's quiet hours: banners are skipped until the deadline.
 struct Snooze {
     until: Instant,
@@ -433,6 +440,8 @@ pub struct ZStatsAppState {
     history: Option<Vec<Spender>>,
     /// The window `history` was (or is being) read for.
     history_range: HistoryRange,
+    /// The last (or in-flight) clean-hints update fetch.
+    hints_sync: Option<HintsSync>,
     /// The whole-table listing, only ever populated on request.
     full_scan: FullScan,
     /// The whole-tree listing for the Apps tab, only ever populated on request.
@@ -500,6 +509,7 @@ impl Default for ZStatsAppState {
             net: NetActivity::default(),
             history: None,
             history_range: HistoryRange::default(),
+            hints_sync: None,
             full_scan: FullScan::default(),
             full_app_scan: FullAppScan::default(),
             proc_filter: None,
@@ -1135,6 +1145,31 @@ impl ZStatsAppState {
     /// flight or before the tab has ever been opened.
     pub fn history(&self) -> Option<&[Spender]> {
         self.history.as_deref()
+    }
+
+    pub fn hints_sync(&self) -> Option<&HintsSync> {
+        self.hints_sync.as_ref()
+    }
+
+    /// Fetch the published rules on the background executor. One at a
+    /// time — a second press while one runs is a no-op, not a queue.
+    pub fn update_cleanhints(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.hints_sync, Some(HintsSync::Running)) {
+            return;
+        }
+        self.hints_sync = Some(HintsSync::Running);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async { cleanhints::update_from_remote() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.hints_sync = Some(HintsSync::Done(outcome));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn history_range(&self) -> HistoryRange {

@@ -75,6 +75,15 @@ rust-embed = { version = "8.12.0", default-features = false, features = [
 # Locale files live in `assets/locales/` (compressed by rust-embed). The
 # `i18n!` macro is pointed at the empty `locales_stub/` so it does not
 # codegen a  backend map; `i18n_loader` inflates one locale on first use.
+# Minimal blocking HTTP client for the clean-hints update fetch — the
+# app's only network call, and strictly user-triggered. rustls avoids a
+# native TLS dependency; socks-proxy so a configured socks:// URI
+# actually connects (same shape as zedis).
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
+    "socks-proxy",
+] }
 rust-i18n = "4.2.1"
 sys-locale = "0.3.2"
 toml = "1.1.4"

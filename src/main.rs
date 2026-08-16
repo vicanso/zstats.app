@@ -23,6 +23,7 @@ mod placement;
 mod prefs;
 #[cfg(target_os = "macos")]
 mod procscan;
+mod proxy;
 mod state;
 #[cfg(target_os = "macos")]
 mod terminate;
@@ -375,15 +376,44 @@ fn use_popover_material(window: &Window) {
 struct SettingsWindow {
     section: views::config::SettingsSection,
     scroll: ScrollHandle,
+    /// The proxy setting's text field. Lives with this window, like the
+    /// panel's filter input lives with the panel — not in global state.
+    proxy_input: gpui::Entity<gpui_component::input::InputState>,
+    /// Whether the field currently parses; drives the inline warning.
+    /// Only valid values are persisted, so junk never reaches app.toml.
+    proxy_valid: bool,
 }
 
 impl SettingsWindow {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = cx.global::<ZStatsGlobalStore>().clone();
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let proxy_input = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder(i18n::tr("config.proxy_placeholder"))
+                .default_value(prefs::proxy())
+        });
+        cx.subscribe(
+            &proxy_input,
+            |this, input, event: &gpui_component::input::InputEvent, cx| {
+                if matches!(event, gpui_component::input::InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    this.proxy_valid = proxy::is_valid_proxy_setting(&value);
+                    if this.proxy_valid {
+                        // Persists and mirrors into the proxy resolver —
+                        // the next fetch picks it up, no restart.
+                        prefs::set_proxy(&value);
+                    }
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         Self {
             section: views::config::SettingsSection::Interface,
             scroll: ScrollHandle::new(),
+            proxy_input,
+            proxy_valid: true,
         }
     }
 }
@@ -400,7 +430,12 @@ impl Render for SettingsWindow {
         let section = self.section;
         let body = gpui_component::v_flex()
             .gap(px(8.))
-            .children(views::config::render(state, section));
+            .children(views::config::render(
+                state,
+                section,
+                &self.proxy_input,
+                self.proxy_valid,
+            ));
         div()
             .relative()
             .size_full()
@@ -526,7 +561,7 @@ pub fn open_settings_window(cx: &mut App) {
         }),
         |window, cx| {
             window.activate_window();
-            let view = cx.new(SettingsWindow::new);
+            let view = cx.new(|cx| SettingsWindow::new(window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         },
     );
