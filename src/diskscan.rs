@@ -116,10 +116,8 @@ pub enum HitKind {
 pub struct DirHit {
     pub path: PathBuf,
     pub bytes: u64,
-    /// Read by nothing yet: the Tag/Heuristic row labels are P2c scope
-    /// (docs/disk-analysis.md), but the classification happens during the
-    /// walk, so the field is carried from day one.
-    #[allow(dead_code)]
+    /// Renders as the row's trust-tier pill: Tag wears "cache",
+    /// Heuristic a fainter "guess", Plain nothing.
     pub kind: HitKind,
 }
 

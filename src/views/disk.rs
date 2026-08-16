@@ -4,7 +4,7 @@ use super::widgets::{self, card};
 use crate::bigfiles;
 use crate::cleanhints;
 use crate::confirm;
-use crate::diskscan::{self, DirHit, FileHit, ScanResult};
+use crate::diskscan::{self, DirHit, FileHit, HitKind, ScanResult};
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -439,14 +439,30 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
             .enumerate()
             // Directory rows drill on click (actions = a finished result;
             // mid-scan tables are inert), file rows never do.
-            .map(|(i, h)| analysis_row(id, i, &h.path, h.bytes, max, &root, deletable, actions))
+            .map(|(i, h)| {
+                analysis_row(
+                    id,
+                    i,
+                    &h.path,
+                    h.bytes,
+                    Some(h.kind),
+                    max,
+                    &root,
+                    deletable,
+                    actions,
+                )
+            })
             .collect()
     };
     let file_rows = |hits: &[FileHit]| -> Vec<AnyElement> {
         let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
         hits.iter()
             .enumerate()
-            .map(|(i, h)| analysis_row("ana-file", i, &h.path, h.bytes, max, &root, false, false))
+            .map(|(i, h)| {
+                analysis_row(
+                    "ana-file", i, &h.path, h.bytes, None, max, &root, false, false,
+                )
+            })
             .collect()
     };
 
@@ -574,12 +590,37 @@ fn back_chip(state: &ZStatsAppState) -> Option<AnyElement> {
 /// clickable: no tree is retained, so "expand" honestly means re-walking
 /// that path as the new root (seconds for a subtree), with "back" holding
 /// the parked outer result.
+/// Only the owner-declared tier gets a pill: "cache" maps straight to
+/// an action semantic — this row is (or can be) a cleanup suggestion.
+/// A heuristic fold earns no pill; its explanatory value did not pay
+/// for the attention it took, so the how-it-was-classified note rides
+/// the row's name tooltip instead. Plain directories say nothing.
+fn kind_pill(id: &'static str, index: usize, kind: HitKind) -> Option<AnyElement> {
+    if kind != HitKind::Tag {
+        return None;
+    }
+    Some(
+        div()
+            .id(SharedString::from(format!("{id}-kind-{index}")))
+            .flex_none()
+            .rounded_full()
+            .px(px(5.))
+            .text_size(px(9.))
+            .bg(theme::inset())
+            .text_color(theme::text_muted())
+            .tooltip(widgets::wrap_tooltip(i18n::tr("disk.kind_tag_tip")))
+            .child(i18n::tr("disk.kind_tag"))
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn analysis_row(
     id: &'static str,
     index: usize,
     path: &std::path::Path,
     bytes: u64,
+    kind: Option<HitKind>,
     group_max: u64,
     root: &std::path::Path,
     deletable: bool,
@@ -593,6 +634,11 @@ fn analysis_row(
         &path.display().to_string(),
         &std::env::var("HOME").unwrap_or_default(),
     );
+    // A heuristic fold explains itself here rather than with a pill.
+    if kind == Some(HitKind::Heuristic) {
+        full.push_str(" — ");
+        full.push_str(&i18n::tr("disk.kind_guess_tip"));
+    }
     // Annotation, not action: a matching clean-hint rides the tooltip —
     // owner tool plus its own cleanup command, never run by us.
     if let Some(hint) = cleanhints::lookup(path) {
@@ -641,6 +687,7 @@ fn analysis_row(
                         .tooltip(widgets::wrap_tooltip(full))
                         .child(label),
                 )
+                .children(kind.and_then(|kind| kind_pill(id, index, kind)))
                 .child(
                     div()
                         .flex_none()
