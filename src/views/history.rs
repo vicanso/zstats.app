@@ -9,7 +9,7 @@ use super::widgets::{self, card};
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::{ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{HistoryRange, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -23,19 +23,30 @@ use rust_i18n::t;
 const TOP_N: usize = 12;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
+    let range = state.history_range();
+    let title = i18n::tr(range.title_key());
     let Some(rows) = state.history() else {
         // The read is on the background executor; this is the frame or two
-        // before it lands.
-        return vec![widgets::empty_card(
-            i18n::tr("history.title"),
-            i18n::tr("history.loading"),
-        )];
+        // before it lands (or a freshly switched range re-reading).
+        return vec![widgets::empty_card(title, i18n::tr("history.loading"))];
     };
     if rows.is_empty() {
-        return vec![widgets::empty_card(
-            i18n::tr("history.empty_title"),
-            i18n::tr("history.empty_body"),
-        )];
+        // Keep the range chips reachable: an empty *day* must not strand
+        // the user away from the week that does have data.
+        return vec![
+            widgets::list_shell()
+                .child(widgets::list_header(
+                    i18n::tr("history.empty_title"),
+                    Some(header_controls(range)),
+                ))
+                .child(
+                    div()
+                        .px(px(13.))
+                        .pb(px(11.))
+                        .child(widgets::note(i18n::tr("history.empty_body"))),
+                )
+                .into_any_element(),
+        ];
     }
 
     // The bar is relative to the day's biggest spender — an absolute scale
@@ -53,10 +64,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
 
     let list = widgets::list_shell()
-        .child(widgets::list_header(
-            i18n::tr("history.title"),
-            Some(refresh_control()),
-        ))
+        .child(widgets::list_header(title, Some(header_controls(range))))
         .children(shown.into_iter().enumerate().map(|(i, s)| {
             v_flex()
                 .px(px(13.))
@@ -181,6 +189,37 @@ fn explainer() -> AnyElement {
                 .text_color(theme::text_muted())
                 .child(i18n::tr("history.about_body")),
         )
+        .into_any_element()
+}
+
+/// Range chips and the refresh button, side by side in the header.
+fn header_controls(current: HistoryRange) -> AnyElement {
+    h_flex()
+        .items_center()
+        .gap(px(2.))
+        .children(HistoryRange::ALL.into_iter().enumerate().map(|(i, range)| {
+            let on = range == current;
+            div()
+                .id(("history-range", i))
+                .flex_none()
+                .rounded(px(4.))
+                .px(px(5.))
+                .py(px(1.))
+                .text_size(px(9.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .when(on, |d| d.bg(theme::chip()).text_color(theme::text()))
+                .when(!on, |d| {
+                    d.text_color(theme::text_muted())
+                        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+                })
+                .child(i18n::tr(range.label_key()))
+                .on_click(move |_, _window, cx| {
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.set_history_range(range, cx));
+                })
+        }))
+        .child(refresh_control())
         .into_any_element()
 }
 

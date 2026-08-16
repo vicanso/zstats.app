@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use zstats::records::{MetricRecord, read_range};
 
-/// One process's share of a day.
+/// One process's share of the chosen window.
 pub struct Spender {
     pub pid: u32,
     pub name: String,
@@ -34,12 +34,17 @@ pub struct Spender {
     pub minutes: usize,
 }
 
-/// Read today's history and rank it. Blocking file IO — call it off the UI
-/// thread.
-pub fn today(config_dir: &Path) -> std::io::Result<Vec<Spender>> {
+/// Read the last `days` days of history (today included) and rank them.
+/// `1` is the classic today view; wider windows answer "who burned the
+/// most this week" from the same 30-day files zstats already keeps.
+/// Blocking file IO — call it off the UI thread.
+pub fn spenders(config_dir: &Path, days: u16) -> std::io::Result<Vec<Spender>> {
     // Files are named by *local* date, which is what `Zoned::now` gives.
-    let date = jiff::Zoned::now().date();
-    Ok(rank(read_range(config_dir, date, date)?))
+    let end = jiff::Zoned::now().date();
+    let start = end
+        .checked_sub(jiff::Span::new().days(i64::from(days.max(1)) - 1))
+        .unwrap_or(end);
+    Ok(rank(read_range(config_dir, start, end)?))
 }
 
 /// Sum each process's consumption across its records.

@@ -170,6 +170,46 @@ enum Episode {
     System(AlertKind),
 }
 
+/// How far back the History tab reads. A view preference like
+/// [`ProcSort`] — session-only, not persisted; the daily files zstats
+/// keeps go back 30 days, which bounds the widest option.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HistoryRange {
+    #[default]
+    Today,
+    Week,
+    Month,
+}
+
+impl HistoryRange {
+    pub const ALL: [HistoryRange; 3] =
+        [HistoryRange::Today, HistoryRange::Week, HistoryRange::Month];
+
+    pub fn days(self) -> u16 {
+        match self {
+            HistoryRange::Today => 1,
+            HistoryRange::Week => 7,
+            HistoryRange::Month => 30,
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            HistoryRange::Today => "history.range_today",
+            HistoryRange::Week => "history.range_week",
+            HistoryRange::Month => "history.range_month",
+        }
+    }
+
+    pub fn title_key(self) -> &'static str {
+        match self {
+            HistoryRange::Today => "history.title_today",
+            HistoryRange::Week => "history.title_week",
+            HistoryRange::Month => "history.title_month",
+        }
+    }
+}
+
 /// The directory analyser (docs/disk-analysis.md). Deliberately NOT reset
 /// on hide, unlike every other one-shot: a `~/Library` walk is minutes,
 /// and the panel auto-hides on any focus loss — hide-resets would mean no
@@ -391,6 +431,8 @@ pub struct ZStatsAppState {
     /// read walks a day of JSONL and there is no reason to pay for it before
     /// somebody asks.
     history: Option<Vec<Spender>>,
+    /// The window `history` was (or is being) read for.
+    history_range: HistoryRange,
     /// The whole-table listing, only ever populated on request.
     full_scan: FullScan,
     /// The whole-tree listing for the Apps tab, only ever populated on request.
@@ -457,6 +499,7 @@ impl Default for ZStatsAppState {
             abnormal: AbnormalWatch::default(),
             net: NetActivity::default(),
             history: None,
+            history_range: HistoryRange::default(),
             full_scan: FullScan::default(),
             full_app_scan: FullAppScan::default(),
             proc_filter: None,
@@ -1094,21 +1137,43 @@ impl ZStatsAppState {
         self.history.as_deref()
     }
 
-    /// Re-read today's history file on the background executor.
+    pub fn history_range(&self) -> HistoryRange {
+        self.history_range
+    }
+
+    /// Switch the window and re-read. The rows drop to the loading state
+    /// first — stale today-rows under a "30 days" title would be a lie.
+    pub fn set_history_range(&mut self, range: HistoryRange, cx: &mut Context<Self>) {
+        if self.history_range == range {
+            return;
+        }
+        self.history_range = range;
+        self.history = None;
+        self.load_history(cx);
+    }
+
+    /// Re-read the selected window's history files on the background
+    /// executor. Guarded by the range it was started for: quickly
+    /// flipping ranges must not let a slow wide read land under a
+    /// narrower title.
     pub fn load_history(&mut self, cx: &mut Context<Self>) {
+        let range = self.history_range;
         cx.spawn(async move |this, cx| {
             let rows = cx
                 .background_executor()
-                .spawn(async {
-                    history::today(&zstats::settings::default_dir()).unwrap_or_else(|e| {
-                        eprintln!("could not read history: {e}");
-                        Vec::new()
-                    })
+                .spawn(async move {
+                    history::spenders(&zstats::settings::default_dir(), range.days())
+                        .unwrap_or_else(|e| {
+                            eprintln!("could not read history: {e}");
+                            Vec::new()
+                        })
                 })
                 .await;
             let _ = this.update(cx, |state, cx| {
-                state.history = Some(rows);
-                cx.notify();
+                if state.history_range == range {
+                    state.history = Some(rows);
+                    cx.notify();
+                }
             });
         })
         .detach();
