@@ -26,16 +26,18 @@ use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs::{self, LanguagePref, ThemePref};
-use crate::state::{HintsSync, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{HintsSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
+use crate::updater;
 use gpui::Entity;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, div, img, px,
+    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Stateful,
+    StatefulInteractiveElement, Styled, div, img, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::switch::Switch;
+use gpui_component::text::TextView;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
@@ -96,7 +98,7 @@ pub fn render(
         SettingsSection::Interface => vec![interface_card(proxy_input, proxy_valid)],
         SettingsSection::Config => render_config(state),
         SettingsSection::Permissions => vec![permissions_card()],
-        SettingsSection::About => vec![about_card()],
+        SettingsSection::About => vec![about_card(state)],
     }
 }
 
@@ -188,7 +190,272 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
     cards
 }
 
-fn about_card() -> AnyElement {
+/// Shared chrome for the About update actions. Full-width or half-row
+/// is the caller's job — the cramped chip-next-to-caption layout is
+/// what overflowed once a version was found.
+fn update_btn(id: &'static str, label: impl Into<String>, accent: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .border_1()
+        .border_color(if accent {
+            theme::accent_wash(45)
+        } else {
+            theme::border()
+        })
+        .bg(if accent {
+            theme::accent_wash(10)
+        } else {
+            theme::inset()
+        })
+        .px(px(10.))
+        .text_size(px(11.))
+        .text_color(theme::text())
+        .child(label.into())
+}
+
+fn update_caption(text: impl Into<String>) -> AnyElement {
+    div()
+        .w_full()
+        .text_size(px(10.))
+        .line_height(relative(1.35))
+        .text_color(theme::text_dim())
+        .whitespace_normal()
+        .child(text.into())
+        .into_any_element()
+}
+
+fn update_check_btn(enabled: bool) -> AnyElement {
+    let btn = update_btn(
+        "about-update-check",
+        i18n::tr(if enabled {
+            "config.update_check"
+        } else {
+            "config.update_checking"
+        }),
+        false,
+    )
+    .w_full()
+    .text_color(if enabled {
+        theme::text()
+    } else {
+        theme::text_dim()
+    });
+    if enabled {
+        btn.hover(|d| d.bg(theme::surface_raised()))
+            .on_click(|_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.check_update(cx));
+            })
+            .into_any_element()
+    } else {
+        btn.into_any_element()
+    }
+}
+
+/// Download (accent) + release page — replace the check button once a
+/// newer tag is known, so the two actions share the row instead of
+/// squeezing in beside the "new version" caption.
+fn update_install_btns(version: String, url: String) -> AnyElement {
+    let download = update_btn(
+        "about-update-download",
+        i18n::tr("config.update_download"),
+        true,
+    )
+    .flex_1()
+    .min_w_0()
+    .hover(|d| d.bg(theme::surface_raised()))
+    .on_click(move |_, _window, cx| {
+        let version = version.clone();
+        cx.global::<ZStatsGlobalStore>()
+            .clone()
+            .update(cx, |state, cx| state.download_update(version, cx));
+    });
+    h_flex()
+        .w_full()
+        .gap(px(8.))
+        .child(download)
+        .child(
+            update_btn("about-update-go", i18n::tr("config.update_go"), false)
+                .flex_1()
+                .min_w_0()
+                .hover(|d| d.bg(theme::surface_raised()))
+                .on_click(move |_, _window, cx| cx.open_url(&url)),
+        )
+        .into_any_element()
+}
+
+fn update_notes_box(notes: &str) -> AnyElement {
+    v_flex()
+        .w_full()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::ink())
+                .child(i18n::tr("config.update_notes")),
+        )
+        .child(
+            div()
+                .id("about-update-notes")
+                .w_full()
+                .max_h(px(160.))
+                .overflow_y_scroll()
+                .rounded(px(7.))
+                .bg(theme::inset())
+                .px(px(10.))
+                .py(px(8.))
+                .text_size(px(11.))
+                .line_height(relative(1.4))
+                .text_color(theme::text_muted())
+                // git-cliff notes are markdown — headings, bullets,
+                // commit links. TextView renders them natively (the
+                // markdown crate is a hard dep of gpui-component, so
+                // this capability was already paid for), and its links
+                // open in the browser on click.
+                .child(TextView::markdown(
+                    "about-update-notes-md",
+                    notes.to_string(),
+                )),
+        )
+        .into_any_element()
+}
+
+fn nonempty_notes(notes: &str) -> Option<&str> {
+    let trimmed = notes.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// "Check for updates" — one query of the latest (non-prerelease)
+/// release, a version compare, and a link. The check button is full
+/// width; finding a newer tag *replaces* it with download / release-page
+/// so the actions never share a row with the caption. Installing stays
+/// a user act on the signed DMG.
+fn update_row(state: &ZStatsAppState) -> AnyElement {
+    enum Action {
+        Check { enabled: bool },
+        Install { version: String, url: String },
+        Busy,
+        Quit,
+    }
+
+    let (caption, action, notes): (Option<String>, Action, Option<&str>) =
+        match state.update_status() {
+            None => (None, Action::Check { enabled: true }, None),
+            Some(UpdateStatus::Checking) => (None, Action::Check { enabled: false }, None),
+            Some(UpdateStatus::Done(updater::UpdateCheck::UpToDate)) => (
+                Some(i18n::tr("config.update_latest")),
+                Action::Check { enabled: true },
+                None,
+            ),
+            Some(UpdateStatus::Done(updater::UpdateCheck::Failed(e))) => (
+                Some(t!("config.update_failed", e = e.as_str()).to_string()),
+                Action::Check { enabled: true },
+                None,
+            ),
+            Some(UpdateStatus::Done(updater::UpdateCheck::Newer {
+                version,
+                url,
+                notes,
+            })) => (
+                Some(t!("config.update_newer", v = version.as_str()).to_string()),
+                Action::Install {
+                    version: version.clone(),
+                    url: url.clone(),
+                },
+                nonempty_notes(notes),
+            ),
+            Some(UpdateStatus::Downloading {
+                received,
+                total,
+                notes,
+                ..
+            }) => (
+                Some(if *total > 0 {
+                    t!(
+                        "config.update_downloading",
+                        got = format::memory(*received),
+                        total = format::memory(*total)
+                    )
+                    .to_string()
+                } else {
+                    t!(
+                        "config.update_downloading_plain",
+                        got = format::memory(*received)
+                    )
+                    .to_string()
+                }),
+                Action::Busy,
+                nonempty_notes(notes),
+            ),
+            Some(UpdateStatus::Installed) => (
+                Some(i18n::tr("config.update_installed")),
+                Action::Quit,
+                None,
+            ),
+            Some(UpdateStatus::DownloadFailed {
+                version,
+                error,
+                url,
+                notes,
+            }) => (
+                Some(t!("config.update_dl_failed", e = error.as_str()).to_string()),
+                Action::Install {
+                    version: version.clone(),
+                    url: url.clone(),
+                },
+                nonempty_notes(notes),
+            ),
+        };
+
+    let actions = match action {
+        Action::Check { enabled } => update_check_btn(enabled),
+        Action::Install { version, url } => update_install_btns(version, url),
+        Action::Busy => update_btn(
+            "about-update-progress",
+            caption.clone().unwrap_or_default(),
+            false,
+        )
+        .w_full()
+        .text_color(theme::text_dim())
+        .into_any_element(),
+        Action::Quit => update_btn("about-update-quit", i18n::tr("config.update_quit"), true)
+            .w_full()
+            .hover(|d| d.bg(theme::surface_raised()))
+            .on_click(|_, _window, cx| cx.quit())
+            .into_any_element(),
+    };
+
+    // During download the caption is the button label itself — don't
+    // repeat it above.
+    let show_caption = !matches!(
+        state.update_status(),
+        Some(UpdateStatus::Downloading { .. })
+    );
+
+    v_flex()
+        .w_full()
+        .px(px(13.))
+        .pt(px(10.))
+        .pb(px(12.))
+        .gap(px(8.))
+        .border_t(px(1.))
+        .border_color(theme::border_subtle())
+        .when(show_caption, |col| {
+            col.children(caption.map(update_caption))
+        })
+        .child(actions)
+        .children(notes.map(update_notes_box))
+        .into_any_element()
+}
+
+fn about_card(state: &ZStatsAppState) -> AnyElement {
     let rows = [
         (
             i18n::tr("config.about_version"),
@@ -247,6 +514,7 @@ fn about_card() -> AnyElement {
                         )
                 })
         })
+        .child(update_row(state))
         .into_any_element()
 }
 

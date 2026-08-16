@@ -30,6 +30,7 @@ mod terminate;
 mod theme;
 #[cfg(not(target_os = "linux"))]
 mod tray;
+mod updater;
 mod views;
 mod watch;
 #[cfg(target_os = "macos")]

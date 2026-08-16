@@ -18,6 +18,7 @@ use crate::history::Spender;
 use crate::i18n;
 use crate::metrics;
 use crate::procscan;
+use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedWatch};
 use gpui::{
@@ -252,6 +253,28 @@ pub enum BigFiles {
     },
 }
 
+/// The version check / assisted download, for the About page.
+pub enum UpdateStatus {
+    Checking,
+    Done(updater::UpdateCheck),
+    Downloading {
+        received: u64,
+        /// 0 while the server has not said.
+        total: u64,
+        url: String,
+        notes: String,
+    },
+    /// Downloaded, verified, and the DMG handed to the OS — the drag
+    /// window is (or was) on screen; installing stays the user's act.
+    Installed,
+    DownloadFailed {
+        version: String,
+        error: String,
+        url: String,
+        notes: String,
+    },
+}
+
 /// The clean-hints update fetch, for the Config page's status line.
 pub enum HintsSync {
     Running,
@@ -442,6 +465,8 @@ pub struct ZStatsAppState {
     history_range: HistoryRange,
     /// The last (or in-flight) clean-hints update fetch.
     hints_sync: Option<HintsSync>,
+    /// The last (or in-flight) version check.
+    update_status: Option<UpdateStatus>,
     /// The whole-table listing, only ever populated on request.
     full_scan: FullScan,
     /// The whole-tree listing for the Apps tab, only ever populated on request.
@@ -510,6 +535,7 @@ impl Default for ZStatsAppState {
             history: None,
             history_range: HistoryRange::default(),
             hints_sync: None,
+            update_status: None,
             full_scan: FullScan::default(),
             full_app_scan: FullAppScan::default(),
             proc_filter: None,
@@ -1145,6 +1171,110 @@ impl ZStatsAppState {
     /// flight or before the tab has ever been opened.
     pub fn history(&self) -> Option<&[Spender]> {
         self.history.as_deref()
+    }
+
+    pub fn update_status(&self) -> Option<&UpdateStatus> {
+        self.update_status.as_ref()
+    }
+
+    /// Ask GitHub for the latest release on the background executor.
+    /// One at a time, same as the hints fetch.
+    pub fn check_update(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.update_status, Some(UpdateStatus::Checking)) {
+            return;
+        }
+        self.update_status = Some(UpdateStatus::Checking);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async { updater::check() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.update_status = Some(UpdateStatus::Done(outcome));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Download `version`'s DMG on the background executor, with a
+    /// progress pump back to this state. One at a time.
+    pub fn download_update(&mut self, version: String, cx: &mut Context<Self>) {
+        if matches!(self.update_status, Some(UpdateStatus::Downloading { .. })) {
+            return;
+        }
+        let (url, notes) = match &self.update_status {
+            Some(UpdateStatus::Done(updater::UpdateCheck::Newer { url, notes, .. })) => {
+                (url.clone(), notes.clone())
+            }
+            Some(UpdateStatus::DownloadFailed { url, notes, .. }) => (url.clone(), notes.clone()),
+            _ => (String::new(), String::new()),
+        };
+        self.update_status = Some(UpdateStatus::Downloading {
+            received: 0,
+            total: 0,
+            url,
+            notes,
+        });
+        cx.notify();
+
+        let (tx, rx) = smol::channel::unbounded::<(u64, u64)>();
+        cx.spawn(async move |this, cx| {
+            while let Ok((received, total)) = rx.recv().await {
+                let _ = this.update(cx, |state, cx| {
+                    if let Some(UpdateStatus::Downloading {
+                        received: r,
+                        total: t,
+                        ..
+                    }) = &mut state.update_status
+                    {
+                        *r = received;
+                        *t = total;
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            let tag = version.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    // Throttled to whole-MB steps: every 64 KB chunk
+                    // would repaint the settings window for nothing.
+                    let mut last_mb = u64::MAX;
+                    updater::download_and_open(&tag, move |received, total| {
+                        let mb = received / (1024 * 1024);
+                        if mb != last_mb || received == total {
+                            last_mb = mb;
+                            let _ = tx.try_send((received, total));
+                        }
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                let (url, notes) = match &state.update_status {
+                    Some(UpdateStatus::Downloading { url, notes, .. }) => {
+                        (url.clone(), notes.clone())
+                    }
+                    _ => (String::new(), String::new()),
+                };
+                state.update_status = Some(match outcome {
+                    Ok(_path) => UpdateStatus::Installed,
+                    Err(error) => UpdateStatus::DownloadFailed {
+                        version,
+                        error,
+                        url,
+                        notes,
+                    },
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn hints_sync(&self) -> Option<&HintsSync> {
