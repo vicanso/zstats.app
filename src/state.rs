@@ -445,6 +445,10 @@ pub struct ZStatsAppState {
     /// is a per-visit choice. Starting or drilling an analysis unfolds —
     /// the user just asked to watch it.
     disk_analysis_expanded: bool,
+    /// Whether the dirs table shows every retained row (up to
+    /// `TABLE_KEEP`) or the display default. Reset together with the
+    /// card fold: per-visit, per-scan choice.
+    analysis_show_all_dirs: bool,
     /// The settings window, if one was ever opened. Kept so a second
     /// click focuses the existing window; a handle whose window the user
     /// closed fails its update and a fresh window is built instead.
@@ -533,6 +537,7 @@ impl Default for ZStatsAppState {
             disk_analysis_stack: Vec::new(),
             disk_analysis_root: None,
             disk_analysis_expanded: false,
+            analysis_show_all_dirs: false,
             settings_window: None,
             disk_analysis_runs: 0,
             snoozed: HashMap::new(),
@@ -774,6 +779,15 @@ impl ZStatsAppState {
         };
         self.cancel_disk_analysis_walk();
         self.disk_analysis = DiskAnalysis::Ready(prev);
+        cx.notify();
+    }
+
+    pub fn analysis_show_all_dirs(&self) -> bool {
+        self.analysis_show_all_dirs
+    }
+
+    pub fn set_analysis_show_all_dirs(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.analysis_show_all_dirs = show;
         cx.notify();
     }
 
@@ -1181,6 +1195,7 @@ impl ZStatsAppState {
             // see `disk_analysis_expanded`.
             if tab == Tab::Hardware {
                 self.disk_analysis_expanded = false;
+                self.analysis_show_all_dirs = false;
             }
             // Opening History is what pays for reading it. Re-read on every
             // visit rather than caching: the file grows a line a minute, and

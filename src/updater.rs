@@ -17,9 +17,18 @@ use crate::proxy;
 
 const LATEST_URL: &str = "https://api.github.com/repos/vicanso/zstats.app/releases/latest";
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// The universal DMG — one asset fits both architectures, so no
-/// os/arch matching is needed at all.
-const ASSET_NAME: &str = "zstats.dmg";
+/// The DMG for this build's architecture — half the bytes of the
+/// universal image (6.6 vs 13.3 MB measured on v0.1.1). `ARCH` is a
+/// compile-time constant: a universal install runs its native slice,
+/// so this picks the machine's real architecture. Unknown arch falls
+/// back to the universal image, which fits everything.
+fn asset_name() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "zstats-aarch64.dmg",
+        "x86_64" => "zstats-x86_64.dmg",
+        _ => "zstats.dmg",
+    }
+}
 /// sha256sum-format digests the release workflow uploads beside it.
 const CHECKSUMS_NAME: &str = "SHA256SUMS";
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -44,8 +53,9 @@ pub fn download_and_open(
         .proxy(proxy::app_proxy())
         .build()
         .new_agent();
+    let asset = asset_name();
     let response = agent
-        .get(&release_download_url(tag, ASSET_NAME))
+        .get(&release_download_url(tag, asset))
         .header("User-Agent", format!("zstats/{}", about::version()))
         .call()
         .map_err(|e| e.to_string())?;
@@ -71,14 +81,14 @@ pub fn download_and_open(
         on_progress(bytes.len() as u64, total);
     }
 
-    let path = std::env::temp_dir().join(format!("zstats-{tag}.dmg"));
+    let path = std::env::temp_dir().join(format!("{tag}-{asset}"));
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
 
     // Transport-integrity check against the release's own digest list.
     // A missing SHA256SUMS degrades to unverified-but-proceed: the DMG
     // is signed and notarized, and Gatekeeper validates that signature
     // when the user installs — the checksum only fails *earlier*.
-    if let Some(expected) = fetch_checksum(&agent, tag)
+    if let Some(expected) = fetch_checksum(&agent, tag, asset)
         && let Some(got) = file_sha256(&path)
         && !got.eq_ignore_ascii_case(&expected)
     {
@@ -98,9 +108,9 @@ pub fn download_and_open(
     Ok(path)
 }
 
-/// The expected digest for the DMG, from the release's SHA256SUMS
+/// The expected digest for `asset`, from the release's SHA256SUMS
 /// (`<sha256>  <name>` lines).
-fn fetch_checksum(agent: &ureq::Agent, tag: &str) -> Option<String> {
+fn fetch_checksum(agent: &ureq::Agent, tag: &str, asset: &str) -> Option<String> {
     let text = agent
         .get(&release_download_url(tag, CHECKSUMS_NAME))
         .header("User-Agent", format!("zstats/{}", about::version()))
@@ -110,7 +120,7 @@ fn fetch_checksum(agent: &ureq::Agent, tag: &str) -> Option<String> {
         .read_to_string()
         .ok()?;
     text.lines()
-        .find(|line| line.trim_end().ends_with(&format!(" {ASSET_NAME}")))
+        .find(|line| line.trim_end().ends_with(&format!(" {asset}")))
         .and_then(|line| line.split_whitespace().next())
         .map(str::to_string)
 }

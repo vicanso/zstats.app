@@ -33,11 +33,14 @@ const DOMINANCE_PERCENT: u64 = 90;
 /// noise the skip counters still account for.
 pub const TABLE_CAP: usize = 8;
 /// The big-directory and big-file tables may grow past `TABLE_CAP` up to
-/// this, but only while every extra row still exceeds `TABLE_EXTEND_MIN`
-/// — a tail that heavy is exactly what the reader came for; a lighter
-/// one is the noise the cap exists to cut. The regenerable table stays
-/// at `TABLE_CAP`.
+/// this by default, but only while every extra row still exceeds
+/// `TABLE_EXTEND_MIN` — a tail that heavy is exactly what the reader
+/// came for; a lighter one is the noise the cap exists to cut.
 const TABLE_CAP_EXTENDED: usize = 10;
+/// Rows *retained* per table — what the dirs section's "show more"
+/// control can reveal. Display defaults stay at `TABLE_CAP`(+2); this
+/// only bounds the data (and the P2b cache rows).
+pub const TABLE_KEEP: usize = 20;
 /// Binary 500 MB, the same convention as `bigfiles`' thresholds.
 const TABLE_EXTEND_MIN: u64 = 500 * 1024 * 1024;
 /// Directories below this never reach any table, so the retained index
@@ -294,19 +297,19 @@ fn run(
             }
             if last_partial.elapsed() >= PARTIAL_EVERY {
                 last_partial = Instant::now();
-                let partial = snapshot(
+                let partial = snapshot(Aggregates {
                     root,
-                    started.elapsed(),
-                    own_bytes.clone(),
-                    &plain_dirs,
-                    &fold,
-                    files.clone(),
-                    dirs_done,
-                    denied,
-                    protected.load(Ordering::Relaxed),
-                    dataless,
-                    false,
-                );
+                    took: started.elapsed(),
+                    own_bytes: own_bytes.clone(),
+                    plain_dirs: &plain_dirs,
+                    fold: &fold,
+                    files: files.clone(),
+                    dirs_seen: dirs_done,
+                    skipped_denied: denied,
+                    skipped_protected: protected.load(Ordering::Relaxed),
+                    skipped_dataless: dataless,
+                    build_index: false,
+                });
                 let _ = tx.try_send(ScanEvent::Partial(Box::new(partial)));
             }
             if path == root || fold_owner(&fold, &path, root).is_some() {
@@ -353,38 +356,57 @@ fn run(
         return Ok(None);
     }
 
-    Ok(Some(snapshot(
+    Ok(Some(snapshot(Aggregates {
         root,
-        started.elapsed(),
+        took: started.elapsed(),
         own_bytes,
-        &plain_dirs,
-        &fold,
+        plain_dirs: &plain_dirs,
+        fold: &fold,
         files,
-        dirs_done,
-        denied,
-        protected.load(Ordering::Relaxed),
-        dataless,
-        true,
-    )))
+        dirs_seen: dirs_done,
+        skipped_denied: denied,
+        skipped_protected: protected.load(Ordering::Relaxed),
+        skipped_dataless: dataless,
+        build_index: true,
+    })))
+}
+
+/// Everything the walk has aggregated so far, named — the snapshot
+/// builder's input as a struct rather than eleven positional arguments
+/// (clippy's lint was right about the call sites).
+struct Aggregates<'a> {
+    root: &'a Path,
+    took: Duration,
+    own_bytes: HashMap<PathBuf, u64>,
+    plain_dirs: &'a [PathBuf],
+    fold: &'a HashMap<PathBuf, HitKind>,
+    files: Vec<FileHit>,
+    dirs_seen: usize,
+    skipped_denied: usize,
+    skipped_protected: usize,
+    skipped_dataless: usize,
+    /// Final results build the drill index and the suggestion set;
+    /// partial snapshots skip both.
+    build_index: bool,
 }
 
 /// Assemble a `ScanResult` from the aggregates as they stand — used for
 /// the final result and, on a clone of the aggregates, for the partial
 /// snapshots streamed mid-walk. One builder, so the two can never drift.
-#[allow(clippy::too_many_arguments)]
-fn snapshot(
-    root: &Path,
-    took: Duration,
-    own_bytes: HashMap<PathBuf, u64>,
-    plain_dirs: &[PathBuf],
-    fold: &HashMap<PathBuf, HitKind>,
-    mut files: Vec<FileHit>,
-    dirs_seen: usize,
-    skipped_denied: usize,
-    skipped_protected: usize,
-    skipped_dataless: usize,
-    build_index: bool,
-) -> ScanResult {
+fn snapshot(agg: Aggregates) -> ScanResult {
+    let Aggregates {
+        root,
+        took,
+        own_bytes,
+        plain_dirs,
+        fold,
+        mut files,
+        dirs_seen,
+        skipped_denied,
+        skipped_protected,
+        skipped_dataless,
+        build_index,
+    } = agg;
     let (totals, children) = rollup(root, own_bytes, plain_dirs, fold);
     let (regenerable, dirs) = tables(root, &totals, &children, fold);
     files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
@@ -397,8 +419,8 @@ fn snapshot(
     } else {
         Vec::new()
     };
-    // The index keeps the FULL blind-spot file list; the table cap below
-    // only trims what one card can show.
+    // The index keeps the FULL blind-spot file list; the retention cap
+    // below only trims what a card (after "show more") can show.
     let index = build_index.then(|| {
         Arc::new(DirIndex {
             totals: totals
@@ -409,7 +431,7 @@ fn snapshot(
             files: files.clone(),
         })
     });
-    cap_table(&mut files, |f| f.bytes);
+    files.truncate(TABLE_KEEP);
     ScanResult {
         root: root.to_path_buf(),
         scanned_at: std::time::SystemTime::now(),
@@ -495,7 +517,7 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
         .cloned()
         .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
-    cap_table(&mut files, |f| f.bytes);
+    files.truncate(TABLE_KEEP);
     if regenerable.is_empty() && dirs.is_empty() && files.is_empty() {
         return None;
     }
@@ -624,7 +646,7 @@ fn tables(
         })
         .unwrap_or_default();
     dirs.sort_by_key(|d| std::cmp::Reverse(d.bytes));
-    cap_table(&mut dirs, |d| d.bytes);
+    dirs.truncate(TABLE_KEEP);
 
     (regenerable, dirs)
 }
@@ -854,14 +876,15 @@ fn load_cache_in(dir: &Path, root: &Path) -> Option<ScanResult> {
     })
 }
 
-/// Cap a descending-sorted table at `TABLE_CAP`, admitting rows 9–10
-/// only while each still exceeds `TABLE_EXTEND_MIN` on its own.
-fn cap_table<T>(items: &mut Vec<T>, bytes: impl Fn(&T) -> u64) {
+/// Default rows shown for a descending-sorted table: `TABLE_CAP`, rows
+/// 9–10 admitted only while each still exceeds `TABLE_EXTEND_MIN` on
+/// its own. The rest (up to `TABLE_KEEP`) hides behind "show more".
+pub fn default_rows<T>(items: &[T], bytes: impl Fn(&T) -> u64) -> usize {
     let mut keep = items.len().min(TABLE_CAP_EXTENDED);
     while keep > TABLE_CAP && bytes(&items[keep - 1]) <= TABLE_EXTEND_MIN {
         keep -= 1;
     }
-    items.truncate(keep);
+    keep
 }
 
 /// Follow single-child dominance down to the first real fork: a chain of
@@ -1250,11 +1273,7 @@ mod tests {
     #[test]
     fn cap_table_extends_only_while_the_tail_stays_heavy() {
         let mb = |n: u64| n * 1024 * 1024;
-        let capped = |sizes: Vec<u64>| {
-            let mut sizes = sizes;
-            cap_table(&mut sizes, |b| *b);
-            sizes.len()
-        };
+        let capped = |sizes: Vec<u64>| default_rows(&sizes, |b| *b);
         // Rows 9 and 10 both exceed 500 MB → the full extended cap.
         assert_eq!(capped((0..12).map(|i| mb(2000 - i * 100)).collect()), 10);
         // Row 9 heavy, row 10 light → nine rows, not a padded ten.

@@ -248,7 +248,11 @@ fn analysis_card(state: &ZStatsAppState) -> AnyElement {
         // that only grow. No delete controls mid-scan: the walker may
         // still be inside any of these trees.
         DiskAnalysis::Running { partial, .. } => div()
-            .children(partial.as_ref().map(|r| analysis_tables(r, false)))
+            .children(
+                partial
+                    .as_ref()
+                    .map(|r| analysis_tables(r, false, state.analysis_show_all_dirs())),
+            )
             .into_any_element(),
         DiskAnalysis::Failed(e) => div()
             .children(back_chip(state))
@@ -264,7 +268,11 @@ fn analysis_card(state: &ZStatsAppState) -> AnyElement {
             .into_any_element(),
         DiskAnalysis::Ready(result) => div()
             .children(back_chip(state))
-            .child(analysis_tables(result, true))
+            .child(analysis_tables(
+                result,
+                true,
+                state.analysis_show_all_dirs(),
+            ))
             .into_any_element(),
     };
     widgets::list_shell()
@@ -473,7 +481,7 @@ fn analysis_caption_parts(
     parts.join(" · ")
 }
 
-fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
+fn analysis_tables(result: &ScanResult, actions: bool, show_all_dirs: bool) -> AnyElement {
     let root = result.root.clone();
     let dir_rows = |hits: &[DirHit], id: &'static str, deletable: bool| -> Vec<AnyElement> {
         let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
@@ -482,17 +490,17 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
             // Directory rows drill on click (actions = a finished result;
             // mid-scan tables are inert), file rows never do.
             .map(|(i, h)| {
-                analysis_row(
+                analysis_row(AnalysisRow {
                     id,
-                    i,
-                    &h.path,
-                    h.bytes,
-                    Some(h.kind),
-                    max,
-                    &root,
+                    index: i,
+                    path: &h.path,
+                    bytes: h.bytes,
+                    kind: Some(h.kind),
+                    group_max: max,
+                    root: &root,
                     deletable,
-                    actions,
-                )
+                    drillable: actions,
+                })
             })
             .collect()
     };
@@ -501,9 +509,17 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
         hits.iter()
             .enumerate()
             .map(|(i, h)| {
-                analysis_row(
-                    "ana-file", i, &h.path, h.bytes, None, max, &root, false, false,
-                )
+                analysis_row(AnalysisRow {
+                    id: "ana-file",
+                    index: i,
+                    path: &h.path,
+                    bytes: h.bytes,
+                    kind: None,
+                    group_max: max,
+                    root: &root,
+                    deletable: false,
+                    drillable: false,
+                })
             })
             .collect()
     };
@@ -552,11 +568,21 @@ fn analysis_tables(result: &ScanResult, actions: bool) -> AnyElement {
             dir_rows(sug_head, "ana-sug", actions),
             actions.then(|| suggest_clear_button(&result.suggestions, sug_total)),
         ))
-        .children(section(
-            i18n::tr("disk.ana_dirs"),
-            dir_rows(&result.dirs, "ana-dir", false),
-            None,
-        ))
+        .children({
+            // Default 8–10 rows; "show more" reveals everything retained
+            // (up to TABLE_KEEP). The chip states how many are hidden.
+            let shown = if show_all_dirs {
+                result.dirs.len()
+            } else {
+                diskscan::default_rows(&result.dirs, |d| d.bytes)
+            };
+            let hidden = result.dirs.len() - shown;
+            section(
+                i18n::tr("disk.ana_dirs"),
+                dir_rows(&result.dirs[..shown], "ana-dir", false),
+                (hidden > 0 || show_all_dirs).then(|| more_chip(hidden, show_all_dirs)),
+            )
+        })
         .children(section(
             i18n::tr("disk.ana_files"),
             file_rows(&result.files),
@@ -656,18 +682,60 @@ fn kind_pill(id: &'static str, index: usize, kind: HitKind) -> Option<AnyElement
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn analysis_row(
+/// The dirs section's fold: "show more · N" ↔ "show less".
+fn more_chip(hidden: usize, show_all: bool) -> AnyElement {
+    div()
+        .id("ana-dirs-more")
+        .flex_none()
+        .rounded(px(4.))
+        .px(px(6.))
+        .py(px(1.))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text_muted())
+        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+        .child(if show_all {
+            i18n::tr("disk.ana_less")
+        } else {
+            t!("disk.ana_more", count = hidden).to_string()
+        })
+        .on_click(move |_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| {
+                    state.set_analysis_show_all_dirs(!show_all, cx)
+                });
+        })
+        .into_any_element()
+}
+
+/// One ranked row's inputs, named — a struct rather than nine
+/// positional arguments (clippy's lint was right about the call sites).
+struct AnalysisRow<'a> {
     id: &'static str,
     index: usize,
-    path: &std::path::Path,
+    path: &'a std::path::Path,
     bytes: u64,
     kind: Option<HitKind>,
+    /// The group's largest row, the meter's 100%.
     group_max: u64,
-    root: &std::path::Path,
+    root: &'a std::path::Path,
     deletable: bool,
     drillable: bool,
-) -> AnyElement {
+}
+
+fn analysis_row(row: AnalysisRow) -> AnyElement {
+    let AnalysisRow {
+        id,
+        index,
+        path,
+        bytes,
+        kind,
+        group_max,
+        root,
+        deletable,
+        drillable,
+    } = row;
     let label = path
         .strip_prefix(root)
         .map(|p| p.display().to_string())
