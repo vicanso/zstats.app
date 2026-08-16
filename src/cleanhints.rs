@@ -228,7 +228,23 @@ owner = "skipped too"
             "/Users/x/dev/proj/target",
             "/Users/x/.rustup/toolchains",
             "/Users/x/Library/Developer/CoreSimulator",
+            "/Users/x/Library/Developer/Xcode/Archives",
             "/Users/x/Library/Containers/com.docker.docker",
+            "/Users/x/Library/Group Containers/HUAQ24HBR6.dev.orbstack",
+            "/Users/x/Library/Containers/com.utmapp.UTM",
+            "/Users/x/Library/Containers/com.tencent.xinWeChat",
+            "/Users/x/Library/Containers/com.tencent.WeWorkMac",
+            "/Users/x/Library/Containers/com.tencent.qq",
+            "/Users/x/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram",
+            "/Users/x/Documents/Zoom",
+            "/Users/x/Library/Application Support/Spotify/PersistentCache",
+            "/Users/x/Library/Application Support/Google/DriveFS",
+            "/Users/x/Library/Application Support/Notion",
+            "/Users/x/Library/Application Support/Figma",
+            "/Users/x/Library/Application Support/Arc",
+            "/Users/x/Library/Application Support/Steam",
+            "/Users/x/Library/Containers/com.kingsoft.wpsoffice.mac",
+            "/Users/x/.Trash",
         ];
         for path in must_not_trash {
             let hint = hints
@@ -240,10 +256,27 @@ owner = "skipped too"
                 "{path} is user data / a working tree and must not be trashable"
             );
         }
-        let npm = hints
-            .iter()
-            .find(|h| h.matches(&p("/Users/x/.npm")))
-            .expect("npm cache");
-        assert!(npm.trashable, "pure caches stay on the cleanup list");
+        let must_trash = [
+            "/Users/x/.npm",
+            "/Users/x/Library/Caches/com.spotify.client",
+            "/Users/x/Library/Caches/Google/Chrome",
+            "/Users/x/Library/Caches/com.brave.Browser",
+            "/Users/x/Library/Caches/us.zoom.xos",
+            "/Users/x/Library/Application Support/Slack/Cache",
+            "/Users/x/Library/Application Support/Adobe/Common/Media Cache Files",
+            "/Users/x/Library/Application Support/Claude/Cache",
+            "/Users/x/Library/Application Support/Notion/Cache",
+            "/Users/x/Library/Developer/Xcode/watchOS DeviceSupport",
+        ];
+        for path in must_trash {
+            let hint = hints
+                .iter()
+                .find(|h| h.matches(&p(path)))
+                .unwrap_or_else(|| panic!("no hint for {path}"));
+            assert!(
+                hint.trashable,
+                "{path} is a pure cache and should stay on the cleanup list"
+            );
+        }
     }
 }

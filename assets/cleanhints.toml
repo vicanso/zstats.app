@@ -293,6 +293,21 @@ owner = "Xcode"
 trashable = true
 
 [[hint]]
+match = "~/Library/Developer/Xcode/watchOS DeviceSupport"
+owner = "Xcode"
+trashable = true
+
+[[hint]]
+match = "~/Library/Developer/Xcode/tvOS DeviceSupport"
+owner = "Xcode"
+trashable = true
+
+# Exported IPAs / xcarchive bundles — user artefacts, never a cleanup target.
+[[hint]]
+match = "~/Library/Developer/Xcode/Archives"
+owner = "Xcode"
+
+[[hint]]
 match = "~/Library/Developer/CoreSimulator/Caches"
 owner = "Simulator"
 trashable = true
@@ -349,6 +364,11 @@ match = "~/Library/Caches/JetBrains"
 owner = "JetBrains"
 trashable = true
 
+[[hint]]
+match = "~/Library/Application Support/Claude/Cache"
+owner = "Claude"
+trashable = true
+
 # --- browsers for tests, containers, ML -------------------------------
 
 [[hint]]
@@ -373,6 +393,17 @@ match = "~/Library/Containers/com.docker.docker"
 owner = "Docker Desktop"
 command = "docker system prune"
 
+# Official data store (docs.orbstack.dev/faq). ~/OrbStack is only a
+# zero-size mount view of the same tree — do not hint that path.
+[[hint]]
+match = "~/Library/Group Containers/HUAQ24HBR6.dev.orbstack"
+owner = "OrbStack"
+command = "docker system prune"
+
+[[hint]]
+match = "~/Library/Containers/com.utmapp.UTM"
+owner = "UTM"
+
 [[hint]]
 match = "~/.cache/huggingface"
 owner = "Hugging Face"
@@ -387,6 +418,176 @@ command = "huggingface-cli delete-cache"
 match = "~/.ollama/models"
 owner = "Ollama"
 command = "ollama rm <model>"
+
+# --- messaging & meetings (chat history inside — annotation only) -----
+
+[[hint]]
+match = "~/Library/Containers/com.tencent.xinWeChat"
+owner = "WeChat 微信"
+command = "微信 → 设置 → 通用 → 存储空间"
+
+[[hint]]
+match = "~/Library/Containers/com.tencent.WeWorkMac"
+owner = "企业微信"
+
+[[hint]]
+match = "~/Library/Containers/com.tencent.qq"
+owner = "QQ"
+command = "QQ → 设置 → 存储管理"
+
+[[hint]]
+match = "~/Library/Application Support/DingTalk"
+owner = "DingTalk 钉钉"
+
+[[hint]]
+match = "~/Library/Application Support/LarkShell"
+owner = "Lark 飞书"
+
+[[hint]]
+match = "~/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
+owner = "Telegram"
+command = "Telegram → Settings → Data and Storage"
+
+[[hint]]
+match = "~/Library/Application Support/Slack/Cache"
+owner = "Slack"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/discord/Cache"
+owner = "Discord"
+trashable = true
+
+# Recordings live here — user data, never suggest it.
+[[hint]]
+match = "~/Documents/Zoom"
+owner = "Zoom"
+
+[[hint]]
+match = "~/Library/Caches/us.zoom.xos"
+owner = "Zoom"
+trashable = true
+
+# --- browsers (cache dirs only, never profiles) ------------------------
+
+[[hint]]
+match = "~/Library/Caches/Google/Chrome"
+owner = "Chrome"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/Microsoft Edge"
+owner = "Edge"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/Firefox"
+owner = "Firefox"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/com.brave.Browser"
+owner = "Brave"
+trashable = true
+
+# Profile / Spaces live under Application Support — annotation only.
+# The short Caches/Arc name is not a documented, stable location.
+[[hint]]
+match = "~/Library/Application Support/Arc"
+owner = "Arc"
+
+# --- streaming & cloud drives ------------------------------------------
+
+# Offline downloads default to PersistentCache/Storage (Spotify community
+# accepted answer). Streaming cache is the Caches entry below; this tree
+# is the user's offline library — annotation only.
+[[hint]]
+match = "~/Library/Application Support/Spotify/PersistentCache"
+owner = "Spotify"
+command = "Spotify → Settings → Storage"
+
+[[hint]]
+match = "~/Library/Caches/com.spotify.client"
+owner = "Spotify"
+command = "Spotify → Settings → Storage → Clear cache"
+trashable = true
+
+[[hint]]
+match = "~/Library/Containers/com.netease.163music"
+owner = "网易云音乐"
+
+[[hint]]
+match = "~/Library/Containers/com.tencent.QQMusicMac"
+owner = "QQ 音乐"
+
+# Cloud drives mix a re-downloadable cache with login and sync state —
+# annotation only, cleaning belongs to the client.
+[[hint]]
+match = "~/Library/Application Support/Google/DriveFS"
+owner = "Google Drive"
+
+[[hint]]
+match = "~/Library/Containers/com.baidu.BaiduNetdisk-mac"
+owner = "百度网盘"
+
+[[hint]]
+match = "~/Library/Dropbox"
+owner = "Dropbox"
+
+# --- design & office ----------------------------------------------------
+
+# Adobe documents both media-cache folders as safe to clear (they are
+# rebuilt on import); video work leaves tens of GB here.
+[[hint]]
+match = "~/Library/Application Support/Adobe/Common/Media Cache Files"
+owner = "Adobe"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Adobe/Common/Media Cache"
+owner = "Adobe"
+trashable = true
+
+[[hint]]
+match = "~/Library/Caches/Adobe"
+owner = "Adobe"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Notion"
+owner = "Notion"
+
+[[hint]]
+match = "~/Library/Application Support/Notion/Cache"
+owner = "Notion"
+trashable = true
+
+[[hint]]
+match = "~/Library/Application Support/Figma"
+owner = "Figma"
+
+[[hint]]
+match = "~/Library/Application Support/Figma/Cache"
+owner = "Figma"
+trashable = true
+
+[[hint]]
+match = "~/Library/Containers/com.kingsoft.wpsoffice.mac"
+owner = "WPS Office"
+
+# --- special -------------------------------------------------------------
+
+# The walk sees the Trash (a dot directory) — often tens of GB that only
+# emptying actually frees. Obviously never a trash suggestion itself.
+[[hint]]
+match = "~/.Trash"
+owner = "Trash 废纸篓"
+command = "Finder → 清空废纸篓"
+
+[[hint]]
+match = "~/Library/Application Support/Steam"
+owner = "Steam"
+command = "Steam → 资源库中管理已安装游戏"
 
 # --- per-project artifacts (matched anywhere by component) ------------
 # Never trashable: they live inside working trees.
