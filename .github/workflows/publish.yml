@@ -46,6 +46,12 @@ jobs:
         id: date
         run: echo "date=$(date +'%Y-%m-%d %H:%M')" >> $GITHUB_OUTPUT
       - uses: actions/checkout@v7
+        with:
+          # Full history + tags: the draft release's changelog needs the
+          # previous v* tag (`git describe` below) to bound its range —
+          # a shallow clone cannot see it and the generated notes would
+          # silently cover the whole history.
+          fetch-depth: 0
       - name: Check tag matches Cargo.toml version
         # Catches a forgotten version bump before an hour of signing and
         # notarization is spent on a release that claims the wrong version.
@@ -115,7 +121,15 @@ jobs:
           if [ -n "$ids" ]; then
             echo "release for $tag already exists; skipping"
           else
-            gh release create "$tag" --draft --title "$tag" --notes ""
+            # Changelog bounded at the previous release tag, found by
+            # matching v* only — the rolling `nightly` tag is newer than
+            # any release and would otherwise be picked as the baseline
+            # (or break auto-detection into "every commit ever"). First
+            # release: no previous tag, and full history is then correct.
+            prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${tag}^" 2>/dev/null || true)"
+            echo "generating notes since: ${prev:-<repository start>}"
+            gh release create "$tag" --draft --title "$tag" \
+              --generate-notes ${prev:+--notes-start-tag "$prev"}
           fi
 
   macos:
