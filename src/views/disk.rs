@@ -77,6 +77,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .when(d.mount_point == "/", |row| {
                             row.child(big_files_chip(state))
                                 .child(analysis_chip(state))
+                                .children(analysis_preset_chips(state))
                                 .child(analysis_pick_chip())
                         })
                         .child(volume_badge(i, d)),
@@ -260,6 +261,59 @@ fn analysis_pick_chip() -> AnyElement {
             .detach();
         })
         .into_any_element()
+}
+
+/// One-click preset scopes beside the folder picker (docs/
+/// disk-analysis.md's scope table): `~/Library` — the blind-spot
+/// close-up — and the merged cache roots. Hidden while a walk runs:
+/// the header's job is then the cancel chip, and a preset click would
+/// silently restart the walk. Clicking starts the walk immediately,
+/// same contract as the picker.
+fn analysis_preset_chips(state: &ZStatsAppState) -> Vec<AnyElement> {
+    if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
+        return Vec::new();
+    }
+    let chip = |id: &'static str,
+                label: String,
+                tip: String,
+                go: fn(&mut ZStatsAppState, &mut gpui::Context<ZStatsAppState>)|
+     -> AnyElement {
+        div()
+            .id(id)
+            .flex_none()
+            .rounded(px(4.))
+            .px(px(5.))
+            .py(px(1.))
+            .text_size(px(10.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme::text_muted())
+            .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+            .tooltip(widgets::wrap_tooltip(tip))
+            .on_click(move |_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>().clone().update(cx, go);
+            })
+            .child(label)
+            .into_any_element()
+    };
+    vec![
+        chip(
+            "ana-preset-library",
+            // A path, not a phrase — the label needs no translation.
+            "~/Library".into(),
+            i18n::tr("disk.ana_preset_library_tip"),
+            |state, cx| {
+                if let Some(home) = diskscan::default_root() {
+                    state.start_disk_analysis_at(home.join("Library"), cx);
+                }
+            },
+        ),
+        chip(
+            "ana-preset-caches",
+            i18n::tr("disk.ana_preset_caches"),
+            i18n::tr("disk.ana_preset_caches_tip"),
+            |state, cx| state.start_disk_analysis_caches(cx),
+        ),
+    ]
 }
 
 fn analysis_card(state: &ZStatsAppState) -> AnyElement {
@@ -493,8 +547,21 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
     if age > STALE_AFTER {
         extras.push(i18n::tr("disk.ana_stale"));
     }
+    // A multi-root scope lists its roots — passing the base alone would
+    // read as a walk of the whole home tree. Pre-tilded, so the parts
+    // helper's own tilde pass leaves the joined string untouched.
+    let root_display = if result.roots.len() > 1 {
+        result
+            .roots
+            .iter()
+            .map(|r| tilde_path(&r.display().to_string(), &home))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    } else {
+        result.root.display().to_string()
+    };
     analysis_caption_parts(
-        &result.root.display().to_string(),
+        &root_display,
         &home,
         format::ago(age),
         t!("disk.ana_took", t = format::took(result.took)).to_string(),

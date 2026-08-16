@@ -131,7 +131,15 @@ pub struct FileHit {
 }
 
 pub struct ScanResult {
+    /// The label / drill base — every table path sits beneath it.
     pub root: PathBuf,
+    /// The roots actually requested, verbatim — `[root]` except for the
+    /// cache-set preset, where `root` is the common ancestor (home) and
+    /// this lists the explicit walk roots. The *requested* set on
+    /// purpose, existing or not: cache identity and the Δ baseline key
+    /// on it, and a `mkdir ~/.cache` between runs must not orphan
+    /// either.
+    pub roots: Vec<PathBuf>,
     /// Wall clock, not monotonic: a cached result must still know its
     /// age after a restart.
     pub scanned_at: std::time::SystemTime,
@@ -190,8 +198,43 @@ pub enum ScanEvent {
 /// Launch the analysis on its own thread. Everything the caller learns —
 /// progress, completion, failure — arrives over `tx`; a cancelled run
 /// simply goes quiet.
-pub fn spawn(root: PathBuf, cancel: Arc<AtomicBool>, tx: smol::channel::Sender<ScanEvent>) {
-    std::thread::spawn(move || match run(&root, &cancel, &tx) {
+/// What one analysis covers: the label/drill base plus the roots the
+/// walker actually visits. Every preset and picked folder is a
+/// single-root scope; the cache-set preset is the one multi-root case
+/// (docs/disk-analysis.md's scope table).
+#[derive(Clone)]
+pub struct ScanScope {
+    pub base: PathBuf,
+    pub roots: Vec<PathBuf>,
+}
+
+impl ScanScope {
+    pub fn single(root: PathBuf) -> Self {
+        Self {
+            base: root.clone(),
+            roots: vec![root],
+        }
+    }
+
+    /// The explicit cache roots, merged into one ranked view under the
+    /// home base. Missing paths (`~/.cache` on many machines) are
+    /// skipped at walk time but stay in the list — see
+    /// [`ScanResult::roots`].
+    pub fn cache_set() -> Option<Self> {
+        let home = default_root()?;
+        Some(Self {
+            roots: vec![
+                home.join("Library/Caches"),
+                home.join(".cache"),
+                home.join("Library/Developer"),
+            ],
+            base: home,
+        })
+    }
+}
+
+pub fn spawn(scope: ScanScope, cancel: Arc<AtomicBool>, tx: smol::channel::Sender<ScanEvent>) {
+    std::thread::spawn(move || match run(&scope, &cancel, &tx) {
         Ok(Some(result)) => {
             let _ = tx.send_blocking(ScanEvent::Done(Box::new(result)));
         }
@@ -216,56 +259,30 @@ pub fn default_root() -> Option<PathBuf> {
 }
 
 fn run(
-    root: &Path,
+    scope: &ScanScope,
     cancel: &Arc<AtomicBool>,
     tx: &smol::channel::Sender<ScanEvent>,
 ) -> Result<Option<ScanResult>, String> {
-    if !root.is_dir() {
-        return Err(format!("{} is not a directory", root.display()));
+    // Missing roots are skipped, not fatal (`~/.cache` on many machines);
+    // only an entirely absent scope is an error.
+    let walked: Vec<PathBuf> = scope.roots.iter().filter(|r| r.is_dir()).cloned().collect();
+    if walked.is_empty() {
+        return Err(format!("{} is not a directory", scope.base.display()));
     }
     let protected = Arc::new(AtomicUsize::new(0));
-
-    let walk = {
-        let deny: Vec<PathBuf> = std::env::var("HOME")
-            .ok()
-            .map(|h| {
-                TCC_DENY
-                    .iter()
-                    .map(|s| Path::new(&h).join("Library").join(s))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let protected = protected.clone();
-        let cancelled = cancel.clone();
-        Walk::new(root)
-            .follow_links(false)
-            .skip_hidden(false)
-            .parallelism(Parallelism::RayonNewPool(walk_threads()))
-            .process_read_dir(move |_depth, _path, _state, children| {
-                if cancelled.load(Ordering::Relaxed) {
-                    // Stop expanding: without this the workers keep
-                    // stat'ing ahead while the consumer is bailing out.
-                    children.clear();
-                    return;
-                }
-                for child in children.iter_mut().flatten() {
-                    if child.file_type.is_dir() {
-                        if deny.iter().any(|d| child.path() == *d) {
-                            // Pruned, not visited: the whole point is that
-                            // no syscall ever lands inside.
-                            child.read_children_path = None;
-                            protected.fetch_add(1, Ordering::Relaxed);
-                        }
-                    } else if child.file_type.is_file() {
-                        // On the worker pool by design — see `Walk`.
-                        child.client_state = std::fs::symlink_metadata(child.path()).ok();
-                    }
-                }
-            })
-    };
+    let deny: Vec<PathBuf> = std::env::var("HOME")
+        .ok()
+        .map(|h| {
+            TCC_DENY
+                .iter()
+                .map(|s| Path::new(&h).join("Library").join(s))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Raw collection: one bytes counter per owning directory, the fold
-    // map, and the candidates for the file table. No tree.
+    // map, and the candidates for the file table. No tree. Shared across
+    // the scope's roots — one merged result, one progress stream.
     let mut own_bytes: HashMap<PathBuf, u64> = HashMap::new();
     let mut plain_dirs: Vec<PathBuf> = Vec::new();
     let mut fold: HashMap<PathBuf, HitKind> = HashMap::new();
@@ -277,79 +294,114 @@ fn run(
     let mut last_progress = started;
     let mut last_partial = started;
 
-    for entry in walk {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(None);
-        }
-        let mut entry = match entry {
-            Ok(e) => e,
-            Err(_) => {
-                denied += 1;
-                continue;
-            }
+    for root in &walked {
+        let walk = {
+            let deny = deny.clone();
+            let protected = protected.clone();
+            let cancelled = cancel.clone();
+            Walk::new(root)
+                .follow_links(false)
+                .skip_hidden(false)
+                .parallelism(Parallelism::RayonNewPool(walk_threads()))
+                .process_read_dir(move |_depth, _path, _state, children| {
+                    if cancelled.load(Ordering::Relaxed) {
+                        // Stop expanding: without this the workers keep
+                        // stat'ing ahead while the consumer is bailing out.
+                        children.clear();
+                        return;
+                    }
+                    for child in children.iter_mut().flatten() {
+                        if child.file_type.is_dir() {
+                            if deny.iter().any(|d| child.path() == *d) {
+                                // Pruned, not visited: the whole point is that
+                                // no syscall ever lands inside.
+                                child.read_children_path = None;
+                                protected.fetch_add(1, Ordering::Relaxed);
+                            }
+                        } else if child.file_type.is_file() {
+                            // On the worker pool by design — see `Walk`.
+                            child.client_state = std::fs::symlink_metadata(child.path()).ok();
+                        }
+                    }
+                })
         };
-        let path = entry.path();
-        if entry.file_type.is_dir() {
-            dirs_done += 1;
-            if last_progress.elapsed() >= PROGRESS_EVERY {
-                last_progress = Instant::now();
-                let _ = tx.try_send(ScanEvent::Progress { dirs_done });
+
+        for entry in walk {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(None);
             }
-            if last_partial.elapsed() >= PARTIAL_EVERY {
-                last_partial = Instant::now();
-                let partial = snapshot(Aggregates {
-                    root,
-                    took: started.elapsed(),
-                    own_bytes: own_bytes.clone(),
-                    plain_dirs: &plain_dirs,
-                    fold: &fold,
-                    files: files.clone(),
-                    dirs_seen: dirs_done,
-                    skipped_denied: denied,
-                    skipped_protected: protected.load(Ordering::Relaxed),
-                    skipped_dataless: dataless,
-                    build_index: false,
-                });
-                let _ = tx.try_send(ScanEvent::Partial(Box::new(partial)));
-            }
-            if path == root || fold_owner(&fold, &path, root).is_some() {
-                continue; // no structure recorded beneath a folded tree
-            }
-            // depth 1 = the root's direct children; the heuristic fold is
-            // suspended there so the level-1 breakdown cannot swallow
-            // itself (Tag keeps its meaning at any depth).
-            match classify(&path, entry.depth <= 1) {
-                Some(kind) => {
-                    fold.insert(path, kind);
+            let mut entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    denied += 1;
+                    continue;
                 }
-                None => plain_dirs.push(path),
-            }
-            continue;
-        }
-        if !entry.file_type.is_file() {
-            continue; // symlinks are never descended or counted
-        }
-        let meta = match entry.client_state.take() {
-            Some(m) => m,
-            None => {
-                denied += 1;
+            };
+            let path = entry.path();
+            if entry.file_type.is_dir() {
+                dirs_done += 1;
+                if last_progress.elapsed() >= PROGRESS_EVERY {
+                    last_progress = Instant::now();
+                    let _ = tx.try_send(ScanEvent::Progress { dirs_done });
+                }
+                if last_partial.elapsed() >= PARTIAL_EVERY {
+                    last_partial = Instant::now();
+                    let partial = snapshot(Aggregates {
+                        base: &scope.base,
+                        roots: &scope.roots,
+                        took: started.elapsed(),
+                        own_bytes: own_bytes.clone(),
+                        plain_dirs: &plain_dirs,
+                        fold: &fold,
+                        files: files.clone(),
+                        dirs_seen: dirs_done,
+                        skipped_denied: denied,
+                        skipped_protected: protected.load(Ordering::Relaxed),
+                        skipped_dataless: dataless,
+                        build_index: false,
+                    });
+                    let _ = tx.try_send(ScanEvent::Partial(Box::new(partial)));
+                }
+                if path == *root || fold_owner(&fold, &path, root).is_some() {
+                    continue; // no structure recorded beneath a folded tree
+                }
+                // depth 1 = this walk root's direct children; the
+                // heuristic fold is suspended there so the level-1
+                // breakdown cannot swallow itself (Tag keeps its meaning
+                // at any depth).
+                match classify(&path, entry.depth <= 1) {
+                    Some(kind) => {
+                        fold.insert(path, kind);
+                    }
+                    None => plain_dirs.push(path),
+                }
                 continue;
             }
-        };
-        if is_dataless(&meta) {
-            dataless += 1;
-            continue;
-        }
-        let bytes = physical_size(&meta);
-        let folded = fold_owner(&fold, &path, root);
-        let owner = folded
-            .clone()
-            .or_else(|| path.parent().map(Path::to_path_buf));
-        if let Some(owner) = owner {
-            *own_bytes.entry(owner).or_default() += bytes;
-        }
-        if folded.is_none() && bytes >= BIG_FILE_IN_TREE && in_blind_spot(&path) {
-            files.push(FileHit { path, bytes });
+            if !entry.file_type.is_file() {
+                continue; // symlinks are never descended or counted
+            }
+            let meta = match entry.client_state.take() {
+                Some(m) => m,
+                None => {
+                    denied += 1;
+                    continue;
+                }
+            };
+            if is_dataless(&meta) {
+                dataless += 1;
+                continue;
+            }
+            let bytes = physical_size(&meta);
+            let folded = fold_owner(&fold, &path, root);
+            let owner = folded
+                .clone()
+                .or_else(|| path.parent().map(Path::to_path_buf));
+            if let Some(owner) = owner {
+                *own_bytes.entry(owner).or_default() += bytes;
+            }
+            if folded.is_none() && bytes >= BIG_FILE_IN_TREE && in_blind_spot(&path) {
+                files.push(FileHit { path, bytes });
+            }
         }
     }
     if cancel.load(Ordering::Relaxed) {
@@ -357,7 +409,8 @@ fn run(
     }
 
     Ok(Some(snapshot(Aggregates {
-        root,
+        base: &scope.base,
+        roots: &scope.roots,
         took: started.elapsed(),
         own_bytes,
         plain_dirs: &plain_dirs,
@@ -375,7 +428,8 @@ fn run(
 /// builder's input as a struct rather than eleven positional arguments
 /// (clippy's lint was right about the call sites).
 struct Aggregates<'a> {
-    root: &'a Path,
+    base: &'a Path,
+    roots: &'a [PathBuf],
     took: Duration,
     own_bytes: HashMap<PathBuf, u64>,
     plain_dirs: &'a [PathBuf],
@@ -395,7 +449,8 @@ struct Aggregates<'a> {
 /// snapshots streamed mid-walk. One builder, so the two can never drift.
 fn snapshot(agg: Aggregates) -> ScanResult {
     let Aggregates {
-        root,
+        base,
+        roots,
         took,
         own_bytes,
         plain_dirs,
@@ -407,8 +462,8 @@ fn snapshot(agg: Aggregates) -> ScanResult {
         skipped_dataless,
         build_index,
     } = agg;
-    let (totals, children) = rollup(root, own_bytes, plain_dirs, fold);
-    let (regenerable, dirs) = tables(root, &totals, &children, fold);
+    let (totals, children) = rollup(base, own_bytes, plain_dirs, fold);
+    let (regenerable, dirs) = tables(roots, &totals, &children, fold);
     files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
     // Suggestions only on the finished result: a partial's lower-bound
     // set would invite trashing while the walker is inside the trees.
@@ -433,7 +488,8 @@ fn snapshot(agg: Aggregates) -> ScanResult {
     });
     files.truncate(TABLE_KEEP);
     ScanResult {
-        root: root.to_path_buf(),
+        root: base.to_path_buf(),
+        roots: roots.to_vec(),
         scanned_at: std::time::SystemTime::now(),
         took,
         dirs_seen,
@@ -509,7 +565,7 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
                 .push(path.clone());
         }
     }
-    let (regenerable, dirs) = tables(root, &index.totals, &children, &index.fold);
+    let (regenerable, dirs) = tables(&[root.to_path_buf()], &index.totals, &children, &index.fold);
     let mut files: Vec<FileHit> = index
         .files
         .iter()
@@ -525,6 +581,7 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
     // took describe the walk this data actually came from.
     Some(ScanResult {
         root: root.to_path_buf(),
+        roots: vec![root.to_path_buf()],
         scanned_at: parent.scanned_at,
         took: parent.took,
         dirs_seen: parent.dirs_seen,
@@ -555,7 +612,7 @@ fn rank(
     fold: &HashMap<PathBuf, HitKind>,
 ) -> (Vec<DirHit>, Vec<DirHit>) {
     let (totals, children) = rollup(root, own_bytes, plain_dirs, fold);
-    tables(root, &totals, &children, fold)
+    tables(&[root.to_path_buf()], &totals, &children, fold)
 }
 
 /// Totals: every candidate dir starts from its direct bytes, then
@@ -602,18 +659,23 @@ fn rollup(
     (totals, children)
 }
 
-/// The two directory tables for `root`, from rolled-up totals — shared
-/// by the walk's snapshots and by index-served drill-downs, so the two
-/// can never disagree about what a breakdown looks like.
+/// The two directory tables for a set of roots, from rolled-up totals —
+/// shared by the walk's snapshots and by index-served drill-downs, so
+/// the two can never disagree about what a breakdown looks like. Single
+/// element for every scope but the cache-set preset, whose roots'
+/// level-1 rows merge into one ranking (the subtrees are disjoint by
+/// construction, so rows still cannot dominate each other).
 fn tables(
-    root: &Path,
+    roots: &[PathBuf],
     totals: &HashMap<PathBuf, u64>,
     children: &HashMap<PathBuf, Vec<PathBuf>>,
     fold: &HashMap<PathBuf, HitKind>,
 ) -> (Vec<DirHit>, Vec<DirHit>) {
     let mut regenerable: Vec<DirHit> = fold
         .iter()
-        .filter(|(path, kind)| **kind == HitKind::Tag && path.starts_with(root))
+        .filter(|(path, kind)| {
+            **kind == HitKind::Tag && roots.iter().any(|root| path.starts_with(root))
+        })
         .map(|(path, _)| DirHit {
             bytes: totals.get(path).copied().unwrap_or(0),
             path: path.clone(),
@@ -625,26 +687,23 @@ fn tables(
     // Fixed cap here on purpose: this table carries the bulk-clear
     // button, and "the N listed" should stay a stable, small N.
 
-    // The dirs table is the root's level-1 breakdown, each entry chased
-    // through dominant chains: level-1 subtrees are disjoint, so the
-    // ancestor-domination problem cannot arise between rows.
-    let mut dirs: Vec<DirHit> = children
-        .get(root)
-        .map(|level1| {
-            level1
-                .iter()
-                .map(|d| {
-                    let rep = chase_dominant(d, totals, children);
-                    DirHit {
-                        bytes: totals.get(&rep).copied().unwrap_or(0),
-                        kind: fold.get(&rep).copied().unwrap_or(HitKind::Plain),
-                        path: rep,
-                    }
-                })
-                .filter(|d| d.bytes > 0)
-                .collect()
+    // The dirs table is each root's level-1 breakdown, every entry
+    // chased through dominant chains: level-1 subtrees are disjoint, so
+    // the ancestor-domination problem cannot arise between rows.
+    let mut dirs: Vec<DirHit> = roots
+        .iter()
+        .filter_map(|root| children.get(root))
+        .flat_map(|level1| level1.iter())
+        .map(|d| {
+            let rep = chase_dominant(d, totals, children);
+            DirHit {
+                bytes: totals.get(&rep).copied().unwrap_or(0),
+                kind: fold.get(&rep).copied().unwrap_or(HitKind::Plain),
+                path: rep,
+            }
         })
-        .unwrap_or_default();
+        .filter(|d| d.bytes > 0)
+        .collect();
     dirs.sort_by_key(|d| std::cmp::Reverse(d.bytes));
     dirs.truncate(TABLE_KEEP);
 
@@ -671,9 +730,18 @@ fn cache_dir() -> PathBuf {
 }
 
 /// Readable slug plus a short FNV hash, so `/a/b` and `/a-b` cannot
-/// collide on the same filename.
-fn cache_path_in(dir: &Path, root: &Path) -> PathBuf {
-    let display = root.display().to_string();
+/// Readable slug plus a short FNV hash, so `/a/b` and `/a-b` cannot
+/// collide on the same filename. Identity is the *roots set*: a
+/// multi-root scope hashes every root (newline-joined — impossible in a
+/// path), so the cache-set preset can never collide with a plain walk
+/// of its base. Single-root names come out byte-identical to the
+/// pre-`roots` scheme, keeping existing files valid.
+fn cache_path_in(dir: &Path, roots: &[PathBuf]) -> PathBuf {
+    let display = roots
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut slug: String = display
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -690,40 +758,40 @@ fn cache_path_in(dir: &Path, root: &Path) -> PathBuf {
 /// The previous run's file, next to the current one — what row deltas
 /// are measured against. Rotated into place by [`save_cache`] just
 /// before the new result lands, so it always holds the last *finished*
-/// walk of the same root, surviving restarts like the cache itself.
-fn prev_cache_path_in(dir: &Path, root: &Path) -> PathBuf {
-    cache_path_in(dir, root).with_extension("prev.toml")
+/// walk of the same scope, surviving restarts like the cache itself.
+fn prev_cache_path_in(dir: &Path, roots: &[PathBuf]) -> PathBuf {
+    cache_path_in(dir, roots).with_extension("prev.toml")
 }
 
 pub fn save_cache(result: &ScanResult) {
     save_cache_in(&cache_dir(), result, true);
 }
 
-pub fn load_cache(root: &Path) -> Option<ScanResult> {
-    load_cache_in(&cache_dir(), root)
+pub fn load_cache(roots: &[PathBuf]) -> Option<ScanResult> {
+    load_cache_in(&cache_dir(), roots)
 }
 
 /// The default root's cache — what a fresh launch opens with.
 pub fn load_default_cache() -> Option<ScanResult> {
-    load_cache(&default_root()?)
+    load_cache(&[default_root()?])
 }
 
 /// The run before the cached one, if two have finished — the Δ baseline.
-pub fn load_prev_cache(root: &Path) -> Option<ScanResult> {
-    load_cache_file(&prev_cache_path_in(&cache_dir(), root), root)
+pub fn load_prev_cache(roots: &[PathBuf]) -> Option<ScanResult> {
+    load_cache_file(&prev_cache_path_in(&cache_dir(), roots), roots)
 }
 
-pub fn delete_cache(root: &Path) {
-    let _ = std::fs::remove_file(cache_path_in(&cache_dir(), root));
-    let _ = std::fs::remove_file(prev_cache_path_in(&cache_dir(), root));
+pub fn delete_cache(roots: &[PathBuf]) {
+    let _ = std::fs::remove_file(cache_path_in(&cache_dir(), roots));
+    let _ = std::fs::remove_file(prev_cache_path_in(&cache_dir(), roots));
 }
 
 /// Rewrite the cache after rows were pruned — but only where this exact
-/// root already has one, so drill-derived subroots never gain a file.
+/// scope already has one, so drill-derived subroots never gain a file.
 /// No rotation: pruning is an edit to the *current* result, and letting
 /// it displace the `.prev` file would erase the baseline mid-cycle.
 pub fn resave_if_cached(result: &ScanResult) {
-    if cache_path_in(&cache_dir(), &result.root).exists() {
+    if cache_path_in(&cache_dir(), &result.roots).exists() {
         save_cache_in(&cache_dir(), result, false);
     }
 }
@@ -732,7 +800,7 @@ fn save_cache_in(dir: &Path, result: &ScanResult, rotate: bool) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let path = cache_path_in(dir, &result.root);
+    let path = cache_path_in(dir, &result.roots);
     let tmp = path.with_extension("toml.tmp");
     if std::fs::write(&tmp, serialise(result)).is_err() {
         return;
@@ -746,7 +814,7 @@ fn save_cache_in(dir: &Path, result: &ScanResult, rotate: bool) {
     if rotate {
         // The displaced current becomes the next comparison's baseline
         // (a silent no-op on a first-ever save).
-        let _ = std::fs::rename(&path, prev_cache_path_in(dir, &result.root));
+        let _ = std::fs::rename(&path, prev_cache_path_in(dir, &result.roots));
     }
     let _ = std::fs::rename(&tmp, &path);
 }
@@ -777,6 +845,16 @@ fn serialise(result: &ScanResult) -> String {
     doc.insert(
         "root".into(),
         Value::String(result.root.display().to_string()),
+    );
+    doc.insert(
+        "roots".into(),
+        Value::Array(
+            result
+                .roots
+                .iter()
+                .map(|r| Value::String(r.display().to_string()))
+                .collect(),
+        ),
     );
     let unix_secs = result
         .scanned_at
@@ -832,17 +910,29 @@ fn serialise(result: &ScanResult) -> String {
     toml::to_string(&Value::Table(doc)).unwrap_or_default()
 }
 
-fn load_cache_in(dir: &Path, root: &Path) -> Option<ScanResult> {
-    load_cache_file(&cache_path_in(dir, root), root)
+fn load_cache_in(dir: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
+    load_cache_file(&cache_path_in(dir, roots), roots)
 }
 
-fn load_cache_file(path: &Path, root: &Path) -> Option<ScanResult> {
+fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
     let text = std::fs::read_to_string(path).ok()?;
     let doc: toml::Value = toml::from_str(&text).ok()?;
     if doc.get("version")?.as_integer()? != CACHE_VERSION {
         return None;
     }
-    if doc.get("root")?.as_str()? != root.display().to_string() {
+    let root = PathBuf::from(doc.get("root")?.as_str()?);
+    // Files predating the `roots` key are all single-root — default to
+    // `[root]` so they stay valid without a version bump.
+    let stored_roots: Vec<PathBuf> = doc
+        .get("roots")
+        .and_then(toml::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|v| v.as_str().map(PathBuf::from))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![root.clone()]);
+    if stored_roots != roots {
         return None;
     }
     let int = |key: &str| {
@@ -886,7 +976,8 @@ fn load_cache_file(path: &Path, root: &Path) -> Option<ScanResult> {
         })
         .unwrap_or_default();
     Some(ScanResult {
-        root: root.to_path_buf(),
+        root,
+        roots: stored_roots,
         scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(int("scanned_at_unix")),
         took: Duration::from_secs(int("took_secs")),
         dirs_seen: int("dirs_seen") as usize,
@@ -909,7 +1000,7 @@ fn load_cache_file(path: &Path, root: &Path) -> Option<ScanResult> {
 /// cut — which is why rows without a match show no delta rather than
 /// claiming "new".
 pub struct DiffBaseline {
-    root: PathBuf,
+    roots: Vec<PathBuf>,
     scanned_at: std::time::SystemTime,
     bytes: std::collections::HashMap<PathBuf, u64>,
 }
@@ -929,18 +1020,18 @@ impl DiffBaseline {
             bytes.insert(hit.path.clone(), hit.bytes);
         }
         Self {
-            root: result.root.clone(),
+            roots: result.roots.clone(),
             scanned_at: result.scanned_at,
             bytes,
         }
     }
 
-    /// The root this baseline compares against — deltas only make sense
-    /// on a result of the same root (drill tables sit mostly below last
-    /// run's retention cut, and a half-comparable table reads as
-    /// "nothing else changed").
-    pub fn root(&self) -> &Path {
-        &self.root
+    /// The scope this baseline compares against — deltas only make
+    /// sense on a result of the same roots (drill tables sit mostly
+    /// below last run's retention cut, and a half-comparable table
+    /// reads as "nothing else changed").
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
     }
 
     pub fn scanned_at(&self) -> std::time::SystemTime {
@@ -1097,9 +1188,13 @@ mod tests {
         std::fs::write(root.join("plain/file"), vec![1u8; 8_000]).unwrap();
 
         let (tx, _rx) = smol::channel::unbounded();
-        let result = run(&root, &Arc::new(AtomicBool::new(false)), &tx)
-            .expect("scan should succeed")
-            .expect("scan was not cancelled");
+        let result = run(
+            &ScanScope::single(root.clone()),
+            &Arc::new(AtomicBool::new(false)),
+            &tx,
+        )
+        .expect("scan should succeed")
+        .expect("scan was not cancelled");
 
         // The tagged tree ranks as regenerable, bytes from inside it.
         assert_eq!(result.regenerable.len(), 1);
@@ -1220,6 +1315,7 @@ mod tests {
         }];
         let parent = ScanResult {
             root: p("/r"),
+            roots: vec![p("/r")],
             scanned_at: std::time::SystemTime::now(),
             took: Duration::ZERO,
             dirs_seen: 6,
@@ -1284,11 +1380,53 @@ mod tests {
     }
 
     #[test]
+    fn merged_scope_ranks_each_roots_level_one_and_nothing_else() {
+        let mb = |n: u64| n * 1024 * 1024;
+        let own: HashMap<PathBuf, u64> = [
+            (p("/r/a/x"), mb(500)),
+            (p("/r/a/x/cache"), mb(100)),
+            (p("/r/b/y"), mb(300)),
+            (p("/r/other/z"), mb(900)),
+            (p("/r/other/cache"), mb(50)),
+        ]
+        .into();
+        let plain = [
+            p("/r/a"),
+            p("/r/a/x"),
+            p("/r/b"),
+            p("/r/b/y"),
+            p("/r/other"),
+            p("/r/other/z"),
+        ];
+        let fold: HashMap<PathBuf, HitKind> = [
+            (p("/r/a/x/cache"), HitKind::Tag),
+            (p("/r/other/cache"), HitKind::Tag),
+        ]
+        .into();
+        let (totals, children) = rollup(&p("/r"), own, &plain, &fold);
+        let (regen, dirs) = tables(&[p("/r/a"), p("/r/b")], &totals, &children, &fold);
+        // Both roots' level-1 rows merge into one ranking; the sibling
+        // outside the scope stays out even though it is the biggest.
+        let dir_paths: Vec<&Path> = dirs.iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(
+            dir_paths,
+            [p("/r/a/x"), p("/r/b/y")]
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>()
+        );
+        // The Tag filter honours the scope the same way.
+        assert_eq!(regen.len(), 1);
+        assert_eq!(regen[0].path, p("/r/a/x/cache"));
+    }
+
+    #[test]
     fn cache_round_trips_and_rejects_mismatches() {
         let dir = std::env::temp_dir().join(format!("zstats-diskcache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let result = ScanResult {
             root: p("/r"),
+            roots: vec![p("/r")],
             scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             took: Duration::from_secs(31),
             dirs_seen: 42,
@@ -1318,7 +1456,7 @@ mod tests {
         };
         save_cache_in(&dir, &result, true);
 
-        let loaded = load_cache_in(&dir, &p("/r")).expect("round trip");
+        let loaded = load_cache_in(&dir, &[p("/r")]).expect("round trip");
         assert_eq!(loaded.scanned_at, result.scanned_at);
         assert_eq!(loaded.took, result.took);
         assert_eq!(loaded.dirs_seen, 42);
@@ -1331,13 +1469,13 @@ mod tests {
         assert!(loaded.index.is_none(), "the drill index is never persisted");
 
         // A different root must never read someone else's file.
-        assert!(load_cache_in(&dir, &p("/other")).is_none());
+        assert!(load_cache_in(&dir, &[p("/other")]).is_none());
 
         // 0600 on purpose: the paths in here leak project names.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(cache_path_in(&dir, &p("/r")))
+            let mode = std::fs::metadata(cache_path_in(&dir, &[p("/r")]))
                 .unwrap()
                 .permissions()
                 .mode();
@@ -1349,6 +1487,7 @@ mod tests {
     fn run_with(bytes: u64, secs: u64) -> ScanResult {
         ScanResult {
             root: p("/r"),
+            roots: vec![p("/r")],
             scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(secs),
             took: Duration::from_secs(1),
             dirs_seen: 1,
@@ -1375,23 +1514,52 @@ mod tests {
     }
 
     #[test]
+    fn cache_identity_tells_a_scope_from_its_base() {
+        let dir = p("/tmp");
+        // The cache-set preset and a plain walk of the base must never
+        // share a file.
+        assert_ne!(
+            cache_path_in(&dir, &[p("/r")]),
+            cache_path_in(&dir, &[p("/r/a"), p("/r/b")])
+        );
+    }
+
+    #[test]
+    fn legacy_cache_without_roots_still_loads() {
+        let dir = std::env::temp_dir().join(format!("zstats-disklegacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file from before the `roots` key: same document minus that
+        // line — must load as the single-root walk it always was.
+        let stripped: String = serialise(&run_with(100, 1))
+            .lines()
+            .filter(|l| !l.starts_with("roots"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(cache_path_in(&dir, &[p("/r")]), stripped).unwrap();
+        let loaded = load_cache_in(&dir, &[p("/r")]).expect("legacy file loads");
+        assert_eq!(loaded.roots, vec![p("/r")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_rotates_the_displaced_run_into_the_delta_baseline() {
         let dir = std::env::temp_dir().join(format!("zstats-diskprev-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let prev_path = prev_cache_path_in(&dir, &p("/r"));
+        let prev_path = prev_cache_path_in(&dir, &[p("/r")]);
         // First-ever save: nothing to rotate, no baseline yet.
         save_cache_in(&dir, &run_with(100, 1), true);
-        assert!(load_cache_file(&prev_path, &p("/r")).is_none());
+        assert!(load_cache_file(&prev_path, &[p("/r")]).is_none());
         // Second save: the displaced first run becomes the baseline.
         save_cache_in(&dir, &run_with(250, 2), true);
-        let prev = load_cache_file(&prev_path, &p("/r")).expect("baseline");
+        let prev = load_cache_file(&prev_path, &[p("/r")]).expect("baseline");
         assert_eq!(prev.dirs[0].bytes, 100);
         // A pruning resave edits the current file only — displacing the
         // baseline mid-cycle would erase what deltas compare against.
         save_cache_in(&dir, &run_with(240, 2), false);
-        let kept = load_cache_file(&prev_path, &p("/r")).expect("kept");
+        let kept = load_cache_file(&prev_path, &[p("/r")]).expect("kept");
         assert_eq!(kept.dirs[0].bytes, 100);
-        assert_eq!(load_cache_in(&dir, &p("/r")).unwrap().dirs[0].bytes, 240);
+        assert_eq!(load_cache_in(&dir, &[p("/r")]).unwrap().dirs[0].bytes, 240);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1403,7 +1571,7 @@ mod tests {
         assert_eq!(base.bytes_for(&p("/r/.blob")), Some(30));
         // Absent ≠ new: the path may have fallen below retention.
         assert_eq!(base.bytes_for(&p("/r/unseen")), None);
-        assert_eq!(base.root(), p("/r"));
+        assert_eq!(base.roots(), [p("/r")]);
     }
 
     #[test]

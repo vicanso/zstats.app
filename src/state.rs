@@ -11,7 +11,7 @@
 use crate::bigfiles;
 use crate::bigfiles::BigFilesScan;
 use crate::cleanhints;
-use crate::diskscan::{self, DiffBaseline, ScanEvent, ScanResult};
+use crate::diskscan::{self, DiffBaseline, ScanEvent, ScanResult, ScanScope};
 use crate::fullscan::{self, GroupScan, Scan};
 use crate::history;
 use crate::history::Spender;
@@ -470,11 +470,12 @@ pub struct ZStatsAppState {
     /// a finished `ScanResult` (a few KB), so "back" restores instantly
     /// instead of re-walking the parent for half a minute.
     disk_analysis_stack: Vec<diskscan::ScanResult>,
-    /// The user-picked analysis root for this session; `None` means the
-    /// default (~). The re-analyze chip re-walks whatever this says, so
-    /// picking a folder once makes the chip mean that folder until the
-    /// results are cleared.
-    disk_analysis_root: Option<std::path::PathBuf>,
+    /// The user-picked analysis scope for this session — a chosen folder
+    /// or the cache-set preset; `None` means the default (~). The
+    /// re-analyze chip re-walks whatever this says, so picking a scope
+    /// once makes the chip mean that scope until the results are
+    /// cleared.
+    disk_analysis_root: Option<ScanScope>,
     /// The run before the current result, flattened for per-row Δs —
     /// rebuilt from the rotated `.prev` cache file whenever a top-level
     /// walk finishes (and once at launch), never during drills.
@@ -588,7 +589,7 @@ impl Default for ZStatsAppState {
             // The baseline outlives restarts the same way the result
             // does: through its file.
             analysis_diff: diskscan::default_root()
-                .and_then(|root| diskscan::load_prev_cache(&root))
+                .and_then(|root| diskscan::load_prev_cache(&[root]))
                 .map(|prev| DiffBaseline::from_result(&prev)),
             disk_analysis_expanded: false,
             analysis_show_all_dirs: false,
@@ -819,22 +820,22 @@ impl ZStatsAppState {
     }
 
     /// The Δ baseline for `result` — present only when a previous run of
-    /// the *same root* exists, so drill views and freshly-picked roots
+    /// the *same scope* exists, so drill views and freshly-picked roots
     /// never show half-comparable deltas.
     pub fn analysis_diff_for(&self, result: &ScanResult) -> Option<&DiffBaseline> {
         self.analysis_diff
             .as_ref()
-            .filter(|diff| diff.root() == result.root)
+            .filter(|diff| diff.roots() == result.roots)
     }
 
     /// Start (or restart) the top-level analysis — of the session's
-    /// picked root, or the home tree by default. A drill-down is left
+    /// picked scope, or the home tree by default. A drill-down is left
     /// via "back", not by rescanning, so the stack is dropped here.
     pub fn start_disk_analysis(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self
+        let Some(scope) = self
             .disk_analysis_root
             .clone()
-            .or_else(diskscan::default_root)
+            .or_else(|| diskscan::default_root().map(ScanScope::single))
         else {
             self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
             cx.notify();
@@ -842,7 +843,7 @@ impl ZStatsAppState {
         };
         self.disk_analysis_stack.clear();
         self.disk_analysis_expanded = true;
-        self.launch_disk_analysis(root, true, cx);
+        self.launch_disk_analysis(scope, true, cx);
     }
 
     /// Analyze a user-chosen root — the folder picker's entry point.
@@ -858,10 +859,27 @@ impl ZStatsAppState {
             cx.notify();
             return;
         }
-        self.disk_analysis_root = Some(root.clone());
+        let scope = ScanScope::single(root);
+        self.disk_analysis_root = Some(scope.clone());
         self.disk_analysis_stack.clear();
         self.disk_analysis_expanded = true;
-        self.launch_disk_analysis(root, true, cx);
+        self.launch_disk_analysis(scope, true, cx);
+    }
+
+    /// Analyze the cache-set preset — the explicit cache roots merged
+    /// into one ranked view (docs/disk-analysis.md's scope table). Same
+    /// session semantics as a picked folder: re-analyze means this scope
+    /// until the results are cleared.
+    pub fn start_disk_analysis_caches(&mut self, cx: &mut Context<Self>) {
+        let Some(scope) = ScanScope::cache_set() else {
+            self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
+            cx.notify();
+            return;
+        };
+        self.disk_analysis_root = Some(scope.clone());
+        self.disk_analysis_stack.clear();
+        self.disk_analysis_expanded = true;
+        self.launch_disk_analysis(scope, true, cx);
     }
 
     /// Drill into one ranked directory: park the current result on the
@@ -884,7 +902,7 @@ impl ZStatsAppState {
                 self.disk_analysis = DiskAnalysis::Ready(result);
                 cx.notify();
             }
-            None => self.launch_disk_analysis(root, false, cx),
+            None => self.launch_disk_analysis(ScanScope::single(root), false, cx),
         }
     }
 
@@ -928,18 +946,18 @@ impl ZStatsAppState {
         self.cancel_disk_analysis_walk();
         // Clean slate includes the saved result — otherwise the next
         // launch would resurrect what the user just dismissed. The
-        // session's top-level root is the outermost parked result, or
+        // session's top-level scope is the outermost parked result, or
         // the current one when nothing is parked.
-        let top_root = self
+        let top_roots = self
             .disk_analysis_stack
             .first()
-            .map(|r| r.root.clone())
+            .map(|r| r.roots.clone())
             .or_else(|| match &self.disk_analysis {
-                DiskAnalysis::Ready(r) => Some(r.root.clone()),
+                DiskAnalysis::Ready(r) => Some(r.roots.clone()),
                 _ => None,
             });
-        if let Some(root) = top_root {
-            diskscan::delete_cache(&root);
+        if let Some(roots) = top_roots {
+            diskscan::delete_cache(&roots);
         }
         // The baseline's file went with the cache; the flattened copy
         // must not outlive it.
@@ -956,12 +974,7 @@ impl ZStatsAppState {
     /// learns — progress, completion, failure — arrives over the channel
     /// drained below, guarded by `run_id` so a superseded run's late
     /// events fall on the floor.
-    fn launch_disk_analysis(
-        &mut self,
-        root: std::path::PathBuf,
-        persist: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn launch_disk_analysis(&mut self, scope: ScanScope, persist: bool, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
         self.disk_analysis_runs += 1;
         let run_id = self.disk_analysis_runs;
@@ -976,7 +989,7 @@ impl ZStatsAppState {
         cx.notify();
 
         let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
-        diskscan::spawn(root, cancel, tx);
+        diskscan::spawn(scope, cancel, tx);
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 let done = matches!(event, ScanEvent::Done(_) | ScanEvent::Failed(_));
@@ -1013,7 +1026,7 @@ impl ZStatsAppState {
                                 // The save rotated the displaced run into
                                 // `.prev` — read it back as the Δ baseline.
                                 diskscan::save_cache(&result);
-                                state.analysis_diff = diskscan::load_prev_cache(&result.root)
+                                state.analysis_diff = diskscan::load_prev_cache(&result.roots)
                                     .map(|prev| DiffBaseline::from_result(&prev));
                             }
                             state.disk_analysis = DiskAnalysis::Ready(*result);
