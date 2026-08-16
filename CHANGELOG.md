@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.2](https://github.com/vicanso/zstats.app/compare/v0.1.1..v0.1.2) - 2026-08-16
+
+### ⛰️  Features
+
+- One-click scopes — ~/Library, and the cache roots as one walk - ([e29558e](https://github.com/vicanso/zstats.app/commit/e29558ebcd011bffc4315c4ee57d1f0c50d0f916))
+- Rows tell what changed since the last walk - ([1fe69da](https://github.com/vicanso/zstats.app/commit/1fe69da19dcb5da59c47cacd2f79984e7b2bd493))
+- Name the gap no walk can find — purgeable space on the volume card - ([99e2010](https://github.com/vicanso/zstats.app/commit/99e20101037bc72e5bcbba433b1bacb314d31a87))
+- History answers the memory question its files already held - ([5a42d10](https://github.com/vicanso/zstats.app/commit/5a42d101a50c6a610ecb3fd01ab9e57feb8e6787))
+- Disk alerts point at the Hardware tab - ([d2be684](https://github.com/vicanso/zstats.app/commit/d2be68465ed39dbbe08c5a147b8af2d05f0703e7))
+- The quiet banner's click finally lands somewhere - ([f10de0e](https://github.com/vicanso/zstats.app/commit/f10de0e85735465e99b8f3ef5ca83e36fd330ad1))
+- Arch-matched update downloads, and twenty directories on request - ([45b303d](https://github.com/vicanso/zstats.app/commit/45b303d0be20d948ef41ab8e8793d19ad5458154))
+- The analysis card folds to a summary, and every visit starts there - ([96580c0](https://github.com/vicanso/zstats.app/commit/96580c0e9ac5a5c1914bf247078c7466177e4e9d))
+- Check for updates on the About page, and walk the install home - ([167c9ca](https://github.com/vicanso/zstats.app/commit/167c9ca922d0f36dfa8f68752e6fb9cfcb678146))
+
+### ⚙️ Miscellaneous Tasks
+
+- Release notes come from git-cliff, and the changelog tells the truth - ([a63b7a7](https://github.com/vicanso/zstats.app/commit/a63b7a77ea32c4322d218446e314e0747c4572f8))
+
 ## [0.1.1](https://github.com/vicanso/zstats.app/compare/v0.1.0..v0.1.1) - 2026-08-16
 
 ### ⛰️  Features
