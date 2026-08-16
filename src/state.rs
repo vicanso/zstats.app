@@ -438,6 +438,13 @@ pub struct ZStatsAppState {
     /// picking a folder once makes the chip mean that folder until the
     /// results are cleared.
     disk_analysis_root: Option<std::path::PathBuf>,
+    /// Whether the Hardware tab shows the full analysis card or just its
+    /// one-line summary. UI-session state, deliberately NOT persisted and
+    /// reset to collapsed on every entry to the tab: the tables are long
+    /// enough to bury the volumes and sensors beneath them, so unfolding
+    /// is a per-visit choice. Starting or drilling an analysis unfolds —
+    /// the user just asked to watch it.
+    disk_analysis_expanded: bool,
     /// The settings window, if one was ever opened. Kept so a second
     /// click focuses the existing window; a handle whose window the user
     /// closed fails its update and a fresh window is built instead.
@@ -525,6 +532,7 @@ impl Default for ZStatsAppState {
                 .unwrap_or_default(),
             disk_analysis_stack: Vec::new(),
             disk_analysis_root: None,
+            disk_analysis_expanded: false,
             settings_window: None,
             disk_analysis_runs: 0,
             snoozed: HashMap::new(),
@@ -712,6 +720,7 @@ impl ZStatsAppState {
             return;
         };
         self.disk_analysis_stack.clear();
+        self.disk_analysis_expanded = true;
         self.launch_disk_analysis(root, true, cx);
     }
 
@@ -730,6 +739,7 @@ impl ZStatsAppState {
         }
         self.disk_analysis_root = Some(root.clone());
         self.disk_analysis_stack.clear();
+        self.disk_analysis_expanded = true;
         self.launch_disk_analysis(root, true, cx);
     }
 
@@ -747,6 +757,7 @@ impl ZStatsAppState {
         if let DiskAnalysis::Ready(current) = std::mem::take(&mut self.disk_analysis) {
             self.disk_analysis_stack.push(current);
         }
+        self.disk_analysis_expanded = true;
         match derived {
             Some(result) => {
                 self.disk_analysis = DiskAnalysis::Ready(result);
@@ -763,6 +774,15 @@ impl ZStatsAppState {
         };
         self.cancel_disk_analysis_walk();
         self.disk_analysis = DiskAnalysis::Ready(prev);
+        cx.notify();
+    }
+
+    pub fn disk_analysis_expanded(&self) -> bool {
+        self.disk_analysis_expanded
+    }
+
+    pub fn set_disk_analysis_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        self.disk_analysis_expanded = expanded;
         cx.notify();
     }
 
@@ -1157,6 +1177,11 @@ impl ZStatsAppState {
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            // Every fresh visit to Hardware starts from the summary —
+            // see `disk_analysis_expanded`.
+            if tab == Tab::Hardware {
+                self.disk_analysis_expanded = false;
+            }
             // Opening History is what pays for reading it. Re-read on every
             // visit rather than caching: the file grows a line a minute, and
             // a stale "today" is worse than a moment's wait.

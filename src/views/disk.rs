@@ -231,19 +231,23 @@ fn analysis_pick_chip() -> AnyElement {
 }
 
 fn analysis_card(state: &ZStatsAppState) -> AnyElement {
+    // Collapsed by default on every visit: the tables are long enough to
+    // bury the volumes and sensors below. The summary line still carries
+    // the vitals (age, cost, counters — or live progress), so collapsed
+    // is informative, not blank.
+    if !state.disk_analysis_expanded() {
+        return widgets::list_shell()
+            .child(analysis_header(state))
+            .into_any_element();
+    }
     let body = match state.disk_analysis() {
         DiskAnalysis::Off => div().into_any_element(),
-        DiskAnalysis::Running {
-            dirs_done, partial, ..
-        } => div()
-            .child(div().px(px(13.)).pt(px(2.)).pb(px(8.)).child(widgets::note(
-                t!("disk.ana_running", dirs = format::thousands(*dirs_done)).to_string(),
-            )))
-            // Whatever has been aggregated so far, rendered with the same
-            // tables as the final result — figures are lower bounds and
-            // the ranking reshuffles as data lands, which the running
-            // banner above frames. No delete controls mid-scan: the
-            // walker may still be inside any of these trees.
+        // The live progress line lives in the header caption (shared
+        // with the collapsed summary); the body is the partial tables —
+        // same renderer as the final result, figures are lower bounds
+        // that only grow. No delete controls mid-scan: the walker may
+        // still be inside any of these trees.
+        DiskAnalysis::Running { partial, .. } => div()
             .children(partial.as_ref().map(|r| analysis_tables(r, false)))
             .into_any_element(),
         DiskAnalysis::Failed(e) => div()
@@ -291,22 +295,52 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
                         .child(i18n::tr("disk.ana_title")),
                 )
                 .child(
-                    // A view action: drops the whole result (and its
-                    // drill index), touches nothing on disk. Cancels the
-                    // walk too if one is still running. Icon-only — the
-                    // tooltip carries the words, and Close (not Delete)
-                    // keeps it visually apart from the file-trashing
-                    // controls below.
-                    Button::new("ana-dismiss")
-                        .icon(IconName::Close)
-                        .ghost()
-                        .xsmall()
-                        .tooltip(i18n::tr("disk.ana_dismiss_hint"))
-                        .on_click(|_, _window, cx| {
-                            cx.global::<ZStatsGlobalStore>()
-                                .clone()
-                                .update(cx, |state, cx| state.clear_disk_analysis(cx));
-                        }),
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child({
+                            let expanded = state.disk_analysis_expanded();
+                            div()
+                                .id("ana-fold")
+                                .flex_none()
+                                .rounded(px(4.))
+                                .px(px(6.))
+                                .py(px(1.))
+                                .text_size(px(10.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme::text_muted())
+                                .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+                                .child(i18n::tr(if expanded {
+                                    "disk.ana_collapse"
+                                } else {
+                                    "disk.ana_expand"
+                                }))
+                                .on_click(move |_, _window, cx| {
+                                    cx.global::<ZStatsGlobalStore>()
+                                        .clone()
+                                        .update(cx, |state, cx| {
+                                            state.set_disk_analysis_expanded(!expanded, cx)
+                                        });
+                                })
+                        })
+                        .child(
+                            // A view action: drops the whole result (and its
+                            // drill index), touches nothing on disk. Cancels the
+                            // walk too if one is still running. Icon-only — the
+                            // tooltip carries the words, and Close (not Delete)
+                            // keeps it visually apart from the file-trashing
+                            // controls below.
+                            Button::new("ana-dismiss")
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip(i18n::tr("disk.ana_dismiss_hint"))
+                                .on_click(|_, _window, cx| {
+                                    cx.global::<ZStatsGlobalStore>()
+                                        .clone()
+                                        .update(cx, |state, cx| state.clear_disk_analysis(cx));
+                                }),
+                        ),
                 ),
         )
         .when(!caption.is_empty(), |d| {
@@ -379,8 +413,16 @@ pub(super) fn open_full_disk_access() {
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 fn analysis_caption(state: &ZStatsAppState) -> String {
-    let DiskAnalysis::Ready(result) = state.disk_analysis() else {
-        return String::new();
+    let result = match state.disk_analysis() {
+        DiskAnalysis::Ready(result) => result,
+        // Collapsed while a walk runs: the summary line is the progress.
+        DiskAnalysis::Running { dirs_done, .. } => {
+            return t!("disk.ana_running", dirs = format::thousands(*dirs_done)).to_string();
+        }
+        DiskAnalysis::Failed(e) => {
+            return t!("disk.ana_failed", e = e.clone()).to_string();
+        }
+        DiskAnalysis::Off => return String::new(),
     };
     let home = std::env::var("HOME").unwrap_or_default();
     let age = result.scanned_at.elapsed().unwrap_or_default();
