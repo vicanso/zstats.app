@@ -4,6 +4,7 @@
 
 mod about;
 mod assets;
+mod autostart;
 mod bigfiles;
 mod cleanhints;
 mod confirm;
@@ -242,6 +243,15 @@ fn apply_ns_appearance() {
         }
     };
     app.setAppearance(appearance.as_deref());
+}
+
+/// The Interface page's launch-at-login switch. The OS records the
+/// state (System Settings → Login Items), we only relay — the chip
+/// re-reads the system's answer on repaint, so a failed register (a
+/// bundle-less debug run) shows as the switch simply staying off.
+pub fn set_autostart_pref(on: bool, cx: &mut App) {
+    autostart::set_enabled(on);
+    repaint(cx);
 }
 
 /// The Config tab's theme picker: persist, re-pin AppKit, restyle, repaint.

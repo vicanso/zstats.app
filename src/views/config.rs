@@ -19,6 +19,7 @@
 use super::widgets::{self, card};
 use crate::about;
 use crate::assets;
+use crate::autostart;
 use crate::confirm;
 use crate::font;
 use crate::format;
@@ -31,6 +32,7 @@ use gpui::{
     AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, div, img, px,
 };
+use gpui_component::switch::Switch;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
@@ -350,7 +352,53 @@ fn interface_card() -> AnyElement {
             crate::set_theme_pref,
             false,
         ))
+        .child(autostart_row())
         .child(opacity_row())
+        .into_any_element()
+}
+
+/// Launch at login. A Switch rather than chips: the control follows the
+/// data — enums pick from chips, a boolean flips a switch, which is
+/// also the System Settings idiom. State is asked live from the OS
+/// record each repaint, so a change made in System Settings shows up
+/// here by itself.
+fn autostart_row() -> AnyElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .px(px(13.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("config.autostart")),
+                )
+                .child(
+                    div()
+                        .id("pref-autostart-info")
+                        .flex_none()
+                        .p(px(1.))
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.autostart_tip")))
+                        .child(
+                            Icon::new(IconName::Info)
+                                .with_size(Size::Size(px(12.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        ),
+                ),
+        )
+        .child(
+            Switch::new("pref-autostart")
+                .small()
+                .checked(autostart::is_enabled())
+                .on_click(|checked, _window, cx| crate::set_autostart_pref(*checked, cx)),
+        )
         .into_any_element()
 }
 
