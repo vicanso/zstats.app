@@ -18,6 +18,7 @@ use crate::history::Spender;
 use crate::i18n;
 use crate::metrics;
 use crate::procscan;
+use crate::spaceinfo::{self, SpaceInfo};
 use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedWatch};
@@ -474,6 +475,12 @@ pub struct ZStatsAppState {
     /// picking a folder once makes the chip mean that folder until the
     /// results are cleared.
     disk_analysis_root: Option<std::path::PathBuf>,
+    /// The boot volume's purgeable-space / snapshot readout, refreshed
+    /// lazily while Hardware is the visible tab (throttled below) — a
+    /// panel-owned query, deliberately not a Monitor metric.
+    space: Option<SpaceInfo>,
+    space_at: Option<Instant>,
+    space_inflight: bool,
     /// Whether the Hardware tab shows the full analysis card or just its
     /// one-line summary. UI-session state, deliberately NOT persisted and
     /// reset to collapsed on every entry to the tab: the tables are long
@@ -576,6 +583,9 @@ impl Default for ZStatsAppState {
             disk_analysis_root: None,
             disk_analysis_expanded: false,
             analysis_show_all_dirs: false,
+            space: None,
+            space_at: None,
+            space_inflight: false,
             settings_window: None,
             disk_analysis_runs: 0,
             snoozed: HashMap::new(),
@@ -627,8 +637,44 @@ impl ZStatsAppState {
         }
 
         self.latest = Some(tick);
+        // Piggyback on the tick rather than the render: views are pure
+        // functions and cannot start work, and a fresh probe is only
+        // interesting while someone is looking at the Hardware tab.
+        if self.tab == Tab::Hardware {
+            self.ensure_space_info(cx);
+        }
         cx.notify();
         fresh
+    }
+
+    /// Refresh the purgeable/snapshot readout when it has gone stale.
+    /// Single-flight; the probe spawns `tmutil`, so it stays off the
+    /// main thread and well below the collection cadence.
+    fn ensure_space_info(&mut self, cx: &mut Context<Self>) {
+        /// Purgeable space moves slowly and the probe costs a process
+        /// spawn — one refresh a minute is plenty.
+        const SPACE_REFRESH: Duration = Duration::from_secs(60);
+        if self.space_inflight || self.space_at.is_some_and(|at| at.elapsed() < SPACE_REFRESH) {
+            return;
+        }
+        self.space_inflight = true;
+        cx.spawn(async move |this, cx| {
+            let info = cx
+                .background_executor()
+                .spawn(async { spaceinfo::probe() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.space = Some(info);
+                state.space_at = Some(Instant::now());
+                state.space_inflight = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn space_info(&self) -> Option<&SpaceInfo> {
+        self.space.as_ref()
     }
 
     /// Fold one alert into the list, merging into its episode if that episode
@@ -1248,6 +1294,7 @@ impl ZStatsAppState {
             if tab == Tab::Hardware {
                 self.disk_analysis_expanded = false;
                 self.analysis_show_all_dirs = false;
+                self.ensure_space_info(cx);
             }
             // Opening History is what pays for reading it. Re-read on every
             // visit rather than caching: the file grows a line a minute, and

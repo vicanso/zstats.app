@@ -363,6 +363,7 @@ owner = "skipped too"
             "/Users/x/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram",
             "/Users/x/Documents/Zoom",
             "/Users/x/Library/Application Support/Spotify/PersistentCache",
+            "/Users/x/Library/Mobile Documents",
             "/Users/x/Library/Application Support/Google/DriveFS",
             "/Users/x/Library/Application Support/Notion",
             "/Users/x/Library/Application Support/Figma",

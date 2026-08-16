@@ -24,6 +24,7 @@ mod prefs;
 #[cfg(target_os = "macos")]
 mod procscan;
 mod proxy;
+mod spaceinfo;
 mod state;
 #[cfg(target_os = "macos")]
 mod terminate;

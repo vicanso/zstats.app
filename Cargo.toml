@@ -124,6 +124,13 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSError",
     "NSFileManager",
     "NSURL",
+    # The boot volume's purgeable-space line: NSURL's two availability
+    # capacities (the important-usage one is Finder's figure), read as
+    # NSNumbers out of a keyed dictionary.
+    "NSArray",
+    "NSDictionary",
+    "NSValue",
+    "NSEnumerator",
 ] }
 raw-window-handle = "0.6"
 # SMAppService.mainApp backs the Interface page's launch-at-login

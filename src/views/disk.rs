@@ -132,6 +132,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         )
                         .child(div().child(d.file_system.clone())),
                 )
+                // The line the capacity meter cannot say: purgeable
+                // space and local snapshots — where a full disk often
+                // actually went, and why per-directory sums do not add
+                // up to "used". Boot volume only; Apple's own figures.
+                .when(d.mount_point == "/", |c| c.children(space_line(state)))
                 // The query's results live inside the card of the volume
                 // they were asked about, as a section under a hairline —
                 // not a sibling card, which would separate the chip from
@@ -153,6 +158,33 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         cards.insert(at, analysis_card(state));
     }
     cards
+}
+
+/// "purgeable ~X · N local snapshots" under the boot volume's footer.
+/// Display and honest pointing only — the tooltip says whose figures
+/// these are and that reclaiming is the system's (or tmutil's) job.
+fn space_line(state: &ZStatsAppState) -> Option<AnyElement> {
+    let info = state.space_info()?;
+    let mut parts = Vec::new();
+    if let Some(purgeable) = info.purgeable_bytes.filter(|p| *p > 0) {
+        parts.push(t!("disk.purgeable", v = format::memory(purgeable)).to_string());
+    }
+    if info.snapshots > 0 {
+        parts.push(t!("disk.snapshots", n = info.snapshots).to_string());
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .id("disk-space-extra")
+            .mt(px(6.))
+            .text_size(px(10.))
+            .text_color(theme::text_dim())
+            .tooltip(widgets::wrap_tooltip(i18n::tr("disk.space_extra_tip")))
+            .child(parts.join(" · "))
+            .into_any_element(),
+    )
 }
 
 /// Trigger / cancel for the directory analyser. Unlike the large-file

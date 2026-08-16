@@ -522,6 +522,16 @@ owner = "QQ 音乐"
 
 # Cloud drives mix a re-downloadable cache with login and sync state —
 # annotation only, cleaning belongs to the client.
+
+# iCloud Drive's local copies. Deleting here deletes the file in the
+# cloud, on every device — the space-safe move is *eviction* (Finder's
+# Remove Download, or `brctl evict`): the local bytes go, the cloud copy
+# stays. Evicted space is what the volume card counts as purgeable.
+[[hint]]
+match = "~/Library/Mobile Documents"
+owner = "iCloud Drive"
+command = "Finder → Remove Download / brctl evict <path>"
+
 [[hint]]
 match = "~/Library/Application Support/Google/DriveFS"
 owner = "Google Drive"
