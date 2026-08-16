@@ -212,6 +212,42 @@ impl HistoryRange {
     }
 }
 
+/// What the History list ranks by. A view preference like [`ProcSort`]
+/// — session-only. Both orders read fields the daily files already
+/// carry; nothing is derived.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HistorySort {
+    /// Accumulated single-core time — the tab's founding question.
+    #[default]
+    CpuTime,
+    /// Highest recorded one-minute footprint. Honesty caveat carried by
+    /// the chip tooltip: only minutes that qualified for the file count.
+    PeakMemory,
+}
+
+impl HistorySort {
+    pub fn next(self) -> Self {
+        match self {
+            HistorySort::CpuTime => HistorySort::PeakMemory,
+            HistorySort::PeakMemory => HistorySort::CpuTime,
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            HistorySort::CpuTime => "history.sort_cpu",
+            HistorySort::PeakMemory => "history.sort_mem",
+        }
+    }
+
+    pub fn tip_key(self) -> &'static str {
+        match self {
+            HistorySort::CpuTime => "history.sort_cpu_tip",
+            HistorySort::PeakMemory => "history.sort_mem_tip",
+        }
+    }
+}
+
 /// The directory analyser (docs/disk-analysis.md). Deliberately NOT reset
 /// on hide, unlike every other one-shot: a `~/Library` walk is minutes,
 /// and the panel auto-hides on any focus loss — hide-resets would mean no
@@ -474,6 +510,8 @@ pub struct ZStatsAppState {
     history: Option<Vec<Spender>>,
     /// The window `history` was (or is being) read for.
     history_range: HistoryRange,
+    /// The order the History list shows.
+    history_sort: HistorySort,
     /// The last (or in-flight) clean-hints update fetch.
     hints_sync: Option<HintsSync>,
     /// The last (or in-flight) version check.
@@ -547,6 +585,7 @@ impl Default for ZStatsAppState {
             net: NetActivity::default(),
             history: None,
             history_range: HistoryRange::default(),
+            history_sort: HistorySort::default(),
             hints_sync: None,
             update_status: None,
             full_scan: FullScan::default(),
@@ -1353,6 +1392,16 @@ impl ZStatsAppState {
             });
         })
         .detach();
+    }
+
+    pub fn history_sort(&self) -> HistorySort {
+        self.history_sort
+    }
+
+    /// One button, two orders — cycle like the process sort chip.
+    pub fn cycle_history_sort(&mut self, cx: &mut Context<Self>) {
+        self.history_sort = self.history_sort.next();
+        cx.notify();
     }
 
     pub fn history_range(&self) -> HistoryRange {

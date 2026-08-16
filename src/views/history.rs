@@ -9,7 +9,7 @@ use super::widgets::{self, card};
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::{HistoryRange, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -37,7 +37,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             widgets::list_shell()
                 .child(widgets::list_header(
                     i18n::tr("history.empty_title"),
-                    Some(header_controls(range)),
+                    Some(header_controls(state, range)),
                 ))
                 .child(
                     div()
@@ -49,10 +49,23 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ];
     }
 
-    // The bar is relative to the day's biggest spender — an absolute scale
+    let sort = state.history_sort();
+    // Re-ordered in the view: rank() ships CPU-time order, and the
+    // memory order is a lens over the same rows, not a second dataset.
+    let mut ordered: Vec<_> = rows.iter().collect();
+    if sort == HistorySort::PeakMemory {
+        ordered.sort_by_key(|s| std::cmp::Reverse(s.peak_memory_bytes));
+    }
+    // The bar is relative to the period's biggest — an absolute scale
     // would be meaningless (a day has 86 400 core-seconds per core).
-    let top = rows.first().map_or(1, |s| s.cpu_time_ms).max(1);
-    let shown: Vec<_> = rows.iter().take(TOP_N).collect();
+    let top = ordered
+        .first()
+        .map_or(1, |s| match sort {
+            HistorySort::CpuTime => s.cpu_time_ms,
+            HistorySort::PeakMemory => s.peak_memory_bytes,
+        })
+        .max(1);
+    let shown: Vec<_> = ordered.into_iter().take(TOP_N).collect();
     let last = shown.len().saturating_sub(1);
 
     // Two `yes` rows with different pids read as a duplicate at a squint;
@@ -64,7 +77,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
 
     let list = widgets::list_shell()
-        .child(widgets::list_header(title, Some(header_controls(range))))
+        .child(widgets::list_header(
+            title,
+            Some(header_controls(state, range)),
+        ))
         .children(shown.into_iter().enumerate().map(|(i, s)| {
             v_flex()
                 .px(px(13.))
@@ -118,13 +134,23 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         .text_size(px(12.))
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .text_color(theme::text())
-                                        .child(format::core_time(s.cpu_time_ms)),
+                                        .child(match sort {
+                                            HistorySort::CpuTime => {
+                                                format::core_time(s.cpu_time_ms)
+                                            }
+                                            HistorySort::PeakMemory => {
+                                                format::memory(s.peak_memory_bytes)
+                                            }
+                                        }),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(8.5))
                                         .text_color(theme::text_dim())
-                                        .child(i18n::tr("alerts.kind_cpu")),
+                                        .child(i18n::tr(match sort {
+                                            HistorySort::CpuTime => "alerts.kind_cpu",
+                                            HistorySort::PeakMemory => "history.peak_tag",
+                                        })),
                                 ),
                         ),
                 )
@@ -136,14 +162,20 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .text_size(px(10.))
                         .text_color(theme::text_dim())
                         .child(
-                            div().child(
-                                t!(
+                            div().child(match sort {
+                                HistorySort::CpuTime => t!(
                                     "history.pid_mem",
                                     pid = s.pid,
                                     mem = format::memory(s.peak_memory_bytes)
                                 )
                                 .to_string(),
-                            ),
+                                HistorySort::PeakMemory => t!(
+                                    "history.pid_cpu",
+                                    pid = s.pid,
+                                    cpu = format::core_time(s.cpu_time_ms)
+                                )
+                                .to_string(),
+                            }),
                         )
                         // Peak beside total on purpose: a small peak next to a
                         // large total is exactly the process this view exists
@@ -160,7 +192,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         ),
                 )
                 .child(div().mt(px(6.)).child(widgets::meter(
-                    s.cpu_time_ms as f32 / top as f32,
+                    match sort {
+                        HistorySort::CpuTime => s.cpu_time_ms as f32,
+                        HistorySort::PeakMemory => s.peak_memory_bytes as f32,
+                    } / top as f32,
                     Hsla::from(theme::ink()),
                     4.,
                 )))
@@ -192,11 +227,12 @@ fn explainer() -> AnyElement {
         .into_any_element()
 }
 
-/// Range chips and the refresh button, side by side in the header.
-fn header_controls(current: HistoryRange) -> AnyElement {
+/// Sort, range and refresh, side by side in the header.
+fn header_controls(state: &ZStatsAppState, current: HistoryRange) -> AnyElement {
     h_flex()
         .items_center()
         .gap(px(2.))
+        .child(sort_chip(state.history_sort()))
         .children(HistoryRange::ALL.into_iter().enumerate().map(|(i, range)| {
             let on = range == current;
             div()
@@ -220,6 +256,31 @@ fn header_controls(current: HistoryRange) -> AnyElement {
                 })
         }))
         .child(refresh_control())
+        .into_any_element()
+}
+
+/// One button cycling the two orders, the process page's idiom — the
+/// label names the order in force, the tooltip carries its caveat.
+fn sort_chip(sort: HistorySort) -> AnyElement {
+    let tip = i18n::tr(sort.tip_key());
+    h_flex()
+        .id("history-sort")
+        .items_center()
+        .rounded(px(4.))
+        .px(px(5.))
+        .py(px(1.))
+        .mr(px(4.))
+        .text_size(px(9.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text_muted())
+        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+        .tooltip(widgets::wrap_tooltip(tip))
+        .child(i18n::tr(sort.label_key()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.cycle_history_sort(cx));
+        })
         .into_any_element()
 }
 
