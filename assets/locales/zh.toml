@@ -238,6 +238,9 @@ to_full = "充满还需"
 no_battery = "没有电池 — 台式机或虚拟机。"
 
 [alerts]
+sustained_title = "持续负载"
+sustained_note = "低于告警线、但长期在烧的进程——来自面板的观察器，只陈列不告警。静默横幅指的就是这里。"
+watch_sustained = "持续负载 ≥%{cpu} 满 %{hours} 小时"
 sustained_subtitle = "持续 %{duration} 维持 %{cpu} CPU"
 sustained_body = "低于告警阈值，因此不会触发常规告警，但累计消耗可观。pid %{pid}。"
 empty_title = "没有告警"

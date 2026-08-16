@@ -658,6 +658,19 @@ impl ZStatsAppState {
 
     /// The CPU share above which load counts as sustained-and-worth-noting.
     /// A third of the alert threshold, so it scales with the user's setting.
+    /// The active sustained stretches, for the Alerts tab's read-only
+    /// card. Judgment stays out of the rule engine: this reads the
+    /// watcher's state and nothing more.
+    pub fn sustained_active(&self) -> Vec<SustainedNotice> {
+        self.sustained.active(self.sustained_bar())
+    }
+
+    /// The sustained bar, exposed for the Alerts empty state's
+    /// watching line.
+    pub fn sustained_bar_percent(&self) -> f64 {
+        self.sustained_bar()
+    }
+
     fn sustained_bar(&self) -> f64 {
         self.settings
             .as_ref()

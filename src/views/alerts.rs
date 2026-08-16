@@ -60,7 +60,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .child(line)
                 }))
                 .into_any_element(),
-        ];
+        ]
+        .into_iter()
+        .chain(sustained_card(state))
+        .collect();
     }
 
     let selected = state.selected_alert().cloned();
@@ -123,8 +126,77 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         })
         .collect();
 
+    cards.extend(sustained_card(state));
     cards.push(widgets::note(i18n::tr("alerts.footer_note")));
     cards
+}
+
+/// The sustained-load watcher's holdings, as a read-only card. This is
+/// the landing spot for the silent banner — its click opens this tab,
+/// and an empty room here read as a broken feature. Display only: the
+/// judgment lives in watch.rs, never in the rule engine, and the rows
+/// carry no actions on purpose — a steady 12% is information, not an
+/// offence.
+fn sustained_card(state: &ZStatsAppState) -> Option<AnyElement> {
+    let active = state.sustained_active();
+    if active.is_empty() {
+        return None;
+    }
+    let last = active.len() - 1;
+    Some(
+        card()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .child(i18n::tr("alerts.sustained_title")),
+            )
+            .child(
+                div()
+                    .mt(px(3.))
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("alerts.sustained_note")),
+            )
+            .children(active.into_iter().enumerate().map(|(i, notice)| {
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .py(px(7.))
+                    .when(i != last, |d| {
+                        d.border_b(px(1.)).border_color(theme::border_subtle())
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme::text())
+                            .truncate()
+                            .child(format!("{} — pid {}", notice.name, notice.pid)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(font::MONO)
+                            .text_size(px(10.))
+                            .text_color(theme::text_muted())
+                            .child(
+                                t!(
+                                    "alerts.sustained_subtitle",
+                                    duration = format::took(notice.duration),
+                                    cpu = format::pct(notice.cpu_avg as f32)
+                                )
+                                .to_string(),
+                            ),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    )
 }
 
 /// "CPU 30% · MEM 25% · disk 90% · cooldown 10m" — the rules the engine is
@@ -148,6 +220,14 @@ fn armed_line(state: &ZStatsAppState) -> Option<String> {
             f64::from(f) * 100.0
         ));
     }
+    items.push(
+        t!(
+            "alerts.watch_sustained",
+            cpu = format!("{:.0}%", state.sustained_bar_percent()),
+            hours = crate::watch::SUSTAINED_AFTER.as_secs() / 3600
+        )
+        .to_string(),
+    );
     items.push(
         t!(
             "alerts.empty_cooldown",

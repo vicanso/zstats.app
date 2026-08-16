@@ -65,8 +65,11 @@ pub struct SustainedNotice {
 /// time we look at it, so a "was it over recently" rule keeps its clock
 /// running forever and eventually reports a steady 10% that never happened.
 /// Its integral is 5%, and the integral is what this tests.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Stretch {
+    /// For the Alerts card — notices carry it, and the live table may no
+    /// longer hold this pid by the time someone looks.
+    name: String,
     /// Start of the current stretch.
     since: Instant,
     /// The process's lifetime CPU counter at [`Self::since`].
@@ -81,8 +84,9 @@ struct Stretch {
 }
 
 impl Stretch {
-    fn new(now: Instant, cpu_time_ms: u64) -> Self {
+    fn new(now: Instant, cpu_time_ms: u64, name: &str) -> Self {
         Self {
+            name: name.to_string(),
             since: now,
             cpu_time_start_ms: cpu_time_ms,
             last_seen: now,
@@ -148,7 +152,7 @@ impl SustainedWatch {
                     .unwrap_or(f64::from(p.cpu_usage_percent));
                 if cpu >= bar {
                     self.stretches
-                        .insert(p.pid, Stretch::new(now, p.cpu_time_ms));
+                        .insert(p.pid, Stretch::new(now, p.cpu_time_ms, &p.name));
                 }
                 continue;
             };
@@ -156,7 +160,7 @@ impl SustainedWatch {
             // A lifetime counter only goes backwards when the pid was reused,
             // and the new tenant's history is not the old one's.
             if p.cpu_time_ms < entry.cpu_time_last_ms {
-                *entry = Stretch::new(now, p.cpu_time_ms);
+                *entry = Stretch::new(now, p.cpu_time_ms, &p.name);
                 continue;
             }
 
@@ -179,7 +183,7 @@ impl SustainedWatch {
                 .quiet_since
                 .is_some_and(|q| now.duration_since(q) > SUSTAINED_GRACE)
             {
-                *entry = Stretch::new(now, p.cpu_time_ms);
+                *entry = Stretch::new(now, p.cpu_time_ms, &p.name);
                 continue;
             }
 
@@ -209,6 +213,29 @@ impl SustainedWatch {
         // Re-arm: a process that stops and later starts again is a new
         // episode and should be announced again.
         self.notified.retain(|pid| self.stretches.contains_key(pid));
+    }
+
+    /// Every stretch currently qualifying — long enough *and* integral
+    /// over the bar — longest first. The Alerts tab's read-only card:
+    /// a view of what the watcher is holding, raising nothing and
+    /// feeding nothing into the rule engine.
+    pub fn active(&self, bar: f64) -> Vec<SustainedNotice> {
+        let mut out: Vec<SustainedNotice> = self
+            .stretches
+            .iter()
+            .filter_map(|(pid, s)| {
+                let duration = s.duration();
+                let average = s.average_percent();
+                (duration >= SUSTAINED_AFTER && average >= bar).then(|| SustainedNotice {
+                    pid: *pid,
+                    name: s.name.clone(),
+                    cpu_avg: average,
+                    duration,
+                })
+            })
+            .collect();
+        out.sort_by_key(|n| std::cmp::Reverse(n.duration));
+        out
     }
 
     /// Notices raised since the last call, taken once.
@@ -327,10 +354,30 @@ mod tests {
     use super::*;
     use crate::procscan::ProcState;
 
+    #[test]
+    fn active_lists_only_qualifying_stretches() {
+        let mut watch = SustainedWatch::default();
+        let long_ago = Instant::now() - SUSTAINED_AFTER - Duration::from_secs(60);
+        // Long enough and ~10% integral → qualifies at a bar of 8.
+        watch.stretches.insert(1, burnt(long_ago, 726_000));
+        // Long enough but ~0.01% → under the bar.
+        watch.stretches.insert(2, burnt(long_ago, 1_000));
+        // Hot but only a minute old → not long enough.
+        watch
+            .stretches
+            .insert(3, burnt(Instant::now() - Duration::from_secs(60), 30_000));
+
+        let active = watch.active(8.0);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].pid, 1);
+        assert!(active[0].duration >= SUSTAINED_AFTER);
+    }
+
     /// A stretch starting at `since` that has consumed `cpu_time_ms` of
     /// single-core time by now.
     fn burnt(since: Instant, cpu_time_ms: u64) -> Stretch {
         Stretch {
+            name: "test".into(),
             since,
             cpu_time_start_ms: 0,
             last_seen: Instant::now(),
@@ -371,7 +418,9 @@ mod tests {
 
         // Busy right now, but only just started — not yet a story, and with a
         // single sample there is nothing to difference anyway.
-        watch.stretches.insert(44, Stretch::new(Instant::now(), 0));
+        watch
+            .stretches
+            .insert(44, Stretch::new(Instant::now(), 0, "test"));
         assert!(watch.duration_for(44, BAR).is_none());
     }
 

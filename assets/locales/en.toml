@@ -238,6 +238,9 @@ to_full = "To full"
 no_battery = "No battery reported — desktop or VM."
 
 [alerts]
+sustained_title = "Sustained load"
+sustained_note = "Processes burning steadily below the alert line — the panel's own watcher, shown here and never alerted on. The quiet banner points at this."
+watch_sustained = "sustained ≥%{cpu} for %{hours}h"
 sustained_subtitle = "%{cpu} CPU held for %{duration}"
 sustained_body = "Below the alert threshold, so it never triggers one — but it adds up. pid %{pid}."
 empty_title = "Nothing firing"
