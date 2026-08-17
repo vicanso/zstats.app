@@ -308,7 +308,6 @@ pub enum UpdateStatus {
         received: u64,
         /// 0 while the server has not said.
         total: u64,
-        url: String,
         notes: String,
     },
     /// Downloaded, verified, and the DMG handed to the OS — the drag
@@ -317,7 +316,6 @@ pub enum UpdateStatus {
     DownloadFailed {
         version: String,
         error: String,
-        url: String,
         notes: String,
     },
 }
@@ -536,6 +534,14 @@ pub struct ZStatsAppState {
     history_sort: HistorySort,
     /// The last (or in-flight) clean-hints update fetch.
     hints_sync: Option<HintsSync>,
+    /// A newer release a silent check found (its tag) — the settings
+    /// gear's dot. Loaded from the check file at launch, refreshed by
+    /// every check, cleared by comparison once the update is installed.
+    update_nudge: Option<String>,
+    /// Throttles the *probe* (a tiny file read) to once an hour; the
+    /// check itself is throttled to days by the file's timestamp.
+    auto_check_probe_at: Option<Instant>,
+    auto_check_inflight: bool,
     /// The last (or in-flight) version check.
     update_status: Option<UpdateStatus>,
     /// The whole-table listing, only ever populated on request.
@@ -653,6 +659,9 @@ impl Default for ZStatsAppState {
             history_sort: HistorySort::default(),
             hints_sync: None,
             update_status: None,
+            update_nudge: updater::nudge(),
+            auto_check_probe_at: None,
+            auto_check_inflight: false,
             full_scan: FullScan::default(),
             full_app_scan: FullAppScan::default(),
             proc_filter: None,
@@ -698,6 +707,7 @@ impl ZStatsAppState {
         if self.tab == Tab::Hardware {
             self.ensure_space_info(cx);
         }
+        self.maybe_auto_check_update(cx);
         cx.notify();
         fresh
     }
@@ -1411,6 +1421,64 @@ impl ZStatsAppState {
         self.update_status.as_ref()
     }
 
+    /// The tag of a newer release a check has seen, if any — what the
+    /// settings gear's dot means.
+    pub fn update_nudge(&self) -> Option<&str> {
+        self.update_nudge.as_deref()
+    }
+
+    /// A silent finding but no check this session: run one, so the
+    /// About row carries the release notes the silent check does not
+    /// retain. Solicited — the user just opened the update surface.
+    pub fn refresh_update_for_about(&mut self, cx: &mut Context<Self>) {
+        if self.update_status.is_none() && self.update_nudge.is_some() {
+            self.check_update(cx);
+        }
+    }
+
+    /// "Skip this version": mute the gear's dot for `version` alone.
+    /// Checks keep running, the About page keeps answering truthfully,
+    /// and the next release re-arms the dot by itself.
+    pub fn ignore_update(&mut self, version: &str, cx: &mut Context<Self>) {
+        updater::ignore(version);
+        self.update_nudge = updater::nudge();
+        cx.notify();
+    }
+
+    /// The silent update check, riding the tick like the space probe.
+    /// Three throttles deep: in-flight flag, an hourly probe of the
+    /// check file, and the file's own days-scale cadence — so the
+    /// steady state is one tiny file read per hour and one network
+    /// round-trip per `AUTO_CHECK_EVERY`.
+    fn maybe_auto_check_update(&mut self, cx: &mut Context<Self>) {
+        const PROBE_EVERY: Duration = Duration::from_secs(3600);
+        if self.auto_check_inflight
+            || self
+                .auto_check_probe_at
+                .is_some_and(|at| at.elapsed() < PROBE_EVERY)
+        {
+            return;
+        }
+        self.auto_check_probe_at = Some(Instant::now());
+        if !updater::auto_check_due(std::time::SystemTime::now()) {
+            return;
+        }
+        self.auto_check_inflight = true;
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async { updater::check() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.auto_check_inflight = false;
+                updater::record_outcome(std::time::SystemTime::now(), &outcome);
+                state.update_nudge = updater::nudge();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Ask GitHub for the latest release on the background executor.
     /// One at a time, same as the hints fetch.
     pub fn check_update(&mut self, cx: &mut Context<Self>) {
@@ -1425,6 +1493,10 @@ impl ZStatsAppState {
                 .spawn(async { updater::check() })
                 .await;
             let _ = this.update(cx, |state, cx| {
+                // A manual check answers the same question: stamp the
+                // silent clock and refresh the gear's dot from it.
+                updater::record_outcome(std::time::SystemTime::now(), &outcome);
+                state.update_nudge = updater::nudge();
                 state.update_status = Some(UpdateStatus::Done(outcome));
                 cx.notify();
             });
@@ -1438,17 +1510,14 @@ impl ZStatsAppState {
         if matches!(self.update_status, Some(UpdateStatus::Downloading { .. })) {
             return;
         }
-        let (url, notes) = match &self.update_status {
-            Some(UpdateStatus::Done(updater::UpdateCheck::Newer { url, notes, .. })) => {
-                (url.clone(), notes.clone())
-            }
-            Some(UpdateStatus::DownloadFailed { url, notes, .. }) => (url.clone(), notes.clone()),
-            _ => (String::new(), String::new()),
+        let notes = match &self.update_status {
+            Some(UpdateStatus::Done(updater::UpdateCheck::Newer { notes, .. }))
+            | Some(UpdateStatus::DownloadFailed { notes, .. }) => notes.clone(),
+            _ => String::new(),
         };
         self.update_status = Some(UpdateStatus::Downloading {
             received: 0,
             total: 0,
-            url,
             notes,
         });
         cx.notify();
@@ -1490,18 +1559,15 @@ impl ZStatsAppState {
                 })
                 .await;
             let _ = this.update(cx, |state, cx| {
-                let (url, notes) = match &state.update_status {
-                    Some(UpdateStatus::Downloading { url, notes, .. }) => {
-                        (url.clone(), notes.clone())
-                    }
-                    _ => (String::new(), String::new()),
+                let notes = match &state.update_status {
+                    Some(UpdateStatus::Downloading { notes, .. }) => notes.clone(),
+                    _ => String::new(),
                 };
                 state.update_status = Some(match outcome {
                     Ok(_path) => UpdateStatus::Installed,
                     Err(error) => UpdateStatus::DownloadFailed {
                         version,
                         error,
-                        url,
                         notes,
                     },
                 });

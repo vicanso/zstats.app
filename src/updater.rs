@@ -22,6 +22,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 const LATEST_URL: &str = "https://api.github.com/repos/vicanso/zstats.app/releases/latest";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -150,8 +152,6 @@ pub enum UpdateCheck {
     Newer {
         /// The remote tag, "v0.1.2" — shown as-is.
         version: String,
-        /// The release page; "go get it" opens this in the browser.
-        url: String,
         /// Release body, unescaped. Empty when GitHub sent `null` or "".
         notes: String,
     },
@@ -181,8 +181,6 @@ pub fn check() -> UpdateCheck {
     let Some(tag) = json_str_field(&body, "tag_name") else {
         return UpdateCheck::Failed("no tag_name in response".into());
     };
-    let url = json_str_field(&body, "html_url")
-        .unwrap_or_else(|| "https://github.com/vicanso/zstats.app/releases".into());
     let notes = json_str_field(&body, "body")
         .unwrap_or_default()
         .replace("\r\n", "\n")
@@ -190,7 +188,6 @@ pub fn check() -> UpdateCheck {
     if is_newer(&tag, about::version()) {
         UpdateCheck::Newer {
             version: tag,
-            url,
             notes,
         }
     } else {
@@ -255,6 +252,131 @@ fn unescape_json_string(s: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ---- silent periodic check (the settings gear's dot) -------------------
+
+/// How often the silent background check may run. Two days: releases
+/// land at most a few times a week, one ~1 KB API request every other
+/// day is invisible, and the dot appears within a day or two of a
+/// release without the user ever thinking about updates. Seven days is
+/// the other sanctioned cadence — this one constant.
+const AUTO_CHECK_EVERY: Duration = Duration::from_secs(2 * 24 * 60 * 60);
+
+fn auto_check_path(dir: &Path) -> PathBuf {
+    dir.join("update-check.toml")
+}
+
+/// What the check file holds. `ignored` is the user's "skip this
+/// version": it silences the gear's dot for that tag only — the About
+/// page's manual check keeps telling the truth, and the next release
+/// (a different tag) brings the dot back on its own.
+#[derive(Default)]
+struct CheckFile {
+    checked_unix: u64,
+    latest: Option<String>,
+    ignored: Option<String>,
+}
+
+fn read_check_in(dir: &Path) -> CheckFile {
+    let doc = fs::read_to_string(auto_check_path(dir))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok());
+    let Some(doc) = doc else {
+        return CheckFile::default();
+    };
+    let get = |k: &str| doc.get(k).and_then(toml::Value::as_str).map(str::to_string);
+    CheckFile {
+        checked_unix: doc
+            .get("checked_unix")
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(0)
+            .max(0) as u64,
+        latest: get("latest"),
+        ignored: get("ignored"),
+    }
+}
+
+fn write_check_in(dir: &Path, file: &CheckFile) {
+    // Tags come from GitHub's own JSON; the escape is belt only.
+    let clean = |v: &str| v.replace(['\\', '"'], "");
+    let mut out = format!("checked_unix = {}\n", file.checked_unix);
+    if let Some(v) = &file.latest {
+        out.push_str(&format!("latest = \"{}\"\n", clean(v)));
+    }
+    if let Some(v) = &file.ignored {
+        out.push_str(&format!("ignored = \"{}\"\n", clean(v)));
+    }
+    let _ = fs::create_dir_all(dir);
+    let _ = fs::write(auto_check_path(dir), out);
+}
+
+/// Whether the silent check is due: no record yet, or the last attempt
+/// is older than [`AUTO_CHECK_EVERY`]. Attempts are stamped regardless
+/// of outcome — an offline machine gets one try per period, not one
+/// per tick.
+pub fn auto_check_due(now: SystemTime) -> bool {
+    auto_check_due_in(&zstats::settings::default_dir(), now)
+}
+
+fn auto_check_due_in(dir: &Path, now: SystemTime) -> bool {
+    let checked = UNIX_EPOCH + Duration::from_secs(read_check_in(dir).checked_unix);
+    now.duration_since(checked)
+        .map_or(true, |age| age >= AUTO_CHECK_EVERY)
+}
+
+/// Stamp a check's outcome. `Newer` stores the version, `UpToDate`
+/// clears it, and `Failed` keeps whatever the last successful check
+/// learned — a network error says nothing about versions, it only
+/// spends this period's attempt. The ignore mark always survives.
+/// Manual checks record too: they answer the same question, so they
+/// also reset the silent clock.
+pub fn record_outcome(now: SystemTime, outcome: &UpdateCheck) {
+    record_outcome_in(&zstats::settings::default_dir(), now, outcome);
+}
+
+fn record_outcome_in(dir: &Path, now: SystemTime, outcome: &UpdateCheck) {
+    let mut file = read_check_in(dir);
+    file.checked_unix = now
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match outcome {
+        UpdateCheck::Newer { version, .. } => file.latest = Some(version.clone()),
+        UpdateCheck::UpToDate => file.latest = None,
+        UpdateCheck::Failed(_) => {}
+    }
+    write_check_in(dir, &file);
+}
+
+/// Mute the dot for `version` alone. Display-layer only, like the
+/// banner snooze: checks keep running and recording, the About page
+/// keeps answering truthfully — the unsolicited reminder is what stops.
+pub fn ignore(version: &str) {
+    ignore_in(&zstats::settings::default_dir(), version);
+}
+
+fn ignore_in(dir: &Path, version: &str) {
+    let mut file = read_check_in(dir);
+    file.ignored = Some(version.to_string());
+    write_check_in(dir, &file);
+}
+
+/// The version a past check found and this build has not caught up to —
+/// the meaning of the settings gear's dot. File plus version compare,
+/// no network: installing the update clears the dot by comparison, not
+/// by bookkeeping.
+pub fn nudge() -> Option<String> {
+    nudge_in(&zstats::settings::default_dir(), about::version())
+}
+
+fn nudge_in(dir: &Path, current: &str) -> Option<String> {
+    let file = read_check_in(dir);
+    let latest = file.latest?;
+    if file.ignored.as_deref() == Some(latest.as_str()) {
+        return None;
+    }
+    is_newer(&latest, current).then_some(latest)
 }
 
 /// `v0.1.2` vs `0.1.1` — numeric segment compare, missing segments are
@@ -330,5 +452,38 @@ mod tests {
             json_str_field("{\"body\":null}", "body").as_deref(),
             Some("")
         );
+    }
+
+    #[test]
+    fn silent_check_cadence_ignore_and_nudge_round_trip() {
+        let dir = env::temp_dir().join(format!("zstats-autocheck-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let newer = |v: &str| UpdateCheck::Newer {
+            version: v.into(),
+            notes: String::new(),
+        };
+        assert!(auto_check_due_in(&dir, t0), "no record yet means due");
+        record_outcome_in(&dir, t0, &newer("v9.9.8"));
+        assert!(!auto_check_due_in(&dir, t0 + Duration::from_secs(3600)));
+        assert!(auto_check_due_in(&dir, t0 + AUTO_CHECK_EVERY));
+        assert_eq!(nudge_in(&dir, "0.1.2"), Some("v9.9.8".into()));
+        assert_eq!(
+            nudge_in(&dir, "9.9.9"),
+            None,
+            "installing past it clears the dot by comparison"
+        );
+        // Skip this version: the dot goes quiet for v9.9.8 alone…
+        ignore_in(&dir, "v9.9.8");
+        assert_eq!(nudge_in(&dir, "0.1.2"), None);
+        // …a failure keeps both the finding and the ignore mark…
+        record_outcome_in(&dir, t0, &UpdateCheck::Failed("offline".into()));
+        assert_eq!(nudge_in(&dir, "0.1.2"), None);
+        // …and the next release brings the dot back on its own.
+        record_outcome_in(&dir, t0, &newer("v9.9.9"));
+        assert_eq!(nudge_in(&dir, "0.1.2"), Some("v9.9.9".into()));
+        record_outcome_in(&dir, t0, &UpdateCheck::UpToDate);
+        assert_eq!(nudge_in(&dir, "0.1.2"), None, "up-to-date clears it");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -262,7 +262,8 @@ fn update_check_btn(enabled: bool) -> AnyElement {
 /// Download (accent) + release page — replace the check button once a
 /// newer tag is known, so the two actions share the row instead of
 /// squeezing in beside the "new version" caption.
-fn update_install_btns(version: String, url: String) -> AnyElement {
+fn update_install_btns(version: String) -> AnyElement {
+    let skip_version = version.clone();
     let download = update_btn(
         "about-update-download",
         i18n::tr("config.update_download"),
@@ -282,11 +283,21 @@ fn update_install_btns(version: String, url: String) -> AnyElement {
         .gap(px(8.))
         .child(download)
         .child(
-            update_btn("about-update-go", i18n::tr("config.update_go"), false)
+            // Mutes the gear's dot for this tag only — manual checks
+            // stay truthful, the next release re-arms the dot.
+            update_btn("about-update-skip", i18n::tr("config.update_skip"), false)
                 .flex_1()
                 .min_w_0()
+                .tooltip(super::widgets::wrap_tooltip(i18n::tr(
+                    "config.update_skip_tip",
+                )))
                 .hover(|d| d.bg(theme::surface_raised()))
-                .on_click(move |_, _window, cx| cx.open_url(&url)),
+                .on_click(move |_, _window, cx| {
+                    let version = skip_version.clone();
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.ignore_update(&version, cx));
+                }),
         )
         .into_any_element()
 }
@@ -341,14 +352,28 @@ fn nonempty_notes(notes: &str) -> Option<&str> {
 fn update_row(state: &ZStatsAppState) -> AnyElement {
     enum Action {
         Check { enabled: bool },
-        Install { version: String, url: String },
+        Install { version: String },
         Busy,
         Quit,
     }
 
     let (caption, action, notes): (Option<String>, Action, Option<&str>) =
         match state.update_status() {
-            None => (None, Action::Check { enabled: true }, None),
+            // No check ran this session, but the silent one has a
+            // finding on file: surface it ready to act on — the gear's
+            // dot led here, so the door must not play dumb and demand a
+            // re-check. Notes are not retained by the silent check;
+            // entering About triggers a real one that fills them in.
+            None => match state.update_nudge() {
+                Some(v) => (
+                    Some(t!("config.update_newer", v = v).to_string()),
+                    Action::Install {
+                        version: v.to_string(),
+                    },
+                    None,
+                ),
+                None => (None, Action::Check { enabled: true }, None),
+            },
             Some(UpdateStatus::Checking) => (None, Action::Check { enabled: false }, None),
             Some(UpdateStatus::Done(updater::UpdateCheck::UpToDate)) => (
                 Some(i18n::tr("config.update_latest")),
@@ -360,15 +385,10 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
                 Action::Check { enabled: true },
                 None,
             ),
-            Some(UpdateStatus::Done(updater::UpdateCheck::Newer {
-                version,
-                url,
-                notes,
-            })) => (
+            Some(UpdateStatus::Done(updater::UpdateCheck::Newer { version, notes })) => (
                 Some(t!("config.update_newer", v = version.as_str()).to_string()),
                 Action::Install {
                     version: version.clone(),
-                    url: url.clone(),
                 },
                 nonempty_notes(notes),
             ),
@@ -403,13 +423,11 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
             Some(UpdateStatus::DownloadFailed {
                 version,
                 error,
-                url,
                 notes,
             }) => (
                 Some(t!("config.update_dl_failed", e = error.as_str()).to_string()),
                 Action::Install {
                     version: version.clone(),
-                    url: url.clone(),
                 },
                 nonempty_notes(notes),
             ),
@@ -417,7 +435,7 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
 
     let actions = match action {
         Action::Check { enabled } => update_check_btn(enabled),
-        Action::Install { version, url } => update_install_btns(version, url),
+        Action::Install { version } => update_install_btns(version),
         Action::Busy => update_btn(
             "about-update-progress",
             caption.clone().unwrap_or_default(),

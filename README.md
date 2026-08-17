@@ -27,18 +27,19 @@ Most menu-bar monitors either paint pretty numbers or nag you. zstats does both,
 
 ## Alert
 
-The headline feature is **per-program thresholds**: on one machine a browser may be allowed 200% CPU while a background daemon should speak up at 30% — every program can carry its own line, edited right on the panel. Built-in templates cover the common cases with sensible defaults, so **alerts are meaningful out of the box, before you configure anything**.
+The headline is **a base threshold combined with per-program ones**: one global line as the floor, and any program can carry its own — on one machine a browser may be allowed 200% CPU while a background daemon should speak up at 30%. A program's own line wins where set, the base line covers the rest, edited right on the panel. Built-in templates cover the common cases with sensible defaults, so **alerts are meaningful out of the box, before you configure anything**.
 
 - CPU, memory, disk and memory-pressure thresholds, evaluated by zstats' rule engine
+- **Slow burns get named too**: a process holding CPU for hours without ever crossing a line (25% for an hour, say) is called out by the sustained-load watcher — delivered as a silent banner, never a nag
 - Native notification banners; snooze an episode for 1 or 3 hours
 - Memory-pressure cards list the top consumers and offer a polite quit (⌘Q / SIGTERM — never SIGKILL)
 
 ## Reclaim disk
 
-- **Large files, instantly** — Spotlight, ≥500 MB (drops to ≥100 MB when few match)
+- **Large files, instantly** — straight from macOS's own Spotlight index, no disk walk: ≥500 MB (drops to ≥100 MB when few match)
 - **Directory analysis** — a background walk of your home tree (hundreds of thousands of directories in about half a minute) into three rankings: regenerable caches (`CACHEDIR.TAG`), fat directories, and files the index never sees
 - Results stream while it walks; click a folder to drill in; pick the analysis root
-- Cleanup suggestions: tagged caches plus known tool caches (npm, Cargo, Xcode, …), one click to the Trash, with the owner's own cleanup command shown
+- Cleanup suggestions **speak only by rule**: a directory either carries a signature-checked `CACHEDIR.TAG` (the owner's own declaration that it is regenerable) or matches a cache list compiled from **each tool's official documentation** (npm, Cargo, Xcode, …) — name-based guesses are labelled, never suggested. One click to the Trash, with the owner's own cleanup command shown
 - Rules you can replace: drop a `~/.zstats/cleanhints.toml` to override the built-in list
 
 ## Safety

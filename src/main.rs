@@ -520,6 +520,16 @@ fn settings_nav(
                             if this.section != item {
                                 this.section = item;
                                 this.scroll = ScrollHandle::new();
+                                // Entering About with a silent finding on
+                                // file: run a real check — the silent one
+                                // does not retain release notes, and the
+                                // user is now looking at the one surface
+                                // that shows them.
+                                if item == views::config::SettingsSection::About {
+                                    cx.global::<ZStatsGlobalStore>()
+                                        .clone()
+                                        .update(cx, |state, cx| state.refresh_update_for_about(cx));
+                                }
                                 cx.notify();
                             }
                         }))

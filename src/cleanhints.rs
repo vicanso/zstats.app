@@ -107,8 +107,8 @@ pub enum RemoteUpdate {
 /// locally (the user file if present, the embedded built-ins otherwise),
 /// replace `~/.zstats/cleanhints.toml` with it and reload. Validated
 /// before a byte lands: content that does not parse to at least one
-/// entry never overwrites a working file. The app's only network call,
-/// strictly user-triggered; goes through [`proxy::app_proxy`]. Blocking
+/// entry never overwrites a working file. Strictly user-triggered;
+/// goes through [`proxy::app_proxy`] like every other fetch. Blocking
 /// — call on the background executor.
 pub fn update_from_remote() -> RemoteUpdate {
     let agent = ureq::Agent::config_builder()

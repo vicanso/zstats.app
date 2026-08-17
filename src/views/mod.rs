@@ -45,6 +45,7 @@ use gpui::{
 };
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use rust_i18n::t;
 
 /// Height of the tab strip: 14 top pad + a 34-tall well (3 + 28 + 3) + 8 gap.
 ///
@@ -75,7 +76,7 @@ pub fn root(cx: &App) -> AnyElement {
         .size_full()
         .child(tab_strip(state))
         .child(content(state))
-        .child(footer())
+        .child(footer(state))
         .into_any_element()
 }
 
@@ -194,8 +195,9 @@ const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
 /// Config, GitHub and Quit sit together on the right — a lone icon on
 /// the left read as an unfinished row. Quit stays last so it is the
 /// edge action.
-fn footer() -> AnyElement {
+fn footer(state: &ZStatsAppState) -> AnyElement {
     let github_tip = i18n::tr("common.github");
+    let nudge = state.update_nudge().map(str::to_string);
     h_flex()
         .h(px(FOOTER_HEIGHT))
         .flex_none()
@@ -211,7 +213,12 @@ fn footer() -> AnyElement {
             // Config lives in its own window, not a tab: a settings
             // session should not be cut short by the popover auto-hiding
             // on focus loss. The gear opens (or refocuses) it.
-            let settings_tip = i18n::tr("tabs.config");
+            let settings_tip = match &nudge {
+                // The dot's words: a silent check found a newer release;
+                // the About page has the download.
+                Some(v) => t!("config.update_nudge_tip", v = v).to_string(),
+                None => i18n::tr("tabs.config"),
+            };
             div()
                 .id("settings")
                 .flex_none()
@@ -220,9 +227,27 @@ fn footer() -> AnyElement {
                 .tooltip(move |window, cx| Tooltip::new(settings_tip.clone()).build(window, cx))
                 .hover(|d| d.bg(theme::surface_raised()))
                 .child(
-                    Icon::new(IconName::Settings2)
-                        .with_size(Size::Size(px(14.)))
-                        .text_color(Hsla::from(theme::text_dim())),
+                    div()
+                        .relative()
+                        .child(
+                            Icon::new(IconName::Settings2)
+                                .with_size(Size::Size(px(14.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        )
+                        // The nudge dot: paint only, no layout — the
+                        // gear must not shift when it appears.
+                        .when(nudge.is_some(), |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top(px(-1.))
+                                    .right(px(-1.))
+                                    .w(px(6.))
+                                    .h(px(6.))
+                                    .rounded_full()
+                                    .bg(Hsla::from(theme::accent())),
+                            )
+                        }),
                 )
                 .on_click(|_, _window, cx| crate::open_settings_window(cx))
         })
