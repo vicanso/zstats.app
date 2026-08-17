@@ -19,6 +19,7 @@ mod i18n;
 mod i18n_loader;
 mod metrics;
 mod notify;
+mod opener;
 mod placement;
 mod prefs;
 #[cfg(target_os = "macos")]
@@ -40,6 +41,7 @@ mod window_ext;
 use crate::assets::Assets;
 use crate::placement::{DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
+use std::time::Duration;
 
 // Pointed at the empty `locales_stub/` so the macro embeds no translations.
 // Real files live in `assets/locales/` and inflate via `i18n_loader`.
@@ -54,8 +56,6 @@ use gpui::{
     WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_component::{ActiveTheme, Icon, Root, Sizable, Size, Theme, ThemeMode};
-
-use std::time::Duration;
 
 /// Shown in the app menu, the tray tooltip, the task switcher and the Linux
 /// title bar.
@@ -90,7 +90,7 @@ const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else
 /// not reopen — that's what makes the tray icon toggle.
 const TOGGLE_GRACE: Duration = Duration::from_millis(300);
 
-actions!(zstats, [Quit]);
+actions!(zstats, [Quit, CloseSettings]);
 
 /// The root view. Owns the window-lifecycle subscriptions and hands the
 /// panel itself to `views::root`; the gpui-component dialog / notification
@@ -180,7 +180,7 @@ impl Render for ZStatsApp {
             state.set_window_metrics(bounds, scale_factor, cx)
         });
 
-        let tint = prefs::applied_opacity().unwrap_or(if theme::is_dark() {
+        let tint = prefs::opacity().unwrap_or(if theme::is_dark() {
             BACKGROUND_OPACITY_DARK
         } else {
             BACKGROUND_OPACITY_LIGHT
@@ -278,8 +278,8 @@ pub fn set_language_pref(pref: prefs::LanguagePref, cx: &mut App) {
     repaint(cx);
 }
 
-/// The Interface page's opacity picker: persist only. The wash is
-/// sampled at launch, so a change sits in `app.toml` until the next start.
+/// The Interface page's opacity picker: persist and repaint — the wash
+/// reads the pref per frame, so the change is visible immediately.
 pub fn set_opacity_pref(value: Option<f32>, cx: &mut App) {
     prefs::set_opacity(value);
     repaint(cx);
@@ -376,6 +376,12 @@ fn use_popover_material(window: &Window) {
 /// a second popover. Repaints are driven by observing the store, the
 /// same signal the panel's per-tick repaint rides on.
 struct SettingsWindow {
+    /// Keyboard anchor: gpui dispatches keystrokes along the focus path,
+    /// so without a focused node the Escape / cmd-w bindings would never
+    /// reach the root's `key_context` at all. Focused at creation; a
+    /// click into the proxy field moves focus there and back-arrives
+    /// here on the next window activation.
+    focus_handle: gpui::FocusHandle,
     section: views::config::SettingsSection,
     scroll: ScrollHandle,
     /// The proxy setting's text field. Lives with this window, like the
@@ -411,7 +417,10 @@ impl SettingsWindow {
             },
         )
         .detach();
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
         Self {
+            focus_handle,
             section: views::config::SettingsSection::Interface,
             scroll: ScrollHandle::new(),
             proxy_input,
@@ -441,6 +450,14 @@ impl Render for SettingsWindow {
         div()
             .relative()
             .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context("SettingsWindow")
+            // Same effect as the title bar's close button; the stored
+            // handle fails its next update and a fresh window is built,
+            // so no state cleanup belongs here.
+            .on_action(cx.listener(|_, _: &CloseSettings, window, _cx| {
+                window.remove_window();
+            }))
             .bg(bg)
             .text_color(fg)
             .child(
@@ -818,15 +835,30 @@ fn main() {
         cx.set_global(ZStatsGlobalStore::new(app_state));
 
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-        cx.bind_keys([KeyBinding::new(
-            if cfg!(target_os = "macos") {
-                "cmd-q"
-            } else {
-                "ctrl-q"
-            },
-            Quit,
-            None,
-        )]);
+        cx.bind_keys([
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-q"
+                } else {
+                    "ctrl-q"
+                },
+                Quit,
+                None,
+            ),
+            // Settings is a standard window, so it answers the standard
+            // dismissals — context-scoped, so neither key leaks into the
+            // panel (whose Escape-free, auto-hide life is deliberate).
+            KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-w"
+                } else {
+                    "ctrl-w"
+                },
+                CloseSettings,
+                Some("SettingsWindow"),
+            ),
+        ]);
         install_menus(cx);
 
         #[cfg(not(target_os = "linux"))]

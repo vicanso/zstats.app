@@ -16,6 +16,10 @@
 //! been sitting there for 6 and 15 days under a live parent, which is exactly
 //! the kind of leak worth surfacing.
 
+use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::ptr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// What kind of abnormal, for wording and colour.
@@ -40,6 +44,11 @@ impl ProcState {
 pub struct AbnormalProcess {
     pub pid: u32,
     pub parent_pid: u32,
+    /// The parent's name, resolved from the same table snapshot the
+    /// abnormal entry came out of — no second syscall. `None` when the
+    /// parent is no longer in the table (exited between fork and scan)
+    /// or the pid row could not be read.
+    pub parent_name: Option<String>,
     pub name: String,
     pub state: ProcState,
     /// Time since the process was created.
@@ -67,9 +76,26 @@ pub fn scan() -> Vec<AbnormalProcess> {
         .chunks_exact(KINFO_PROC_SIZE)
         .filter_map(parse_entry)
         .collect();
+    // Resolve parent names from the same snapshot: a second pass over
+    // the buffer already in hand, only for the pids actually needed. A
+    // zombie's parent is by definition still alive (its exit is what
+    // the parent has not acknowledged), so this nearly always names it.
+    if !found.is_empty() {
+        let wanted: HashSet<u32> = found.iter().map(|p| p.parent_pid).collect();
+        let mut names: HashMap<u32, String> = HashMap::new();
+        for chunk in raw.chunks_exact(KINFO_PROC_SIZE) {
+            let pid = read_i32(chunk, OFF_PID);
+            if pid > 0 && wanted.contains(&(pid as u32)) {
+                names.insert(pid as u32, read_name(&chunk[OFF_COMM..OFF_COMM + COMM_LEN]));
+            }
+        }
+        for p in &mut found {
+            p.parent_name = names.get(&p.parent_pid).filter(|n| !n.is_empty()).cloned();
+        }
+    }
     // Oldest first: a zombie sitting there for days is the signal; one that
     // appeared this second is probably about to be reaped.
-    found.sort_by_key(|p| std::cmp::Reverse(p.age));
+    found.sort_by_key(|p| Reverse(p.age));
     found
 }
 
@@ -89,9 +115,9 @@ fn all_processes() -> Option<Vec<u8>> {
         libc::sysctl(
             mib.as_mut_ptr(),
             mib.len() as u32,
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             &mut len,
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             0,
         )
     };
@@ -106,7 +132,7 @@ fn all_processes() -> Option<Vec<u8>> {
             mib.len() as u32,
             buf.as_mut_ptr().cast(),
             &mut len,
-            std::ptr::null_mut(),
+            ptr::null_mut(),
             0,
         )
     };
@@ -160,6 +186,7 @@ fn parse_entry(chunk: &[u8]) -> Option<AbnormalProcess> {
     Some(AbnormalProcess {
         pid: pid as u32,
         parent_pid: read_i32(chunk, OFF_PPID).max(0) as u32,
+        parent_name: None,
         name: read_name(&chunk[OFF_COMM..OFF_COMM + COMM_LEN]),
         state,
         age,

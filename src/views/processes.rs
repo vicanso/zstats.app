@@ -23,7 +23,10 @@ use gpui::{
 use gpui_component::input::Input;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
+use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::process;
+use std::thread;
 use zstats::Tick;
 use zstats::snapshot::ProcessSnapshot;
 
@@ -143,7 +146,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // user's choice is applied here so it only affects this tab.
     match state.proc_sort() {
         ProcSort::Cpu => {}
-        ProcSort::Memory => rows.sort_by_key(|(p, _)| std::cmp::Reverse(shown_memory(p))),
+        ProcSort::Memory => rows.sort_by_key(|(p, _)| Reverse(shown_memory(p))),
         // Case-insensitive, or every capitalised app name would sort ahead of
         // every lowercase daemon — not what "by name" means to someone
         // scanning for one. `_cached_` because the key allocates: plain
@@ -277,7 +280,7 @@ fn process_row(
     let hot = cpu > HOT_PERCENT;
     let expanded = state.selected_pid() == Some(p.pid);
     let pid = p.pid;
-    let is_self = pid == std::process::id();
+    let is_self = pid == process::id();
     let avg = cpu;
 
     let mut row = v_flex()
@@ -784,8 +787,8 @@ fn kill(pid: u32) {
         eprintln!("refusing to kill pid {pid}");
         return;
     }
-    std::thread::spawn(move || {
-        match std::process::Command::new("kill")
+    thread::spawn(move || {
+        match process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output()
         {
@@ -801,7 +804,7 @@ fn kill(pid: u32) {
 }
 
 fn safe_to_kill(pid: u32) -> bool {
-    pid > 1 && pid != std::process::id()
+    pid > 1 && pid != process::id()
 }
 
 /// The filter chip in the list header.
@@ -850,6 +853,12 @@ fn abnormal_rows(
     more_follows: bool,
 ) -> Vec<AnyElement> {
     let total = found.len();
+    // "zstats (60337)" when the scan could name the parent, bare pid
+    // when it could not — never a guess.
+    let parent_label = |p: &procscan::AbnormalProcess| match &p.parent_name {
+        Some(name) => format!("{name} ({})", p.parent_pid),
+        None => p.parent_pid.to_string(),
+    };
     found
         .iter()
         .enumerate()
@@ -863,7 +872,7 @@ fn abnormal_rows(
                 });
                 let meta = t!(
                     "processes.abnormal_meta",
-                    ppid = p.parent_pid,
+                    ppid = parent_label(p),
                     age = format::uptime(p.age.as_secs())
                 )
                 .to_string();
@@ -914,7 +923,7 @@ fn abnormal_rows(
                             div().child(
                                 t!(
                                     "processes.abnormal_meta",
-                                    ppid = p.parent_pid,
+                                    ppid = parent_label(p),
                                     age = format::uptime(p.age.as_secs())
                                 )
                                 .to_string(),
@@ -946,7 +955,7 @@ fn sort_indices(indices: &mut [usize], processes: &[ProcessSnapshot], sort: Proc
                 .total_cmp(&processes[a].cpu_usage_percent)
         }),
         ProcSort::Memory => {
-            indices.sort_by_key(|&i| std::cmp::Reverse(shown_memory(&processes[i])));
+            indices.sort_by_key(|&i| Reverse(shown_memory(&processes[i])));
         }
         ProcSort::Name => indices.sort_by_cached_key(|&i| processes[i].name.to_lowercase()),
     }
@@ -1061,8 +1070,8 @@ mod tests {
     fn will_not_kill_init_or_self() {
         assert!(!safe_to_kill(0));
         assert!(!safe_to_kill(1));
-        assert!(!safe_to_kill(std::process::id()));
-        assert!(safe_to_kill(std::process::id().saturating_add(1000).max(2)));
+        assert!(!safe_to_kill(process::id()));
+        assert!(safe_to_kill(process::id().saturating_add(1000).max(2)));
     }
 
     #[test]

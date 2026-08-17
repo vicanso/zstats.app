@@ -35,14 +35,29 @@ pub fn wrap_tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut 
     }
 }
 
+/// Light mode's 1px card outline, painted as a zero-blur inset shadow
+/// instead of a border. Not cosmetic hair-splitting: gpui borders occupy
+/// layout space, so a real border made every light card 2px taller than
+/// its dark twin — a window sized snugly under one theme scrolled under
+/// the other. A shadow costs no layout, and `inset` draws it exactly
+/// where the old border sat; the two themes now produce pixel-identical
+/// geometry.
+fn light_outline(d: Div) -> Div {
+    d.shadow(vec![gpui::BoxShadow {
+        color: gpui::Hsla::from(theme::border()),
+        offset: gpui::point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(1.),
+        inset: true,
+    }])
+}
+
 /// Settings-style grouped container: fill, no hard outline.
 pub fn card() -> Div {
     v_flex()
         .rounded(px(12.))
         .bg(theme::surface())
-        .when(!theme::is_dark(), |d| {
-            d.border_1().border_color(theme::border())
-        })
+        .when(!theme::is_dark(), light_outline)
         .px(px(13.))
         .pt(px(12.))
         .pb(px(13.))
@@ -53,9 +68,7 @@ pub fn list_shell() -> Div {
     v_flex()
         .rounded(px(12.))
         .bg(theme::surface())
-        .when(!theme::is_dark(), |d| {
-            d.border_1().border_color(theme::border())
-        })
+        .when(!theme::is_dark(), light_outline)
         .overflow_hidden()
 }
 
@@ -202,25 +215,47 @@ fn legend_swatch(mark: LegendMark) -> AnyElement {
     }
 }
 
+/// Above this many characters a kv value gets a hover tooltip with the
+/// full text. A proxy for "might be truncated", and a sound one: the
+/// value renders in the mono face, so character count maps linearly to
+/// pixels. Calibrated for the WORST case, not the default: at the
+/// panel's minimum width (320px) a half column beside the widest label
+/// fits ~12–13 mono chars. The error direction is safe by construction
+/// — a long-but-fitting value shows a redundant tooltip (harmless); a
+/// truncated value without one would lose the only path to the tail.
+const KV_TIP_FROM: usize = 12;
+
 /// One "label ……… value" line with the design's hairline underneath.
-/// One key/value line. `last` suppresses the rule underneath — a separator on
-/// the final row has nothing to separate and lands on the block's own edge.
+/// `last` suppresses the rule — a separator on the final row has
+/// nothing to separate and lands on the block's own edge.
 pub fn kv_row(k: impl Into<SharedString>, v: impl Into<SharedString>, last: bool) -> AnyElement {
+    let k = k.into();
+    let v = v.into();
+    let long = v.chars().count() >= KV_TIP_FROM;
     h_flex()
         .justify_between()
+        .gap(px(8.))
         .py(px(5.))
         .when(!last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
         })
         .text_size(px(11.))
         .text_color(theme::text_muted())
-        .child(div().child(k.into()))
+        .child(div().flex_none().child(k.clone()))
         .child(
+            // A value that outgrows its half-width column (a parent
+            // process name, a long user) truncates instead of spilling
+            // over the label and the column edge; the tooltip carries
+            // what the ellipsis ate.
             div()
+                .id(SharedString::from(format!("kv-{k}")))
+                .min_w_0()
+                .truncate()
                 .font_family(font::MONO)
                 .font_weight(gpui::FontWeight::NORMAL)
                 .text_color(theme::text())
-                .child(v.into()),
+                .when(long, |d| d.tooltip(wrap_tooltip(v.clone())))
+                .child(v),
         )
         .into_any_element()
 }

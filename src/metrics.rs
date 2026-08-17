@@ -13,7 +13,9 @@ use crate::tray;
 use gpui::{App, Global};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc;
+use std::sync::mpsc::RecvTimeoutError;
+use std::thread;
 use std::time::Duration;
 use zstats::Monitor;
 use zstats::settings::FileConfig;
@@ -179,7 +181,7 @@ pub fn start(cx: &mut App) {
     let (tx, rx) = smol::channel::unbounded::<zstats::Tick>();
 
     // `tick()` is a pile of syscalls and blocks — keep it off the UI thread.
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         // Shared with the zstats CLI on purpose: same config.toml, same
         // thresholds, same history. See docs/design.md about running `zstats serve`
         // at the same time.

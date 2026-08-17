@@ -15,6 +15,7 @@
 //! looking alarming.
 
 use std::collections::HashMap;
+use std::io;
 use std::path::Path;
 use zstats::records::{MetricRecord, read_range};
 
@@ -38,7 +39,7 @@ pub struct Spender {
 /// `1` is the classic today view; wider windows answer "who burned the
 /// most this week" from the same 30-day files zstats already keeps.
 /// Blocking file IO — call it off the UI thread.
-pub fn spenders(config_dir: &Path, days: u16) -> std::io::Result<Vec<Spender>> {
+pub fn spenders(config_dir: &Path, days: u16) -> io::Result<Vec<Spender>> {
     // Files are named by *local* date, which is what `Zoned::now` gives.
     let end = jiff::Zoned::now().date();
     let start = end

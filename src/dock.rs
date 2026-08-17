@@ -24,10 +24,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
 use objc2::sel;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+use std::mem;
+use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// The implementation we displaced, called for every policy except `Regular`.
-static ORIGINAL_IMP: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static ORIGINAL_IMP: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 type SetActivationPolicyFn =
     unsafe extern "C-unwind" fn(*mut AnyObject, Sel, NSApplicationActivationPolicy) -> Bool;
@@ -47,7 +49,7 @@ unsafe extern "C-unwind" fn set_activation_policy(
     }
     // SAFETY: `original` is the IMP this method had before we replaced it, so
     // it has exactly this signature.
-    let original: SetActivationPolicyFn = unsafe { std::mem::transmute(original) };
+    let original: SetActivationPolicyFn = unsafe { mem::transmute(original) };
     unsafe { original(this, sel, policy) }
 }
 
@@ -73,9 +75,7 @@ pub fn suppress_regular_policy() {
     // SAFETY: `replacement` has the signature the runtime expects for this
     // selector, and forwards to the original for every policy it doesn't drop.
     unsafe {
-        method.set_implementation(std::mem::transmute::<SetActivationPolicyFn, Imp>(
-            replacement,
-        ));
+        method.set_implementation(mem::transmute::<SetActivationPolicyFn, Imp>(replacement));
     }
 }
 

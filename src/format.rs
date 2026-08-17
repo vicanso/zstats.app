@@ -140,15 +140,26 @@ pub fn rate(bytes_per_sec: Option<u64>) -> String {
     }
 }
 
-/// Uptime, at most two units: "3d 4h", "4h 12m", "9m".
+/// Uptime, at most two units: "3d 4h", "4h 12m", "9m". A zero second
+/// unit is omitted — "2h", not "2h 00m": on a round figure the trailing
+/// zeros read as a glitch, and the precision they claim ("exactly on
+/// the hour") is not one a minute-granular label can honour anyway.
 pub fn uptime(secs: u64) -> String {
     let d = secs / 86_400;
     let h = (secs % 86_400) / 3_600;
     let m = (secs % 3_600) / 60;
     if d > 0 {
-        format!("{d}d {h}h")
+        if h > 0 {
+            format!("{d}d {h}h")
+        } else {
+            format!("{d}d")
+        }
     } else if h > 0 {
-        format!("{h}h {m:02}m")
+        if m > 0 {
+            format!("{h}h {m:02}m")
+        } else {
+            format!("{h}h")
+        }
     } else {
         format!("{m}m")
     }
@@ -298,6 +309,10 @@ mod tests {
         assert_eq!(uptime(3 * 86_400 + 4 * 3_600 + 30 * 60), "3d 4h");
         assert_eq!(uptime(4 * 3_600 + 12 * 60), "4h 12m");
         assert_eq!(uptime(9 * 60), "9m");
+        // Round figures drop the zero unit instead of wearing "00".
+        assert_eq!(uptime(2 * 3_600), "2h");
+        assert_eq!(uptime(3 * 86_400), "3d");
+        assert_eq!(uptime(0), "0m");
     }
 
     #[test]

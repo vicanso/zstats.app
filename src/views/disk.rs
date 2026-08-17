@@ -8,6 +8,7 @@ use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult};
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::opener;
 use crate::state::{BigFiles, DiskAnalysis, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
@@ -19,6 +20,12 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex};
 use rust_i18n::t;
+use std::env;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process;
+use std::thread;
+use std::time::Duration;
 use zstats::snapshot::DiskSnapshot;
 
 /// The design's default disk alert bar.
@@ -515,9 +522,8 @@ fn fda_hint(state: &ZStatsAppState) -> Option<AnyElement> {
 /// Deep-link into System Settings → Privacy & Security → Full Disk
 /// Access. Navigation only — granting stays a user act in the system UI.
 pub(super) fn open_full_disk_access() {
-    let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-        .spawn();
+    let _ =
+        opener::open(["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]);
 }
 
 /// Age, how many directories were walked, and every honesty counter
@@ -530,7 +536,7 @@ pub(super) fn open_full_disk_access() {
 /// self-trigger, so a nudge is where staleness honesty ends. A day is
 /// when "the numbers are from earlier" stops going without saying —
 /// mostly reached through the persisted cache surviving a restart.
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn analysis_caption(state: &ZStatsAppState) -> String {
     let result = match state.disk_analysis() {
@@ -543,7 +549,7 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
             dirs_done, scope, ..
         } => {
             let progress = t!("disk.ana_running", dirs = format::thousands(*dirs_done)).to_string();
-            let home = std::env::var("HOME").unwrap_or_default();
+            let home = env::var("HOME").unwrap_or_default();
             let root = scope_display(&scope.roots, &scope.base, &home);
             return if root == "~" {
                 progress
@@ -556,7 +562,7 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
         }
         DiskAnalysis::Off => return String::new(),
     };
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = env::var("HOME").unwrap_or_default();
     let age = result.scanned_at.elapsed().unwrap_or_default();
     let mut extras = Vec::new();
     if result.skipped_protected > 0 {
@@ -601,7 +607,7 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
 /// the whole home tree. Every path tilde'd; a plain "~" is the default
 /// home walk, which callers omit (the only scope that goes without
 /// saying).
-fn scope_display(roots: &[std::path::PathBuf], base: &std::path::Path, home: &str) -> String {
+fn scope_display(roots: &[PathBuf], base: &Path, home: &str) -> String {
     if roots.len() > 1 {
         roots
             .iter()
@@ -772,7 +778,7 @@ fn analysis_tables(
 /// restates the count and total so nothing moves that was not announced.
 fn suggest_clear_button(hits: &[DirHit], total: u64) -> AnyElement {
     let n = hits.len();
-    let paths: Vec<std::path::PathBuf> = hits.iter().map(|h| h.path.clone()).collect();
+    let paths: Vec<PathBuf> = hits.iter().map(|h| h.path.clone()).collect();
     Button::new("ana-sug-clear")
         .icon(IconName::Delete)
         .ghost()
@@ -884,7 +890,7 @@ fn more_chip(hidden: usize, show_all: bool) -> AnyElement {
 struct AnalysisRow<'a> {
     id: &'static str,
     index: usize,
-    path: &'a std::path::Path,
+    path: &'a Path,
     bytes: u64,
     /// This path's figure in the previous run, when it ranked there —
     /// `None` renders no delta (absence proves nothing, see
@@ -896,7 +902,7 @@ struct AnalysisRow<'a> {
     kind: Option<HitKind>,
     /// The group's largest row, the meter's 100%.
     group_max: u64,
-    root: &'a std::path::Path,
+    root: &'a Path,
     deletable: bool,
     drillable: bool,
 }
@@ -939,7 +945,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         .unwrap_or_else(|_| path.display().to_string());
     let mut full = tilde_path(
         &path.display().to_string(),
-        &std::env::var("HOME").unwrap_or_default(),
+        &env::var("HOME").unwrap_or_default(),
     );
     // A heuristic fold explains itself here rather than with a pill.
     if kind == Some(HitKind::Heuristic) {
@@ -1224,7 +1230,7 @@ fn big_file_row(index: usize, file: &bigfiles::BigFile, last: bool) -> AnyElemen
     // and a 320px column has no honest way to show a deep path anyway.
     let mut full = tilde_path(
         &file.path.display().to_string(),
-        &std::env::var("HOME").unwrap_or_default(),
+        &env::var("HOME").unwrap_or_default(),
     );
     // Sparse and compressed files qualify by logical size but display
     // physical — without both figures a "300 MB" row under a "≥ 500 MB"
@@ -1371,13 +1377,13 @@ fn eject(mount: &str) {
         return;
     }
     let mount = mount.to_string();
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         #[cfg(target_os = "macos")]
-        let result = std::process::Command::new("diskutil")
+        let result = process::Command::new("diskutil")
             .args(["eject", &mount])
             .output();
         #[cfg(not(target_os = "macos"))]
-        let result = std::process::Command::new("umount").arg(&mount).output();
+        let result = process::Command::new("umount").arg(&mount).output();
 
         match result {
             Ok(out) if out.status.success() => {}

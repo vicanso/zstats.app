@@ -7,6 +7,7 @@
 use rust_i18n::Backend;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::str;
 use std::sync::OnceLock;
 
 use crate::assets;
@@ -71,7 +72,7 @@ fn parse_locale(locale: &str) -> HashMap<String, String> {
     let Some(bytes) = locale_file(locale) else {
         return flat;
     };
-    let Ok(content) = std::str::from_utf8(&bytes) else {
+    let Ok(content) = str::from_utf8(&bytes) else {
         return flat;
     };
     let Ok(value) = toml::from_str::<toml::Value>(content) else {
@@ -116,6 +117,7 @@ fn flatten_keys(prefix: String, value: &toml::Value, out: &mut HashMap<String, S
 mod tests {
     use super::runtime_backend;
     use rust_i18n::Backend;
+    use std::collections::BTreeSet;
 
     #[test]
     fn loads_en_and_zh() {
@@ -141,7 +143,7 @@ mod tests {
     #[test]
     fn every_locale_defines_the_same_keys() {
         let backend = runtime_backend();
-        let keys = |locale: &str| -> std::collections::BTreeSet<String> {
+        let keys = |locale: &str| -> BTreeSet<String> {
             backend
                 .messages_for_locale(locale)
                 .unwrap_or_default()

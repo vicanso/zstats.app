@@ -77,10 +77,11 @@ fn running_application(pid: u32) -> Option<objc2::rc::Retained<NSRunningApplicat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
 
     #[test]
     fn own_process_is_signalable_and_pid_zero_is_refused() {
-        assert!(can_quit(std::process::id()));
+        assert!(can_quit(process::id()));
         // pid 0 addresses the whole process group; request_quit must refuse
         // it outright rather than pass it to kill().
         assert!(!request_quit(0));

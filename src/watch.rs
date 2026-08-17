@@ -16,7 +16,9 @@
 //! be tested against a hand-built sequence of samples instead of a live app.
 
 use crate::procscan::AbnormalProcess;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::time::{Duration, Instant};
 use zstats::rolling::ProcessStats;
 use zstats::snapshot::{NetworkSnapshot, ProcessSnapshot};
@@ -234,13 +236,13 @@ impl SustainedWatch {
                 })
             })
             .collect();
-        out.sort_by_key(|n| std::cmp::Reverse(n.duration));
+        out.sort_by_key(|n| Reverse(n.duration));
         out
     }
 
     /// Notices raised since the last call, taken once.
     pub fn take_notices(&mut self) -> Vec<SustainedNotice> {
-        std::mem::take(&mut self.pending)
+        mem::take(&mut self.pending)
     }
 
     /// How long this process has been holding a low-but-real CPU share, once
@@ -457,6 +459,7 @@ mod tests {
 
     fn zombie(pid: u32) -> AbnormalProcess {
         AbnormalProcess {
+            parent_name: None,
             pid,
             parent_pid: 1,
             name: "login".into(),

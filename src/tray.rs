@@ -9,6 +9,9 @@ use crate::state::TrayAnchor;
 use crate::{APP_NAME, show_main_window, toggle_main_window};
 use gpui::{App, Global};
 use resvg::{tiny_skia, usvg};
+use std::cell::RefCell;
+use std::str;
+use std::thread;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -21,7 +24,7 @@ struct TrayHandle {
     icon: TrayIcon,
     /// Last title actually pushed to AppKit, so an unchanged reading is not
     /// re-applied — see `set_cpu_title`.
-    last_title: std::cell::RefCell<String>,
+    last_title: RefCell<String>,
 }
 
 impl Global for TrayHandle {}
@@ -90,7 +93,7 @@ fn rasterise_icon_scaled(size: u32, glyph_scale: f32) -> Option<Vec<u8>> {
     // lucide ships `stroke="currentColor"`, which is a CSS-context keyword
     // usvg cannot resolve on its own. The colour is irrelevant anyway: as a
     // template image only the alpha channel survives.
-    let svg = std::str::from_utf8(&raw)
+    let svg = str::from_utf8(&raw)
         .ok()?
         .replace("currentColor", "#000000");
 
@@ -174,7 +177,7 @@ pub fn init_tray(cx: &mut App) {
     };
     cx.set_global(TrayHandle {
         icon: tray,
-        last_title: std::cell::RefCell::new(String::new()),
+        last_title: RefCell::new(String::new()),
     });
 
     // Both receivers only block, so park a dedicated thread on each (zero CPU
@@ -183,7 +186,7 @@ pub fn init_tray(cx: &mut App) {
     let (action_tx, action_rx) = smol::channel::unbounded::<TrayAction>();
 
     let menu_tx = action_tx.clone();
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         let receiver = MenuEvent::receiver();
         while let Ok(event) = receiver.recv() {
             let action = match event.id().0.as_str() {
@@ -197,7 +200,7 @@ pub fn init_tray(cx: &mut App) {
         }
     });
 
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         let receiver = TrayIconEvent::receiver();
         while let Ok(event) = receiver.recv() {
             // macOS emits Click on both mouseDown and mouseUp — keying off Up

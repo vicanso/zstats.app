@@ -28,9 +28,15 @@ use gpui::{
     ScrollHandle, Window, px,
 };
 use gpui_component::input::{InputEvent, InputState};
+use std::array;
 use std::collections::{HashMap, VecDeque};
+use std::mem;
 use std::ops::Deref;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use zstats::settings::FileConfig;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
@@ -273,7 +279,7 @@ pub enum DiskAnalysis {
         /// launch opens with); false for drill-fallback subwalks, which
         /// the design keeps out of the cache.
         persist: bool,
-        cancel: Arc<std::sync::atomic::AtomicBool>,
+        cancel: Arc<AtomicBool>,
     },
     Ready(ScanResult),
     Failed(String),
@@ -587,7 +593,7 @@ impl Default for ZStatsAppState {
                 roots,
             })
         };
-        let launch_roots: Vec<std::path::PathBuf> = restored
+        let launch_roots: Vec<PathBuf> = restored
             .as_ref()
             .map(|s| s.roots.clone())
             .or_else(|| diskscan::default_root().map(|home| vec![home]))
@@ -653,7 +659,7 @@ impl Default for ZStatsAppState {
             proc_filter_open: false,
             proc_filter_text: String::new(),
             next_seq: 0,
-            scroll: std::array::from_fn(|_| ScrollHandle::new()),
+            scroll: array::from_fn(|_| ScrollHandle::new()),
             proc_rows_scroll: ScrollHandle::new(),
             app_rows_scroll: ScrollHandle::new(),
         }
@@ -890,8 +896,8 @@ impl ZStatsAppState {
     /// double-count, and /System plus TCC would distort every figure
     /// (docs/disk-analysis.md's scope table) — the answer would be
     /// wrong, not merely slow.
-    pub fn start_disk_analysis_at(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
-        if root == std::path::Path::new("/") {
+    pub fn start_disk_analysis_at(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if root == Path::new("/") {
             self.cancel_disk_analysis_walk();
             self.disk_analysis_stack.clear();
             self.disk_analysis = DiskAnalysis::Failed(i18n::tr("disk.ana_root_unsupported"));
@@ -927,12 +933,12 @@ impl ZStatsAppState {
     /// only folded interiors and below-floor corners fall back to a live
     /// walk. Only a finished result can be drilled — the rows are inert
     /// while a walk is running.
-    pub fn drill_disk_analysis(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+    pub fn drill_disk_analysis(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let DiskAnalysis::Ready(current) = &self.disk_analysis else {
             return;
         };
         let derived = diskscan::drill(current, &root);
-        if let DiskAnalysis::Ready(current) = std::mem::take(&mut self.disk_analysis) {
+        if let DiskAnalysis::Ready(current) = mem::take(&mut self.disk_analysis) {
             self.disk_analysis_stack.push(current);
         }
         self.disk_analysis_expanded = true;
@@ -1018,7 +1024,7 @@ impl ZStatsAppState {
         self.cancel_disk_analysis_walk();
         self.disk_analysis_runs += 1;
         let run_id = self.disk_analysis_runs;
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = Arc::new(AtomicBool::new(false));
         self.disk_analysis = DiskAnalysis::Running {
             run_id,
             dirs_done: 0,
@@ -1110,7 +1116,7 @@ impl ZStatsAppState {
 
     fn cancel_disk_analysis_walk(&self) {
         if let DiskAnalysis::Running { cancel, .. } = &self.disk_analysis {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -1293,7 +1299,7 @@ impl ZStatsAppState {
     /// The delete button's confirmed action: move to the Trash, then drop
     /// the row. A failed trash leaves the row — a file that is still there
     /// must not vanish from the list.
-    pub fn trash_big_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+    pub fn trash_big_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Err(e) = bigfiles::trash(path) {
             eprintln!("trash {}: {e}", path.display());
             return;
@@ -1311,8 +1317,8 @@ impl ZStatsAppState {
     /// must not vanish from the list. Only rows are touched; every other
     /// figure stays as scanned, with `scanned_at` as the staleness
     /// boundary.
-    pub fn trash_regenerable(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
-        let mut gone: Vec<&std::path::PathBuf> = Vec::new();
+    pub fn trash_regenerable(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut gone: Vec<&PathBuf> = Vec::new();
         for path in paths {
             match bigfiles::trash(path) {
                 Ok(()) => gone.push(path),
@@ -1768,7 +1774,7 @@ impl ZStatsAppState {
     /// list state to match — `gpui::list` is told its row count up front,
     /// so a changed row set is a new list, scrolled back to the top.
     fn refresh_full_scan_filter(&mut self) {
-        let filter = std::mem::take(&mut self.proc_filter_text);
+        let filter = mem::take(&mut self.proc_filter_text);
         if let FullScan::Ready(data) = &mut self.full_scan {
             data.visible = filtered_indices(&data.processes, &filter);
             data.list = ListState::new(data.visible.len(), ListAlignment::Top, px(400.));
@@ -1911,11 +1917,7 @@ impl Deref for ZStatsGlobalStore {
 /// Write one `zstats -add` key into `<dir>/config.toml` and return the
 /// saved file. The Config tab and the Alerts chips both go through this
 /// so they share the CLI's validation.
-pub(crate) fn persist_setting(
-    dir: &std::path::Path,
-    key: &str,
-    value: &str,
-) -> Result<FileConfig, String> {
+pub(crate) fn persist_setting(dir: &Path, key: &str, value: &str) -> Result<FileConfig, String> {
     let mut file = zstats::settings::load(dir).map_err(|e| e.to_string())?;
     zstats::settings::apply_add(&mut file, key, value)?;
     zstats::settings::save(dir, &file).map_err(|e| e.to_string())?;
@@ -1924,7 +1926,7 @@ pub(crate) fn persist_setting(
 
 /// Write a default `config.toml`. Absent keys are zstats builtins; any
 /// per-subject override in the previous file is gone.
-pub(crate) fn reset_config(dir: &std::path::Path) -> Result<FileConfig, String> {
+pub(crate) fn reset_config(dir: &Path) -> Result<FileConfig, String> {
     let file = FileConfig::default();
     zstats::settings::save(dir, &file).map_err(|e| e.to_string())?;
     Ok(file)
@@ -1961,6 +1963,9 @@ pub struct TrayAnchor {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::env;
+    use std::fs;
+    use std::process;
     use zstats::AlertDetail;
 
     fn snap(pid: u32, name: &str) -> ProcessSnapshot {
@@ -2154,14 +2159,14 @@ mod tests {
         assert!(!setting_rebuilds_collector("alert-template"));
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("zstats-app-settings-{name}-{}", std::process::id()))
+    fn scratch(name: &str) -> PathBuf {
+        env::temp_dir().join(format!("zstats-app-settings-{name}-{}", process::id()))
     }
 
     #[test]
     fn persist_setting_round_trips_collector_and_alerts() {
         let dir = scratch("roundtrip");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
 
         let file = persist_setting(&dir, "process-disk-io", "true").unwrap();
         assert!(file.collector.as_ref().unwrap().collect_process_disk_io);
@@ -2177,25 +2182,25 @@ mod tests {
         assert!(reloaded.collector.as_ref().unwrap().collect_process_disk_io);
         assert_eq!(reloaded.alerts.cpu, Some(50.0));
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn persist_setting_rejects_unknown_keys() {
         let dir = scratch("unknown");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
         assert!(persist_setting(&dir, "not-a-key", "true").is_err());
         assert!(
             !dir.join("config.toml").exists(),
             "a rejected key must not create the file"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reset_config_clears_overrides_and_collector() {
         let dir = scratch("reset");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
 
         persist_setting(&dir, "process-disk-io", "true").unwrap();
         persist_setting(&dir, "alert-cpu", "50").unwrap();
@@ -2212,6 +2217,6 @@ mod tests {
         assert!(reloaded.alerts.cpu.is_none());
         assert!(reloaded.alerts.cpu_overrides.is_empty());
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

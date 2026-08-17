@@ -34,6 +34,8 @@ use crate::APP_NAME;
 use notify_rust::Notification;
 #[cfg(not(target_os = "macos"))]
 use std::sync::mpsc;
+#[cfg(not(target_os = "macos"))]
+use std::thread;
 
 /// Click on a banner: open the panel on the Alerts tab.
 static CLICK: OnceLock<smol::channel::Sender<()>> = OnceLock::new();
@@ -73,6 +75,7 @@ mod native {
         NSObjectProtocol, NSString, NSUserNotification, NSUserNotificationCenter,
         NSUserNotificationCenterDelegate, NSUserNotificationDefaultSoundName,
     };
+    use std::mem;
 
     define_class!(
         /// Receives activations for every banner this process posted. One
@@ -123,7 +126,7 @@ mod native {
         // SAFETY: `setDelegate:` stores an unretained pointer, so the
         // referent must outlive it — the `forget` below makes ours immortal.
         unsafe { center.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
-        std::mem::forget(delegate);
+        mem::forget(delegate);
     }
 
     /// Post one banner and return. Whether and when it shows is the
@@ -226,7 +229,7 @@ pub fn start(cx: &mut gpui::App) {
     {
         let (banner_tx, banner_rx) = mpsc::sync_channel::<Banner>(QUEUE_DEPTH);
         let _ = QUEUE.set(banner_tx);
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             while let Ok(banner) = banner_rx.recv() {
                 deliver(&banner);
             }

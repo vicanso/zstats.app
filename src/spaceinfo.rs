@@ -11,6 +11,7 @@
 //! demand, and forcing it is `tmutil`'s job behind admin rights, not
 //! ours.
 
+use std::process;
 pub struct SpaceInfo {
     /// Bytes the system could free on demand (snapshots, regenerable
     /// caches…). `None` when the query failed.
@@ -59,7 +60,7 @@ fn purgeable() -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 fn snapshot_count() -> usize {
-    let Ok(out) = std::process::Command::new("tmutil")
+    let Ok(out) = process::Command::new("tmutil")
         .args(["listlocalsnapshots", "/"])
         .output()
     else {

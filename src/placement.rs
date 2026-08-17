@@ -7,6 +7,7 @@
 use crate::state::{TrayAnchor, ZStatsGlobalStore};
 use crate::window_ext;
 use gpui::{App, Bounds, Pixels, Point, Size, point, px, size};
+use std::env;
 
 /// Menu-bar panel: 320px matches Control Center / Stats combined popovers
 /// and lets the icon tab strip breathe. Height covers the icon strip,
@@ -106,7 +107,7 @@ pub fn bounds_below_tray(
     // symptom beyond "it opened on the wrong screen". `ZSTATS_DEBUG_POSITION=1`
     // prints the whole chain so a bad step can be identified rather than
     // guessed at.
-    if std::env::var_os("ZSTATS_DEBUG_POSITION").is_some() {
+    if env::var_os("ZSTATS_DEBUG_POSITION").is_some() {
         eprintln!(
             "POS tray_physical=({:.0},{:.0} {:.0}x{:.0}) scale={scale} \
              icon_logical=({:.0},{:.0}) screen={} window=({:.0},{:.0} {:.0}x{:.0})",

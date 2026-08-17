@@ -15,6 +15,11 @@
 //! unlink. Same posture as `terminate.rs`: the panel delivers refusable,
 //! reversible requests; it does not destroy.
 
+use crate::opener;
+use std::cmp::Reverse;
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -66,7 +71,7 @@ pub enum ScanError {
 /// Query `$HOME` for big files. Blocking (two subprocess round-trips plus
 /// a stat per hit) — callers run it on the background executor.
 pub fn scan() -> Result<BigFilesScan, ScanError> {
-    let home = std::env::var("HOME").map_err(|e| ScanError::Other(e.to_string()))?;
+    let home = env::var("HOME").map_err(|e| ScanError::Other(e.to_string()))?;
     if !indexing_enabled() {
         return Err(ScanError::IndexingOff);
     }
@@ -81,7 +86,7 @@ pub fn scan() -> Result<BigFilesScan, ScanError> {
         threshold = FALLBACK_THRESHOLD;
         files = collect(query(&home, threshold)?, threshold);
     }
-    files.sort_by_key(|f| std::cmp::Reverse(f.size));
+    files.sort_by_key(|f| Reverse(f.size));
     let total = files.len();
     files.truncate(SHOWN);
     Ok(BigFilesScan {
@@ -100,7 +105,7 @@ fn collect(paths: Vec<PathBuf>, threshold: u64) -> Vec<BigFile> {
     paths
         .into_iter()
         .filter_map(|path| {
-            let meta = std::fs::symlink_metadata(&path).ok()?;
+            let meta = fs::symlink_metadata(&path).ok()?;
             if !meta.is_file() || meta.len() < threshold {
                 return None;
             }
@@ -137,7 +142,7 @@ pub fn trash(_path: &Path) -> Result<(), String> {
 /// an action on the system — nothing on disk changes — so no confirm gate.
 #[cfg(target_os = "macos")]
 pub fn reveal(path: &Path) {
-    if let Err(e) = Command::new("open").arg("-R").arg(path).spawn() {
+    if let Err(e) = opener::open([OsStr::new("-R"), path.as_os_str()]) {
         eprintln!("reveal {}: {e}", path.display());
     }
 }
@@ -172,7 +177,7 @@ fn split_null(bytes: &[u8]) -> Vec<PathBuf> {
             #[cfg(unix)]
             {
                 use std::os::unix::ffi::OsStrExt;
-                PathBuf::from(std::ffi::OsStr::from_bytes(s))
+                PathBuf::from(OsStr::from_bytes(s))
             }
             #[cfg(not(unix))]
             {
@@ -182,7 +187,7 @@ fn split_null(bytes: &[u8]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn physical_size(meta: &std::fs::Metadata) -> u64 {
+fn physical_size(meta: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -211,6 +216,7 @@ fn indexing_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
 
     #[test]
     fn split_null_handles_trailing_terminator_and_empty() {
@@ -224,13 +230,13 @@ mod tests {
 
     #[test]
     fn collect_reverifies_against_the_bar() {
-        let dir = std::env::temp_dir().join(format!("zstats-bigcollect-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = env::temp_dir().join(format!("zstats-bigcollect-{}", process::id()));
+        fs::create_dir_all(&dir).unwrap();
         let small = dir.join("small");
         let big = dir.join("big");
         let gone = dir.join("gone");
-        std::fs::write(&small, vec![0u8; 1_000]).unwrap();
-        std::fs::write(&big, vec![0u8; 64_000]).unwrap();
+        fs::write(&small, vec![0u8; 1_000]).unwrap();
+        fs::write(&big, vec![0u8; 64_000]).unwrap();
 
         // A stale index hands back all three; only the one still over the
         // bar survives — vanished and shrunk-below entries both drop.
@@ -239,16 +245,16 @@ mod tests {
         assert_eq!(kept[0].path, big);
         assert_eq!(kept[0].logical, 64_000);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn physical_size_counts_blocks() {
-        let dir = std::env::temp_dir().join(format!("zstats-bigfiles-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = env::temp_dir().join(format!("zstats-bigfiles-{}", process::id()));
+        fs::create_dir_all(&dir).unwrap();
         let file = dir.join("blob");
-        std::fs::write(&file, vec![7u8; 1_000_000]).unwrap();
-        let meta = std::fs::metadata(&file).unwrap();
+        fs::write(&file, vec![7u8; 1_000_000]).unwrap();
+        let meta = fs::metadata(&file).unwrap();
         let physical = physical_size(&meta);
         // A written-out megabyte occupies real blocks; exact figures vary
         // by filesystem, so bracket rather than pin.
@@ -256,6 +262,6 @@ mod tests {
             physical >= 500_000,
             "physical {physical} suspiciously small"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

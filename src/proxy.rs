@@ -16,11 +16,11 @@
 //!
 //! Deliberately out of scope: PAC files (need a full PAC engine).
 
-#[cfg(any(target_os = "macos", test))]
 use std::collections::HashMap;
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "macos", test))]
 use std::process::Command;
 use std::sync::RwLock;
+#[cfg(not(target_os = "linux"))]
 use ureq::Proxy;
 
 /// User-configured proxy override, mirrored from `app.toml`

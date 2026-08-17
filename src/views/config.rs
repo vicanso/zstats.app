@@ -40,6 +40,9 @@ use gpui_component::switch::Switch;
 use gpui_component::text::TextView;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
+use std::env;
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 use zstats::CollectorConfig;
 use zstats::alerts::ActiveThresholds;
@@ -163,13 +166,11 @@ fn permissions_card() -> AnyElement {
 /// while the window is open (one failed open() per tick), so flipping
 /// the switch shows up live.
 fn full_disk_access_granted() -> bool {
-    let Ok(home) = std::env::var("HOME") else {
+    let Ok(home) = env::var("HOME") else {
         return false;
     };
-    std::fs::File::open(
-        std::path::Path::new(&home).join("Library/Application Support/com.apple.TCC/TCC.db"),
-    )
-    .is_ok()
+    fs::File::open(Path::new(&home).join("Library/Application Support/com.apple.TCC/TCC.db"))
+        .is_ok()
 }
 
 fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {

@@ -19,8 +19,13 @@
 use crate::about;
 use crate::assets;
 use crate::proxy;
+use std::env;
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::str;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct CleanHint {
@@ -42,7 +47,7 @@ enum Rule {
     Exact(PathBuf),
     /// A bare name in the file — any directory with that last component
     /// (`node_modules` anywhere), same shape as the walk's suffix folds.
-    Component(std::ffi::OsString),
+    Component(OsString),
 }
 
 impl CleanHint {
@@ -70,7 +75,7 @@ fn current() -> Arc<Loaded> {
     if let Some(loaded) = CACHE.read().unwrap().as_ref() {
         return loaded.clone();
     }
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let home = PathBuf::from(env::var("HOME").unwrap_or_default());
     let loaded = Arc::new(load(&zstats::settings::default_dir(), &home));
     *CACHE.write().unwrap() = Some(loaded.clone());
     loaded
@@ -83,7 +88,7 @@ const REMOTE_URL: &str =
     "https://raw.githubusercontent.com/vicanso/zstats.app/main/assets/cleanhints.toml";
 /// Generous for a ~10 KB file: the point is not hanging a thread when a
 /// proxy blackholes the connection.
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the update button's press came to.
 pub enum RemoteUpdate {
@@ -122,20 +127,20 @@ pub fn update_from_remote() -> RemoteUpdate {
         },
         Err(e) => return RemoteUpdate::Failed(e.to_string()),
     };
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let home = PathBuf::from(env::var("HOME").unwrap_or_default());
     let parsed = parse(&text, &home);
     if parsed.is_empty() {
         return RemoteUpdate::Invalid;
     }
     let dir = zstats::settings::default_dir();
     let user = dir.join("cleanhints.toml");
-    let live = std::fs::read_to_string(&user).ok().or_else(|| {
+    let live = fs::read_to_string(&user).ok().or_else(|| {
         assets::get("cleanhints.toml").and_then(|bytes| String::from_utf8(bytes.into_owned()).ok())
     });
     if live.as_deref() == Some(text.as_str()) {
         return RemoteUpdate::AlreadyCurrent;
     }
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&user, &text)) {
+    if let Err(e) = fs::create_dir_all(&dir).and_then(|()| fs::write(&user, &text)) {
         return RemoteUpdate::Failed(e.to_string());
     }
     reload();
@@ -164,7 +169,7 @@ pub fn lookup(path: &Path) -> Option<CleanHint> {
 
 fn load(dir: &Path, home: &Path) -> Loaded {
     let user = dir.join("cleanhints.toml");
-    if let Ok(content) = std::fs::read_to_string(&user) {
+    if let Ok(content) = fs::read_to_string(&user) {
         let hints = parse(&content, home);
         if !hints.is_empty() {
             return Loaded {
@@ -235,6 +240,7 @@ fn parse(content: &str, home: &Path) -> Vec<CleanHint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -282,9 +288,9 @@ owner = "skipped too"
     #[test]
     fn user_file_replaces_the_embedded_list_wholesale() {
         let home = p("/Users/x");
-        let dir = std::env::temp_dir().join(format!("zstats-cleanhints-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = env::temp_dir().join(format!("zstats-cleanhints-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
 
         // No user file → embedded defaults.
         let built_in = load(&dir, &home);
@@ -297,7 +303,7 @@ owner = "skipped too"
         );
 
         // A valid user file wins outright — the built-in npm entry is gone.
-        std::fs::write(
+        fs::write(
             dir.join("cleanhints.toml"),
             "[[hint]]\nmatch = \"~/custom\"\nowner = \"me\"\n",
         )
@@ -308,7 +314,7 @@ owner = "skipped too"
         assert!(user.hints[0].matches(&p("/Users/x/custom")));
 
         // A broken user file falls back instead of emptying the list.
-        std::fs::write(dir.join("cleanhints.toml"), "not toml [[").unwrap();
+        fs::write(dir.join("cleanhints.toml"), "not toml [[").unwrap();
         let fallback = load(&dir, &home);
         assert!(
             !fallback.from_user_file,
@@ -321,7 +327,7 @@ owner = "skipped too"
                 .any(|h| h.matches(&p("/Users/x/.npm")))
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Every embedded entry must parse into one of the two rule forms —
@@ -330,7 +336,7 @@ owner = "skipped too"
     #[test]
     fn embedded_defaults_all_parse() {
         let raw = assets::get("cleanhints.toml").expect("embedded");
-        let content = std::str::from_utf8(&raw).unwrap();
+        let content = str::from_utf8(&raw).unwrap();
         let entry_count = content.matches("[[hint]]").count();
         let hints = parse(content, &p("/Users/x"));
         assert_eq!(hints.len(), entry_count, "an embedded entry was dropped");
@@ -344,7 +350,7 @@ owner = "skipped too"
     fn annotation_only_locations_are_not_trashable() {
         let home = p("/Users/x");
         let raw = assets::get("cleanhints.toml").expect("embedded");
-        let hints = parse(std::str::from_utf8(&raw).unwrap(), &home);
+        let hints = parse(str::from_utf8(&raw).unwrap(), &home);
         let must_not_trash = [
             "/Users/x/.cache/huggingface",
             "/Users/x/.ollama/models",

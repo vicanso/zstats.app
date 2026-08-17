@@ -18,6 +18,8 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
+use std::cmp::Reverse;
+use std::collections::HashMap;
 
 /// How many rows to name. Beyond this the tail is all daemons doing their job.
 const TOP_N: usize = 12;
@@ -54,7 +56,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // memory order is a lens over the same rows, not a second dataset.
     let mut ordered: Vec<_> = rows.iter().collect();
     if sort == HistorySort::PeakMemory {
-        ordered.sort_by_key(|s| std::cmp::Reverse(s.peak_memory_bytes));
+        ordered.sort_by_key(|s| Reverse(s.peak_memory_bytes));
     }
     // The bar is relative to the period's biggest — an absolute scale
     // would be meaningless (a day has 86 400 core-seconds per core).
@@ -71,7 +73,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // Two `yes` rows with different pids read as a duplicate at a squint;
     // a repeated name gets its pid inline so identity is visible without
     // reading the caption line.
-    let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
     for s in &shown {
         *name_counts.entry(s.name.as_str()).or_default() += 1;
     }

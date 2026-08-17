@@ -13,17 +13,25 @@
 //! the rolling `nightly` build never counts as an update.
 
 use crate::about;
+use crate::opener;
 use crate::proxy;
+use std::env;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process;
+use std::time::Duration;
 
 const LATEST_URL: &str = "https://api.github.com/repos/vicanso/zstats.app/releases/latest";
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The DMG for this build's architecture — half the bytes of the
 /// universal image (6.6 vs 13.3 MB measured on v0.1.1). `ARCH` is a
 /// compile-time constant: a universal install runs its native slice,
 /// so this picks the machine's real architecture. Unknown arch falls
 /// back to the universal image, which fits everything.
 fn asset_name() -> &'static str {
-    match std::env::consts::ARCH {
+    match env::consts::ARCH {
         "aarch64" => "zstats-aarch64.dmg",
         "x86_64" => "zstats-x86_64.dmg",
         _ => "zstats.dmg",
@@ -31,7 +39,7 @@ fn asset_name() -> &'static str {
 }
 /// sha256sum-format digests the release workflow uploads beside it.
 const CHECKSUMS_NAME: &str = "SHA256SUMS";
-const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Guards against a runaway body; the DMG is ~15 MB.
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 
@@ -47,7 +55,7 @@ fn release_download_url(tag: &str, name: &str) -> String {
 pub fn download_and_open(
     tag: &str,
     mut on_progress: impl FnMut(u64, u64),
-) -> Result<std::path::PathBuf, String> {
+) -> Result<PathBuf, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(DOWNLOAD_TIMEOUT))
         .proxy(proxy::app_proxy())
@@ -70,7 +78,7 @@ pub fn download_and_open(
     let mut buf = [0u8; 64 * 1024];
     on_progress(0, total);
     loop {
-        let n = std::io::Read::read(&mut reader, &mut buf).map_err(|e| e.to_string())?;
+        let n = io::Read::read(&mut reader, &mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
@@ -81,8 +89,8 @@ pub fn download_and_open(
         on_progress(bytes.len() as u64, total);
     }
 
-    let path = std::env::temp_dir().join(format!("{tag}-{asset}"));
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    let path = env::temp_dir().join(format!("{tag}-{asset}"));
+    fs::write(&path, &bytes).map_err(|e| e.to_string())?;
 
     // Transport-integrity check against the release's own digest list.
     // A missing SHA256SUMS degrades to unverified-but-proceed: the DMG
@@ -92,19 +100,14 @@ pub fn download_and_open(
         && let Some(got) = file_sha256(&path)
         && !got.eq_ignore_ascii_case(&expected)
     {
-        let _ = std::fs::remove_file(&path);
+        let _ = fs::remove_file(&path);
         return Err(format!("checksum mismatch: expected {expected}, got {got}"));
     }
 
     // Mount the image and bring Finder forward — LaunchServices opens
     // the drag window *behind* whatever is focused otherwise.
-    std::process::Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let _ = std::process::Command::new("open")
-        .args(["-a", "Finder"])
-        .spawn();
+    opener::open([path.as_os_str()]).map_err(|e| e.to_string())?;
+    let _ = opener::open(["-a", "Finder"]);
     Ok(path)
 }
 
@@ -127,8 +130,8 @@ fn fetch_checksum(agent: &ureq::Agent, tag: &str, asset: &str) -> Option<String>
 
 /// `shasum -a 256` on the written file — ships with macOS, and this
 /// whole install path is macOS-only anyway (it ends in a DMG).
-fn file_sha256(path: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("shasum")
+fn file_sha256(path: &Path) -> Option<String> {
+    let out = process::Command::new("shasum")
         .args(["-a", "256"])
         .arg(path)
         .output()

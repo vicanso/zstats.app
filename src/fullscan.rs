@@ -25,6 +25,7 @@
 //! thread, and only when clicked.
 
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot, SystemSnapshot};
 use zstats::{CollectError, Collector, CollectorConfig, LocalCollector};
@@ -95,7 +96,7 @@ fn collect_once(config: CollectorConfig) -> Result<(SystemSnapshot, Duration), C
     let mut collector = LocalCollector::new(config);
     collector.collect()?;
     let started = Instant::now();
-    std::thread::sleep(SETTLE);
+    thread::sleep(SETTLE);
     let snapshot = collector.collect()?;
     Ok((snapshot, started.elapsed()))
 }

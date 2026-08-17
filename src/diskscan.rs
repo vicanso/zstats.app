@@ -17,10 +17,16 @@
 
 use crate::cleanhints;
 use jwalk::{Parallelism, WalkDirGeneric};
+use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
 /// Files worth a row of their own; everything smaller folds into its
@@ -94,7 +100,7 @@ const PARTIAL_EVERY: Duration = Duration::from_secs(2);
 /// compute-bound: these threads spend most of their time blocked in the
 /// kernel, so the process's CPU% stays low by nature.
 fn walk_threads() -> usize {
-    let cores = std::thread::available_parallelism()
+    let cores = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
     (cores / 2).clamp(1, 3)
@@ -104,7 +110,7 @@ fn walk_threads() -> usize {
 /// runs there), not in the consumer loop — the per-file stat is the
 /// walk's most numerous syscall, and doing it serially on the consumer
 /// thread would idle the pool.
-type Walk = WalkDirGeneric<((), Option<std::fs::Metadata>)>;
+type Walk = WalkDirGeneric<((), Option<fs::Metadata>)>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HitKind {
@@ -142,7 +148,7 @@ pub struct ScanResult {
     pub roots: Vec<PathBuf>,
     /// Wall clock, not monotonic: a cached result must still know its
     /// age after a restart.
-    pub scanned_at: std::time::SystemTime,
+    pub scanned_at: SystemTime,
     /// Wall clock from walk start to this snapshot — on `Done`, the
     /// whole run's cost, shown so the user can decide whether a re-scan
     /// is a "wait for it" or a "come back later".
@@ -249,7 +255,7 @@ impl ScanScope {
 }
 
 pub fn spawn(scope: ScanScope, cancel: Arc<AtomicBool>, tx: smol::channel::Sender<ScanEvent>) {
-    std::thread::spawn(move || match run(&scope, &cancel, &tx) {
+    thread::spawn(move || match run(&scope, &cancel, &tx) {
         Ok(Some(result)) => {
             let _ = tx.send_blocking(ScanEvent::Done(Box::new(result)));
         }
@@ -270,7 +276,7 @@ pub fn spawn(scope: ScanScope, cancel: Arc<AtomicBool>, tx: smol::channel::Sende
 /// not pruned — unlike Mail and friends, whose prompts would read as
 /// snooping.
 pub fn default_root() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    env::var("HOME").ok().map(PathBuf::from)
 }
 
 fn run(
@@ -285,7 +291,7 @@ fn run(
         return Err(format!("{} is not a directory", scope.base.display()));
     }
     let protected = Arc::new(AtomicUsize::new(0));
-    let deny: Vec<PathBuf> = std::env::var("HOME")
+    let deny: Vec<PathBuf> = env::var("HOME")
         .ok()
         .map(|h| {
             TCC_DENY
@@ -335,7 +341,7 @@ fn run(
                             }
                         } else if child.file_type.is_file() {
                             // On the worker pool by design — see `Walk`.
-                            child.client_state = std::fs::symlink_metadata(child.path()).ok();
+                            child.client_state = fs::symlink_metadata(child.path()).ok();
                         }
                     }
                 })
@@ -479,7 +485,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
     } = agg;
     let (totals, children) = rollup(base, own_bytes, plain_dirs, fold);
     let (regenerable, dirs) = tables(roots, &totals, &children, fold);
-    files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
+    files.sort_by_key(|f| Reverse(f.bytes));
     // Suggestions only on the finished result: a partial's lower-bound
     // set would invite trashing while the walker is inside the trees.
     let suggestions = if build_index {
@@ -505,7 +511,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
     ScanResult {
         root: base.to_path_buf(),
         roots: roots.to_vec(),
-        scanned_at: std::time::SystemTime::now(),
+        scanned_at: SystemTime::now(),
         took,
         dirs_seen,
         skipped_denied,
@@ -548,7 +554,7 @@ fn suggest(
             });
         }
     }
-    picks.sort_by_key(|d| std::cmp::Reverse(d.bytes));
+    picks.sort_by_key(|d| Reverse(d.bytes));
     let mut kept: Vec<DirHit> = Vec::new();
     for hit in picks {
         if !kept.iter().any(|k| hit.path.starts_with(&k.path)) {
@@ -587,7 +593,7 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
         .filter(|f| f.path.starts_with(root))
         .cloned()
         .collect();
-    files.sort_by_key(|f| std::cmp::Reverse(f.bytes));
+    files.sort_by_key(|f| Reverse(f.bytes));
     files.truncate(TABLE_KEEP);
     if regenerable.is_empty() && dirs.is_empty() && files.is_empty() {
         return None;
@@ -648,7 +654,7 @@ fn rollup(
         totals.entry(f.clone()).or_default();
     }
     let mut deepest_first: Vec<PathBuf> = totals.keys().cloned().collect();
-    deepest_first.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    deepest_first.sort_by_key(|p| Reverse(p.components().count()));
     for path in deepest_first {
         if path == root {
             continue;
@@ -697,7 +703,7 @@ fn tables(
             kind: HitKind::Tag,
         })
         .collect();
-    regenerable.sort_by_key(|d| std::cmp::Reverse(d.bytes));
+    regenerable.sort_by_key(|d| Reverse(d.bytes));
     regenerable.truncate(TABLE_CAP);
     // Fixed cap here on purpose: this table carries the bulk-clear
     // button, and "the N listed" should stay a stable, small N.
@@ -719,7 +725,7 @@ fn tables(
         })
         .filter(|d| d.bytes > 0)
         .collect();
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.bytes));
+    dirs.sort_by_key(|d| Reverse(d.bytes));
     dirs.truncate(TABLE_KEEP);
 
     (regenerable, dirs)
@@ -792,8 +798,8 @@ pub fn load_prev_cache(roots: &[PathBuf]) -> Option<ScanResult> {
 }
 
 pub fn delete_cache(roots: &[PathBuf]) {
-    let _ = std::fs::remove_file(cache_path_in(&cache_dir(), roots));
-    let _ = std::fs::remove_file(prev_cache_path_in(&cache_dir(), roots));
+    let _ = fs::remove_file(cache_path_in(&cache_dir(), roots));
+    let _ = fs::remove_file(prev_cache_path_in(&cache_dir(), roots));
 }
 
 /// Files an abandoned scope left behind age out after this long. The
@@ -819,7 +825,7 @@ fn sweep_orphans_in(dir: &Path, keep: &[&Vec<PathBuf>], max_age: Duration) {
             keep_files.push(prev_cache_path_in(dir, roots));
         }
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -834,7 +840,7 @@ fn sweep_orphans_in(dir: &Path, keep: &[&Vec<PathBuf>], max_age: Duration) {
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age >= max_age);
         if expired {
-            let _ = std::fs::remove_file(&path);
+            let _ = fs::remove_file(&path);
         }
     }
 }
@@ -850,26 +856,26 @@ pub fn resave_if_cached(result: &ScanResult) {
 }
 
 fn save_cache_in(dir: &Path, result: &ScanResult, rotate: bool) {
-    if std::fs::create_dir_all(dir).is_err() {
+    if fs::create_dir_all(dir).is_err() {
         return;
     }
     let path = cache_path_in(dir, &result.roots);
     let tmp = path.with_extension("toml.tmp");
-    if std::fs::write(&tmp, serialise(result)).is_err() {
+    if fs::write(&tmp, serialise(result)).is_err() {
         return;
     }
     // 0600: the paths in here leak project names.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
     if rotate {
         // The displaced current becomes the next comparison's baseline
         // (a silent no-op on a first-ever save).
-        let _ = std::fs::rename(&path, prev_cache_path_in(dir, &result.roots));
+        let _ = fs::rename(&path, prev_cache_path_in(dir, &result.roots));
     }
-    let _ = std::fs::rename(&tmp, &path);
+    let _ = fs::rename(&tmp, &path);
 }
 
 fn serialise(result: &ScanResult) -> String {
@@ -911,7 +917,7 @@ fn serialise(result: &ScanResult) -> String {
     );
     let unix_secs = result
         .scanned_at
-        .duration_since(std::time::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     doc.insert("scanned_at_unix".into(), clamp(unix_secs));
@@ -968,7 +974,7 @@ fn load_cache_in(dir: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
 }
 
 fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = fs::read_to_string(path).ok()?;
     let doc: toml::Value = toml::from_str(&text).ok()?;
     if doc.get("version")?.as_integer()? != CACHE_VERSION {
         return None;
@@ -1031,7 +1037,7 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
     Some(ScanResult {
         root,
         roots: stored_roots,
-        scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(int("scanned_at_unix")),
+        scanned_at: UNIX_EPOCH + Duration::from_secs(int("scanned_at_unix")),
         took: Duration::from_secs(int("took_secs")),
         dirs_seen: int("dirs_seen") as usize,
         skipped_denied: int("skipped_denied") as usize,
@@ -1054,13 +1060,13 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
 /// claiming "new".
 pub struct DiffBaseline {
     roots: Vec<PathBuf>,
-    scanned_at: std::time::SystemTime,
-    bytes: std::collections::HashMap<PathBuf, u64>,
+    scanned_at: SystemTime,
+    bytes: HashMap<PathBuf, u64>,
 }
 
 impl DiffBaseline {
     pub fn from_result(result: &ScanResult) -> Self {
-        let mut bytes = std::collections::HashMap::new();
+        let mut bytes = HashMap::new();
         for hit in result
             .regenerable
             .iter()
@@ -1087,7 +1093,7 @@ impl DiffBaseline {
         &self.roots
     }
 
-    pub fn scanned_at(&self) -> std::time::SystemTime {
+    pub fn scanned_at(&self) -> SystemTime {
         self.scanned_at
     }
 
@@ -1172,7 +1178,7 @@ fn classify(path: &Path, heuristics_suspended: bool) -> Option<HitKind> {
 
 /// CACHEDIR.TAG with the spec's signature as its first bytes.
 fn has_cache_tag(dir: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(dir.join("CACHEDIR.TAG")) else {
+    let Ok(bytes) = fs::read(dir.join("CACHEDIR.TAG")) else {
         return false;
     };
     bytes.starts_with(CACHE_TAG_SIGNATURE)
@@ -1187,10 +1193,10 @@ fn in_blind_spot(path: &Path) -> bool {
         c.as_os_str()
             .to_str()
             .is_some_and(|s| s.starts_with('.') && s.len() > 1)
-    }) || std::env::var("HOME").is_ok_and(|h| path.starts_with(Path::new(&h).join("Library")))
+    }) || env::var("HOME").is_ok_and(|h| path.starts_with(Path::new(&h).join("Library")))
 }
 
-fn is_dataless(meta: &std::fs::Metadata) -> bool {
+fn is_dataless(meta: &fs::Metadata) -> bool {
     #[cfg(target_os = "macos")]
     {
         use std::os::macos::fs::MetadataExt;
@@ -1203,7 +1209,7 @@ fn is_dataless(meta: &std::fs::Metadata) -> bool {
     }
 }
 
-fn physical_size(meta: &std::fs::Metadata) -> u64 {
+fn physical_size(meta: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1218,6 +1224,7 @@ fn physical_size(meta: &std::fs::Metadata) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -1225,20 +1232,20 @@ mod tests {
 
     #[test]
     fn run_walks_a_real_tree_into_the_tables() {
-        let root = std::env::temp_dir().join(format!("zstats-diskscan-run-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = env::temp_dir().join(format!("zstats-diskscan-run-{}", process::id()));
+        let _ = fs::remove_dir_all(&root);
         // A tagged cache tree, a dominant wrapper chain, and a plain dir.
-        std::fs::create_dir_all(root.join("cache/deep")).unwrap();
-        std::fs::write(
+        fs::create_dir_all(root.join("cache/deep")).unwrap();
+        fs::write(
             root.join("cache/CACHEDIR.TAG"),
             b"Signature: 8a477f597d28d172789f06886806bc55\n",
         )
         .unwrap();
-        std::fs::write(root.join("cache/deep/blob"), vec![1u8; 20_000]).unwrap();
-        std::fs::create_dir_all(root.join("wrapper/inner")).unwrap();
-        std::fs::write(root.join("wrapper/inner/data"), vec![1u8; 40_000]).unwrap();
-        std::fs::create_dir_all(root.join("plain")).unwrap();
-        std::fs::write(root.join("plain/file"), vec![1u8; 8_000]).unwrap();
+        fs::write(root.join("cache/deep/blob"), vec![1u8; 20_000]).unwrap();
+        fs::create_dir_all(root.join("wrapper/inner")).unwrap();
+        fs::write(root.join("wrapper/inner/data"), vec![1u8; 40_000]).unwrap();
+        fs::create_dir_all(root.join("plain")).unwrap();
+        fs::write(root.join("plain/file"), vec![1u8; 8_000]).unwrap();
 
         let (tx, _rx) = smol::channel::unbounded();
         let result = run(
@@ -1269,7 +1276,7 @@ mod tests {
         assert!(result.index.is_some());
         assert!(result.suggestions.iter().any(|d| d.path.ends_with("cache")));
 
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1321,17 +1328,17 @@ mod tests {
 
     #[test]
     fn cache_tag_requires_the_signature() {
-        let dir = std::env::temp_dir().join(format!("zstats-diskscan-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("CACHEDIR.TAG"), b"not the signature").unwrap();
+        let dir = env::temp_dir().join(format!("zstats-diskscan-{}", process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("CACHEDIR.TAG"), b"not the signature").unwrap();
         assert!(!has_cache_tag(&dir));
-        std::fs::write(
+        fs::write(
             dir.join("CACHEDIR.TAG"),
             b"Signature: 8a477f597d28d172789f06886806bc55\n# by test",
         )
         .unwrap();
         assert!(has_cache_tag(&dir));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1369,7 +1376,7 @@ mod tests {
         let parent = ScanResult {
             root: p("/r"),
             roots: vec![p("/r")],
-            scanned_at: std::time::SystemTime::now(),
+            scanned_at: SystemTime::now(),
             took: Duration::ZERO,
             dirs_seen: 6,
             skipped_denied: 0,
@@ -1475,12 +1482,12 @@ mod tests {
 
     #[test]
     fn cache_round_trips_and_rejects_mismatches() {
-        let dir = std::env::temp_dir().join(format!("zstats-diskcache-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = env::temp_dir().join(format!("zstats-diskcache-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
         let result = ScanResult {
             root: p("/r"),
             roots: vec![p("/r")],
-            scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            scanned_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             took: Duration::from_secs(31),
             dirs_seen: 42,
             skipped_denied: 1,
@@ -1528,20 +1535,20 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(cache_path_in(&dir, &[p("/r")]))
+            let mode = fs::metadata(cache_path_in(&dir, &[p("/r")]))
                 .unwrap()
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn run_with(bytes: u64, secs: u64) -> ScanResult {
         ScanResult {
             root: p("/r"),
             roots: vec![p("/r")],
-            scanned_at: std::time::UNIX_EPOCH + Duration::from_secs(secs),
+            scanned_at: UNIX_EPOCH + Duration::from_secs(secs),
             took: Duration::from_secs(1),
             dirs_seen: 1,
             skipped_denied: 0,
@@ -1568,14 +1575,14 @@ mod tests {
 
     #[test]
     fn merged_run_walks_existing_roots_and_keeps_the_requested_set() {
-        let base = std::env::temp_dir().join(format!("zstats-multiroot-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = env::temp_dir().join(format!("zstats-multiroot-{}", process::id()));
+        let _ = fs::remove_dir_all(&base);
         let a = base.join("a");
         let b = base.join("b");
-        std::fs::create_dir_all(a.join("x")).unwrap();
-        std::fs::write(a.join("x/data"), vec![1u8; 30_000]).unwrap();
-        std::fs::create_dir_all(b.join("y")).unwrap();
-        std::fs::write(b.join("y/data"), vec![1u8; 20_000]).unwrap();
+        fs::create_dir_all(a.join("x")).unwrap();
+        fs::write(a.join("x/data"), vec![1u8; 30_000]).unwrap();
+        fs::create_dir_all(b.join("y")).unwrap();
+        fs::write(b.join("y/data"), vec![1u8; 20_000]).unwrap();
         let scope = ScanScope {
             base: base.clone(),
             // A missing root mid-list (— `~/.cache` on most machines)
@@ -1599,7 +1606,7 @@ mod tests {
             roots: vec![base.join("nope")],
         };
         assert!(run(&gone, &Arc::new(AtomicBool::new(false)), &tx).is_err());
-        let _ = std::fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1615,9 +1622,9 @@ mod tests {
 
     #[test]
     fn legacy_cache_without_roots_still_loads() {
-        let dir = std::env::temp_dir().join(format!("zstats-disklegacy-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = env::temp_dir().join(format!("zstats-disklegacy-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
         // A file from before the `roots` key: same document minus that
         // line — must load as the single-root walk it always was.
         let stripped: String = serialise(&run_with(100, 1))
@@ -1625,16 +1632,16 @@ mod tests {
             .filter(|l| !l.starts_with("roots"))
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(cache_path_in(&dir, &[p("/r")]), stripped).unwrap();
+        fs::write(cache_path_in(&dir, &[p("/r")]), stripped).unwrap();
         let loaded = load_cache_in(&dir, &[p("/r")]).expect("legacy file loads");
         assert_eq!(loaded.roots, vec![p("/r")]);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn save_rotates_the_displaced_run_into_the_delta_baseline() {
-        let dir = std::env::temp_dir().join(format!("zstats-diskprev-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = env::temp_dir().join(format!("zstats-diskprev-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
         let prev_path = prev_cache_path_in(&dir, &[p("/r")]);
         // First-ever save: nothing to rotate, no baseline yet.
         save_cache_in(&dir, &run_with(100, 1), true);
@@ -1649,19 +1656,19 @@ mod tests {
         let kept = load_cache_file(&prev_path, &[p("/r")]).expect("kept");
         assert_eq!(kept.dirs[0].bytes, 100);
         assert_eq!(load_cache_in(&dir, &[p("/r")]).unwrap().dirs[0].bytes, 240);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn sweep_spares_kept_scopes_and_young_files() {
-        let dir = std::env::temp_dir().join(format!("zstats-disksweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = env::temp_dir().join(format!("zstats-disksweep-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
         let kept = vec![p("/r")];
         let orphan = vec![p("/old")];
-        std::fs::write(cache_path_in(&dir, &kept), "x").unwrap();
-        std::fs::write(prev_cache_path_in(&dir, &kept), "x").unwrap();
-        std::fs::write(cache_path_in(&dir, &orphan), "x").unwrap();
+        fs::write(cache_path_in(&dir, &kept), "x").unwrap();
+        fs::write(prev_cache_path_in(&dir, &kept), "x").unwrap();
+        fs::write(cache_path_in(&dir, &orphan), "x").unwrap();
         // Everything is younger than a month; nothing may go yet.
         sweep_orphans_in(&dir, &[&kept], ORPHAN_AGE);
         assert!(cache_path_in(&dir, &orphan).exists());
@@ -1671,7 +1678,7 @@ mod tests {
         assert!(!cache_path_in(&dir, &orphan).exists());
         assert!(cache_path_in(&dir, &kept).exists());
         assert!(prev_cache_path_in(&dir, &kept).exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
