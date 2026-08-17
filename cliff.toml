@@ -69,11 +69,18 @@ filter_unconventional = true
 # process each line of a commit as an individual commit
 split_commits = false
 # regex for preprocessing the commit messages
+# No `replace_command` preprocessor here, deliberately. The upstream
+# example pipes every message through `typos --write-changes -`, and a
+# missing binary is not an error git-cliff reports: the command fails,
+# the message becomes empty, `filter_unconventional` then drops the
+# commit, and the run exits 0 having produced a release header with no
+# entries. That is exactly what shipped as v0.1.2's release notes — CI
+# installs git-cliff and not typos, so the failure was invisible on a
+# developer machine that had both. Spell-checking hand-written commit
+# subjects was never worth an undeclared dependency with a silent,
+# total failure mode.
 commit_preprocessors = [
     { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](<REPO>/issues/${2}))" },
-    # Check spelling of the commit with https://github.com/crate-ci/typos
-    # If the spelling is incorrect, it will be automatically fixed.
-    { pattern = '.*', replace_command = 'typos --write-changes -' },
 ]
 # regex for parsing and grouping commits
 commit_parsers = [

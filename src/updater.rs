@@ -98,12 +98,20 @@ pub fn download_and_open(
     // A missing SHA256SUMS degrades to unverified-but-proceed: the DMG
     // is signed and notarized, and Gatekeeper validates that signature
     // when the user installs — the checksum only fails *earlier*.
-    if let Some(expected) = fetch_checksum(&agent, tag, asset)
-        && let Some(got) = file_sha256(&path)
-        && !got.eq_ignore_ascii_case(&expected)
-    {
-        let _ = fs::remove_file(&path);
-        return Err(format!("checksum mismatch: expected {expected}, got {got}"));
+    //
+    // Having the digest but failing to compute ours is a different
+    // story and must not take the same exit: "we meant to verify and
+    // could not" is a failure, not a pass. Handing over bytes we
+    // intended to check and didn't would make the check decorative.
+    if let Some(expected) = fetch_checksum(&agent, tag, asset) {
+        let Some(got) = file_sha256(&path) else {
+            let _ = fs::remove_file(&path);
+            return Err("could not verify the download (shasum failed)".into());
+        };
+        if !got.eq_ignore_ascii_case(&expected) {
+            let _ = fs::remove_file(&path);
+            return Err(format!("checksum mismatch: expected {expected}, got {got}"));
+        }
     }
 
     // Mount the image and bring Finder forward — LaunchServices opens
@@ -362,6 +370,29 @@ fn ignore_in(dir: &Path, version: &str) {
     write_check_in(dir, &file);
 }
 
+/// The version the user chose to skip, while this build still has not
+/// caught up to it. `None` once installed — the mark is then history,
+/// not a standing choice.
+pub fn ignored() -> Option<String> {
+    ignored_in(&zstats::settings::default_dir(), about::version())
+}
+
+fn ignored_in(dir: &Path, current: &str) -> Option<String> {
+    let marked = read_check_in(dir).ignored?;
+    is_newer(&marked, current).then_some(marked)
+}
+
+/// Drop the skip mark: the dot and the About row speak up again.
+pub fn unignore() {
+    unignore_in(&zstats::settings::default_dir());
+}
+
+fn unignore_in(dir: &Path) {
+    let mut file = read_check_in(dir);
+    file.ignored = None;
+    write_check_in(dir, &file);
+}
+
 /// The version a past check found and this build has not caught up to —
 /// the meaning of the settings gear's dot. File plus version compare,
 /// no network: installing the update clears the dot by comparison, not
@@ -479,6 +510,21 @@ mod tests {
         // …a failure keeps both the finding and the ignore mark…
         record_outcome_in(&dir, t0, &UpdateCheck::Failed("offline".into()));
         assert_eq!(nudge_in(&dir, "0.1.2"), None);
+        assert_eq!(
+            ignored_in(&dir, "0.1.2"),
+            Some("v9.9.8".into()),
+            "the skip is a standing choice while it still applies"
+        );
+        assert_eq!(
+            ignored_in(&dir, "9.9.9"),
+            None,
+            "installing past it makes the mark history"
+        );
+        // Undo puts it back on the board.
+        unignore_in(&dir);
+        assert_eq!(nudge_in(&dir, "0.1.2"), Some("v9.9.8".into()));
+        assert_eq!(ignored_in(&dir, "0.1.2"), None);
+        ignore_in(&dir, "v9.9.8");
         // …and the next release brings the dot back on its own.
         record_outcome_in(&dir, t0, &newer("v9.9.9"));
         assert_eq!(nudge_in(&dir, "0.1.2"), Some("v9.9.9".into()));

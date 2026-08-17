@@ -290,32 +290,51 @@ fn write(
     proxy: &str,
     analysis_roots: &[String],
 ) -> io::Result<()> {
-    let mut out =
-        String::from("# UI preferences for zstats.app. An absent key follows the system.\n");
+    // Serialised by the toml crate, never by hand: an analysis root is
+    // a user-chosen path, and macOS allows every byte but `/` and NUL
+    // in a filename — including the control characters that are illegal
+    // raw inside a TOML basic string. A hand-rolled quote would emit
+    // them as-is, the reader would fail to parse the whole file, and
+    // `read`'s fallback would silently reset *every* preference here.
+    let mut doc = toml::Table::new();
     if let Some(key) = language.key() {
-        out.push_str(&format!("language = \"{key}\"\n"));
+        doc.insert("language".into(), toml::Value::String(key.into()));
     }
     if let Some(key) = theme.key() {
-        out.push_str(&format!("theme = \"{key}\"\n"));
+        doc.insert("theme".into(), toml::Value::String(key.into()));
     }
     if let Some(value) = opacity.filter(|v| *v >= OPACITY_MIN) {
-        out.push_str(&format!("opacity = {:.2}\n", value.min(OPACITY_MAX)));
+        doc.insert(
+            "opacity".into(),
+            toml::Value::Float(f64::from((value.min(OPACITY_MAX) * 100.0).round() / 100.0)),
+        );
     }
     if !proxy.is_empty() {
-        // TOML basic-string escapes; a proxy URI has no reason to hold
-        // either, but a hand-crafted value must not corrupt the file.
-        let escaped = proxy.replace('\\', "\\\\").replace('"', "\\\"");
-        out.push_str(&format!("proxy = \"{escaped}\"\n"));
+        doc.insert("proxy".into(), toml::Value::String(proxy.into()));
     }
     if !analysis_roots.is_empty() {
-        let rows: Vec<String> = analysis_roots
-            .iter()
-            .map(|r| format!("\"{}\"", r.replace('\\', "\\\\").replace('"', "\\\"")))
-            .collect();
-        out.push_str(&format!("analysis_roots = [{}]\n", rows.join(", ")));
+        doc.insert(
+            "analysis_roots".into(),
+            toml::Value::Array(
+                analysis_roots
+                    .iter()
+                    .map(|r| toml::Value::String(r.clone()))
+                    .collect(),
+            ),
+        );
     }
+    let body = toml::to_string(&toml::Value::Table(doc))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let out = format!("# UI preferences for zstats.app. An absent key follows the system.\n{body}");
+
+    // Written through a temp file, like every other side file: a kill
+    // mid-write must not leave a truncated app.toml, which reads as
+    // "no preferences at all".
     fs::create_dir_all(dir)?;
-    fs::write(file_path(dir), out)
+    let path = file_path(dir);
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, out)?;
+    fs::rename(&tmp, &path)
 }
 
 #[cfg(test)]
@@ -398,6 +417,30 @@ mod tests {
         fs::write(file_path(&dir), "language = \"ja\"\ntheme = \"sepia\"\n").unwrap();
         assert_eq!(read(&dir), system);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// macOS filenames may hold newlines and other control characters,
+    /// which a hand-rolled TOML quote would emit raw — the file would
+    /// then fail to parse and every preference in it would silently
+    /// reset on the next launch.
+    #[test]
+    fn a_hostile_path_survives_the_round_trip() {
+        let dir = scratch("hostile");
+        let nasty = "/Users/x/we\nird \"quoted\"\\path\ttab";
+        write(
+            &dir,
+            LanguagePref::Chinese,
+            ThemePref::Dark,
+            Some(0.8),
+            "",
+            &[nasty.to_string()],
+        )
+        .unwrap();
+        let back = read(&dir);
+        assert_eq!(back.4, vec![nasty.to_string()], "the path comes back whole");
+        assert_eq!(back.0, LanguagePref::Chinese, "and takes the rest with it");
+        assert_eq!(back.2, Some(0.8));
         let _ = fs::remove_dir_all(&dir);
     }
 

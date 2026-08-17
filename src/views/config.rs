@@ -353,6 +353,7 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
     enum Action {
         Check { enabled: bool },
         Install { version: String },
+        Unskip,
         Busy,
         Quit,
     }
@@ -364,15 +365,23 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
             // dot led here, so the door must not play dumb and demand a
             // re-check. Notes are not retained by the silent check;
             // entering About triggers a real one that fills them in.
-            None => match state.update_nudge() {
-                Some(v) => (
+            None => match (state.update_nudge(), state.update_ignored()) {
+                (Some(v), _) => (
                     Some(t!("config.update_newer", v = v).to_string()),
                     Action::Install {
                         version: v.to_string(),
                     },
                     None,
                 ),
-                None => (None, Action::Check { enabled: true }, None),
+                // Skipped, and it still applies: say so and offer the
+                // way back, rather than going blank and leaving the
+                // click that got here looking inert.
+                (None, Some(v)) => (
+                    Some(t!("config.update_ignored", v = v).to_string()),
+                    Action::Unskip,
+                    None,
+                ),
+                (None, None) => (None, Action::Check { enabled: true }, None),
             },
             Some(UpdateStatus::Checking) => (None, Action::Check { enabled: false }, None),
             Some(UpdateStatus::Done(updater::UpdateCheck::UpToDate)) => (
@@ -436,6 +445,19 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
     let actions = match action {
         Action::Check { enabled } => update_check_btn(enabled),
         Action::Install { version } => update_install_btns(version),
+        Action::Unskip => update_btn(
+            "about-update-unskip",
+            i18n::tr("config.update_unskip"),
+            true,
+        )
+        .w_full()
+        .hover(|d| d.bg(theme::surface_raised()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.unignore_update(cx));
+        })
+        .into_any_element(),
         Action::Busy => update_btn(
             "about-update-progress",
             caption.clone().unwrap_or_default(),

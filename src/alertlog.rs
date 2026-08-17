@@ -149,7 +149,7 @@ fn unix(t: SystemTime) -> i64 {
 /// The local calendar date of a wall-clock instant, as `2026-08-17`.
 /// Local, not UTC: "today" means the user's day, the same boundary the
 /// History tab draws.
-fn local_date(t: SystemTime) -> Option<String> {
+pub(crate) fn local_date(t: SystemTime) -> Option<String> {
     let secs = t.duration_since(UNIX_EPOCH).ok()?.as_secs();
     let stamp = jiff::Timestamp::from_second(secs.min(i64::MAX as u64) as i64).ok()?;
     Some(

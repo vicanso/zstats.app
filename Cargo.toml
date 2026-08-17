@@ -50,7 +50,7 @@ gpui_macros = { git = "https://github.com/zed-industries/zed" }
 # Embedded metrics collection. `frontend` brings the alert rule engine,
 # rolling per-process averages and the settings model — and deliberately no
 # tokio. `client` (the daemon's unix-socket probe) is left off for that reason.
-zstats = { version = "0.5", default-features = false, features = ["frontend"] }
+zstats = { version = "0.5.1", default-features = false, features = ["frontend"] }
 # Dates for `records::read_range`, whose parameters are `jiff::civil::Date`
 # and whose `MetricRecord::timestamp` is a `jiff::Timestamp`. Same version
 # zstats already pins, so this resolves to the one copy it is already

@@ -105,7 +105,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         // evaluated, so no numbers are re-derived here.
                         .child(seen.event.summary()),
                 )
-                .children(consumer_rows(i, &seen.event))
+                .children(consumer_rows(i, &seen.event, seen.live))
                 .when_some(seen.event.repeat_after, |d, after| {
                     d.child(div().mt(px(8.)).child(widgets::note(
                         t!("alerts.follow_up", when = format::uptime(after.as_secs())).to_string(),
@@ -210,8 +210,41 @@ fn armed_line(state: &ZStatsAppState) -> Option<String> {
     if let Some(v) = eff.cpu.base() {
         items.push(format!("{} {v:.0}%", i18n::tr("alerts.kind_cpu")));
     }
-    if let Some(f) = eff.memory.base() {
-        items.push(format!("{} {:.0}%", i18n::tr("alerts.kind_mem"), f * 100.0));
+    // Memory bars are the LOWER of a share and an absolute ceiling, so
+    // the percentage alone overstates them: 25% reads as 16 GB on a
+    // 64 GiB machine while the rule actually trips at 4 GB. zstats
+    // resolves the effective figure itself — ask it rather than paint
+    // half the rule. The empty name matches no override, which is what
+    // "the base bar" means here.
+    let total = state.latest().map(|tick| tick.snapshot.memory.total_bytes);
+    match total.and_then(|t| eff.memory_bar_bytes("", t)) {
+        Some(bytes) => items.push(format!(
+            "{} {}",
+            i18n::tr("alerts.kind_mem"),
+            format::memory(bytes)
+        )),
+        // Before the first sample there is no total to resolve against;
+        // the share is all that can be said honestly.
+        None => {
+            if let Some(f) = eff.memory.base() {
+                items.push(format!("{} {:.0}%", i18n::tr("alerts.kind_mem"), f * 100.0));
+            }
+        }
+    }
+    // The whole-app rules, which zstats 0.5.1 made reachable (the app
+    // memory bar gained an absolute ceiling; a share of RAM alone was
+    // unreachable on the machines browsers actually run on). They are
+    // half of what "per-program thresholds" means, so an armed list
+    // that omits them understates the watch.
+    if let Some(v) = eff.app_cpu.base() {
+        items.push(format!("{} {v:.0}%", i18n::tr("alerts.kind_app_cpu")));
+    }
+    if let Some(bytes) = total.and_then(|t| eff.app_memory_bar_bytes("", t)) {
+        items.push(format!(
+            "{} {}",
+            i18n::tr("alerts.kind_app_mem"),
+            format::memory(bytes)
+        ));
     }
     if let Some(f) = eff.disk.base() {
         items.push(format!(
@@ -296,10 +329,16 @@ fn alert_head(
                     .snoozed_until(&seen.event)
                     .map(|_| widgets::outline_pill(i18n::tr("alerts.snoozed_pill"))),
             )
+            // A card from before the last launch says so: it explains
+            // both the old numbers and the missing action buttons
+            // (see [`SeenAlert::live`]).
+            .when(!seen.live, |d| {
+                d.child(widgets::outline_pill(i18n::tr("alerts.earlier_session")))
+            })
             // An explicit control rather than a clickable card: macOS does
             // not change the pointer over clickable things, so "the whole row
             // does something" has no way to announce itself.
-            .children(quit_button(index, &seen.event))
+            .children(quit_button(index, seen))
             .children(hardware_button(index, &seen.event))
             .children(target.map(|tgt| {
                 Button::new(("edit-threshold", index))
@@ -312,7 +351,23 @@ fn alert_head(
                             .clone()
                             .update(cx, |state, cx| state.toggle_alert(tgt.key, &tgt.name, cx));
                     })
-            })),
+            }))
+            .child({
+                // The list's only acknowledgement path — and the edge
+                // action, so it goes last. Close, not Delete: this
+                // removes a record, it touches nothing on the system.
+                let seq = seen.seq;
+                Button::new(("dismiss-alert", index))
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .tooltip(i18n::tr("alerts.dismiss_hint"))
+                    .on_click(move |_, _window, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.dismiss_alert(seq, cx));
+                    })
+            }),
     )
     .into_any_element()
 }
@@ -373,9 +428,16 @@ fn subject_label(subject: &AlertSubject) -> String {
 /// something is over the line stays zstats' (this consumes its event);
 /// the click, the confirm sheet and the delivery are `terminate`'s.
 #[cfg(target_os = "macos")]
-fn quit_button(index: usize, event: &AlertEvent) -> Option<Button> {
+fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
     use crate::terminate;
 
+    // A restored card's pid may belong to something else entirely by
+    // now — see [`SeenAlert::live`]. No button rather than a button
+    // that could hit the wrong target.
+    if !seen.live {
+        return None;
+    }
+    let event = &seen.event;
     let (pid, name) = match (&event.subject, event.kind()) {
         (AlertSubject::Process { pid, name }, AlertKind::Memory) => (*pid, name.clone()),
         (AlertSubject::App { root_pid, name, .. }, AlertKind::AppMemory) => {
@@ -434,7 +496,7 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
 
 /// Never-run stub — see "Platform reality" in CLAUDE.md.
 #[cfg(not(target_os = "macos"))]
-fn quit_button(_index: usize, _event: &AlertEvent) -> Option<Button> {
+fn quit_button(_index: usize, _seen: &SeenAlert) -> Option<Button> {
     None
 }
 
@@ -443,7 +505,7 @@ fn quit_button(_index: usize, _event: &AlertEvent) -> Option<Button> {
 /// Attribution is zstats' (`top_consumers`, snapshotted at the crossing);
 /// this renders and offers the exit, nothing more — pressure goes from
 /// "machine state, nothing to act on" to "these are holding it, you pick".
-fn consumer_rows(index: usize, event: &AlertEvent) -> Option<AnyElement> {
+fn consumer_rows(index: usize, event: &AlertEvent, live: bool) -> Option<AnyElement> {
     let AlertDetail::Pressure { top_consumers, .. } = &event.detail else {
         return None;
     };
@@ -480,7 +542,7 @@ fn consumer_rows(index: usize, event: &AlertEvent) -> Option<AnyElement> {
                                     .text_color(theme::text_muted())
                                     .child(format::memory(c.bytes)),
                             )
-                            .children(consumer_quit(index, i, c)),
+                            .children(live.then(|| consumer_quit(index, i, c)).flatten()),
                     )
                     .into_any_element()
             }))

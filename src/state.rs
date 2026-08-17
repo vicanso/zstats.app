@@ -372,6 +372,18 @@ pub struct SeenAlert {
     /// How many times zstats has reported it — 1 on the crossing, 2 once the
     /// 30-minute follow-up lands.
     pub reports: u32,
+    /// Whether this episode has been reported *in this session*.
+    ///
+    /// The gate on every acting control the card carries. A card
+    /// restored from yesterday names a pid, and after a reboot macOS
+    /// hands low pids straight back out — so "quit Google Chrome ·
+    /// 923" could deliver SIGTERM to whatever holds 923 now. Nothing in
+    /// `terminate::can_quit` catches that: `kill(pid, 0)` answers "may
+    /// I signal this pid", never "is this still that program". So the
+    /// buttons appear only once a live report has confirmed the pid
+    /// during this run — restored cards are records to read, and the
+    /// Processes tab still offers a quit for anything actually running.
+    pub live: bool,
     pub event: AlertEvent,
 }
 
@@ -539,10 +551,16 @@ pub struct ZStatsAppState {
     history_sort: HistorySort,
     /// The last (or in-flight) clean-hints update fetch.
     hints_sync: Option<HintsSync>,
+    /// Throttle for the alert list's midnight sweep.
+    alert_day_checked_at: Option<Instant>,
     /// A newer release a silent check found (its tag) — the settings
     /// gear's dot. Loaded from the check file at launch, refreshed by
     /// every check, cleared by comparison once the update is installed.
     update_nudge: Option<String>,
+    /// The version the user chose to skip, while it still applies. The
+    /// About page states it rather than going blank, and offers the way
+    /// back — a choice with no visible record reads as a dead button.
+    update_ignored: Option<String>,
     /// Throttles the *probe* (a tiny file read) to once an hour; the
     /// check itself is throttled to days by the file's timestamp.
     auto_check_probe_at: Option<Instant>,
@@ -664,7 +682,9 @@ impl Default for ZStatsAppState {
             history_sort: HistorySort::default(),
             hints_sync: None,
             update_status: None,
+            alert_day_checked_at: None,
             update_nudge: updater::nudge(),
+            update_ignored: updater::ignored(),
             auto_check_probe_at: None,
             auto_check_inflight: false,
             full_scan: FullScan::default(),
@@ -719,6 +739,7 @@ impl ZStatsAppState {
         if self.tab == Tab::Hardware {
             self.ensure_space_info(cx);
         }
+        self.prune_stale_alerts();
         self.maybe_auto_check_update(cx);
         cx.notify();
         fresh
@@ -766,6 +787,8 @@ impl ZStatsAppState {
         {
             seen.at = now;
             seen.reports += 1;
+            // A live report just named this pid: the card may act again.
+            seen.live = true;
             // Keep the newest reading: the follow-up carries current numbers,
             // and a card showing the crossing value 30 minutes on is stale.
             seen.event = event;
@@ -779,6 +802,7 @@ impl ZStatsAppState {
             first_at: now,
             at: now,
             reports: 1,
+            live: true,
             event,
         });
         while self.alerts.len() > MAX_ALERTS {
@@ -806,9 +830,66 @@ impl ZStatsAppState {
                 first_at: saved.first_at,
                 at: saved.at,
                 reports: saved.reports,
+                // Read-only until a live report confirms the subject —
+                // see [`SeenAlert::live`].
+                live: false,
                 event: saved.event,
             });
         }
+    }
+
+    /// Drop one episode from the list and the file. Display-layer only,
+    /// like the banner snooze: the engine keeps evaluating, and a
+    /// condition that still holds re-opens the episode on its next
+    /// report. Without this the list has no acknowledgement path at
+    /// all — it outlives restarts now, so the tab's alert tint would
+    /// otherwise stay lit for the rest of the day.
+    pub fn dismiss_alert(&mut self, seq: u64, cx: &mut Context<Self>) {
+        if self.drop_alert(seq) {
+            self.persist_alerts();
+            cx.notify();
+        }
+    }
+
+    /// The removal proper, minus the file write — `true` when the list
+    /// actually changed.
+    fn drop_alert(&mut self, seq: u64) -> bool {
+        let before = self.alerts.len();
+        self.alerts.retain(|seen| seen.seq != seq);
+        self.alerts.len() != before
+    }
+
+    /// Retire episodes that are no longer today's. The file already
+    /// draws this boundary when it loads; a session that runs past
+    /// midnight has to draw it too, or "today's alerts" would quietly
+    /// mean "since this app started". Throttled — the check is a
+    /// calendar conversion, not something to do 30 times a minute.
+    fn prune_stale_alerts(&mut self) {
+        const CHECK_EVERY: Duration = Duration::from_secs(60);
+        if self
+            .alert_day_checked_at
+            .is_some_and(|at| at.elapsed() < CHECK_EVERY)
+        {
+            return;
+        }
+        self.alert_day_checked_at = Some(Instant::now());
+        if self.retain_today(SystemTime::now()) {
+            self.persist_alerts();
+        }
+    }
+
+    /// Keep only `now`'s episodes — `true` when something was retired.
+    /// A clock with no readable calendar (before the epoch) prunes
+    /// nothing: dropping the list on a broken clock is worse than
+    /// keeping it.
+    fn retain_today(&mut self, now: SystemTime) -> bool {
+        let Some(today) = alertlog::local_date(now) else {
+            return false;
+        };
+        let before = self.alerts.len();
+        self.alerts
+            .retain(|seen| alertlog::local_date(seen.at).as_deref() == Some(today.as_str()));
+        self.alerts.len() != before
     }
 
     fn persist_alerts(&self) {
@@ -1404,15 +1485,24 @@ impl ZStatsAppState {
                 .suggestions
                 .retain(|h| !gone.iter().any(|g| h.path.starts_with(g)));
         };
+        // Only the session's top-level result owns a cache file, and it
+        // is the outermost parked one — or the current view when
+        // nothing is parked. Every other level is drill-derived, and
+        // writing one out would overwrite whatever scope happens to
+        // share its root with the *parent's* vintage (`drill` inherits
+        // `scanned_at`, `took` and the skip counters).
+        let top_level_is_current = self.disk_analysis_stack.is_empty();
         if let DiskAnalysis::Ready(result) = &mut self.disk_analysis {
             prune(result);
-            // Keep the on-disk copy in step with the pruned rows — only
-            // where this root already has one (drill views never do).
-            diskscan::resave_if_cached(result);
+            if top_level_is_current {
+                diskscan::resave_if_cached(result);
+            }
         }
-        for parked in &mut self.disk_analysis_stack {
+        for (level, parked) in self.disk_analysis_stack.iter_mut().enumerate() {
             prune(parked);
-            diskscan::resave_if_cached(parked);
+            if level == 0 {
+                diskscan::resave_if_cached(parked);
+            }
         }
         cx.notify();
     }
@@ -1487,12 +1577,35 @@ impl ZStatsAppState {
         }
     }
 
+    /// The version the user skipped, while it still applies.
+    pub fn update_ignored(&self) -> Option<&str> {
+        self.update_ignored.as_deref()
+    }
+
+    /// Take the skip back: the dot returns and the About row goes back
+    /// to offering the download.
+    pub fn unignore_update(&mut self, cx: &mut Context<Self>) {
+        updater::unignore();
+        self.update_ignored = None;
+        self.update_nudge = updater::nudge();
+        cx.notify();
+    }
+
     /// "Skip this version": mute the gear's dot for `version` alone.
     /// Checks keep running, the About page keeps answering truthfully,
     /// and the next release re-arms the dot by itself.
     pub fn ignore_update(&mut self, version: &str, cx: &mut Context<Self>) {
         updater::ignore(version);
         self.update_nudge = updater::nudge();
+        self.update_ignored = updater::ignored();
+        // Clear the finding this session is showing, so the row falls
+        // through to the "skipped" state below it. Without this the row
+        // keeps rendering from `update_status`, which the skip does not
+        // touch — the button would look inert while the only thing it
+        // changed (the gear's dot) sits in another window. Checking
+        // again still tells the truth: skipping silences the reminder,
+        // never the answer.
+        self.update_status = None;
         cx.notify();
     }
 
@@ -2234,6 +2347,67 @@ mod tests {
         state.record_alert(mem_alert(7), SystemTime::now());
         assert_eq!(state.alerts().len(), 2);
         assert_ne!(state.alerts()[0].seq, state.alerts()[1].seq);
+    }
+
+    /// The acting controls on a card are gated on the pid having been
+    /// confirmed *this session*: after a reboot the pid a restored card
+    /// names may belong to something else entirely, and "quit Chrome"
+    /// would deliver SIGTERM to whatever holds it now.
+    #[test]
+    fn a_restored_card_cannot_act_until_a_live_report_confirms_it() {
+        let mut state = ZStatsAppState::new();
+        state.adopt_alerts(vec![alertlog::Restored {
+            event: mem_alert(923),
+            first_at: SystemTime::now() - Duration::from_secs(7200),
+            at: SystemTime::now() - Duration::from_secs(7200),
+            reports: 1,
+        }]);
+        assert!(!state.alerts()[0].live, "restored is read-only");
+
+        // The same condition reported again names the pid live.
+        state.record_alert(mem_alert(923), SystemTime::now());
+        assert!(state.alerts()[0].live, "a live report re-arms the card");
+        assert_eq!(state.alerts().len(), 1, "still one episode");
+    }
+
+    /// The list outlives restarts now, so it needs a way to be put down
+    /// — otherwise the tab's alert tint stays lit for the rest of the
+    /// day with nothing the user can do about it.
+    #[test]
+    fn dismiss_removes_one_episode_and_leaves_the_rest() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(cpu_alert(7), t0);
+        state.record_alert(cpu_alert(8), t0);
+        let doomed = state.alerts()[0].seq;
+
+        assert!(state.drop_alert(doomed));
+        assert_eq!(state.alerts().len(), 1);
+        assert_ne!(state.alerts()[0].seq, doomed);
+        assert!(
+            !state.drop_alert(doomed),
+            "dismissing twice changes nothing"
+        );
+    }
+
+    /// "Today's alerts" has to keep meaning today on a machine that
+    /// never restarts — the file draws that boundary when it loads, and
+    /// a session running past midnight has to draw it too.
+    #[test]
+    fn the_day_boundary_retires_yesterdays_episodes() {
+        let mut state = ZStatsAppState::new();
+        let now = SystemTime::now();
+        state.record_alert(cpu_alert(7), now - Duration::from_secs(3 * 86_400));
+        state.record_alert(cpu_alert(8), now);
+        assert_eq!(state.alerts().len(), 2);
+
+        assert!(state.retain_today(now), "the stale one is retired");
+        assert_eq!(state.alerts().len(), 1);
+        assert!(matches!(
+            state.alerts()[0].event.subject,
+            AlertSubject::Process { pid: 8, .. }
+        ));
+        assert!(!state.retain_today(now), "nothing left to retire");
     }
 
     /// The id has to outlive reordering — it is what element state (hover,

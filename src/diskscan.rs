@@ -871,9 +871,12 @@ fn save_cache_in(dir: &Path, result: &ScanResult, rotate: bool) {
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
     if rotate {
-        // The displaced current becomes the next comparison's baseline
-        // (a silent no-op on a first-ever save).
-        let _ = fs::rename(&path, prev_cache_path_in(dir, &result.roots));
+        // Copied, not renamed: a rename would unlink the current cache
+        // first, and dying between the two renames would leave the
+        // scope with a baseline but no result. Copying costs a few KB
+        // and the worst interruption leaves `.prev` equal to the
+        // current file — a Δ of all zeros, which is merely useless.
+        let _ = fs::copy(&path, prev_cache_path_in(dir, &result.roots));
     }
     let _ = fs::rename(&tmp, &path);
 }
