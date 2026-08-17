@@ -8,6 +8,7 @@
 //! scroll offsets. Collected metrics are the main tenant, and sampling runs
 //! whether or not a window exists at all.
 
+use crate::alertlog;
 use crate::bigfiles;
 use crate::bigfiles::BigFilesScan;
 use crate::cleanhints;
@@ -37,7 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use zstats::settings::FileConfig;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 use zstats::{AlertEvent, AlertKind, AlertSubject, Tick};
@@ -362,10 +363,12 @@ pub struct SeenAlert {
     /// index would silently reassign element state — hover, tooltips, the
     /// expanded editor — to a different card.
     pub seq: u64,
-    /// When this episode first crossed.
-    pub first_at: Instant,
+    /// When this episode first crossed. Wall clock, not `Instant`:
+    /// these outlive the process now ([`crate::alertlog`]), and a
+    /// monotonic clock restarts with the machine.
+    pub first_at: SystemTime,
     /// Most recent report within the episode.
-    pub at: Instant,
+    pub at: SystemTime,
     /// How many times zstats has reported it — 1 on the crossing, 2 once the
     /// 30-minute follow-up lands.
     pub reports: u32,
@@ -373,15 +376,17 @@ pub struct SeenAlert {
 }
 
 impl SeenAlert {
-    /// Time since the most recent report.
+    /// Time since the most recent report. A clock stepped backwards
+    /// (NTP, a manual change) reads as "just now" rather than a
+    /// negative age.
     pub fn age(&self) -> Duration {
-        self.at.elapsed()
+        self.at.elapsed().unwrap_or_default()
     }
 
     /// How long the episode has been going, once that differs from [`age`]
     /// by enough to be worth a second timestamp on the card.
     pub fn span(&self) -> Option<Duration> {
-        let span = self.at.duration_since(self.first_at);
+        let span = self.at.duration_since(self.first_at).unwrap_or_default();
         (span >= Duration::from_secs(60)).then_some(span)
     }
 }
@@ -688,8 +693,15 @@ impl ZStatsAppState {
     pub fn ingest(&mut self, tick: Tick, cx: &mut Context<Self>) -> Vec<AlertEvent> {
         let now = Instant::now();
         let fresh = tick.alerts.clone();
-        for event in &fresh {
-            self.record_alert(event.clone(), now);
+        if !fresh.is_empty() {
+            let wall = SystemTime::now();
+            for event in &fresh {
+                self.record_alert(event.clone(), wall);
+            }
+            // The file mirrors the list, so it is rewritten where the
+            // list changes — which is only ever here. Tests drive
+            // `record_alert` directly and touch no disk.
+            self.persist_alerts();
         }
 
         if let Some(processes) = tick.snapshot.processes.as_deref() {
@@ -744,7 +756,7 @@ impl ZStatsAppState {
 
     /// Fold one alert into the list, merging into its episode if that episode
     /// is already there and moving it back to the front.
-    fn record_alert(&mut self, event: AlertEvent, now: Instant) {
+    fn record_alert(&mut self, event: AlertEvent, now: SystemTime) {
         let episode = Episode::of(&event);
         if let Some(i) = self
             .alerts
@@ -772,6 +784,45 @@ impl ZStatsAppState {
         while self.alerts.len() > MAX_ALERTS {
             self.alerts.pop_back();
         }
+    }
+
+    /// Fill the list from today's saved episodes. Called once at
+    /// startup rather than from `Default` so the startup order stays
+    /// visible in `main` — and so tests construct an empty state
+    /// instead of inheriting the developer's own alerts.
+    pub fn restore_alerts(&mut self) {
+        self.adopt_alerts(alertlog::load());
+    }
+
+    /// The restore proper, minus the file read: episodes join the list
+    /// with fresh ids from the same counter live ones use, so a later
+    /// crossing of the same condition merges into the restored episode
+    /// instead of opening a duplicate beside it.
+    fn adopt_alerts(&mut self, saved: Vec<alertlog::Restored>) {
+        for saved in saved {
+            self.next_seq += 1;
+            self.alerts.push_back(SeenAlert {
+                seq: self.next_seq,
+                first_at: saved.first_at,
+                at: saved.at,
+                reports: saved.reports,
+                event: saved.event,
+            });
+        }
+    }
+
+    fn persist_alerts(&self) {
+        let episodes: Vec<alertlog::Restored> = self
+            .alerts
+            .iter()
+            .map(|seen| alertlog::Restored {
+                event: seen.event.clone(),
+                first_at: seen.first_at,
+                at: seen.at,
+                reports: seen.reports,
+            })
+            .collect();
+        alertlog::save(&episodes);
     }
 
     /// The most recent collection, or `None` before the first one lands.
@@ -1460,7 +1511,7 @@ impl ZStatsAppState {
             return;
         }
         self.auto_check_probe_at = Some(Instant::now());
-        if !updater::auto_check_due(std::time::SystemTime::now()) {
+        if !updater::auto_check_due(SystemTime::now()) {
             return;
         }
         self.auto_check_inflight = true;
@@ -1471,7 +1522,7 @@ impl ZStatsAppState {
                 .await;
             let _ = this.update(cx, |state, cx| {
                 state.auto_check_inflight = false;
-                updater::record_outcome(std::time::SystemTime::now(), &outcome);
+                updater::record_outcome(SystemTime::now(), &outcome);
                 state.update_nudge = updater::nudge();
                 cx.notify();
             });
@@ -1495,7 +1546,7 @@ impl ZStatsAppState {
             let _ = this.update(cx, |state, cx| {
                 // A manual check answers the same question: stamp the
                 // silent clock and refresh the gear's dot from it.
-                updater::record_outcome(std::time::SystemTime::now(), &outcome);
+                updater::record_outcome(SystemTime::now(), &outcome);
                 state.update_nudge = updater::nudge();
                 state.update_status = Some(UpdateStatus::Done(outcome));
                 cx.notify();
@@ -2133,7 +2184,7 @@ mod tests {
     #[test]
     fn repeat_reports_merge_into_one_episode() {
         let mut state = ZStatsAppState::new();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
 
         state.record_alert(cpu_alert(7), t0);
         state.record_alert(cpu_alert(7), t0 + Duration::from_secs(1800));
@@ -2154,12 +2205,43 @@ mod tests {
         assert_eq!(state.alerts()[0].seq, 1, "still the episode opened first");
     }
 
+    /// A restart is not a new problem: an episode read back from the
+    /// file is the same episode, so the next report merges into it and
+    /// the count keeps climbing.
+    #[test]
+    fn a_restored_episode_is_continued_not_duplicated() {
+        let mut state = ZStatsAppState::new();
+        let morning = SystemTime::now() - Duration::from_secs(4 * 3600);
+        state.adopt_alerts(vec![alertlog::Restored {
+            event: cpu_alert(7),
+            first_at: morning,
+            at: morning,
+            reports: 2,
+        }]);
+        assert_eq!(state.alerts().len(), 1);
+
+        state.record_alert(cpu_alert(7), SystemTime::now());
+        assert_eq!(state.alerts().len(), 1, "same condition, same episode");
+        assert_eq!(state.alerts()[0].reports, 3, "the count carries over");
+        assert!(
+            state.alerts()[0]
+                .span()
+                .is_some_and(|s| s >= Duration::from_secs(4 * 3600)),
+            "the episode still knows it started this morning"
+        );
+
+        // A different condition opens its own card with its own id.
+        state.record_alert(mem_alert(7), SystemTime::now());
+        assert_eq!(state.alerts().len(), 2);
+        assert_ne!(state.alerts()[0].seq, state.alerts()[1].seq);
+    }
+
     /// The id has to outlive reordering — it is what element state (hover,
     /// the expanded editor) is keyed on.
     #[test]
     fn episode_ids_are_unique_and_stable() {
         let mut state = ZStatsAppState::new();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         for pid in 1..=3 {
             state.record_alert(cpu_alert(pid), t0);
         }

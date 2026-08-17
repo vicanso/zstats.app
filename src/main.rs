@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod about;
+mod alertlog;
 mod assets;
 mod autostart;
 mod bigfiles;
@@ -841,7 +842,14 @@ fn main() {
         // macOS — taking the tray icon with it.
         cx.set_quit_mode(QuitMode::Explicit);
 
-        let app_state = cx.new(|_| ZStatsAppState::new());
+        let app_state = cx.new(|_| {
+            let mut state = ZStatsAppState::new();
+            // Today's alerts survive a restart (alertlog.rs): the panel
+            // opens showing what already fired, not an empty list that
+            // implies a quiet morning.
+            state.restore_alerts();
+            state
+        });
         cx.set_global(ZStatsGlobalStore::new(app_state));
 
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
