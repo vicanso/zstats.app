@@ -1,4 +1,5 @@
-//! UI preferences: language, theme, and panel opacity, persisted in `app.toml`.
+//! UI preferences — language, theme, panel opacity, the outbound proxy,
+//! and the analyser's last scope — persisted in `app.toml`.
 //!
 //! Deliberately *not* in the shared `config.toml`: `zstats::settings::save`
 //! serialises only the sections the CLI models (`collector` / `daemon` /
@@ -93,6 +94,10 @@ static OPACITY_SAVED: AtomicU8 = AtomicU8::new(0);
 /// and on every set, so the module the background fetch reads is never
 /// stale.
 static PROXY: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+/// The analysis scope a fresh launch restores — the roots of the last
+/// finished top-level walk. Empty means the default home walk, expressed
+/// by leaving the key out (same posture as every other pref here).
+static ANALYSIS_ROOTS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 
 /// Floor accepted from the file or the picker. Below this the built-in
 /// dark/light default is used instead.
@@ -158,6 +163,26 @@ pub fn set_proxy(value: &str) {
     persist();
 }
 
+/// The analyser scope to restore at launch; empty = the default (~).
+pub fn analysis_roots() -> Vec<std::path::PathBuf> {
+    ANALYSIS_ROOTS
+        .read()
+        .expect("analysis roots pref lock poisoned")
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+/// Remember and persist the scope the next launch should restore. Pass
+/// an empty slice for the default home walk — the key is then omitted.
+pub fn set_analysis_roots(roots: &[std::path::PathBuf]) {
+    *ANALYSIS_ROOTS
+        .write()
+        .expect("analysis roots pref lock poisoned") =
+        roots.iter().map(|r| r.display().to_string()).collect();
+    persist();
+}
+
 /// Opacity frozen at startup. `None` → caller uses the mode default.
 pub fn applied_opacity() -> Option<f32> {
     decode_opacity(OPACITY_APPLIED.load(Ordering::Relaxed))
@@ -177,7 +202,7 @@ fn decode_opacity(raw: u8) -> Option<f32> {
 /// Read `app.toml` into the statics. Call once at startup, before the
 /// theme is first resolved and the locale first pinned.
 pub fn load() {
-    let (language, theme, opacity, proxy) = read(&zstats::settings::default_dir());
+    let (language, theme, opacity, proxy, roots) = read(&zstats::settings::default_dir());
     LANGUAGE.store(encode_language(language), Ordering::Relaxed);
     THEME.store(encode_theme(theme), Ordering::Relaxed);
     let encoded = encode_opacity(opacity);
@@ -185,6 +210,9 @@ pub fn load() {
     OPACITY_SAVED.store(encoded, Ordering::Relaxed);
     crate::proxy::set_configured_proxy(&proxy);
     *PROXY.write().expect("proxy pref lock poisoned") = proxy;
+    *ANALYSIS_ROOTS
+        .write()
+        .expect("analysis roots pref lock poisoned") = roots;
 }
 
 /// Remember and persist a language choice. Only the store is infallible —
@@ -211,7 +239,11 @@ pub fn set_opacity(value: Option<f32>) {
 
 fn persist() {
     let dir = zstats::settings::default_dir();
-    if let Err(e) = write(&dir, language(), theme(), opacity(), &proxy()) {
+    let roots = ANALYSIS_ROOTS
+        .read()
+        .expect("analysis roots pref lock poisoned")
+        .clone();
+    if let Err(e) = write(&dir, language(), theme(), opacity(), &proxy(), &roots) {
         eprintln!("could not write {}: {e}", file_path(&dir).display());
     }
 }
@@ -220,7 +252,7 @@ fn file_path(dir: &Path) -> PathBuf {
     dir.join("app.toml")
 }
 
-type Prefs = (LanguagePref, ThemePref, Option<f32>, String);
+type Prefs = (LanguagePref, ThemePref, Option<f32>, String, Vec<String>);
 
 fn read(dir: &Path) -> Prefs {
     let Ok(text) = std::fs::read_to_string(file_path(dir)) else {
@@ -235,6 +267,15 @@ fn read(dir: &Path) -> Prefs {
         get("theme").map_or_else(Default::default, ThemePref::from_key),
         table.get("opacity").and_then(parse_opacity),
         get("proxy").unwrap_or_default().trim().to_string(),
+        table
+            .get("analysis_roots")
+            .and_then(toml::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
     )
 }
 
@@ -252,6 +293,7 @@ fn write(
     theme: ThemePref,
     opacity: Option<f32>,
     proxy: &str,
+    analysis_roots: &[String],
 ) -> std::io::Result<()> {
     let mut out =
         String::from("# UI preferences for zstats.app. An absent key follows the system.\n");
@@ -269,6 +311,13 @@ fn write(
         // either, but a hand-crafted value must not corrupt the file.
         let escaped = proxy.replace('\\', "\\\\").replace('"', "\\\"");
         out.push_str(&format!("proxy = \"{escaped}\"\n"));
+    }
+    if !analysis_roots.is_empty() {
+        let rows: Vec<String> = analysis_roots
+            .iter()
+            .map(|r| format!("\"{}\"", r.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        out.push_str(&format!("analysis_roots = [{}]\n", rows.join(", ")));
     }
     std::fs::create_dir_all(dir)?;
     std::fs::write(file_path(dir), out)
@@ -291,6 +340,10 @@ mod tests {
             ThemePref::Dark,
             Some(0.8),
             "http://127.0.0.1:7890",
+            &[
+                "/Users/x/Library".to_string(),
+                "/Users/x/.cache".to_string(),
+            ],
         )
         .unwrap();
         assert_eq!(
@@ -299,13 +352,17 @@ mod tests {
                 LanguagePref::Chinese,
                 ThemePref::Dark,
                 Some(0.8),
-                "http://127.0.0.1:7890".to_string()
+                "http://127.0.0.1:7890".to_string(),
+                vec![
+                    "/Users/x/Library".to_string(),
+                    "/Users/x/.cache".to_string()
+                ],
             )
         );
 
         // Both back to System: the keys disappear rather than being written
         // as a third value. Same for an unset opacity.
-        write(&dir, LanguagePref::System, ThemePref::System, None, "").unwrap();
+        write(&dir, LanguagePref::System, ThemePref::System, None, "", &[]).unwrap();
         let text = std::fs::read_to_string(file_path(&dir)).unwrap();
         assert!(!text.contains("language"), "System should omit the key");
         assert!(
@@ -313,9 +370,19 @@ mod tests {
             "unset opacity should omit the key"
         );
         assert!(!text.contains("proxy"), "empty proxy should omit the key");
+        assert!(
+            !text.contains("analysis_roots"),
+            "the default scope should omit the key"
+        );
         assert_eq!(
             read(&dir),
-            (LanguagePref::System, ThemePref::System, None, String::new())
+            (
+                LanguagePref::System,
+                ThemePref::System,
+                None,
+                String::new(),
+                Vec::new()
+            )
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -324,23 +391,15 @@ mod tests {
     #[test]
     fn missing_or_broken_file_reads_as_system() {
         let dir = scratch("missing");
-        assert_eq!(
-            read(&dir),
-            (LanguagePref::System, ThemePref::System, None, String::new())
-        );
+        let system: Prefs = Default::default();
+        assert_eq!(read(&dir), system);
 
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(file_path(&dir), "not [valid toml").unwrap();
-        assert_eq!(
-            read(&dir),
-            (LanguagePref::System, ThemePref::System, None, String::new())
-        );
+        assert_eq!(read(&dir), system);
 
         std::fs::write(file_path(&dir), "language = \"ja\"\ntheme = \"sepia\"\n").unwrap();
-        assert_eq!(
-            read(&dir),
-            (LanguagePref::System, ThemePref::System, None, String::new())
-        );
+        assert_eq!(read(&dir), system);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -358,7 +417,15 @@ mod tests {
         std::fs::write(file_path(&dir), "opacity = 1.4\n").unwrap();
         assert_eq!(read(&dir).2, Some(1.0), "above 1.0 clamps");
 
-        write(&dir, LanguagePref::System, ThemePref::System, Some(0.4), "").unwrap();
+        write(
+            &dir,
+            LanguagePref::System,
+            ThemePref::System,
+            Some(0.4),
+            "",
+            &[],
+        )
+        .unwrap();
         let text = std::fs::read_to_string(file_path(&dir)).unwrap();
         assert!(!text.contains("opacity"), "the picker cannot persist < 0.5");
 

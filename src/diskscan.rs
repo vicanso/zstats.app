@@ -217,17 +217,32 @@ impl ScanScope {
     }
 
     /// The explicit cache roots, merged into one ranked view under the
-    /// home base. Missing paths (`~/.cache` on many machines) are
-    /// skipped at walk time but stay in the list — see
-    /// [`ScanResult::roots`].
+    /// home base: the three macOS/XDG locations, then the tool caches
+    /// that live directly in `~` and a full home walk would bury among
+    /// project noise. Admission bar: a well-known location that is
+    /// wholly cache-like — `~/.cargo/registry` rather than `~/.cargo`,
+    /// whose `bin` is installed software, not cache. Missing paths
+    /// (most machines have only a few of the dot ones) are skipped at
+    /// walk time but stay in the list — see [`ScanResult::roots`].
+    ///
+    /// This list IS the preset's cache identity: every edit renames the
+    /// cache file, orphaning the previous result and Δ baseline once.
+    /// Grow it deliberately, not entry-by-entry.
     pub fn cache_set() -> Option<Self> {
         let home = default_root()?;
         Some(Self {
-            roots: vec![
-                home.join("Library/Caches"),
-                home.join(".cache"),
-                home.join("Library/Developer"),
-            ],
+            roots: [
+                "Library/Caches",
+                ".cache",
+                "Library/Developer",
+                ".npm",
+                ".cargo/registry",
+                ".gradle",
+                ".m2",
+            ]
+            .iter()
+            .map(|sub| home.join(sub))
+            .collect(),
             base: home,
         })
     }
@@ -771,11 +786,6 @@ pub fn load_cache(roots: &[PathBuf]) -> Option<ScanResult> {
     load_cache_in(&cache_dir(), roots)
 }
 
-/// The default root's cache — what a fresh launch opens with.
-pub fn load_default_cache() -> Option<ScanResult> {
-    load_cache(&[default_root()?])
-}
-
 /// The run before the cached one, if two have finished — the Δ baseline.
 pub fn load_prev_cache(roots: &[PathBuf]) -> Option<ScanResult> {
     load_cache_file(&prev_cache_path_in(&cache_dir(), roots), roots)
@@ -784,6 +794,49 @@ pub fn load_prev_cache(roots: &[PathBuf]) -> Option<ScanResult> {
 pub fn delete_cache(roots: &[PathBuf]) {
     let _ = std::fs::remove_file(cache_path_in(&cache_dir(), roots));
     let _ = std::fs::remove_file(prev_cache_path_in(&cache_dir(), roots));
+}
+
+/// Files an abandoned scope left behind age out after this long. The
+/// guard exists so a scope the user only stepped away from — and may
+/// re-select next week — keeps its "last time" and Δ; a month of
+/// silence says the scope is done with, and a few KB per pair is not
+/// worth keeping forever.
+const ORPHAN_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Remove cache files belonging to none of the scopes a launch can
+/// restore (`keep`: the default home walk plus the last active scope),
+/// once untouched for [`ORPHAN_AGE`]. Called at startup; the directory
+/// holds a handful of small files, so this is a few stats.
+pub fn sweep_orphans(keep: &[&Vec<PathBuf>]) {
+    sweep_orphans_in(&cache_dir(), keep, ORPHAN_AGE);
+}
+
+fn sweep_orphans_in(dir: &Path, keep: &[&Vec<PathBuf>], max_age: Duration) {
+    let mut keep_files: Vec<PathBuf> = Vec::new();
+    for roots in keep {
+        if !roots.is_empty() {
+            keep_files.push(cache_path_in(dir, roots));
+            keep_files.push(prev_cache_path_in(dir, roots));
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep_files.contains(&path) {
+            continue;
+        }
+        let expired = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if expired {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// Rewrite the cache after rows were pruned — but only where this exact
@@ -1514,6 +1567,42 @@ mod tests {
     }
 
     #[test]
+    fn merged_run_walks_existing_roots_and_keeps_the_requested_set() {
+        let base = std::env::temp_dir().join(format!("zstats-multiroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(a.join("x")).unwrap();
+        std::fs::write(a.join("x/data"), vec![1u8; 30_000]).unwrap();
+        std::fs::create_dir_all(b.join("y")).unwrap();
+        std::fs::write(b.join("y/data"), vec![1u8; 20_000]).unwrap();
+        let scope = ScanScope {
+            base: base.clone(),
+            // A missing root mid-list (— `~/.cache` on most machines)
+            // must be skipped without failing the walk.
+            roots: vec![a.clone(), base.join("missing"), b.clone()],
+        };
+        let (tx, _rx) = smol::channel::unbounded();
+        let result = run(&scope, &Arc::new(AtomicBool::new(false)), &tx)
+            .expect("merged scan should succeed")
+            .expect("scan was not cancelled");
+        assert_eq!(result.root, base);
+        // Identity records the REQUESTED set verbatim, absentee included.
+        assert_eq!(result.roots, scope.roots);
+        let dir_paths: Vec<&Path> = result.dirs.iter().map(|d| d.path.as_path()).collect();
+        assert!(dir_paths.contains(&a.join("x").as_path()));
+        assert!(dir_paths.contains(&b.join("y").as_path()));
+
+        // An entirely absent scope is the error it always was.
+        let gone = ScanScope {
+            base: base.clone(),
+            roots: vec![base.join("nope")],
+        };
+        assert!(run(&gone, &Arc::new(AtomicBool::new(false)), &tx).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn cache_identity_tells_a_scope_from_its_base() {
         let dir = p("/tmp");
         // The cache-set preset and a plain walk of the base must never
@@ -1560,6 +1649,28 @@ mod tests {
         let kept = load_cache_file(&prev_path, &[p("/r")]).expect("kept");
         assert_eq!(kept.dirs[0].bytes, 100);
         assert_eq!(load_cache_in(&dir, &[p("/r")]).unwrap().dirs[0].bytes, 240);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_spares_kept_scopes_and_young_files() {
+        let dir = std::env::temp_dir().join(format!("zstats-disksweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = vec![p("/r")];
+        let orphan = vec![p("/old")];
+        std::fs::write(cache_path_in(&dir, &kept), "x").unwrap();
+        std::fs::write(prev_cache_path_in(&dir, &kept), "x").unwrap();
+        std::fs::write(cache_path_in(&dir, &orphan), "x").unwrap();
+        // Everything is younger than a month; nothing may go yet.
+        sweep_orphans_in(&dir, &[&kept], ORPHAN_AGE);
+        assert!(cache_path_in(&dir, &orphan).exists());
+        // Age floor zero: the orphan expires, the kept pair survives on
+        // identity, not on youth.
+        sweep_orphans_in(&dir, &[&kept], Duration::ZERO);
+        assert!(!cache_path_in(&dir, &orphan).exists());
+        assert!(cache_path_in(&dir, &kept).exists());
+        assert!(prev_cache_path_in(&dir, &kept).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

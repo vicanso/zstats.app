@@ -17,6 +17,7 @@ use crate::history;
 use crate::history::Spender;
 use crate::i18n;
 use crate::metrics;
+use crate::prefs;
 use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
 use crate::updater;
@@ -260,6 +261,9 @@ pub enum DiskAnalysis {
     Running {
         run_id: u64,
         dirs_done: usize,
+        /// What this walk covers — named in the progress caption, so a
+        /// user returning mid-run knows *which* scope is being walked.
+        scope: ScanScope,
         /// The latest mid-walk snapshot — lower bounds that only grow,
         /// rendered under the running banner so minutes-long walks pay
         /// out from their first seconds.
@@ -564,6 +568,38 @@ pub struct ZStatsAppState {
 
 impl Default for ZStatsAppState {
     fn default() -> Self {
+        // The scope a fresh launch restores: the last finished top-level
+        // walk's, from app.toml — or the default home walk when the key
+        // is absent. Restoring the scope also restores what "re-analyze"
+        // means, same as if the user had just picked it.
+        let restored: Option<ScanScope> = {
+            let roots = prefs::analysis_roots();
+            (!roots.is_empty()).then(|| ScanScope {
+                // The cache-set preset is the only multi-root producer,
+                // and its base is home; a single stored root is its own
+                // base — the same derivation `ScanScope`'s constructors
+                // use.
+                base: if roots.len() > 1 {
+                    diskscan::default_root().unwrap_or_else(|| roots[0].clone())
+                } else {
+                    roots[0].clone()
+                },
+                roots,
+            })
+        };
+        let launch_roots: Vec<std::path::PathBuf> = restored
+            .as_ref()
+            .map(|s| s.roots.clone())
+            .or_else(|| diskscan::default_root().map(|home| vec![home]))
+            .unwrap_or_default();
+        // Cache pairs no launch can restore any more (scopes analysed
+        // once and abandoned) age out here — a handful of stats.
+        diskscan::sweep_orphans(&[
+            &diskscan::default_root()
+                .map(|h| vec![h])
+                .unwrap_or_default(),
+            &launch_roots,
+        ]);
         Self {
             window_bounds: None,
             scale_factor: 1.0,
@@ -581,15 +617,18 @@ impl Default for ZStatsAppState {
             big_files: BigFiles::default(),
             // A fresh launch opens with the last finished analysis, if
             // one was cached — "see last time's numbers first".
-            disk_analysis: diskscan::load_default_cache()
+            disk_analysis: (!launch_roots.is_empty())
+                .then(|| diskscan::load_cache(&launch_roots))
+                .flatten()
                 .map(DiskAnalysis::Ready)
                 .unwrap_or_default(),
             disk_analysis_stack: Vec::new(),
-            disk_analysis_root: None,
+            disk_analysis_root: restored,
             // The baseline outlives restarts the same way the result
             // does: through its file.
-            analysis_diff: diskscan::default_root()
-                .and_then(|root| diskscan::load_prev_cache(&[root]))
+            analysis_diff: (!launch_roots.is_empty())
+                .then(|| diskscan::load_prev_cache(&launch_roots))
+                .flatten()
                 .map(|prev| DiffBaseline::from_result(&prev)),
             disk_analysis_expanded: false,
             analysis_show_all_dirs: false,
@@ -963,9 +1002,10 @@ impl ZStatsAppState {
         // must not outlive it.
         self.analysis_diff = None;
         self.disk_analysis_stack.clear();
-        // Clean slate includes the picked root: the next "Analyze" means
-        // the default home tree again.
+        // Clean slate includes the picked scope: the next "Analyze"
+        // means the default home tree again — this launch and the next.
         self.disk_analysis_root = None;
+        prefs::set_analysis_roots(&[]);
         self.disk_analysis = DiskAnalysis::Off;
         cx.notify();
     }
@@ -982,6 +1022,7 @@ impl ZStatsAppState {
         self.disk_analysis = DiskAnalysis::Running {
             run_id,
             dirs_done: 0,
+            scope: scope.clone(),
             partial: None,
             persist,
             cancel: cancel.clone(),
@@ -1028,6 +1069,16 @@ impl ZStatsAppState {
                                 diskscan::save_cache(&result);
                                 state.analysis_diff = diskscan::load_prev_cache(&result.roots)
                                     .map(|prev| DiffBaseline::from_result(&prev));
+                                // Remember the scope the next launch
+                                // restores; the default home walk is
+                                // expressed as the absent key.
+                                let is_default = diskscan::default_root()
+                                    .is_some_and(|home| result.roots == [home]);
+                                prefs::set_analysis_roots(if is_default {
+                                    &[]
+                                } else {
+                                    &result.roots
+                                });
                             }
                             state.disk_analysis = DiskAnalysis::Ready(*result);
                         }

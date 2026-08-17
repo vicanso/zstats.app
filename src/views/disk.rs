@@ -75,13 +75,18 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         // holds ~ — a standing card of its own would be a
                         // permanent block of chrome for a one-shot query.
                         .when(d.mount_point == "/", |row| {
-                            row.child(big_files_chip(state))
-                                .child(analysis_chip(state))
-                                .children(analysis_preset_chips(state))
-                                .child(analysis_pick_chip())
+                            row.child(big_files_chip(state)).child(analysis_chip(state))
                         })
                         .child(volume_badge(i, d)),
                 )
+                // Scope selection on its own row: the title row above
+                // holds two state-dependent labels already, and a third
+                // language's worth of chip text must not fight the badge
+                // for 290px. Hidden while a walk runs — changing scope
+                // mid-run goes through cancel, never a silent restart.
+                .when(d.mount_point == "/", |c| {
+                    c.children(analysis_scope_row(state))
+                })
                 .child(
                     h_flex()
                         .items_baseline()
@@ -263,16 +268,34 @@ fn analysis_pick_chip() -> AnyElement {
         .into_any_element()
 }
 
-/// One-click preset scopes beside the folder picker (docs/
-/// disk-analysis.md's scope table): `~/Library` — the blind-spot
-/// close-up — and the merged cache roots. Hidden while a walk runs:
-/// the header's job is then the cancel chip, and a preset click would
-/// silently restart the walk. Clicking starts the walk immediately,
-/// same contract as the picker.
-fn analysis_preset_chips(state: &ZStatsAppState) -> Vec<AnyElement> {
+/// The "analysis scope" row under the boot volume's title: a dim label,
+/// the two preset chips, and the folder picker. `None` while a walk
+/// runs — the title row's cancel chip is the only control then.
+fn analysis_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
     if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
-        return Vec::new();
+        return None;
     }
+    Some(
+        h_flex()
+            .items_center()
+            .gap(px(4.))
+            .mt(px(6.))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("disk.ana_scope_label")),
+            )
+            .children(analysis_preset_chips())
+            .child(analysis_pick_chip())
+            .into_any_element(),
+    )
+}
+
+/// One-click preset scopes (docs/disk-analysis.md's scope table):
+/// `~/Library` — the blind-spot close-up — and the merged cache roots.
+/// Clicking starts the walk immediately, same contract as the picker.
+fn analysis_preset_chips() -> Vec<AnyElement> {
     let chip = |id: &'static str,
                 label: String,
                 tip: String,
@@ -512,9 +535,21 @@ const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 
 fn analysis_caption(state: &ZStatsAppState) -> String {
     let result = match state.disk_analysis() {
         DiskAnalysis::Ready(result) => result,
-        // Collapsed while a walk runs: the summary line is the progress.
-        DiskAnalysis::Running { dirs_done, .. } => {
-            return t!("disk.ana_running", dirs = format::thousands(*dirs_done)).to_string();
+        // Collapsed while a walk runs: the summary line is the progress,
+        // led by the scope — a user returning mid-run must not have to
+        // guess whether the walker is in the whole home tree or one
+        // preset. "~" goes without saying, like the finished caption.
+        DiskAnalysis::Running {
+            dirs_done, scope, ..
+        } => {
+            let progress = t!("disk.ana_running", dirs = format::thousands(*dirs_done)).to_string();
+            let home = std::env::var("HOME").unwrap_or_default();
+            let root = scope_display(&scope.roots, &scope.base, &home);
+            return if root == "~" {
+                progress
+            } else {
+                format!("{root} · {progress}")
+            };
         }
         DiskAnalysis::Failed(e) => {
             return t!("disk.ana_failed", e = e.clone()).to_string();
@@ -547,21 +582,8 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
     if age > STALE_AFTER {
         extras.push(i18n::tr("disk.ana_stale"));
     }
-    // A multi-root scope lists its roots — passing the base alone would
-    // read as a walk of the whole home tree. Pre-tilded, so the parts
-    // helper's own tilde pass leaves the joined string untouched.
-    let root_display = if result.roots.len() > 1 {
-        result
-            .roots
-            .iter()
-            .map(|r| tilde_path(&r.display().to_string(), &home))
-            .collect::<Vec<_>>()
-            .join(" + ")
-    } else {
-        result.root.display().to_string()
-    };
     analysis_caption_parts(
-        &root_display,
+        &scope_display(&result.roots, &result.root, &home),
         &home,
         format::ago(age),
         t!("disk.ana_took", t = format::took(result.took)).to_string(),
@@ -572,6 +594,23 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
         .to_string(),
         extras,
     )
+}
+
+/// One string naming a scope: the single root, or a multi-root scope's
+/// roots listed in full — passing the base alone would read as a walk of
+/// the whole home tree. Every path tilde'd; a plain "~" is the default
+/// home walk, which callers omit (the only scope that goes without
+/// saying).
+fn scope_display(roots: &[std::path::PathBuf], base: &std::path::Path, home: &str) -> String {
+    if roots.len() > 1 {
+        roots
+            .iter()
+            .map(|r| tilde_path(&r.display().to_string(), home))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    } else {
+        tilde_path(&base.display().to_string(), home)
+    }
 }
 
 fn analysis_caption_parts(
@@ -601,6 +640,15 @@ fn analysis_tables(
     diff: Option<&DiffBaseline>,
 ) -> AnyElement {
     let root = result.root.clone();
+    // One tooltip for every ± in these tables: which run the figure is
+    // measured against, and why silence is not a claim of "new".
+    let delta_tip = diff.map(|d| {
+        t!(
+            "disk.delta_tip",
+            ago = format::ago(d.scanned_at().elapsed().unwrap_or_default())
+        )
+        .to_string()
+    });
     let dir_rows = |hits: &[DirHit], id: &'static str, deletable: bool| -> Vec<AnyElement> {
         let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
         hits.iter()
@@ -614,6 +662,7 @@ fn analysis_tables(
                     path: &h.path,
                     bytes: h.bytes,
                     prev_bytes: diff.and_then(|d| d.bytes_for(&h.path)),
+                    delta_tip: delta_tip.clone(),
                     kind: Some(h.kind),
                     group_max: max,
                     root: &root,
@@ -634,6 +683,7 @@ fn analysis_tables(
                     path: &h.path,
                     bytes: h.bytes,
                     prev_bytes: diff.and_then(|d| d.bytes_for(&h.path)),
+                    delta_tip: delta_tip.clone(),
                     kind: None,
                     group_max: max,
                     root: &root,
@@ -840,6 +890,9 @@ struct AnalysisRow<'a> {
     /// `None` renders no delta (absence proves nothing, see
     /// [`DiffBaseline`]).
     prev_bytes: Option<u64>,
+    /// The ± explainer, shared by the whole table (names the baseline
+    /// run). Only read when a delta actually renders.
+    delta_tip: Option<String>,
     kind: Option<HitKind>,
     /// The group's largest row, the meter's 100%.
     group_max: u64,
@@ -873,6 +926,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         path,
         bytes,
         prev_bytes,
+        delta_tip,
         kind,
         group_max,
         root,
@@ -945,10 +999,12 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                     // Quiet on purpose: the sign carries the meaning, and
                     // accent is reserved for over-threshold (views/mod.rs).
                     div()
+                        .id(SharedString::from(format!("{id}-delta-{index}")))
                         .flex_none()
                         .font_family(font::MONO)
                         .text_size(px(9.5))
                         .text_color(theme::text_muted())
+                        .when_some(delta_tip, |d, tip| d.tooltip(widgets::wrap_tooltip(tip)))
                         .child(delta)
                 }))
                 .child(
@@ -1088,7 +1144,12 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
                 // both directions: sparse files enter on logical size and
                 // display far below it.
                 let bar = display_bar(scan.files.iter().map(|f| f.size).min().unwrap_or(0));
-                let mut text = if bar == 0 {
+                // "~" leads: the chip sits beside the volume name "/",
+                // which reads as volume-wide — but the query is
+                // `mdfind -onlyin $HOME`. Same notation the analysis
+                // caption uses to name a scope.
+                let mut text = String::from("~ · ");
+                text.push_str(&if bar == 0 {
                     t!("disk.big_count_plain", count = scan.total).to_string()
                 } else {
                     t!(
@@ -1097,7 +1158,7 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
                         count = scan.total
                     )
                     .to_string()
-                };
+                });
                 if scan.threshold == bigfiles::FALLBACK_THRESHOLD {
                     text.push_str(" · ");
                     text.push_str(&i18n::tr("disk.big_fallback_note"));
