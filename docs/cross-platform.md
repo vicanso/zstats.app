@@ -4,32 +4,39 @@
 
 它不是移植计划。面板自身的移植可行性是另一件事，结论写在 `design.md` 的「非 macOS 平台编译不过」一节：Linux 上托盘不发点击事件、Wayland 不允许客户端定位窗口、`gpui_linux` 的 `activate`/`hide` 是静默 no-op，三条叠加意味着「点菜单栏图标弹出锚定面板」这个形态在 Linux 上无法还原；Windows 外壳可行但数据层要等 zstats 补课。**本文只处理数据层那一半**——即使面板永远只跑在 macOS 上，其中一部分改动（第一节）也是净收益。
 
-贯穿全文的硬约束：**macOS 上的行为必须逐项不变。** 下面每条方案都按「在 macOS 上求值为今天的样子」设计，capabilities 在 macOS 上三项全 true，所有分支落回现有路径。
+贯穿全文的硬约束：**macOS 上的行为不得倒退。** 每条方案都按「capabilities 在 macOS 上三项全真、
+新写的『不支持』分支在 macOS 上不可达」设计。唯一有意改变 macOS 观感的是第一节里进程展开行的那句空值说明——
+它从沉默变成了说出原因，属于净增而非改动。
 
 ---
 
-## 一、停止猜测，开始读取能力（唯一一条现在就有价值的）
+## 一、停止猜测，开始读取能力（**已落地**，zstats 0.5.2）
 
-对应 zstats 的第 6 条（capabilities 描述符）与第 5 条（规则的「支持」与「启用」分离）。
+对应 zstats 的第 6 条（capabilities 描述符）。0.5.2 在 `SystemSnapshot::capabilities` 上给出
+`memory_footprint` / `memory_pressure` / `cpu_perf_levels`，随快照传递（接在守护进程上的前端读到的
+是**守护进程的**能力，不是自己构建的）。面板已改为读取它，见下表的「现状」列。
+
+动手时发现原计划里有两处**并不存在**，如实记下免得后人再找：告警页的「已武装」行从来没有列出
+`Pressure`（它只列 cpu / 内存 / 应用 CPU / 应用内存 / 磁盘），阈值编辑器的压力档位也只出现在
+压力告警卡上——而那张卡本身就要求该规则先触发过。两者都不需要门禁。
 
 面板今天有多处**在猜平台能不能给出某个数**，猜对是因为只跑在 macOS：
 
 | 位置 | 现在的写法 | 问题 |
 |---|---|---|
-| `views/overview.rs:246` | `pressure_level` 为 `None` → 显示「无压力接口」，tooltip 写死「当前平台不报告内核内存压力」 | 把三种 `None`（平台不支持 / 采集未开 / 首次采样）**当成一种**。macOS 上恰好只可能是第一种 |
-| `views/processes.rs:74` | `phys_footprint_bytes.unwrap_or(memory_bytes)` | 静默换量纲。macOS 上 root 进程因 EPERM 落回 RSS，展开行有并列标注；但那是人工补的诚实，不是 API 给的 |
-| `views/alerts.rs` 的 armed 行 | 逐条列出基础阈值 | 一条**本平台永不触发**的规则（Pressure）照样被列为「已武装」 |
-| `views/alerts.rs` 的阈值编辑器 | `alert-pressure` 的档位 chip 无条件渲染 | 同上，用户可以调一个不会生效的值 |
+| `views/overview.rs` 压力卡 | ~~`None` 一律显示「无压力接口」~~ | **已改**：`capabilities.memory_pressure` 为假才说「本平台不报告」，为真而值缺失则显示 `—` 与「还没采到」。压缩内存那一行同理，顺带修掉全 app 唯一一处 `n/a` 与 `—` 混用 |
+| `views/processes.rs` 展开行 | ~~footprint 为空只显示 `—`~~ | **已改**：平台不支持说「本平台不提供」，平台支持而读不到说「读不到（他人进程）」——macOS 上恒为后者，正是 `proc_pid_rusage` 对 root 守护进程的 EPERM。这是 0.5.2 在 macOS 上唯一带来实际改善的地方 |
+| `views/alerts.rs` 的 armed 行 | 不需要改 | 它从未列出 `Pressure` |
+| `views/alerts.rs` 的阈值编辑器 | 不需要改 | 压力档位只出现在压力告警卡上，那张卡的存在前提就是规则已触发 |
 
-**方案**：zstats 提供 capabilities 后，这四处改为读取而非假设。
+`shown_memory` 的回落**没有动**（`phys_footprint_bytes.unwrap_or(memory_bytes)`）——行内那个数字在
+macOS 上必须一如既往。变的只是**空值怎么解释**。
 
-- `pressure` 的第四臂条件从「值是 None」改为「本平台不支持」，文案相应从「当前平台不报告」（一句猜测）变成陈述；若平台支持但本次为 `None`，那是「等待采样」，与其它指标一致显示 `—`；
-- `shown_memory` 的回落保持不变（**macOS 行为不能变**），但展开行的说明可以说出原因：「本平台不提供」与「无权限读取」是两句不同的话，后者才是 macOS 上 root 进程的真实情况；
-- armed 行与阈值编辑器按「supported」过滤：不支持的规则不列、不给编辑入口，而不是列出来再让它沉默。
-
-**macOS 影响**：capabilities 三项全 true，四处分支全部落到今天的路径。armed 行少不了任何一条，pressure 的第四臂在 macOS 上本来就走不到。
-
-**这条值得单独做**，即使永不移植：它把「面板替 zstats 猜平台能力」这个隐式耦合换成显式契约，而 CLAUDE.md 的铁律本来就是「zstats 拥有数字与告警，面板只负责呈现」——猜测恰恰是那条规则的破口。
+**macOS 上的实际影响**：压力卡与压缩内存那两处的新分支在 macOS 上不可达（capability 恒为真），
+行为逐像素不变；进程展开行则**有意改变**——footprint 为空时从一个沉默的 `—` 变成「读不到（他人进程）」，
+这正是采纳 capabilities 的收益，也是它在一个只跑 macOS 的应用上仍然值得做的理由：
+它把「面板替 zstats 猜平台能力」这个隐式耦合换成了显式契约，而 CLAUDE.md 的铁律本来就是
+「zstats 拥有数字与告警，面板只负责呈现」——猜测恰恰是那条规则的破口。
 
 ---
 
@@ -62,6 +69,13 @@ zstats 第 5 条建议在 Windows/Linux 上补 footprint 的等价物。这对�
 三者都叫「实际占用」，但 PSS 的分摊语义与另外两个根本不同。面板现在的文案（`design.md:119` 与 `processes.mem_footprint` 的说明）逐字讲的是 macOS 的记账方式。**若 zstats 的改动先落地而文案没跟上，面板会用一句 macOS 的解释去说明一个 Linux 的数字——那正是这个仓库最不能容忍的那类错误。**
 
 **方案**：把这一列的标签与 tooltip 做成平台变体，与 zstats 的发布**同批上线**，不得滞后一个版本。
+
+**已经走了这条路的一处**：清理提示清单（`assets/cleanhints-macos.toml`）已按操作系统拆成
+一文件一平台，`cleanhints::FILE` 按 cfg 选名，嵌入默认、`~/.zstats` 用户覆盖、GitHub 上
+的发布副本三者同名。它没有走「一份文件加一列平台」，理由与文案不同——那不是同一句话的
+翻译问题，而是**根本没有对应物**：`~/Library/Caches` 无法通过改前缀变成
+`%LOCALAPPDATA%`，归属的工具与它们文档里的清理命令也各不相同。取不到本平台文件时的
+退化是「没有注解」，行照常渲染。见 `docs/disk-analysis.md`。
 
 顺带记下更大的账：i18n 里已有 **58 处** macOS 专有概念（Spotlight 10、Trash 8、Library 6、launchd 6、Finder 4、tmutil / ⌘Q / iCloud / 完全磁盘访问各 2），而 `i18n_loader` 的 parity 测试目前只保 en/zh 两维，**没有平台变体机制**。真移植时这是一次架构决定（分平台键集 / 运行时选择 / 分平台文件），不是逐条改文案。
 

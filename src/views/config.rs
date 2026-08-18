@@ -992,7 +992,7 @@ fn pref_row<T: Copy + PartialEq + 'static>(
 /// The clean-hint rule set: which list is live (built-in vs the user
 /// file) and a reload that takes effect immediately — the missing half
 /// of the pull-update path: an external tool drops a new
-/// ~/.zstats/cleanhints.toml, one click here and the annotations and
+/// ~/.zstats/&lt;cleanhints::FILE&gt;, one click here and the annotations and
 /// suggestions follow, no restart.
 fn hints_card(state: &ZStatsAppState) -> AnyElement {
     let (from_user, count) = cleanhints::info();
@@ -1013,12 +1013,9 @@ fn hints_card(state: &ZStatsAppState) -> AnyElement {
                 .gap(px(8.))
                 .px(px(13.))
                 .py(px(8.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(widgets::note(i18n::tr("config.hints_note"))),
-                )
+                .child(div().flex_1().min_w_0().child(widgets::note(
+                    t!("config.hints_note", file = cleanhints::FILE).to_string(),
+                )))
                 .child(hints_update_chip(state))
                 .child(
                     div()

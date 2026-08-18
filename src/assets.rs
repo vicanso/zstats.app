@@ -29,7 +29,7 @@ use std::borrow::Cow;
 #[include = "icons/*.svg"]
 #[include = "fonts/*.ttf"]
 #[include = "locales/*.toml"]
-#[include = "cleanhints.toml"]
+#[include = "cleanhints-*.toml"]
 #[include = "zstats-icon.png"]
 pub struct Assets;
 
@@ -101,6 +101,7 @@ impl From<CustomIconName> for Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cleanhints::FILE as HINTS_FILE;
 
     /// Every name resolves to a file that is actually embedded. Without this
     /// a typo — or an `include` pattern that stops matching — shows up as a
@@ -125,7 +126,9 @@ mod tests {
     fn fonts_and_locales_are_embedded() {
         assert!(get("fonts/JetBrainsMono-Regular.ttf").is_some());
         assert!(get("locales/en.toml").is_some());
-        assert!(get("cleanhints.toml").is_some());
+        // Through the constant, not the literal: the hints file is named
+        // per platform, and the allowlist glob has to keep matching it.
+        assert!(get(HINTS_FILE).is_some());
         assert!(get("zstats-icon.png").is_some());
         assert!(
             !Assets::iter().any(|p| p.ends_with(".DS_Store")),

@@ -7,14 +7,14 @@
 //! runs a command or deletes anything on the strength of a hint — the
 //! only acting paths remain the two confirm-gated ones (CLAUDE.md).
 //!
-//! The embedded defaults (`assets/cleanhints.toml`) come only from each
-//! tool's own documentation. Third-party cleanup rule sets must not be
-//! collected or copied into this file. A user copy at `~/.zstats/cleanhints.toml`
-//! replaces the embedded list wholesale when it parses to at least one
-//! entry — "read = whole file, write = whole file" like the other
-//! side-files — so an external puller can drop updates there. Cached on
-//! first use; the Config page's reload control ([`reload`]) drops the
-//! cache, so a pulled update takes effect without a restart.
+//! The embedded defaults ([`FILE`]) come only from each tool's own
+//! documentation. Third-party cleanup rule sets must not be collected or
+//! copied into that file. A user copy at `~/.zstats/<FILE>` replaces the
+//! embedded list wholesale when it parses to at least one entry — "read =
+//! whole file, write = whole file" like the other side-files — so an
+//! external puller can drop updates there. Cached on first use; the
+//! Config page's reload control ([`reload`]) drops the cache, so a pulled
+//! update takes effect without a restart.
 
 use crate::about;
 use crate::assets;
@@ -26,6 +26,31 @@ use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+/// This platform's hints file, the one name behind all three copies: the
+/// embedded default, the user override in `~/.zstats`, and the published
+/// list the update button fetches.
+///
+/// The list is split per OS rather than kept as one file with a platform
+/// column, because a cache location does not translate: `~/Library/Caches`
+/// has no counterpart to rewrite a prefix into (Windows has
+/// `%LOCALAPPDATA%`, Linux `$XDG_CACHE_HOME`), the owning tools differ, and
+/// so do their documented cleanup commands — one shared file would be a
+/// list where most rows can never match. The platform is in the user file's
+/// name too: `~/.zstats` is shared with the zstats CLI and may be synced
+/// between machines, so an unqualified name would be wrong on one of them.
+///
+/// Only the macOS list is written today; the other arms exist so the name
+/// is decided in one place, and they resolve to nothing until someone
+/// writes those files. That is the graceful end — no annotations, no
+/// suggestions, rows still render — and it is unreachable anyway while the
+/// crate builds on macOS alone (`main.rs`).
+#[cfg(target_os = "macos")]
+pub const FILE: &str = "cleanhints-macos.toml";
+#[cfg(target_os = "windows")]
+pub const FILE: &str = "cleanhints-windows.toml";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const FILE: &str = "cleanhints-linux.toml";
 
 #[derive(Clone)]
 pub struct CleanHint {
@@ -66,8 +91,8 @@ static CACHE: RwLock<Option<Arc<Loaded>>> = RwLock::new(None);
 
 struct Loaded {
     hints: Vec<CleanHint>,
-    /// Whether the user file at ~/.zstats/cleanhints.toml won — the
-    /// Config page's source line says which list is live.
+    /// Whether the user file at `~/.zstats/<FILE>` won — the Config
+    /// page's source line says which list is live.
     from_user_file: bool,
 }
 
@@ -81,11 +106,10 @@ fn current() -> Arc<Loaded> {
     loaded
 }
 
-/// The published copy of the built-in list; the Config page's update
-/// button fetches it. raw.githubusercontent.com, not /blob/ — the
-/// latter is the HTML page.
-const REMOTE_URL: &str =
-    "https://raw.githubusercontent.com/vicanso/zstats.app/main/assets/cleanhints.toml";
+/// Where the published copies live; the Config page's update button
+/// fetches this platform's ([`FILE`] is appended).
+/// raw.githubusercontent.com, not /blob/ — the latter is the HTML page.
+const REMOTE_DIR: &str = "https://raw.githubusercontent.com/vicanso/zstats.app/main/assets/";
 /// Generous for a ~10 KB file: the point is not hanging a thread when a
 /// proxy blackholes the connection.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -103,9 +127,9 @@ pub enum RemoteUpdate {
     Failed(String),
 }
 
-/// Fetch the published list and, when it differs from what is live
-/// locally (the user file if present, the embedded built-ins otherwise),
-/// replace `~/.zstats/cleanhints.toml` with it and reload. Validated
+/// Fetch this platform's published list and, when it differs from what
+/// is live locally (the user file if present, the embedded built-ins
+/// otherwise), replace `~/.zstats/<FILE>` with it and reload. Validated
 /// before a byte lands: content that does not parse to at least one
 /// entry never overwrites a working file. Strictly user-triggered;
 /// goes through [`proxy::app_proxy`] like every other fetch. Blocking
@@ -117,7 +141,7 @@ pub fn update_from_remote() -> RemoteUpdate {
         .build()
         .new_agent();
     let text = match agent
-        .get(REMOTE_URL)
+        .get(format!("{REMOTE_DIR}{FILE}"))
         .header("User-Agent", format!("zstats/{}", about::version()))
         .call()
     {
@@ -133,10 +157,10 @@ pub fn update_from_remote() -> RemoteUpdate {
         return RemoteUpdate::Invalid;
     }
     let dir = zstats::settings::default_dir();
-    let user = dir.join("cleanhints.toml");
-    let live = fs::read_to_string(&user).ok().or_else(|| {
-        assets::get("cleanhints.toml").and_then(|bytes| String::from_utf8(bytes.into_owned()).ok())
-    });
+    let user = dir.join(FILE);
+    let live = fs::read_to_string(&user)
+        .ok()
+        .or_else(|| assets::get(FILE).and_then(|bytes| String::from_utf8(bytes.into_owned()).ok()));
     if live.as_deref() == Some(text.as_str()) {
         return RemoteUpdate::AlreadyCurrent;
     }
@@ -167,8 +191,34 @@ pub fn lookup(path: &Path) -> Option<CleanHint> {
     current().hints.iter().find(|h| h.matches(path)).cloned()
 }
 
+/// Name the list was overridden under before the per-OS split. Kept only
+/// to adopt it once; nothing reads it as a fallback.
+const LEGACY_USER_FILE: &str = "cleanhints.toml";
+
+/// Take over a pre-split override. That file can only have been written
+/// by a macOS build (the app has never built anywhere else), so on macOS
+/// it *is* this platform's list — renaming it beats silently ignoring
+/// someone's customisation, which is what the split would otherwise do.
+/// Never overwrites an existing new-name file, and a failure is only a
+/// log line: the built-ins still load.
+#[cfg(target_os = "macos")]
+fn adopt_legacy_user_file(dir: &Path) {
+    let legacy = dir.join(LEGACY_USER_FILE);
+    let current = dir.join(FILE);
+    if !legacy.is_file() || current.exists() {
+        return;
+    }
+    if let Err(e) = fs::rename(&legacy, &current) {
+        eprintln!("cleanhints: could not adopt {}: {e}", legacy.display());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn adopt_legacy_user_file(_dir: &Path) {}
+
 fn load(dir: &Path, home: &Path) -> Loaded {
-    let user = dir.join("cleanhints.toml");
+    adopt_legacy_user_file(dir);
+    let user = dir.join(FILE);
     if let Ok(content) = fs::read_to_string(&user) {
         let hints = parse(&content, home);
         if !hints.is_empty() {
@@ -184,7 +234,9 @@ fn load(dir: &Path, home: &Path) -> Loaded {
             user.display()
         );
     }
-    let embedded = assets::get("cleanhints.toml")
+    // No embedded list for this platform yet (only macOS has one) means
+    // no annotations — rows still render, they just carry no owner.
+    let embedded = assets::get(FILE)
         .and_then(|bytes| String::from_utf8(bytes.into_owned()).ok())
         .unwrap_or_default();
     Loaded {
@@ -304,7 +356,7 @@ owner = "skipped too"
 
         // A valid user file wins outright — the built-in npm entry is gone.
         fs::write(
-            dir.join("cleanhints.toml"),
+            dir.join(FILE),
             "[[hint]]\nmatch = \"~/custom\"\nowner = \"me\"\n",
         )
         .unwrap();
@@ -314,7 +366,7 @@ owner = "skipped too"
         assert!(user.hints[0].matches(&p("/Users/x/custom")));
 
         // A broken user file falls back instead of emptying the list.
-        fs::write(dir.join("cleanhints.toml"), "not toml [[").unwrap();
+        fs::write(dir.join(FILE), "not toml [[").unwrap();
         let fallback = load(&dir, &home);
         assert!(
             !fallback.from_user_file,
@@ -330,12 +382,45 @@ owner = "skipped too"
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A user file written before the per-OS split keeps working: it is
+    /// adopted under the platform name once, and an already-migrated
+    /// directory is left alone.
+    #[test]
+    fn a_pre_split_user_file_is_adopted_not_ignored() {
+        let home = p("/Users/x");
+        let dir = env::temp_dir().join(format!("zstats-cleanhints-legacy-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(
+            dir.join(LEGACY_USER_FILE),
+            "[[hint]]\nmatch = \"~/legacy\"\nowner = \"me\"\n",
+        )
+        .unwrap();
+        let adopted = load(&dir, &home);
+        assert!(adopted.from_user_file, "the old override still wins");
+        assert!(adopted.hints[0].matches(&p("/Users/x/legacy")));
+        assert!(dir.join(FILE).is_file(), "renamed to the platform name");
+        assert!(!dir.join(LEGACY_USER_FILE).exists(), "and only once");
+
+        // A new-name file already there is never clobbered by a stray old one.
+        fs::write(
+            dir.join(LEGACY_USER_FILE),
+            "[[hint]]\nmatch = \"~/stale\"\nowner = \"me\"\n",
+        )
+        .unwrap();
+        let kept = load(&dir, &home);
+        assert!(kept.hints[0].matches(&p("/Users/x/legacy")));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Every embedded entry must parse into one of the two rule forms —
     /// a typo in the shipped file should fail here, not silently drop
     /// the entry at runtime.
     #[test]
     fn embedded_defaults_all_parse() {
-        let raw = assets::get("cleanhints.toml").expect("embedded");
+        let raw = assets::get(FILE).expect("embedded");
         let content = str::from_utf8(&raw).unwrap();
         let entry_count = content.matches("[[hint]]").count();
         let hints = parse(content, &p("/Users/x"));
@@ -349,7 +434,7 @@ owner = "skipped too"
     #[test]
     fn annotation_only_locations_are_not_trashable() {
         let home = p("/Users/x");
-        let raw = assets::get("cleanhints.toml").expect("embedded");
+        let raw = assets::get(FILE).expect("embedded");
         let hints = parse(str::from_utf8(&raw).unwrap(), &home);
         let must_not_trash = [
             "/Users/x/.cache/huggingface",

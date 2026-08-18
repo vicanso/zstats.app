@@ -260,11 +260,10 @@ fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
 /// the walk survives hide by design, and the result is waiting on the
 /// next open.
 fn analysis_pick_chip() -> AnyElement {
-    Button::new("ana-pick")
+    let button = Button::new("ana-pick")
         .icon(IconName::FolderOpen)
         .ghost()
         .xsmall()
-        .tooltip(i18n::tr("disk.ana_pick_hint"))
         .on_click(|_, _window, cx| {
             let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
                 files: false,
@@ -284,8 +283,10 @@ fn analysis_pick_chip() -> AnyElement {
                 }
             })
             .detach();
-        })
-        .into_any_element()
+        });
+    // A sentence, not a label — it needs the wrapping tooltip a Button
+    // cannot build for itself.
+    widgets::with_wrap_tooltip("ana-pick-tip", i18n::tr("disk.ana_pick_hint"), button)
 }
 
 /// The "analysis scope" row under the boot volume's title: a dim label,
@@ -470,16 +471,19 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
                             // tooltip carries the words, and Close (not Delete)
                             // keeps it visually apart from the file-trashing
                             // controls below.
-                            Button::new("ana-dismiss")
-                                .icon(IconName::Close)
-                                .ghost()
-                                .xsmall()
-                                .tooltip(i18n::tr("disk.ana_dismiss_hint"))
-                                .on_click(|_, _window, cx| {
-                                    cx.global::<ZStatsGlobalStore>()
-                                        .clone()
-                                        .update(cx, |state, cx| state.clear_disk_analysis(cx));
-                                }),
+                            widgets::with_wrap_tooltip(
+                                "ana-dismiss-tip",
+                                i18n::tr("disk.ana_dismiss_hint"),
+                                Button::new("ana-dismiss")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(|_, _window, cx| {
+                                        cx.global::<ZStatsGlobalStore>()
+                                            .clone()
+                                            .update(cx, |state, cx| state.clear_disk_analysis(cx));
+                                    }),
+                            ),
                         ),
                 ),
         )

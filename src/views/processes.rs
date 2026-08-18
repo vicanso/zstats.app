@@ -27,7 +27,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::process;
 use zstats::Tick;
-use zstats::snapshot::ProcessSnapshot;
+use zstats::snapshot::{Capabilities, ProcessSnapshot};
 
 /// Floor for the per-row CPU bar. The original scale was 800% (eight
 /// cores), which left every normal row looking empty. One core is the
@@ -193,7 +193,14 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let list_el = widgets::list_shell()
         .child(widgets::list_header(
-            title,
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(title)
+                .child(widgets::info_icon(
+                    "proc-cpu-basis",
+                    i18n::tr("processes.cpu_basis_tip"),
+                )),
             Some(
                 h_flex()
                     .items_center()
@@ -277,6 +284,12 @@ fn process_row(
     parent_name: Option<&str>,
 ) -> AnyElement {
     let hot = cpu > HOT_PERCENT;
+    // `Default` is `current()`, so a row painted before the first tick
+    // reads this build's own capabilities — never a false "unsupported".
+    let caps = state
+        .latest()
+        .map(|tick| tick.snapshot.capabilities)
+        .unwrap_or_default();
     let expanded = state.selected_pid() == Some(p.pid);
     let pid = p.pid;
     let is_self = pid == process::id();
@@ -382,7 +395,12 @@ fn process_row(
     if expanded {
         // Resolved only now: it needs a name lookup, and only one row per
         // frame is ever expanded.
-        row = row.child(expand_block(p, parent_name, current_user_id().as_deref()));
+        row = row.child(expand_block(
+            p,
+            parent_name,
+            current_user_id().as_deref(),
+            caps,
+        ));
     }
 
     row.on_click(move |_, _window, cx| {
@@ -610,6 +628,7 @@ fn expand_block(
     p: &ProcessSnapshot,
     parent_name: Option<&str>,
     current_uid: Option<&str>,
+    caps: Capabilities,
 ) -> AnyElement {
     let pid = p.pid;
     let mut detail = vec![
@@ -620,8 +639,16 @@ fn expand_block(
         // 300 MB in the other (GPU + compressed vs shared pages).
         (
             i18n::tr("processes.mem_footprint"),
-            p.phys_footprint_bytes
-                .map_or(format::PLACEHOLDER.into(), format::memory),
+            // A missing footprint has two readings, and until zstats
+            // 0.5.2 the row could not tell them apart. `capabilities`
+            // answers the platform half; on macOS — where it is always
+            // true — what is left is the permission half, which is the
+            // honest word for a root daemon `proc_pid_rusage` refuses.
+            match p.phys_footprint_bytes {
+                Some(bytes) => format::memory(bytes),
+                None if !caps.memory_footprint => i18n::tr("processes.mem_no_platform"),
+                None => i18n::tr("processes.mem_no_permission"),
+            },
         ),
         (
             i18n::tr("processes.mem_rss"),

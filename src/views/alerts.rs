@@ -373,16 +373,19 @@ fn alert_head(
                 // action, so it goes last. Close, not Delete: this
                 // removes a record, it touches nothing on the system.
                 let seq = seen.seq;
-                Button::new(("dismiss-alert", index))
-                    .icon(IconName::Close)
-                    .ghost()
-                    .xsmall()
-                    .tooltip(i18n::tr("alerts.dismiss_hint"))
-                    .on_click(move |_, _window, cx| {
-                        cx.global::<ZStatsGlobalStore>()
-                            .clone()
-                            .update(cx, |state, cx| state.dismiss_alert(seq, cx));
-                    })
+                widgets::with_wrap_tooltip(
+                    ("dismiss-alert-tip", index),
+                    i18n::tr("alerts.dismiss_hint"),
+                    Button::new(("dismiss-alert", index))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, _window, cx| {
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| state.dismiss_alert(seq, cx));
+                        }),
+                )
             }),
     )
     .into_any_element()

@@ -67,7 +67,14 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let list_el = widgets::list_shell()
         .child(widgets::list_header(
-            t!("apps.count_of", shown = shown).to_string(),
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(t!("apps.count_of", shown = shown).to_string())
+                .child(widgets::info_icon(
+                    "apps-cpu-basis",
+                    i18n::tr("apps.cpu_basis_tip"),
+                )),
             Some(
                 h_flex()
                     .items_center()
@@ -294,7 +301,7 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
                         .text_size(px(9.5))
                         .text_color(theme::text_muted())
                         .child(mem_io_line(
-                            g.memory_bytes,
+                            shown_memory(g),
                             g.read_bytes_per_sec,
                             g.write_bytes_per_sec,
                         )),
@@ -305,7 +312,20 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
         let mut detail = vec![
             (i18n::tr("apps.root_pid"), g.root_pid.to_string()),
             (i18n::tr("apps.processes"), g.process_count.to_string()),
-            (i18n::tr("apps.memory"), format::memory(g.memory_bytes)),
+            // Both figures, like the process rows: the row above shows
+            // the footprint, and this is where "80 MB resident, 300 MB
+            // actually held" stops being a contradiction. A group with
+            // no footprint at all reads `—` here rather than repeating
+            // its RSS under the other name.
+            (
+                i18n::tr("processes.mem_footprint"),
+                g.phys_footprint_bytes
+                    .map_or(format::PLACEHOLDER.into(), format::memory),
+            ),
+            (
+                i18n::tr("processes.mem_rss"),
+                format::memory(g.memory_bytes),
+            ),
             (i18n::tr("apps.cpu"), format::pct(g.cpu_usage_percent)),
         ];
         // Real zeros still get rows here — the expansion is where "measured
@@ -330,6 +350,20 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
             .update(cx, |state, cx| state.toggle_app(root_pid, cx));
     })
     .into_any_element()
+}
+/// The memory figure a group row shows: the summed physical footprint
+/// when zstats could take one, its summed RSS otherwise.
+///
+/// The same rule and the same fallback as `processes::shown_memory`,
+/// deliberately — one program appearing in both tabs must be measured
+/// the same way. RSS alone understates a GUI tree badly: compressed
+/// pages and GPU/IOKit allocations are invisible to it, which is the
+/// whole reason the process rows moved to footprint. zstats sums member
+/// footprints over the FULL table (a member the kernel refused is
+/// counted by its RSS), so the total is never partial and never worse
+/// than the resident sum it replaces.
+fn shown_memory(g: &ProcessGroupSnapshot) -> u64 {
+    g.phys_footprint_bytes.unwrap_or(g.memory_bytes)
 }
 
 fn mem_io_line(memory: u64, read: Option<u64>, write: Option<u64>) -> String {
@@ -356,6 +390,27 @@ fn io_line(read: Option<u64>, write: Option<u64>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One program in two tabs must be measured one way. This mirrors
+    /// `processes::shown_memory_prefers_footprint_and_falls_back_to_rss`
+    /// exactly — if either rule ever changes alone, a browser reads two
+    /// different sizes on two pages of the same panel.
+    #[test]
+    fn shown_memory_prefers_footprint_and_falls_back_to_rss() {
+        let mut g = ProcessGroupSnapshot {
+            root_pid: 1,
+            name: "Google Chrome".into(),
+            process_count: 37,
+            cpu_usage_percent: 0.0,
+            memory_bytes: 80,
+            phys_footprint_bytes: None,
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        };
+        assert_eq!(shown_memory(&g), 80, "no footprint → the resident sum");
+        g.phys_footprint_bytes = Some(300);
+        assert_eq!(shown_memory(&g), 300, "footprint wins where there is one");
+    }
 
     #[test]
     fn io_line_stays_off_when_uncollected_or_idle() {

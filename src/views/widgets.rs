@@ -8,11 +8,11 @@ use crate::font;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AnyView, App, Div, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px, relative,
+    AnyElement, AnyView, App, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{h_flex, v_flex};
+use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 
 /// Long-copy tooltip: wraps inside the 320px panel and uses caption size
 /// instead of the default `text_sm` one-liner.
@@ -33,6 +33,27 @@ pub fn wrap_tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut 
         .py(px(4.))
         .build(window, cx)
     }
+}
+
+/// Give a control a *wrapping* tooltip when it cannot build one itself.
+///
+/// gpui-component's `Button::tooltip` takes a plain string and renders
+/// it on a single line. That is right for "Reveal in Finder" and wrong
+/// for a sentence: at fifty-odd characters the tooltip grows wider than
+/// the 320px panel it is explaining, and the tail runs off screen. The
+/// button keeps its own chrome; the tooltip moves to a wrapper that can
+/// carry [`wrap_tooltip`].
+pub fn with_wrap_tooltip(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString> + 'static,
+    control: impl IntoElement + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex_none()
+        .tooltip(wrap_tooltip(text))
+        .child(control)
+        .into_any_element()
 }
 
 /// Light mode's 1px card outline, painted as a zero-blur inset shadow
@@ -89,7 +110,11 @@ pub fn card_header(title: impl Into<SharedString>, right: Option<AnyElement>) ->
 }
 
 /// Title row for a [`list_shell`]: padded, no divider (rows carry the hairlines).
-pub fn list_header(title: impl Into<SharedString>, right: Option<AnyElement>) -> AnyElement {
+///
+/// The title is an element, not a string, so a card can put an
+/// [`info_icon`] beside its own name; `String`, `&str` and
+/// `SharedString` all satisfy it unchanged.
+pub fn list_header(title: impl IntoElement, right: Option<AnyElement>) -> AnyElement {
     h_flex()
         .items_center()
         .justify_between()
@@ -101,9 +126,29 @@ pub fn list_header(title: impl Into<SharedString>, right: Option<AnyElement>) ->
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::text())
-                .child(title.into()),
+                .child(title),
         )
         .children(right)
+        .into_any_element()
+}
+
+/// A quiet ⓘ next to a card's title, carrying an explanation on hover.
+///
+/// For the fact a reader only needs once — what a number *means*, why
+/// two cards can disagree about the same program — where a permanent
+/// note block would be a paragraph of chrome on every open. Same
+/// wrapping tooltip as everywhere else, so a sentence stays inside the
+/// panel.
+pub fn info_icon(id: impl Into<ElementId>, tip: impl Into<SharedString> + 'static) -> AnyElement {
+    div()
+        .id(id)
+        .flex_none()
+        .tooltip(wrap_tooltip(tip))
+        .child(
+            Icon::new(IconName::Info)
+                .with_size(Size::Size(px(11.)))
+                .text_color(gpui::Hsla::from(theme::text_dim())),
+        )
         .into_any_element()
 }
 

@@ -118,7 +118,7 @@ zstats 的告警是 episode 语义：跨越阈值报一次，30 分钟后若仍�
 
 ### 进程内存显示 footprint，读不到才落回 RSS
 
-进程行和排序用的内存数字是 zstats 0.4 起上报的 `phys_footprint_bytes`——macOS 给进程记账的口径（私有脏页 + 压缩页 + GPU/IOKit 分配），即活动监视器「内存」列。只看 RSS 会把 GPU 重度应用整个看错：Metal 缓冲和被压缩的页 RSS 根本看不见，一个 GUI 应用 RSS 读 80 MB、实际吃 300 MB 是常态。`proc_pid_rusage` 读不了别的用户的进程，所以非特权采集对 root 守护进程报 `None`，这时落回 RSS——那是 zstats 对它们仅有的数字。行展开里两个口径并列标注（`processes.rs` 的 `shown_memory`，有测试守 fallback）。
+进程行和排序用的内存数字是 zstats 0.4 起上报的 `phys_footprint_bytes`——macOS 给进程记账的口径（私有脏页 + 压缩页 + GPU/IOKit 分配），即活动监视器「内存」列。只看 RSS 会把 GPU 重度应用整个看错：Metal 缓冲和被压缩的页 RSS 根本看不见，一个 GUI 应用 RSS 读 80 MB、实际吃 300 MB 是常态。`proc_pid_rusage` 读不了别的用户的进程，所以非特权采集对 root 守护进程报 `None`，这时落回 RSS——那是 zstats 对它们仅有的数字。行展开里两个口径并列标注（`processes.rs` 的 `shown_memory`，有测试守 fallback）。**Apps 页走同一条规则**：`ProcessGroupSnapshot::phys_footprint_bytes`（zstats 按成员逐个求和，读不到的成员用其 RSS 顶上）优先，回落 `memory_bytes`，展开处同样并列两个口径——同一个程序出现在两个页面，必须用同一种量。两边各有一个测试，注释互指，任何一侧单独改动都会被另一侧的测试点名。
 
 两处**有意不动**：Apps 页的分组内存仍是 RSS 之和（zstats 的分组快照没有 footprint 字段，成员又不全在 top-N 里，自己加总就是在推导 zstats 没说过的数字）；`alert-mem` 告警在上游仍按 RSS 均值份额评估，告警卡片引用的是事件自带的数字，两边各自一致。
 

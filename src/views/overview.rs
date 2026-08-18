@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
-use zstats::snapshot::{CpuSnapshot, IoTotalsSnapshot, MemorySnapshot};
+use zstats::snapshot::{Capabilities, CpuSnapshot, IoTotalsSnapshot, MemorySnapshot};
 
 /// How many processes the first panel names. Enough to answer "who's
 /// hot" without turning Overview into a second Processes tab.
@@ -34,7 +34,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     vec![
         processor(&snapshot.cpu),
         top_cpu(state),
-        memory(&snapshot.memory, &snapshot.io_totals),
+        memory(&snapshot.memory, &snapshot.io_totals, snapshot.capabilities),
     ]
 }
 
@@ -217,10 +217,18 @@ fn cluster_label(name: &str, cores: u32) -> String {
     format!("{pretty} · {cores}")
 }
 
-fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot) -> AnyElement {
+/// `caps` decides how an absent figure reads: this build cannot measure
+/// it, or it can and has not yet. On macOS every capability is true, so
+/// every branch here resolves exactly as it did before 0.5.2.
+fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> AnyElement {
     // The kernel's own verdict, not a number we derive: 1 normal, 2 warning,
-    // 4 critical. Absent means the platform has no pressure API at all —
-    // which the design is careful to word differently from "fine".
+    // 4 critical. Absent has two readings and they are not the same
+    // sentence: this build cannot measure pressure at all, or it can and
+    // has nothing yet. zstats 0.5.2 answers the first through
+    // `capabilities`, so the panel stops inferring it from a `None` —
+    // on macOS the capability is true and every arm below reads exactly
+    // as it did.
+    let supported = caps.memory_pressure;
     let (label, tip, fg, bg, line) = match mem.pressure_level {
         Some(l) if l >= 4 => (
             i18n::tr("overview.pressure_critical"),
@@ -243,9 +251,18 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot) -> AnyElement {
             Hsla::from(theme::inset()),
             Hsla::from(theme::border()),
         ),
-        None => (
+        None if !supported => (
             i18n::tr("overview.pressure_none"),
             i18n::tr("overview.pressure_tip_none"),
+            Hsla::from(theme::text_muted()),
+            Hsla::from(theme::inset()),
+            Hsla::from(theme::border()),
+        ),
+        // Measurable here, just not measured yet — the same `—` every
+        // other waiting figure shows, not a claim about the platform.
+        None => (
+            format::PLACEHOLDER.to_string(),
+            i18n::tr("overview.pressure_tip_waiting"),
             Hsla::from(theme::text_muted()),
             Hsla::from(theme::inset()),
             Hsla::from(theme::border()),
@@ -275,9 +292,12 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot) -> AnyElement {
     ];
     rows.push((
         i18n::tr("overview.compressed"),
+        // Same split: "this build cannot" keeps the explicit n/a, "not
+        // yet" gets the placeholder every other pending figure uses.
         match mem.compressed_bytes {
             Some(b) => format::gb(b),
-            None => i18n::tr("common.n_a"),
+            None if !supported => i18n::tr("common.n_a"),
+            None => format::PLACEHOLDER.to_string(),
         },
     ));
     rows.push((i18n::tr("overview.total"), format::gb(mem.total_bytes)));
