@@ -2,6 +2,26 @@
 // app pops an empty terminal behind the window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// macOS only, and it fails here rather than six files later. `procscan`,
+// `terminate` and `window_ext` are declared `#[cfg(target_os = "macos")]`
+// below while six modules import them unconditionally, so another target
+// produces a scatter of unresolved-import errors that say nothing about
+// why. This says it once.
+//
+// The gates are deliberately NOT spread across those six files: a build
+// that compiles with no tray, no window show/hide, no abnormal-process
+// scan and a permanently failing Trash button would be a worse answer
+// than a build that stops. Adding them belongs to a port, where each
+// gated feature gets a real implementation or an honest empty state —
+// not to scaffolding kept warm for a port nobody has committed to. See
+// "非 macOS 平台编译不过" in docs/design.md for the full list.
+#[cfg(not(target_os = "macos"))]
+compile_error!(
+    "zstats-app builds on macOS only. See the platform section in docs/design.md \
+     — porting means implementing the tray, window show/hide, positioning and \
+     process scanning, not just satisfying the compiler."
+);
+
 mod about;
 mod alertlog;
 mod assets;

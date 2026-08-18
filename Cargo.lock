@@ -9782,6 +9782,7 @@ dependencies = [
  "resvg 0.46.0",
  "rust-embed",
  "rust-i18n",
+ "sha2 0.11.0",
  "smol",
  "sys-locale",
  "toml 1.1.4+spec-1.1.0",

@@ -17,6 +17,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use zstats::Monitor;
 use zstats::settings::FileConfig;
 
@@ -265,10 +266,14 @@ pub fn start(cx: &mut App) {
                 cx.global::<ZStatsGlobalStore>()
                     .clone()
                     .update(cx, |state, cx| {
+                        let now = Instant::now();
                         for event in state.ingest(tick, cx) {
-                            // Snoozed subjects still land in the Alerts
-                            // list above — only the banner stays quiet.
-                            if state.banner_snoozed(&event) {
+                            // Quiet subjects still land in the Alerts list
+                            // above — only the banner stays quiet. Two
+                            // gates: the snooze the user asked for, and
+                            // the auto-quiet for a subject that has
+                            // already interrupted twice this hour.
+                            if state.banner_snoozed(&event) || state.banner_damped(&event, now) {
                                 continue;
                             }
                             notify::post(&event);

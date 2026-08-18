@@ -26,7 +26,6 @@ use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::process;
-use std::thread;
 use zstats::Tick;
 use zstats::snapshot::ProcessSnapshot;
 
@@ -672,7 +671,7 @@ fn expand_block(
                 }),
         )
         .child(widgets::kv_columns(detail))
-        .when(safe_to_kill(pid), |col| {
+        .when(crate::terminate::can_term(pid), |col| {
             col.child(h_flex().justify_end().child(kill_button(pid, name)))
         })
         .into_any_element()
@@ -782,30 +781,21 @@ fn abnormal_badge(pid: u32, state: ProcState, tip: String) -> AnyElement {
 }
 
 /// SIGTERM. Activity Monitor's "Quit", not Force Quit.
+///
+/// The delivery itself lives in `terminate.rs` with the alert card's
+/// quit — the app acts on a process in exactly one module, and a
+/// syscall does what spawning `/bin/kill` used to.
+#[cfg(target_os = "macos")]
 fn kill(pid: u32) {
-    if !safe_to_kill(pid) {
-        eprintln!("refusing to kill pid {pid}");
-        return;
-    }
-    thread::spawn(move || {
-        match process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output()
-        {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => eprintln!(
-                "kill {pid} failed ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(e) => eprintln!("kill {pid}: {e}"),
-        }
-    });
+    // Inline: a signal is a syscall that returns immediately. The
+    // thread this used to spawn was there for the `/bin/kill`
+    // subprocess, and went away with it.
+    crate::terminate::request_term(pid);
 }
 
-fn safe_to_kill(pid: u32) -> bool {
-    pid > 1 && pid != process::id()
-}
+/// Never-run stub — see "Platform reality" in CLAUDE.md.
+#[cfg(not(target_os = "macos"))]
+fn kill(_pid: u32) {}
 
 /// The filter chip in the list header.
 ///
@@ -1065,14 +1055,6 @@ fn current_user_id() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn will_not_kill_init_or_self() {
-        assert!(!safe_to_kill(0));
-        assert!(!safe_to_kill(1));
-        assert!(!safe_to_kill(process::id()));
-        assert!(safe_to_kill(process::id().saturating_add(1000).max(2)));
-    }
 
     #[test]
     fn bundle_name_reads_the_app_wrapper() {

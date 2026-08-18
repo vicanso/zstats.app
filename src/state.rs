@@ -327,6 +327,20 @@ pub enum HintsSync {
     Done(cleanhints::RemoteUpdate),
 }
 
+/// How far back the auto-quiet rule looks, and how many banners it lets
+/// through in that span before it stops interrupting.
+///
+/// Aimed at a condition that keeps crossing, clearing and crossing again:
+/// zstats already spaces the reminders *inside* one episode (the pressure
+/// rule backs off 30m/1h/2h/4h), but a flapping subject opens a fresh
+/// episode each time and each one is news. Two banners is enough to have
+/// said it; a third within the hour is the same sentence again.
+///
+/// Deliberately per episode, not global: a second, different subject
+/// crossing its line is new information and must still arrive.
+const NOISY_WINDOW: Duration = Duration::from_secs(3600);
+const NOISY_AFTER: usize = 2;
+
 /// One episode's quiet hours: banners are skipped until the deadline.
 struct Snooze {
     until: Instant,
@@ -529,6 +543,12 @@ pub struct ZStatsAppState {
     /// Monotonic id for analyser runs, so a stale run's channel events
     /// can never land into a newer run's state.
     disk_analysis_runs: u64,
+    /// When each episode's banners were actually delivered, newest last.
+    /// Drives the auto-quiet rule ([`NOISY_AFTER`]); trimmed to
+    /// [`NOISY_WINDOW`] on every read, so it cannot grow. Session-only,
+    /// like the snooze beside it — a restart is a deliberate act and
+    /// starts the count over.
+    banner_sent: HashMap<Episode, Vec<Instant>>,
     /// Banner snoozes by episode: the user asked for quiet on this subject
     /// until a deadline. Delivery-layer only — events still land in the
     /// alerts list and the engine's rules are untouched. Deliberately not
@@ -672,6 +692,7 @@ impl Default for ZStatsAppState {
             space_inflight: false,
             settings_window: None,
             disk_analysis_runs: 0,
+            banner_sent: HashMap::new(),
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
             sustained: SustainedWatch::default(),
@@ -1283,8 +1304,17 @@ impl ZStatsAppState {
     }
 
     pub fn unsnooze_banners(&mut self, event: &AlertEvent, cx: &mut Context<Self>) {
-        self.snoozed.remove(&Episode::of(event));
+        self.resume_banners(event);
         cx.notify();
+    }
+
+    /// The un-mute proper, minus the repaint. "Resume" is unambiguous, so
+    /// it clears the auto-quiet too — one left standing would keep the
+    /// subject silent behind the user's back.
+    fn resume_banners(&mut self, event: &AlertEvent) {
+        let key = Episode::of(event);
+        self.snoozed.remove(&key);
+        self.banner_sent.remove(&key);
     }
 
     /// Whether this event's banner is muted right now. Runs on every fresh
@@ -1294,6 +1324,38 @@ impl ZStatsAppState {
         let now = Instant::now();
         self.snoozed.retain(|_, s| s.until > now);
         self.snoozed.contains_key(&Episode::of(event))
+    }
+
+    /// Whether this event's banner is being held back because the same
+    /// episode has already interrupted [`NOISY_AFTER`] times inside
+    /// [`NOISY_WINDOW`]. Delivery-layer only, exactly like the snooze:
+    /// the engine keeps evaluating, the list keeps recording and the card
+    /// keeps counting reports — what stops is the interruption.
+    ///
+    /// Records the delivery it permits, so the window slides and the
+    /// subject gets its voice back once it quiets down.
+    pub fn banner_damped(&mut self, event: &AlertEvent, now: Instant) -> bool {
+        let sent = self.banner_sent.entry(Episode::of(event)).or_default();
+        sent.retain(|at| now.duration_since(*at) < NOISY_WINDOW);
+        if sent.len() >= NOISY_AFTER {
+            return true;
+        }
+        sent.push(now);
+        false
+    }
+
+    /// Whether a card should say it has gone auto-quiet. Read-only — the
+    /// count is only ever advanced by an actual delivery attempt.
+    pub fn banner_auto_quiet(&self, event: &AlertEvent) -> bool {
+        let now = Instant::now();
+        self.banner_sent
+            .get(&Episode::of(event))
+            .is_some_and(|sent| {
+                sent.iter()
+                    .filter(|at| now.duration_since(**at) < NOISY_WINDOW)
+                    .count()
+                    >= NOISY_AFTER
+            })
     }
 
     /// The "muted until 14:32" label for a card, if its episode is muted.
@@ -2316,6 +2378,56 @@ mod tests {
         assert_eq!(state.alerts().len(), 3);
         assert_eq!(state.alerts()[0].reports, 3);
         assert_eq!(state.alerts()[0].seq, 1, "still the episode opened first");
+    }
+
+    /// A subject that keeps crossing, clearing and crossing again opens a
+    /// fresh episode each time, and each one used to interrupt. Two is
+    /// enough to have said it; the rest go to the list only.
+    #[test]
+    fn a_flapping_subject_stops_interrupting_after_two_banners() {
+        let mut state = ZStatsAppState::new();
+        let t0 = Instant::now();
+        let event = cpu_alert(7);
+
+        assert!(!state.banner_damped(&event, t0), "first one interrupts");
+        assert!(
+            !state.banner_damped(&event, t0 + Duration::from_secs(600)),
+            "so does the second"
+        );
+        assert!(
+            state.banner_damped(&event, t0 + Duration::from_secs(1200)),
+            "the third within the hour does not"
+        );
+        assert!(state.banner_auto_quiet(&event), "and the card says so");
+
+        // A different subject is different news — it must still arrive.
+        assert!(!state.banner_damped(&mem_alert(9), t0 + Duration::from_secs(1200)));
+
+        // Once the window has slid past both deliveries, it speaks again.
+        let later = t0 + Duration::from_secs(3600 + 700);
+        assert!(
+            !state.banner_damped(&event, later),
+            "quiet for an hour buys back a banner"
+        );
+    }
+
+    /// "Resume" has to mean resume: an auto-quiet that outlived the
+    /// explicit un-mute would keep the subject silent behind the user.
+    #[test]
+    fn resuming_a_snooze_also_clears_the_auto_quiet() {
+        let mut state = ZStatsAppState::new();
+        let t0 = Instant::now();
+        let event = cpu_alert(7);
+        assert!(!state.banner_damped(&event, t0));
+        assert!(!state.banner_damped(&event, t0));
+        assert!(state.banner_auto_quiet(&event));
+
+        state.resume_banners(&event);
+        assert!(!state.banner_auto_quiet(&event));
+        assert!(
+            !state.banner_damped(&event, t0),
+            "and the next one interrupts again"
+        );
     }
 
     /// A restart is not a new problem: an episode read back from the

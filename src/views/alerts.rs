@@ -329,6 +329,22 @@ fn alert_head(
                     .snoozed_until(&seen.event)
                     .map(|_| widgets::outline_pill(i18n::tr("alerts.snoozed_pill"))),
             )
+            // Auto-quiet says so on the card for the same reason the
+            // snooze does: a banner that silently stopped arriving is
+            // indistinguishable from a rule that stopped firing. Only
+            // when the user has not already asked for quiet — one
+            // reason for the silence is enough.
+            .when(
+                state.snoozed_until(&seen.event).is_none() && state.banner_auto_quiet(&seen.event),
+                |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("auto-quiet-{index}")))
+                            .child(widgets::outline_pill(i18n::tr("alerts.auto_quiet_pill")))
+                            .tooltip(widgets::wrap_tooltip(i18n::tr("alerts.auto_quiet_tip"))),
+                    )
+                },
+            )
             // A card from before the last launch says so: it explains
             // both the old numbers and the missing action buttons
             // (see [`SeenAlert::live`]).

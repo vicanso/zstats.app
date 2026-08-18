@@ -1,22 +1,29 @@
-//! Asking a process to quit — the panel's one way of acting on the system.
+//! Asking a process to quit — the panel's one way of acting on a process.
 //!
-//! Runs only from the quit button on a memory alert card, behind a confirm
-//! sheet, and never automatically: an unattended kill can take unsaved work
-//! with it, so the app's posture stays "notify and offer", with the user's
-//! click as the trigger. *When* something is over the line remains zstats'
-//! call (the button consumes its `AlertEvent`s); this module only carries
-//! out the eviction.
+//! Two callers, both behind a confirm sheet and never automatic: the quit
+//! button on a memory alert card ([`request_quit`]) and the Quit control on
+//! a process row ([`request_term`]). An unattended kill can take unsaved
+//! work with it, so the app's posture stays "notify and offer", with the
+//! user's click as the trigger. *When* something is over the line remains
+//! zstats' call (the alert button consumes its `AlertEvent`s); this module
+//! only carries out the request.
 //!
-//! Two tiers, both refusable by the target:
+//! [`request_quit`] has two tiers, both refusable by the target:
 //! - pids LaunchServices knows as applications get
 //!   [`NSRunningApplication::terminate`] — the same request as ⌘Q, so the
 //!   app can still raise its own save dialog and survive the click;
 //! - everything else gets `SIGTERM`, the signal a well-behaved daemon traps
 //!   to clean up after itself.
 //!
-//! `SIGKILL` is deliberately absent. It cannot be refused, which makes it a
-//! data-loss button; a process stuck enough to ignore SIGTERM is Activity
-//! Monitor's job, not a metrics panel's.
+//! [`request_term`] is the one-tier version: SIGTERM whatever the target
+//! is. The process page offers it as "Quit process", the same thing
+//! Activity Monitor's Quit does to a row, and deliberately *not* the
+//! ⌘Q-equivalent — a row is a process, not an application, and promoting
+//! a bare pid to an app-level quit would act on more than the row names.
+//!
+//! `SIGKILL` is deliberately absent from both. It cannot be refused, which
+//! makes it a data-loss button; a process stuck enough to ignore SIGTERM is
+//! Activity Monitor's job, not a metrics panel's.
 
 use objc2_app_kit::NSRunningApplication;
 
@@ -74,9 +81,49 @@ fn running_application(pid: u32) -> Option<objc2::rc::Retained<NSRunningApplicat
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid as libc::pid_t)
 }
 
+/// Whether the process page should offer a Quit for `pid` at all.
+///
+/// Refuses pid 1 (launchd, which cannot usefully be signalled) and our
+/// own pid — quitting the panel from its own process list is a footgun,
+/// not a feature. Policy, not permission: [`can_quit`] is the one that
+/// asks the kernel.
+pub fn can_term(pid: u32) -> bool {
+    pid > 1 && pid != std::process::id()
+}
+
+/// SIGTERM, and nothing above it — the process page's Quit.
+///
+/// Re-checks [`can_term`] rather than trusting the caller: this is the
+/// delivering end, and a control that should never have rendered is not
+/// a reason to signal something. `false` means nothing was sent.
+pub fn request_term(pid: u32) -> bool {
+    if !can_term(pid) {
+        eprintln!("refusing to signal pid {pid}");
+        return false;
+    }
+    // SAFETY: SIGTERM to a pid this user may signal; the kernel does the
+    // permission check and reports failure through the return value.
+    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+    if !sent {
+        eprintln!("SIGTERM to pid {pid} was not delivered");
+    }
+    sent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn will_not_signal_init_or_self() {
+        assert!(!can_term(0));
+        assert!(!can_term(1));
+        assert!(!can_term(std::process::id()));
+        assert!(can_term(std::process::id().saturating_add(1000).max(2)));
+        // The delivering end refuses the same pids, not just the button.
+        assert!(!request_term(1));
+        assert!(!request_term(std::process::id()));
+    }
     use std::process;
 
     #[test]

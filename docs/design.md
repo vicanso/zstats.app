@@ -2,7 +2,7 @@
 
 macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats Popover v3 shadcn`，指标由 [zstats](https://crates.io/crates/zstats) 嵌入式采集。基于 [gpui](https://github.com/zed-industries/zed) + [gpui-component](https://github.com/longbridge/gpui-component)。
 
-**支持平台：macOS。** Linux 和 Windows 能编译，但托盘（Linux）、窗口显隐、多屏定位、异常进程扫描、Dock 隐藏都只有 macOS 实现，其余平台的分支从未被验证过。详见「已知问题 / TODO」。
+**支持平台：macOS。** 其它平台**当前编译不过**（见「已知问题 / TODO」）：托盘（Linux）、窗口显隐、多屏定位、异常进程扫描、Dock 隐藏都只有 macOS 实现，而其中三个模块被六处无条件 import 引用。
 
 ## 源码结构
 
@@ -92,6 +92,8 @@ zstats 的告警是 episode 语义：跨越阈值报一次，30 分钟后若仍�
 跨过本地午夜时列表会自行退休非当日的 episode，「当日」才不至于悄悄变成「自本次启动以来」。
 
 阈值可以在卡片上直接改：写入 `~/.zstats/config.toml` 的 per-name override（和 CLI 的 `-add` 同一套键），采集线程下一次循环 `reload_settings()`。
+
+还有一层**自动降噪**（`state.rs` 的 `banner_damped`）：同一条 episode 在一小时内已经弹过两次横幅，后续横幅暂停，直到时间窗滑过那两次投递。它针对的是**反复越线又回落**的主体——zstats 已经在一条 episode *内部*把提醒拉开（压力规则 30m/1h/2h/4h 递增退避），但每次重新越线都会开一条新 episode，每一条都当作新消息送达。按 episode 计数是刻意的：另一个主体越线是另一件事，照常送达。卡片上有「已降噪」标签并附说明——**一条悄悄不再出现的横幅，和一条不再触发的规则，从外面看是一样的**，所以必须说出来；点「恢复」两层一起清除，且都不跨重启（与旁边会持久化的列表不同）。
 
 同一块编辑区里还有**横幅静音**（1 小时 / 3 小时）。它刻意做在投递层而不是规则层：引擎照常评估、告警照常进列表、config.toml 一个字节不动——被压住的只有横幅这一次打扰。临时改阈值再定时改回的方案被否掉了：那会污染与 CLI 共享的配置，应用中途退出还会把「临时」变成永久。静音按 episode（对象 + 度量）生效、到点自动过期、不跨重启持久化——静音的语义是「现在别吵」，重启后已是新的「现在」。
 
@@ -263,6 +265,12 @@ release 构建、托盘常驻不开窗、cputime 差值 ÷ 墙钟实测：
 
 托盘报的是物理像素，换算成逻辑坐标需要 scale factor，而选哪块屏的 scale 又得先知道图标在哪块屏——互为前提。现在统一用 `screens()[0]`（菜单栏所在屏）的倍率，所以**多屏同 DPI 时正确**，混合 DPI（比如内置 Retina + 外接 1x）时托盘在副屏的定位会偏。彻底修需要按屏试算再回选。
 
-### 非 macOS 分支未经验证
+### 非 macOS 平台编译不过
 
-`main.rs` 与 `metrics.rs` 里保留着一批 `#[cfg(not(target_os = "macos"))]` 分支（窗口用销毁代替隐藏、`cx.displays()` 查屏、无毛玻璃）。它们能编译，但从未在真实环境跑过，也没有测试覆盖。保留是为了不堵死后续移植，但不应当理解为「支持」。
+`main.rs` 把 `procscan` / `terminate` / `window_ext` 声明为 `#[cfg(target_os = "macos")]`，但有**六处无条件 import** 它们——`metrics.rs`、`state.rs`、`watch.rs`、`views/processes.rs`、`views/alerts.rs`、`placement.rs`。在 Windows / Linux 上这是六个 `E0432 unresolved import`。此前本节写的是「能编译但未验证」，那是错的：**从未有任何一次非 macOS 构建成功过**。
+
+`main.rs` 顶部有一条 `#[cfg(not(target_os = "macos"))] compile_error!`，把这件事在最早的位置说清楚——否则另一个目标上得到的是六个散落的 unresolved import，看不出原因。**门禁刻意没有铺到那六个文件里**：一个能编译但没有托盘、没有窗口显隐、没有异常进程扫描、废纸篓按钮永久失败的构建，比一个直接停下来的构建更糟。铺门禁属于移植工作本身——那时每个被门禁的功能要么有真实现、要么有诚实的空态，而不是为一次尚未决定的移植预留脚手架。
+
+因此 `main.rs` 与 `metrics.rs` 里保留的那批 `#[cfg(not(target_os = "macos"))]` 分支（窗口用销毁代替隐藏、`cx.displays()` 查屏、无毛玻璃）连编译都没经历过，更谈不上跑。保留它们是为了不堵死后续移植，但不应当理解为「支持」，也不应当理解为「现成的」。
+
+移植还有三条硬约束值得先知道：Linux 上 `tray-icon` **根本不发射点击事件**（其自身文档写明），所以拿不到锚定弹窗所需的图标屏幕矩形；Wayland 不允许客户端设置绝对窗口位置；`gpui_linux` 的 `activate` / `hide` 是静默 no-op。三条叠加意味着「点菜单栏图标弹出锚定面板」这个形态在 Linux 上无法还原。

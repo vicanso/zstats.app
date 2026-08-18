@@ -15,12 +15,13 @@
 use crate::about;
 use crate::opener;
 use crate::proxy;
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -106,7 +107,7 @@ pub fn download_and_open(
     if let Some(expected) = fetch_checksum(&agent, tag, asset) {
         let Some(got) = file_sha256(&path) else {
             let _ = fs::remove_file(&path);
-            return Err("could not verify the download (shasum failed)".into());
+            return Err("could not verify the download (could not hash it)".into());
         };
         if !got.eq_ignore_ascii_case(&expected) {
             let _ = fs::remove_file(&path);
@@ -138,21 +139,30 @@ fn fetch_checksum(agent: &ureq::Agent, tag: &str, asset: &str) -> Option<String>
         .map(str::to_string)
 }
 
-/// `shasum -a 256` on the written file — ships with macOS, and this
-/// whole install path is macOS-only anyway (it ends in a DMG).
+/// SHA-256 of the written file, computed in-process.
 fn file_sha256(path: &Path) -> Option<String> {
-    let out = process::Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    // Streamed rather than read-to-end: the DMG is ~13 MB today and
+    // nothing says it stays that size. Hashing the file on disk, not
+    // the buffer in hand, so a truncated write is caught too.
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
     }
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()
-        .map(str::to_string)
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .fold(String::with_capacity(64), |mut out, byte| {
+                out.push_str(&format!("{byte:02x}"));
+                out
+            }),
+    )
 }
 
 pub enum UpdateCheck {
@@ -440,6 +450,7 @@ fn is_newer(remote_tag: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
 
     #[test]
     fn version_compare_is_numeric_per_segment() {
@@ -483,6 +494,47 @@ mod tests {
             json_str_field("{\"body\":null}", "body").as_deref(),
             Some("")
         );
+    }
+
+    /// The digest has to match what `sha256sum`/`shasum -a 256` print,
+    /// because that is what the release's SHA256SUMS was generated with —
+    /// lowercase hex, no separators. Known vectors, so a future crate bump
+    /// cannot silently change the encoding.
+    #[test]
+    fn file_digest_matches_the_reference_vectors() {
+        let dir = env::temp_dir().join(format!("zstats-sha-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let empty = dir.join("empty");
+        fs::write(&empty, b"").unwrap();
+        assert_eq!(
+            file_sha256(&empty).as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+
+        let abc = dir.join("abc");
+        fs::write(&abc, b"abc").unwrap();
+        assert_eq!(
+            file_sha256(&abc).as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+
+        // Larger than the 64 KiB read buffer: the streaming loop must
+        // fold every chunk, not just the first.
+        let big = dir.join("big");
+        fs::write(&big, vec![b'z'; 200_000]).unwrap();
+        let digest = file_sha256(&big).expect("hashed");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
+
+        // A file that is not there is not a zero digest.
+        assert_eq!(file_sha256(&dir.join("nope")), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
