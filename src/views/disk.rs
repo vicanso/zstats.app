@@ -24,7 +24,6 @@ use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process;
-use std::thread;
 use std::time::Duration;
 use zstats::snapshot::DiskSnapshot;
 
@@ -51,6 +50,20 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         )];
     }
 
+    // A volume we have just ejected is gone as far as the OS is
+    // concerned, but zstats serves the disk list from cache between
+    // refreshes — without this the card outlives the drive by up to a
+    // full cadence (`state::mark_ejected` carries the reasoning).
+    let disks: Vec<&DiskSnapshot> = disks
+        .iter()
+        .filter(|d| !state.is_ejected(&d.mount_point))
+        .collect();
+    if disks.is_empty() {
+        return vec![widgets::empty_card(
+            i18n::tr("disk.no_volumes"),
+            i18n::tr("disk.no_volumes_body"),
+        )];
+    }
     let mut cards: Vec<AnyElement> = disks
         .iter()
         .enumerate()
@@ -1348,7 +1361,7 @@ fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
                     i18n::tr("disk.eject_title"),
                     t!("disk.eject_body", mount = mount.clone()).to_string(),
                     i18n::tr("disk.eject_ok"),
-                    move |_| eject(&mount),
+                    move |cx| eject(&mount, cx),
                 );
             })
             .child(
@@ -1371,30 +1384,69 @@ fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
 
 /// Unmount / eject a removable volume. Never the boot volume — the
 /// badge is only rendered for `is_removable`, and this is a second gate.
-fn eject(mount: &str) {
+///
+/// On success the collector is woken rather than the card being hidden
+/// here: the volume list the panel paints is zstats', and a row that
+/// vanished because the *view* decided so would be the one place the
+/// panel asserted a machine state on its own. Waking makes the next
+/// sample land in milliseconds instead of at the end of the cadence, so
+/// the row goes away because the OS no longer lists the volume.
+fn eject(mount: &str, cx: &mut gpui::App) {
     if !safe_to_eject(mount) {
         eprintln!("refusing to eject {mount}");
         return;
     }
     let mount = mount.to_string();
-    thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        let result = process::Command::new("diskutil")
-            .args(["eject", &mount])
-            .output();
-        #[cfg(not(target_os = "macos"))]
-        let result = process::Command::new("umount").arg(&mount).output();
+    let mount_for_hide = mount.clone();
+    cx.spawn(async move |cx| {
+        let ejected = cx
+            .background_executor()
+            .spawn(async move { run_eject(&mount) })
+            .await;
+        if ejected {
+            cx.update(|cx| {
+                // Hide the card now, and ask for a sample so the
+                // snapshot catches up as soon as its own disk cadence
+                // allows — the hide is what makes it feel immediate,
+                // the wake is what ends it early where it can.
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.mark_ejected(mount_for_hide, cx));
+                if let Some(pace) = cx.try_global::<crate::metrics::CollectorPace>() {
+                    pace.wake();
+                }
+            });
+        }
+    })
+    .detach();
+}
 
-        match result {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => eprintln!(
+/// The subprocess half, off the main thread. `true` only when the tool
+/// reported success — a failed eject must not shorten the wait for a
+/// sample that would show the volume still mounted.
+fn run_eject(mount: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let result = process::Command::new("diskutil")
+        .args(["eject", mount])
+        .output();
+    #[cfg(not(target_os = "macos"))]
+    let result = process::Command::new("umount").arg(mount).output();
+
+    match result {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            eprintln!(
                 "eject {mount} failed ({}): {}",
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(e) => eprintln!("eject {mount}: {e}"),
+            );
+            false
         }
-    });
+        Err(e) => {
+            eprintln!("eject {mount}: {e}");
+            false
+        }
+    }
 }
 
 fn safe_to_eject(mount: &str) -> bool {

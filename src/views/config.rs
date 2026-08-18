@@ -1234,6 +1234,26 @@ fn interval_row(
         .into_any_element()
 }
 
+/// The human name for a threshold key. The key itself stays on the row
+/// beneath it: these are the exact strings `config.toml` and the CLI's
+/// `-add` take, and a card that only showed a translated name would
+/// leave a reader who wants to change one with nothing to type.
+fn threshold_label(key: &str) -> String {
+    i18n::tr(match key {
+        "alert-cpu" => "config.th_cpu",
+        "alert-mem" => "config.th_mem",
+        "alert-mem-bytes" => "config.th_mem_bytes",
+        "alert-app-cpu" => "config.th_app_cpu",
+        "alert-app-mem" => "config.th_app_mem",
+        "alert-disk" => "config.th_disk",
+        "alert-pressure" => "config.th_pressure",
+        "alert-cooldown" => "config.th_cooldown",
+        // Unreachable for the eight rows above; a future key shows its
+        // own name rather than a blank until it is given one.
+        other => return other.to_string(),
+    })
+}
+
 fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
     let a = &file.alerts;
     // zstats' own resolution of what runs when a key is unset — "unset"
@@ -1310,7 +1330,27 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                             h_flex()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_size(px(11.)).text_color(theme::ink()).child(k))
+                                .child(
+                                    v_flex()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(theme::ink())
+                                                .child(threshold_label(k)),
+                                        )
+                                        // The key stays, one size down:
+                                        // it is what you type into
+                                        // config.toml or `zstats -add`,
+                                        // and this card is where you
+                                        // would go looking for it.
+                                        .child(
+                                            div()
+                                                .font_family(font::MONO)
+                                                .text_size(px(9.))
+                                                .text_color(theme::text_dim())
+                                                .child(k),
+                                        ),
+                                )
                                 .child(
                                     h_flex()
                                         .items_center()

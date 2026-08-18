@@ -327,6 +327,16 @@ pub enum HintsSync {
     Done(cleanhints::RemoteUpdate),
 }
 
+/// A successfully ejected volume stays hidden at most this long.
+///
+/// The normal exit is the snapshot dropping it, which happens on the
+/// collector's disk cadence. This is the backstop for the case that
+/// never resolves that way: the user replugs the drive and it mounts on
+/// the same path, so the volume never disappears and the hide would
+/// otherwise be permanent. A minute is several disk refreshes at the
+/// panel's default cadence, so it only ever fires for a replug.
+const EJECT_HIDE_MAX: Duration = Duration::from_secs(60);
+
 /// How far back the auto-quiet rule looks, and how many banners it lets
 /// through in that span before it stops interrupting.
 ///
@@ -543,6 +553,10 @@ pub struct ZStatsAppState {
     /// Monotonic id for analyser runs, so a stale run's channel events
     /// can never land into a newer run's state.
     disk_analysis_runs: u64,
+    /// Volumes this session has successfully ejected, and when. They
+    /// are hidden from the Hardware tab until the snapshot stops
+    /// listing them — see [`Self::mark_ejected`].
+    ejected: HashMap<String, Instant>,
     /// When each episode's banners were actually delivered, newest last.
     /// Drives the auto-quiet rule ([`NOISY_AFTER`]); trimmed to
     /// [`NOISY_WINDOW`] on every read, so it cannot grow. Session-only,
@@ -692,6 +706,7 @@ impl Default for ZStatsAppState {
             space_inflight: false,
             settings_window: None,
             disk_analysis_runs: 0,
+            ejected: HashMap::new(),
             banner_sent: HashMap::new(),
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
@@ -728,6 +743,36 @@ impl ZStatsAppState {
 
     // ---- metrics -------------------------------------------------------
 
+    /// Remember that `mount` was ejected, so the Hardware tab can drop
+    /// its card now rather than at the end of the disk cadence.
+    ///
+    /// The one place the panel shows a machine state ahead of zstats,
+    /// and it is bounded on both ends: it is only ever called after
+    /// `diskutil eject` **returned success** — the OS itself saying the
+    /// volume is gone, not the panel guessing — and the entry is
+    /// dropped the moment a snapshot agrees (or after
+    /// [`EJECT_HIDE_MAX`]). Without it the card outlives the volume by
+    /// up to a full `disk_io_refresh_interval`, because zstats serves
+    /// the whole disk list from cache between refreshes; waking the
+    /// collector does not help, since that cadence is wall-clock.
+    pub fn mark_ejected(&mut self, mount: String, cx: &mut Context<Self>) {
+        self.ejected.insert(mount, Instant::now());
+        cx.notify();
+    }
+
+    /// Whether a volume card should be withheld this frame.
+    pub fn is_ejected(&self, mount: &str) -> bool {
+        self.ejected.contains_key(mount)
+    }
+
+    /// Retire hide entries that have done their job — the volume is
+    /// gone from the snapshot — or that have waited long enough.
+    fn prune_ejected(&mut self, listed: &[String], now: Instant) {
+        self.ejected.retain(|mount, at| {
+            listed.iter().any(|m| m == mount) && now.duration_since(*at) < EJECT_HIDE_MAX
+        });
+    }
+
     /// Fold one collection round into the state. Returns the events that
     /// arrived this tick so the caller can deliver desktop notifications
     /// without walking the accumulated list.
@@ -753,6 +798,17 @@ impl ZStatsAppState {
             self.net.record(nets, now);
         }
 
+        if !self.ejected.is_empty() {
+            let listed: Vec<String> = tick
+                .snapshot
+                .disks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.mount_point.clone())
+                .collect();
+            self.prune_ejected(&listed, now);
+        }
         self.latest = Some(tick);
         // Piggyback on the tick rather than the render: views are pure
         // functions and cannot start work, and a fresh probe is only
@@ -2378,6 +2434,46 @@ mod tests {
         assert_eq!(state.alerts().len(), 3);
         assert_eq!(state.alerts()[0].reports, 3);
         assert_eq!(state.alerts()[0].seq, 1, "still the episode opened first");
+    }
+
+    /// The hide exists because zstats serves the disk list from cache
+    /// between refreshes; it must end the moment the snapshot agrees,
+    /// and it must not outlive a drive that came back.
+    #[test]
+    fn an_ejected_volume_is_hidden_until_the_snapshot_agrees() {
+        let mut state = ZStatsAppState::new();
+        let t0 = Instant::now();
+        state.ejected.insert("/Volumes/USB".into(), t0);
+        assert!(state.is_ejected("/Volumes/USB"));
+        assert!(!state.is_ejected("/"), "only the volume that was ejected");
+
+        // Still listed a moment later: the cache has not turned over yet,
+        // so the card stays hidden.
+        state.prune_ejected(
+            &["/".into(), "/Volumes/USB".into()],
+            t0 + Duration::from_secs(5),
+        );
+        assert!(state.is_ejected("/Volumes/USB"));
+
+        // The snapshot drops it — the hide has done its job and goes.
+        state.prune_ejected(&["/".into()], t0 + Duration::from_secs(6));
+        assert!(!state.is_ejected("/Volumes/USB"));
+    }
+
+    /// A drive replugged onto the same path never disappears from the
+    /// snapshot, so "hide until it is gone" alone would hide it forever.
+    #[test]
+    fn a_volume_that_never_leaves_stops_being_hidden() {
+        let mut state = ZStatsAppState::new();
+        let t0 = Instant::now();
+        state.ejected.insert("/Volumes/USB".into(), t0);
+
+        let listed = ["/".to_string(), "/Volumes/USB".to_string()];
+        state.prune_ejected(&listed, t0 + EJECT_HIDE_MAX - Duration::from_secs(1));
+        assert!(state.is_ejected("/Volumes/USB"), "still within the cap");
+
+        state.prune_ejected(&listed, t0 + EJECT_HIDE_MAX);
+        assert!(!state.is_ejected("/Volumes/USB"), "the cap releases it");
     }
 
     /// A subject that keeps crossing, clearing and crossing again opens a
