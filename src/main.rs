@@ -111,6 +111,10 @@ const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else
 /// not reopen — that's what makes the tray icon toggle.
 const TOGGLE_GRACE: Duration = Duration::from_millis(300);
 
+/// Vertical padding inside the settings window's scrolling body. Named
+/// because `about_card`'s height budget has to subtract exactly it.
+const SETTINGS_BODY_PAD: f32 = 14.;
+
 actions!(zstats, [Quit, CloseSettings]);
 
 /// The root view. Owns the window-lifecycle subscriptions and hands the
@@ -460,11 +464,19 @@ impl Render for SettingsWindow {
         let fg = cx.theme().foreground;
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
         let section = self.section;
+        // How tall a section may be before the window itself has to
+        // scroll. Only About uses it, to cap its card and let the
+        // release notes absorb the difference — see `about_card`.
+        // `viewport_size`, not `bounds`: the latter is the window frame
+        // in screen space and would hand out the title bar's height as
+        // if it were usable, putting the card that much past the bottom.
+        let body_height = f32::from(window.viewport_size().height) - SETTINGS_BODY_PAD * 2.;
         let body = gpui_component::v_flex()
             .gap(px(8.))
             .children(views::config::render(
                 state,
                 section,
+                body_height,
                 &self.proxy_input,
                 self.proxy_valid,
             ));
@@ -494,7 +506,7 @@ impl Render for SettingsWindow {
                             .h_full()
                             .overflow_y_scroll()
                             .px(px(16.))
-                            .py(px(14.))
+                            .py(px(SETTINGS_BODY_PAD))
                             .child(body),
                     ),
             )
@@ -508,6 +520,14 @@ fn settings_nav(
     cx: &mut Context<SettingsWindow>,
 ) -> gpui::AnyElement {
     use views::config::SettingsSection;
+    // The gear's dot led the user into this window; without a second one
+    // here the trail stops at the door and they have to guess which
+    // section holds the news. Read once, before `cx.listener` borrows.
+    let update_pending = cx
+        .global::<ZStatsGlobalStore>()
+        .read(cx)
+        .update_nudge()
+        .is_some();
     gpui_component::v_flex()
         .id("settings-nav")
         .flex_none()
@@ -525,6 +545,9 @@ fn settings_nav(
                 .enumerate()
                 .map(|(i, item)| {
                     let on = item == current;
+                    // Not while About is the open section: the update row
+                    // on that page is already saying it, in words.
+                    let dot = update_pending && item == SettingsSection::About && !on;
                     div()
                         .id(("settings-nav-item", i))
                         .w_full()
@@ -569,6 +592,13 @@ fn settings_nav(
                                 )
                                 .child(
                                     div()
+                                        // Takes the slack so the dot sits
+                                        // at the row's end; the label is
+                                        // still left-aligned inside it, so
+                                        // nothing moves when the dot comes
+                                        // and goes.
+                                        .flex_1()
+                                        .min_w_0()
                                         .text_size(px(12.))
                                         .font_weight(if on {
                                             gpui::FontWeight::MEDIUM
@@ -577,7 +607,17 @@ fn settings_nav(
                                         })
                                         .text_color(if on { theme::ink() } else { theme::text() })
                                         .child(i18n::tr(item.label_key())),
-                                ),
+                                )
+                                .when(dot, |row| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .w(px(6.))
+                                            .h(px(6.))
+                                            .rounded_full()
+                                            .bg(gpui::Hsla::from(theme::accent())),
+                                    )
+                                }),
                         )
                 }),
         )

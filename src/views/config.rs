@@ -91,9 +91,13 @@ impl SettingsSection {
     }
 }
 
+/// `body_height` is what the window can show without scrolling. Only
+/// About reads it — every other section is short enough that the body's
+/// own scroll is the right answer.
 pub fn render(
     state: &ZStatsAppState,
     section: SettingsSection,
+    body_height: f32,
     proxy_input: &Entity<InputState>,
     proxy_valid: bool,
 ) -> Vec<AnyElement> {
@@ -101,7 +105,7 @@ pub fn render(
         SettingsSection::Interface => vec![interface_card(proxy_input, proxy_valid)],
         SettingsSection::Config => render_config(state),
         SettingsSection::Permissions => vec![permissions_card()],
-        SettingsSection::About => vec![about_card(state)],
+        SettingsSection::About => vec![about_card(state, body_height)],
     }
 }
 
@@ -191,10 +195,12 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
     cards
 }
 
-/// Shared chrome for the About update actions. Full-width or half-row
-/// is the caller's job — the cramped chip-next-to-caption layout is
-/// what overflowed once a version was found.
-fn update_btn(id: &'static str, label: impl Into<String>, accent: bool) -> Stateful<Div> {
+/// Shared chrome for the About update actions. Full-width or half-row is
+/// the caller's job — the cramped chip-next-to-caption layout is what
+/// overflowed once a version was found. The label is the caller's too:
+/// the download button paints a progress fill *behind* its text, and a
+/// child added by this function could only ever land in front of it.
+fn update_btn(id: &'static str, accent: bool) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(28.))
@@ -216,7 +222,50 @@ fn update_btn(id: &'static str, label: impl Into<String>, accent: bool) -> State
         .px(px(10.))
         .text_size(px(11.))
         .text_color(theme::text())
-        .child(label.into())
+}
+
+/// How full the download button's bar is. `None` when the server never
+/// sent a length — the label then reads "3.2 MB" with no total, and a
+/// bar with no denominator would have to invent one.
+fn download_fraction(received: u64, total: u64) -> Option<f32> {
+    (total > 0).then(|| received as f32 / total as f32)
+}
+
+/// The download button, whose fill *is* the progress bar: the same
+/// chrome as every other action, with an accent wash growing left to
+/// right behind the "3.2 MB / 6.6 MB" it already carried. A separate
+/// bar under the button would have said the same thing twice and cost a
+/// row; a button that is 40% filled says it once.
+///
+/// `overflow_hidden` matters — without it the fill's square corner
+/// escapes the button's 7px radius at 100%.
+///
+/// No `progress` means the server never sent a length. The button then
+/// looks like any other disabled one and the label reads "3.2 MB"
+/// without a total, which is the honest pair: a bar with no denominator
+/// would have to invent one.
+fn update_progress_btn(label: String, progress: Option<f32>) -> AnyElement {
+    update_btn("about-update-progress", false)
+        .w_full()
+        .overflow_hidden()
+        .children(progress.map(|fraction| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .bottom_0()
+                .w(relative(fraction.clamp(0.0, 1.0)))
+                // Neutral, not accent: `theme::accent` is reserved for
+                // over-threshold states and the primary action, so a
+                // red bar would read as "something is wrong" when the
+                // only thing happening is a file arriving. This is the
+                // same ink every meter fills with below its line,
+                // dropped to a wash because it sits behind text rather
+                // than standing alone as a 6px bar.
+                .bg(Hsla::from(theme::ink()).opacity(0.16))
+        }))
+        .child(div().text_color(theme::text_dim()).child(label))
+        .into_any_element()
 }
 
 fn update_caption(text: impl Into<String>) -> AnyElement {
@@ -231,21 +280,18 @@ fn update_caption(text: impl Into<String>) -> AnyElement {
 }
 
 fn update_check_btn(enabled: bool) -> AnyElement {
-    let btn = update_btn(
-        "about-update-check",
-        i18n::tr(if enabled {
+    let btn = update_btn("about-update-check", false)
+        .child(i18n::tr(if enabled {
             "config.update_check"
         } else {
             "config.update_checking"
-        }),
-        false,
-    )
-    .w_full()
-    .text_color(if enabled {
-        theme::text()
-    } else {
-        theme::text_dim()
-    });
+        }))
+        .w_full()
+        .text_color(if enabled {
+            theme::text()
+        } else {
+            theme::text_dim()
+        });
     if enabled {
         btn.hover(|d| d.bg(theme::surface_raised()))
             .on_click(|_, _window, cx| {
@@ -264,20 +310,17 @@ fn update_check_btn(enabled: bool) -> AnyElement {
 /// squeezing in beside the "new version" caption.
 fn update_install_btns(version: String) -> AnyElement {
     let skip_version = version.clone();
-    let download = update_btn(
-        "about-update-download",
-        i18n::tr("config.update_download"),
-        true,
-    )
-    .flex_1()
-    .min_w_0()
-    .hover(|d| d.bg(theme::surface_raised()))
-    .on_click(move |_, _window, cx| {
-        let version = version.clone();
-        cx.global::<ZStatsGlobalStore>()
-            .clone()
-            .update(cx, |state, cx| state.download_update(version, cx));
-    });
+    let download = update_btn("about-update-download", true)
+        .child(i18n::tr("config.update_download"))
+        .flex_1()
+        .min_w_0()
+        .hover(|d| d.bg(theme::surface_raised()))
+        .on_click(move |_, _window, cx| {
+            let version = version.clone();
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.download_update(version, cx));
+        });
     h_flex()
         .w_full()
         .gap(px(8.))
@@ -285,7 +328,8 @@ fn update_install_btns(version: String) -> AnyElement {
         .child(
             // Mutes the gear's dot for this tag only — manual checks
             // stay truthful, the next release re-arms the dot.
-            update_btn("about-update-skip", i18n::tr("config.update_skip"), false)
+            update_btn("about-update-skip", false)
+                .child(i18n::tr("config.update_skip"))
                 .flex_1()
                 .min_w_0()
                 .tooltip(super::widgets::wrap_tooltip(i18n::tr(
@@ -305,9 +349,11 @@ fn update_install_btns(version: String) -> AnyElement {
 fn update_notes_box(notes: &str) -> AnyElement {
     v_flex()
         .w_full()
+        .min_h_0()
         .gap(px(4.))
         .child(
             div()
+                .flex_none()
                 .text_size(px(10.))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme::ink())
@@ -317,7 +363,17 @@ fn update_notes_box(notes: &str) -> AnyElement {
             div()
                 .id("about-update-notes")
                 .w_full()
-                .max_h(px(160.))
+                // The page's one flexible part. It keeps its natural
+                // height while everything fits, and gives up exactly the
+                // overflow once the card hits its cap — so the window
+                // shows one screen and the scrollbar that appears is
+                // this pane's, not the whole page's. `min_h_0` is what
+                // permits the shrink; the fixed siblings above are all
+                // `flex_none`, so the height comes from here or nowhere.
+                // (It used to be a hard 160px with its own scroll, which
+                // put a cramped window onto the notes while the settings
+                // window had room to spare below it.)
+                .min_h_0()
                 .overflow_y_scroll()
                 .rounded(px(7.))
                 .bg(theme::inset())
@@ -351,10 +407,18 @@ fn nonempty_notes(notes: &str) -> Option<&str> {
 /// a user act on the signed DMG.
 fn update_row(state: &ZStatsAppState) -> AnyElement {
     enum Action {
-        Check { enabled: bool },
-        Install { version: String },
+        Check {
+            enabled: bool,
+        },
+        Install {
+            version: String,
+        },
         Unskip,
-        Busy,
+        Busy {
+            /// `None` while the server has not said how big the file is —
+            /// no bar rather than a made-up one.
+            progress: Option<f32>,
+        },
         Quit,
     }
 
@@ -421,7 +485,9 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
                     )
                     .to_string()
                 }),
-                Action::Busy,
+                Action::Busy {
+                    progress: download_fraction(*received, *total),
+                },
                 nonempty_notes(notes),
             ),
             Some(UpdateStatus::Installed) => (
@@ -445,28 +511,21 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
     let actions = match action {
         Action::Check { enabled } => update_check_btn(enabled),
         Action::Install { version } => update_install_btns(version),
-        Action::Unskip => update_btn(
-            "about-update-unskip",
-            i18n::tr("config.update_unskip"),
-            true,
-        )
-        .w_full()
-        .hover(|d| d.bg(theme::surface_raised()))
-        .on_click(|_, _window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.unignore_update(cx));
-        })
-        .into_any_element(),
-        Action::Busy => update_btn(
-            "about-update-progress",
-            caption.clone().unwrap_or_default(),
-            false,
-        )
-        .w_full()
-        .text_color(theme::text_dim())
-        .into_any_element(),
-        Action::Quit => update_btn("about-update-quit", i18n::tr("config.update_quit"), true)
+        Action::Unskip => update_btn("about-update-unskip", true)
+            .child(i18n::tr("config.update_unskip"))
+            .w_full()
+            .hover(|d| d.bg(theme::surface_raised()))
+            .on_click(|_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.unignore_update(cx));
+            })
+            .into_any_element(),
+        Action::Busy { progress } => {
+            update_progress_btn(caption.clone().unwrap_or_default(), progress)
+        }
+        Action::Quit => update_btn("about-update-quit", true)
+            .child(i18n::tr("config.update_quit"))
             .w_full()
             .hover(|d| d.bg(theme::surface_raised()))
             .on_click(|_, _window, cx| cx.quit())
@@ -482,6 +541,10 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
 
     v_flex()
         .w_full()
+        // Shrinkable, and `min_h_0` so it may actually go below its
+        // content size — without it the notes box inside can never give
+        // up the height the card's cap is asking for.
+        .min_h_0()
         .px(px(13.))
         .pt(px(10.))
         .pb(px(12.))
@@ -489,14 +552,24 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
         .border_t(px(1.))
         .border_color(theme::border_subtle())
         .when(show_caption, |col| {
-            col.children(caption.map(update_caption))
+            col.children(caption.map(|text| div().flex_none().child(update_caption(text))))
         })
-        .child(actions)
+        .child(div().flex_none().child(actions))
         .children(notes.map(update_notes_box))
         .into_any_element()
 }
 
-fn about_card(state: &ZStatsAppState) -> AnyElement {
+/// Floor for the About card's height budget. Below this the window is
+/// smaller than the fixed content, and the body's own scroll is the
+/// honest answer — squeezing the notes to nothing would not help.
+const MIN_ABOUT_HEIGHT: f32 = 360.;
+
+/// The About page, laid out to fit one screen: everything above the
+/// release notes is fixed, and the notes take whatever height is left
+/// and scroll inside it. `max_h` rather than `h` on purpose — short
+/// notes keep their natural size instead of stretching an empty inset
+/// box to the window's bottom edge.
+fn about_card(state: &ZStatsAppState, body_height: f32) -> AnyElement {
     let rows = [
         (
             i18n::tr("config.about_version"),
@@ -506,12 +579,15 @@ fn about_card(state: &ZStatsAppState) -> AnyElement {
         (i18n::tr("config.about_arch"), about::architecture()),
     ];
     widgets::list_shell()
+        .max_h(px(body_height.max(MIN_ABOUT_HEIGHT)))
         // The identity block a macOS About view leads with: the app icon
         // over the app name. The icon is the real bundle artwork (a
         // 256px cut of icons/zstats-1024.png, embedded), so this view
         // can never drift from what the Dock and Finder show.
         .child(
             v_flex()
+                // Fixed: only the notes may give up height.
+                .flex_none()
                 .items_center()
                 .gap(px(8.))
                 .pt(px(18.))
@@ -533,6 +609,7 @@ fn about_card(state: &ZStatsAppState) -> AnyElement {
                 .enumerate()
                 .map(move |(i, (label, value))| {
                     h_flex()
+                        .flex_none()
                         .items_center()
                         .justify_between()
                         .px(px(13.))
@@ -1448,6 +1525,18 @@ pub(super) fn humanize(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bar is the download's only quantitative claim, so it has to
+    /// come from the same two numbers the label already shows — and a
+    /// server that sent no length must produce no bar rather than a
+    /// guess.
+    #[test]
+    fn download_fraction_tracks_the_bytes_and_declines_to_guess() {
+        assert_eq!(download_fraction(0, 6_600_000), Some(0.0));
+        assert_eq!(download_fraction(3_300_000, 6_600_000), Some(0.5));
+        assert_eq!(download_fraction(6_600_000, 6_600_000), Some(1.0));
+        assert_eq!(download_fraction(1_000, 0), None, "no length, no bar");
+    }
 
     #[test]
     fn humanize_matches_file_form() {
