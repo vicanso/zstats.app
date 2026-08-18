@@ -277,13 +277,29 @@ pub enum DiskAnalysis {
         partial: Option<ScanResult>,
         /// Whether a finished result is written to the per-root cache.
         /// True for top-level analyses (the "last analysed X" a fresh
-        /// launch opens with); false for drill-fallback subwalks, which
-        /// the design keeps out of the cache.
+        /// launch opens with). Expansion sub-walks never come through
+        /// here at all — they write into `expanded`, not the card.
         persist: bool,
         cancel: Arc<AtomicBool>,
     },
     Ready(ScanResult),
     Failed(String),
+}
+
+/// What sits under an opened directory row (`toggle_expansion`).
+///
+/// `Ready` is the ranked directory table for that path — it may be
+/// empty, and empty is an answer: nothing inside cleared the bar the
+/// tables rank by. There is no `Ready`-from-index vs `Ready`-from-walk
+/// distinction on purpose; the rows are built by the same `tables()`
+/// either way, and where they came from would only invite the reader to
+/// trust one over the other.
+pub enum Expansion {
+    /// The index had nothing recorded here, so a walk of this subtree is
+    /// running. Seconds, and only ever one at a time.
+    Walking,
+    Ready(Vec<diskscan::DirHit>),
+    Failed,
 }
 
 /// The Hardware tab's one-shot large-file query, same lifecycle shape as
@@ -518,7 +534,14 @@ pub struct ZStatsAppState {
     /// Outer results parked while drilled into a subtree — each level is
     /// a finished `ScanResult` (a few KB), so "back" restores instantly
     /// instead of re-walking the parent for half a minute.
-    disk_analysis_stack: Vec<diskscan::ScanResult>,
+    /// Rows the reader opened in the analysis tables, and what is under
+    /// each. Session state that belongs to the result on screen: a new
+    /// walk, a cleared result or a fresh window drops it.
+    expanded: HashMap<PathBuf, Expansion>,
+    /// Monotonic id for expansion sub-walks. One runs at a time; a
+    /// superseded one's events land nowhere, same guard as the main walk.
+    expand_runs: u64,
+    expand_cancel: Option<Arc<AtomicBool>>,
     /// The user-picked analysis scope for this session — a chosen folder
     /// or the cache-set preset; `None` means the default (~). The
     /// re-analyze chip re-walks whatever this says, so picking a scope
@@ -535,21 +558,17 @@ pub struct ZStatsAppState {
     space: Option<SpaceInfo>,
     space_at: Option<Instant>,
     space_inflight: bool,
-    /// Whether the Hardware tab shows the full analysis card or just its
-    /// one-line summary. UI-session state, deliberately NOT persisted and
-    /// reset to collapsed on every entry to the tab: the tables are long
-    /// enough to bury the volumes and sensors beneath them, so unfolding
-    /// is a per-visit choice. Starting or drilling an analysis unfolds —
-    /// the user just asked to watch it.
-    disk_analysis_expanded: bool,
     /// Whether the dirs table shows every retained row (up to
-    /// `TABLE_KEEP`) or the display default. Reset together with the
-    /// card fold: per-visit, per-scan choice.
+    /// `TABLE_KEEP`) or the display default. A per-visit choice: reset
+    /// when the disk-space window is built fresh, not persisted.
     analysis_show_all_dirs: bool,
     /// The settings window, if one was ever opened. Kept so a second
     /// click focuses the existing window; a handle whose window the user
     /// closed fails its update and a fresh window is built instead.
     settings_window: Option<gpui::AnyWindowHandle>,
+    /// The disk-space window (large files + the analyser), same
+    /// reuse-or-rebuild contract as [`Self::settings_window`].
+    storage_window: Option<gpui::AnyWindowHandle>,
     /// Monotonic id for analyser runs, so a stale run's channel events
     /// can never land into a newer run's state.
     disk_analysis_runs: u64,
@@ -691,7 +710,9 @@ impl Default for ZStatsAppState {
                 .flatten()
                 .map(DiskAnalysis::Ready)
                 .unwrap_or_default(),
-            disk_analysis_stack: Vec::new(),
+            expanded: HashMap::new(),
+            expand_runs: 0,
+            expand_cancel: None,
             disk_analysis_root: restored,
             // The baseline outlives restarts the same way the result
             // does: through its file.
@@ -699,12 +720,12 @@ impl Default for ZStatsAppState {
                 .then(|| diskscan::load_prev_cache(&launch_roots))
                 .flatten()
                 .map(|prev| DiffBaseline::from_result(&prev)),
-            disk_analysis_expanded: false,
             analysis_show_all_dirs: false,
             space: None,
             space_at: None,
             space_inflight: false,
             settings_window: None,
+            storage_window: None,
             disk_analysis_runs: 0,
             ejected: HashMap::new(),
             banner_sent: HashMap::new(),
@@ -1105,8 +1126,6 @@ impl ZStatsAppState {
             cx.notify();
             return;
         };
-        self.disk_analysis_stack.clear();
-        self.disk_analysis_expanded = true;
         self.launch_disk_analysis(scope, true, cx);
     }
 
@@ -1118,15 +1137,13 @@ impl ZStatsAppState {
     pub fn start_disk_analysis_at(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         if root == Path::new("/") {
             self.cancel_disk_analysis_walk();
-            self.disk_analysis_stack.clear();
+            self.drop_expansions();
             self.disk_analysis = DiskAnalysis::Failed(i18n::tr("disk.ana_root_unsupported"));
             cx.notify();
             return;
         }
         let scope = ScanScope::single(root);
         self.disk_analysis_root = Some(scope.clone());
-        self.disk_analysis_stack.clear();
-        self.disk_analysis_expanded = true;
         self.launch_disk_analysis(scope, true, cx);
     }
 
@@ -1141,43 +1158,104 @@ impl ZStatsAppState {
             return;
         };
         self.disk_analysis_root = Some(scope.clone());
-        self.disk_analysis_stack.clear();
-        self.disk_analysis_expanded = true;
         self.launch_disk_analysis(scope, true, cx);
     }
 
-    /// Drill into one ranked directory: park the current result on the
-    /// stack and show that path as the new root. Served instantly from
-    /// the finished scan's retained index when it can honestly answer;
-    /// only folded interiors and below-floor corners fall back to a live
-    /// walk. Only a finished result can be drilled — the rows are inert
-    /// while a walk is running.
-    pub fn drill_disk_analysis(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    /// Open or close one ranked directory, in place.
+    ///
+    /// This replaced a drill-down that made the clicked path the new root
+    /// and rebuilt the whole card. The answer was the same; the cost was
+    /// that everything else on screen moved, and a reader comparing two
+    /// branches lost their place on every click. Children are inserted
+    /// under the row instead, so nothing above it shifts.
+    ///
+    /// Two sources, and which one serves is invisible except in latency:
+    /// the finished scan's retained index answers instantly wherever it
+    /// recorded anything under this path (`diskscan::drill`), and the
+    /// derived result shares the same `Arc`, so depth stays free. Folded
+    /// leaves (`node_modules`, `.git`, a `CACHEDIR.TAG` tree) and
+    /// interiors whose every child fell under `INDEX_FLOOR` were never
+    /// recorded, and those take a real walk of that subtree — seconds,
+    /// reported in the row itself.
+    ///
+    /// Only a finished result can be opened: mid-walk tables are lower
+    /// bounds with no index behind them.
+    pub fn toggle_expansion(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.expanded.remove(&path).is_some() {
+            cx.notify();
+            return;
+        }
         let DiskAnalysis::Ready(current) = &self.disk_analysis else {
             return;
         };
-        let derived = diskscan::drill(current, &root);
-        if let DiskAnalysis::Ready(current) = mem::take(&mut self.disk_analysis) {
-            self.disk_analysis_stack.push(current);
-        }
-        self.disk_analysis_expanded = true;
-        match derived {
-            Some(result) => {
-                self.disk_analysis = DiskAnalysis::Ready(result);
+        match diskscan::drill(current, &path) {
+            Some(derived) => {
+                self.expanded.insert(path, Expansion::Ready(derived.dirs));
                 cx.notify();
             }
-            None => self.launch_disk_analysis(ScanScope::single(root), false, cx),
+            None => self.walk_expansion(path, cx),
         }
     }
 
-    /// Leave the current drill level and restore the parked outer result.
-    pub fn pop_disk_analysis(&mut self, cx: &mut Context<Self>) {
-        let Some(prev) = self.disk_analysis_stack.pop() else {
-            return;
-        };
-        self.cancel_disk_analysis_walk();
-        self.disk_analysis = DiskAnalysis::Ready(prev);
+    /// The index had nothing under this row, so walk it. One at a time:
+    /// a second open cancels the first, whose thread stops and whose
+    /// events are dropped by the run-id guard either way.
+    fn walk_expansion(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.expand_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.expand_runs += 1;
+        let run_id = self.expand_runs;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.expand_cancel = Some(cancel.clone());
+        self.expanded.insert(path.clone(), Expansion::Walking);
         cx.notify();
+
+        let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
+        diskscan::spawn(ScanScope::single(path.clone()), cancel, tx);
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                // Progress and partials are dropped on purpose: a subtree
+                // is seconds, and a row that reshuffles under the cursor
+                // costs more than the wait it saves.
+                let landed = match event {
+                    ScanEvent::Done(result) => Expansion::Ready(result.dirs),
+                    ScanEvent::Failed(e) => {
+                        eprintln!("expand {}: {e}", path.display());
+                        Expansion::Failed
+                    }
+                    _ => continue,
+                };
+                let _ = this.update(cx, |state, cx| {
+                    // Superseded by a newer open, or the row was closed
+                    // while the walk ran — either way this lands nowhere.
+                    if state.expand_runs != run_id
+                        || !matches!(state.expanded.get(&path), Some(Expansion::Walking))
+                    {
+                        return;
+                    }
+                    state.expanded.insert(path.clone(), landed);
+                    cx.notify();
+                });
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// What is under an opened row, or `None` when it is closed.
+    pub fn expansion(&self, path: &Path) -> Option<&Expansion> {
+        self.expanded.get(path)
+    }
+
+    /// Every open row closes when the result they describe goes away —
+    /// a new walk, a cleared card. Children of a replaced result would
+    /// be figures from a scan that is no longer on screen.
+    fn drop_expansions(&mut self) {
+        self.expanded.clear();
+        if let Some(cancel) = self.expand_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
     }
 
     pub fn analysis_show_all_dirs(&self) -> bool {
@@ -1189,44 +1267,25 @@ impl ZStatsAppState {
         cx.notify();
     }
 
-    pub fn disk_analysis_expanded(&self) -> bool {
-        self.disk_analysis_expanded
-    }
-
-    pub fn set_disk_analysis_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
-        self.disk_analysis_expanded = expanded;
-        cx.notify();
-    }
-
-    pub fn disk_analysis_can_back(&self) -> bool {
-        !self.disk_analysis_stack.is_empty()
-    }
-
-    /// Dismiss the analysis entirely — straight to Off, whatever level
-    /// is showing. This is a view action, not a disk one: nothing is
-    /// touched on disk, and dropping the results also releases the
-    /// retained drill index.
+    /// Dismiss the analysis entirely — straight to Off, opened rows and
+    /// all. This is a view action, not a disk one: nothing is touched on
+    /// disk, and dropping the result also releases the retained index
+    /// every opened row was served from.
     pub fn clear_disk_analysis(&mut self, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
         // Clean slate includes the saved result — otherwise the next
-        // launch would resurrect what the user just dismissed. The
-        // session's top-level scope is the outermost parked result, or
-        // the current one when nothing is parked.
-        let top_roots = self
-            .disk_analysis_stack
-            .first()
-            .map(|r| r.roots.clone())
-            .or_else(|| match &self.disk_analysis {
-                DiskAnalysis::Ready(r) => Some(r.roots.clone()),
-                _ => None,
-            });
+        // launch would resurrect what the user just dismissed.
+        let top_roots = match &self.disk_analysis {
+            DiskAnalysis::Ready(r) => Some(r.roots.clone()),
+            _ => None,
+        };
         if let Some(roots) = top_roots {
             diskscan::delete_cache(&roots);
         }
         // The baseline's file went with the cache; the flattened copy
         // must not outlive it.
         self.analysis_diff = None;
-        self.disk_analysis_stack.clear();
+        self.drop_expansions();
         // Clean slate includes the picked scope: the next "Analyze"
         // means the default home tree again — this launch and the next.
         self.disk_analysis_root = None;
@@ -1241,6 +1300,7 @@ impl ZStatsAppState {
     /// events fall on the floor.
     fn launch_disk_analysis(&mut self, scope: ScanScope, persist: bool, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
+        self.drop_expansions();
         self.disk_analysis_runs += 1;
         let run_id = self.disk_analysis_runs;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1322,14 +1382,11 @@ impl ZStatsAppState {
     }
 
     /// The explicit cancel — the only way a walk stops early. Partial
-    /// results are never kept. A cancelled drill falls back to the outer
-    /// result it came from; a cancelled top-level run goes to Off.
+    /// results are never kept, so this goes to Off rather than showing
+    /// half a table.
     pub fn cancel_disk_analysis(&mut self, cx: &mut Context<Self>) {
         self.cancel_disk_analysis_walk();
-        self.disk_analysis = match self.disk_analysis_stack.pop() {
-            Some(prev) => DiskAnalysis::Ready(prev),
-            None => DiskAnalysis::Off,
-        };
+        self.disk_analysis = DiskAnalysis::Off;
         cx.notify();
     }
 
@@ -1508,6 +1565,14 @@ impl ZStatsAppState {
         self.settings_window = Some(handle);
     }
 
+    pub fn storage_window(&self) -> Option<gpui::AnyWindowHandle> {
+        self.storage_window
+    }
+
+    pub fn set_storage_window(&mut self, handle: gpui::AnyWindowHandle) {
+        self.storage_window = Some(handle);
+    }
+
     /// This tab's scroll offset, held across frames so switching away and
     /// back returns to where the list was left.
     pub fn scroll_handle(&self, tab: Tab) -> &ScrollHandle {
@@ -1603,23 +1668,20 @@ impl ZStatsAppState {
                 .suggestions
                 .retain(|h| !gone.iter().any(|g| h.path.starts_with(g)));
         };
-        // Only the session's top-level result owns a cache file, and it
-        // is the outermost parked one — or the current view when
-        // nothing is parked. Every other level is drill-derived, and
-        // writing one out would overwrite whatever scope happens to
-        // share its root with the *parent's* vintage (`drill` inherits
-        // `scanned_at`, `took` and the skip counters).
-        let top_level_is_current = self.disk_analysis_stack.is_empty();
+        // The card always shows the session's top-level result now
+        // (opening a row nests under it instead of replacing it), so the
+        // one result on screen is exactly the one that owns a cache file.
         if let DiskAnalysis::Ready(result) = &mut self.disk_analysis {
             prune(result);
-            if top_level_is_current {
-                diskscan::resave_if_cached(result);
-            }
+            diskscan::resave_if_cached(result);
         }
-        for (level, parked) in self.disk_analysis_stack.iter_mut().enumerate() {
-            prune(parked);
-            if level == 0 {
-                diskscan::resave_if_cached(parked);
+        // Opened rows are tables too: a trashed tree must not survive as
+        // somebody's child row, and a row for the tree itself closes.
+        self.expanded
+            .retain(|path, _| !gone.iter().any(|g| path.starts_with(g)));
+        for state in self.expanded.values_mut() {
+            if let Expansion::Ready(rows) = state {
+                rows.retain(|h| !gone.iter().any(|g| h.path.starts_with(g)));
             }
         }
         cx.notify();
@@ -1630,6 +1692,12 @@ impl ZStatsAppState {
     /// a panel reopened hours later with yesterday's query looks broken,
     /// not remembered. Scroll positions and the selected tab survive —
     /// those are orientation, not a question being asked.
+    ///
+    /// The large-file listing is deliberately **not** cleared here any
+    /// more: it renders in the disk-space window, and opening that window
+    /// takes focus off the panel — which is exactly what calls this. The
+    /// same "not remembered" rule now runs on that window's own
+    /// lifecycle ([`Self::reset_storage_views`]).
     pub fn reset_transient_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.proc_filter_open {
             // The close arm clears the input, the lowercased mirror and
@@ -1638,7 +1706,24 @@ impl ZStatsAppState {
         }
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
+        cx.notify();
+    }
+
+    /// A freshly built disk-space window starts without yesterday's
+    /// index query, and with the dirs table folded back to its default
+    /// length. Only on a *new* window: raising one that is already open
+    /// must not wipe what its owner is reading.
+    ///
+    /// The analysis result itself survives on purpose — it costs minutes
+    /// to produce and is cached to disk across restarts; the caption says
+    /// how old it is.
+    pub fn reset_storage_views(&mut self, cx: &mut Context<Self>) {
         self.big_files = BigFiles::Off;
+        self.analysis_show_all_dirs = false;
+        // Opened rows are questions too — a window opened tomorrow should
+        // show the result the way a finished scan leaves it, not a tree
+        // somebody unfolded yesterday.
+        self.drop_expansions();
         cx.notify();
     }
 
@@ -1653,11 +1738,7 @@ impl ZStatsAppState {
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
-            // Every fresh visit to Hardware starts from the summary —
-            // see `disk_analysis_expanded`.
             if tab == Tab::Hardware {
-                self.disk_analysis_expanded = false;
-                self.analysis_show_all_dirs = false;
                 self.ensure_space_info(cx);
             }
             // Opening History is what pays for reading it. Re-read on every

@@ -31,6 +31,7 @@ mod net;
 mod overview;
 mod processes;
 mod sensors;
+pub mod storage;
 
 pub mod widgets;
 

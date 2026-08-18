@@ -111,11 +111,21 @@ const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else
 /// not reopen — that's what makes the tray icon toggle.
 const TOGGLE_GRACE: Duration = Duration::from_millis(300);
 
-/// Vertical padding inside the settings window's scrolling body. Named
-/// because `about_card`'s height budget has to subtract exactly it.
-const SETTINGS_BODY_PAD: f32 = 14.;
+/// Vertical padding inside an auxiliary window's scrolling body (both
+/// settings and disk-space use it). Named because `about_card`'s height
+/// budget has to subtract exactly it.
+const AUX_BODY_PAD: f32 = 14.;
 
-actions!(zstats, [Quit, CloseSettings]);
+/// Both auxiliary windows open at the same size, deliberately: settings
+/// and disk space are two halves of "the app's own windows", and two
+/// nearly-equal sizes read as an accident rather than a decision. Still
+/// resizable — this is where they open, not where they must stay.
+const AUX_WINDOW_SIZE: (f32, f32) = (507., 620.);
+/// Floor for both. Has to stay under [`AUX_WINDOW_SIZE`]: a minimum
+/// wider than the opening width would silently widen the window.
+const AUX_MIN_WINDOW_SIZE: (f32, f32) = (460., 420.);
+
+actions!(zstats, [Quit, CloseWindow]);
 
 /// The root view. Owns the window-lifecycle subscriptions and hands the
 /// panel itself to `views::root`; the gpui-component dialog / notification
@@ -470,7 +480,7 @@ impl Render for SettingsWindow {
         // `viewport_size`, not `bounds`: the latter is the window frame
         // in screen space and would hand out the title bar's height as
         // if it were usable, putting the card that much past the bottom.
-        let body_height = f32::from(window.viewport_size().height) - SETTINGS_BODY_PAD * 2.;
+        let body_height = f32::from(window.viewport_size().height) - AUX_BODY_PAD * 2.;
         let body = gpui_component::v_flex()
             .gap(px(8.))
             .children(views::config::render(
@@ -488,7 +498,7 @@ impl Render for SettingsWindow {
             // Same effect as the title bar's close button; the stored
             // handle fails its next update and a fresh window is built,
             // so no state cleanup belongs here.
-            .on_action(cx.listener(|_, _: &CloseSettings, window, _cx| {
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _cx| {
                 window.remove_window();
             }))
             .bg(bg)
@@ -506,7 +516,7 @@ impl Render for SettingsWindow {
                             .h_full()
                             .overflow_y_scroll()
                             .px(px(16.))
-                            .py(px(SETTINGS_BODY_PAD))
+                            .py(px(AUX_BODY_PAD))
                             .child(body),
                     ),
             )
@@ -624,6 +634,86 @@ fn settings_nav(
         .into_any_element()
 }
 
+/// The disk-space window's view. Owns nothing but focus and a scroll
+/// offset — both features it shows live in the global store, which this
+/// observes exactly as the panel does, so a walk's progress lands here
+/// with no plumbing of its own.
+///
+/// Note the observer is unconditional, unlike the panel's: `CollectorPace`
+/// gates the panel's repaint because that window is moved off screen
+/// rather than destroyed. This one is either open and visible or gone.
+struct StorageWindow {
+    /// Keyboard anchor, same reason as [`SettingsWindow`]: gpui dispatches
+    /// keystrokes along the focus path, so without a focused node the
+    /// Escape / cmd-w bindings never reach the root's `key_context`.
+    focus_handle: gpui::FocusHandle,
+    scroll: ScrollHandle,
+}
+
+impl StorageWindow {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let store = cx.global::<ZStatsGlobalStore>().clone();
+        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+        Self {
+            focus_handle,
+            scroll: ScrollHandle::new(),
+        }
+    }
+}
+
+impl Render for StorageWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Every trash control in here raises `confirm::ask`, which needs
+        // the dialog layer mounted on the window it is raised from.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+        let bg = cx.theme().background;
+        let fg = cx.theme().foreground;
+        let state = cx.global::<ZStatsGlobalStore>().read(cx);
+        let body = gpui_component::v_flex()
+            .gap(px(8.))
+            .children(views::storage::render(state));
+        div()
+            .relative()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context("StorageWindow")
+            // Same effect as the title bar's close button; the stored
+            // handle fails its next update and a fresh window is built,
+            // so no state cleanup belongs here — least of all cancelling
+            // the walk, which outlives every surface by design.
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _cx| {
+                window.remove_window();
+            }))
+            .bg(bg)
+            .text_color(fg)
+            .child(
+                div()
+                    .id("storage-body")
+                    .track_scroll(&self.scroll)
+                    .size_full()
+                    .overflow_y_scroll()
+                    .px(px(16.))
+                    .py(px(AUX_BODY_PAD))
+                    .child(body),
+            )
+            .children(dialog_layer)
+            .children(notification_layer)
+    }
+}
+
+fn aux_window_size() -> gpui::Size<gpui::Pixels> {
+    let (w, h) = AUX_WINDOW_SIZE;
+    size(px(w), px(h))
+}
+
+fn aux_min_window_size() -> gpui::Size<gpui::Pixels> {
+    let (w, h) = AUX_MIN_WINDOW_SIZE;
+    size(px(w), px(h))
+}
+
 /// Open the settings window, or focus the one already open. Closing it
 /// really closes (the main window's own stance); the stored handle then
 /// fails its update and the next click builds a fresh window.
@@ -636,11 +726,11 @@ pub fn open_settings_window(cx: &mut App) {
     {
         return;
     }
-    let bounds = Bounds::centered(None, size(px(520.), px(620.)), cx);
+    let bounds = Bounds::centered(None, aux_window_size(), cx);
     let opened = cx.open_window(
         with_app_identity(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(460.), px(420.))),
+            window_min_size: Some(aux_min_window_size()),
             // A real title bar on purpose — this window closes with its
             // own traffic lights, unlike the chromeless panel.
             titlebar: Some(TitlebarOptions {
@@ -659,6 +749,55 @@ pub fn open_settings_window(cx: &mut App) {
         cx.global::<ZStatsGlobalStore>()
             .clone()
             .update(cx, |state, _| state.set_settings_window(handle.into()));
+    }
+}
+
+/// Open the disk-space window (large files + the directory analyser), or
+/// focus the one already open. Same reuse-or-rebuild contract as the
+/// settings window, and for the same reason: a minutes-long walk must
+/// not die to the popover's auto-hide, and neither must the reading of
+/// its result.
+///
+/// Opens at [`AUX_WINDOW_SIZE`], the same as settings. Even at that width
+/// a row has half again the panel's 320 to spend on a path, which is what
+/// drove the tables out of the card; anyone reading deep paths all day can
+/// drag it wider, and macOS remembers nothing here on purpose — every open
+/// starts from the same known-good frame.
+pub fn open_storage_window(cx: &mut App) {
+    let existing = cx.global::<ZStatsGlobalStore>().read(cx).storage_window();
+    if let Some(handle) = existing
+        && handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+    {
+        return;
+    }
+    // A fresh window, not a raised one: yesterday's index query is not
+    // what someone reopening this is asking about.
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, cx| state.reset_storage_views(cx));
+    let bounds = Bounds::centered(None, aux_window_size(), cx);
+    let opened = cx.open_window(
+        with_app_identity(WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(aux_min_window_size()),
+            titlebar: Some(TitlebarOptions {
+                title: Some(SharedString::from(i18n::tr("disk.storage_title"))),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| StorageWindow::new(window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
+        },
+    );
+    if let Ok(handle) = opened {
+        cx.global::<ZStatsGlobalStore>()
+            .clone()
+            .update(cx, |state, _| state.set_storage_window(handle.into()));
     }
 }
 
@@ -923,18 +1062,29 @@ fn main() {
                 Quit,
                 None,
             ),
-            // Settings is a standard window, so it answers the standard
-            // dismissals — context-scoped, so neither key leaks into the
-            // panel (whose Escape-free, auto-hide life is deliberate).
-            KeyBinding::new("escape", CloseSettings, Some("SettingsWindow")),
+            // The auxiliary windows are standard windows, so they answer
+            // the standard dismissals — context-scoped, so neither key
+            // leaks into the panel (whose Escape-free, auto-hide life is
+            // deliberate).
+            KeyBinding::new("escape", CloseWindow, Some("SettingsWindow")),
+            KeyBinding::new("escape", CloseWindow, Some("StorageWindow")),
             KeyBinding::new(
                 if cfg!(target_os = "macos") {
                     "cmd-w"
                 } else {
                     "ctrl-w"
                 },
-                CloseSettings,
+                CloseWindow,
                 Some("SettingsWindow"),
+            ),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-w"
+                } else {
+                    "ctrl-w"
+                },
+                CloseWindow,
+                Some("StorageWindow"),
             ),
         ]);
         install_menus(cx);

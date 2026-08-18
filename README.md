@@ -38,7 +38,7 @@ The headline is **a base threshold combined with per-program ones**: one global 
 
 - **Large files, instantly** — straight from macOS's own Spotlight index, no disk walk: ≥500 MB (drops to ≥100 MB when few match)
 - **Directory analysis** — a background walk of your home tree (hundreds of thousands of directories in about half a minute) into three rankings: regenerable caches (`CACHEDIR.TAG`), fat directories, and files the index never sees
-- Results stream while it walks; click a folder to drill in; pick the analysis root
+- Both live in a window of their own, wide enough to read a path in full; results stream while the walk runs, click a folder to drill in, pick the analysis root
 - Cleanup suggestions **speak only by rule**: a directory either carries a signature-checked `CACHEDIR.TAG` (the owner's own declaration that it is regenerable) or matches a cache list compiled from **each tool's official documentation** (npm, Cargo, Xcode, …) — name-based guesses are labelled, never suggested. One click to the Trash, with the owner's own cleanup command shown
 - Rules you can replace: drop a `~/.zstats/cleanhints-macos.toml` to override the built-in list
 
