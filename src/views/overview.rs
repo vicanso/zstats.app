@@ -62,7 +62,20 @@ fn top_cpu(state: &ZStatsAppState) -> AnyElement {
             Some(top_cpu_all()),
         ))
         .children(rows.into_iter().enumerate().map(|(i, (p, avg))| {
-            let hot = avg > processes::HOT_PERCENT;
+            let sustained = state.sustained_load(p.pid);
+            let hot = processes::is_hot(avg, sustained.is_some());
+            // A red number with nothing beside it is a question. The
+            // Processes row answers it with a visible "sustained" pill;
+            // here, at 320px next to a truncating name, the tooltip is
+            // the proportionate place to say which of the two rules
+            // lit it.
+            let why = state.sustained_load(p.pid).map(|dur| {
+                t!(
+                    "processes.sustained",
+                    duration = format::uptime(dur.as_secs())
+                )
+                .to_string()
+            });
             h_flex()
                 .items_center()
                 .justify_between()
@@ -84,11 +97,13 @@ fn top_cpu(state: &ZStatsAppState) -> AnyElement {
                 )
                 .child(
                     div()
+                        .id(("top-cpu-pct", i))
                         .flex_none()
                         .font_family(font::MONO)
                         .text_size(px(12.))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(theme::text_for(hot))
+                        .when_some(why, |d, text| d.tooltip(widgets::wrap_tooltip(text)))
                         .child(format::pct_col(avg as f32)),
                 )
         }))

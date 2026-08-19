@@ -209,6 +209,28 @@ pub fn ago(elapsed: Duration) -> String {
     }
 }
 
+/// How long something has been going on, in the locale's words.
+///
+/// Not [`uptime`], which is the `4h 12m` shorthand a monospaced column
+/// needs. This one sits inside a sentence next to [`ago`] — an alert
+/// head reads "3 hours 24 minutes ago · going 1 hour 19 minutes", and
+/// having one half spelled out while the other wore `1h 19m` made the
+/// two look like different kinds of measurement.
+pub fn span(elapsed: Duration) -> String {
+    use rust_i18n::t;
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return t!("time.under_a_minute").to_string();
+    }
+    let h = secs / 3_600;
+    let m = (secs % 3_600) / 60;
+    if h > 0 {
+        t!("time.hours_minutes", h = h, m = format!("{m:02}")).to_string()
+    } else {
+        t!("time.minutes", m = m).to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

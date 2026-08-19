@@ -35,9 +35,73 @@ use zstats::snapshot::{Capabilities, ProcessSnapshot};
 /// hotter, so the trough still fills on a busy machine.
 const BAR_FLOOR_PERCENT: f32 = 100.0;
 
-/// Past this a process is worth flagging visually. Shared with Overview
-/// so the same pid is red in both places, or in neither.
-pub(super) const HOT_PERCENT: f64 = 200.0;
+/// What a row's meter is drawn from, and what a full track means.
+///
+/// The measure follows the list's ranking key on purpose. With rows
+/// ordered by memory and meters drawn from CPU — which is what this used
+/// to do — one list carries two different rankings, and the sort reads as
+/// broken. Name order ranks by no magnitude at all, so there the page's
+/// own subject keeps the track.
+#[derive(Clone, Copy)]
+struct BarScale {
+    by_memory: bool,
+    full: f32,
+}
+
+impl BarScale {
+    /// Which page the maxima come from is the caller's call: the top
+    /// list measures the rows it shows, the full listing measures the
+    /// whole table rather than the filtered cut, so its meters do not
+    /// rescale on every keystroke.
+    fn new(sort: ProcSort, cpu_max: f32, mem_max: u64) -> Self {
+        let by_memory = matches!(sort, ProcSort::Memory);
+        Self {
+            by_memory,
+            // Memory gets no floor-at-one-core equivalent: bytes have no
+            // natural unit to hold the track against, so the largest row
+            // on the page is the only honest full. A `max(1)` only keeps
+            // the division defined.
+            full: if by_memory {
+                (mem_max as f32).max(1.0)
+            } else {
+                cpu_max.max(BAR_FLOOR_PERCENT)
+            },
+        }
+    }
+
+    fn fraction(&self, p: &ProcessSnapshot, cpu: f64) -> f32 {
+        if self.by_memory {
+            shown_memory(p) as f32 / self.full
+        } else {
+            cpu as f32 / self.full
+        }
+    }
+}
+
+/// A burst this big is worth flagging on its own — two whole cores.
+/// Deliberately not scaled by core count: the percentage means the same
+/// thing on every machine, and a line that moved with the hardware would
+/// make the same number red here and grey there.
+const HOT_PERCENT: f64 = 200.0;
+
+/// Whether a row gets the page's only colour. Shared with Overview so
+/// the same pid is red in both places, or in neither.
+///
+/// Two ways in, because "worth a look" has two shapes. A burst over
+/// [`HOT_PERCENT`] is the obvious one. The other is a process holding a
+/// low-but-real share for a long time (`watch.rs`), which **by
+/// definition never crosses a threshold** — it was the whole reason that
+/// watcher exists, and the colour used to ignore it: a compile spiking
+/// to 210% for two seconds lit up, while a daemon sitting on 60% for
+/// four hours looked exactly like one at 3%. On a 12-core machine the
+/// burst line is a sixth of the box, so in practice the old rule almost
+/// never fired at all.
+///
+/// Display only, like every threshold in `views/` — the alert engine is
+/// untouched, and the sustained watcher still notifies on its own terms.
+pub(super) fn is_hot(cpu: f64, sustained: bool) -> bool {
+    cpu > HOT_PERCENT || sustained
+}
 
 /// Header plus caveat above the list: 36 for the header (11 + 16 + 9), and
 /// 34 for the note, which wraps to two lines at this width in every locale.
@@ -178,10 +242,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .unwrap_or_default();
     // Floor at one core so a quiet page does not stretch its hottest
     // 8% process across the whole track.
-    let bar_full = rows
-        .iter()
-        .map(|(_, cpu)| *cpu as f32)
-        .fold(BAR_FLOOR_PERCENT, f32::max);
+    let bar = BarScale::new(
+        state.proc_sort(),
+        rows.iter().map(|(_, cpu)| *cpu as f32).fold(0.0, f32::max),
+        rows.iter().map(|(p, _)| shown_memory(p)).max().unwrap_or(0),
+    );
 
     let no_match = !filter.is_empty() && rows.is_empty() && !only_abnormal;
 
@@ -240,7 +305,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .map(move |(i, (p, avg))| {
                             let parent_name =
                                 p.parent_pid.and_then(|pp| name_by_pid.get(&pp).copied());
-                            process_row(p, avg, bar_full, i + 1 == shown, state, parent_name)
+                            process_row(p, avg, bar, i + 1 == shown, state, parent_name)
                         })
                 })
                 .when(no_match, |d| {
@@ -274,16 +339,18 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 /// `cpu` is whatever the caller ranks by — the 60s rolling average in the
 /// top list, the scan-window sample in the full one. The row cannot tell
 /// which it was given; the full-scan card's caveat line is what owns that
-/// difference.
+/// difference. `bar` decides what the meter measures, which is the list's
+/// sort key rather than always CPU — see [`BarScale`].
 fn process_row(
     p: &ProcessSnapshot,
     cpu: f64,
-    bar_full: f32,
+    bar: BarScale,
     is_last: bool,
     state: &ZStatsAppState,
     parent_name: Option<&str>,
 ) -> AnyElement {
-    let hot = cpu > HOT_PERCENT;
+    let sustained = state.sustained_load(p.pid);
+    let hot = is_hot(cpu, sustained.is_some());
     // `Default` is `current()`, so a row painted before the first tick
     // reads this build's own capabilities — never a false "unsupported".
     let caps = state
@@ -303,7 +370,7 @@ fn process_row(
         // every line a different length.
         .w_full()
         .px(px(13.))
-        .py(px(9.))
+        .py(px(7.))
         .when(!is_last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
         })
@@ -364,7 +431,7 @@ fn process_row(
                                 }),
                         )
                         .when(is_self, |d| d.child(this_app_badge()))
-                        .children(state.sustained_load(p.pid).map(|dur| {
+                        .children(sustained.map(|dur| {
                             // This never trips the alert — that asks
                             // whether it is over the line right now,
                             // and it never is. So the badge is the
@@ -386,10 +453,10 @@ fn process_row(
                         .child(format::memory(shown_memory(p))),
                 ),
         )
-        .child(div().mt(px(6.)).child(widgets::meter(
-            (avg as f32) / bar_full,
+        .child(div().mt(px(4.)).child(widgets::meter(
+            bar.fraction(p, avg),
             Hsla::from(theme::fill_for(hot)),
-            4.,
+            3.,
         )));
 
     if expanded {
@@ -435,10 +502,14 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
     // page, so the meters in the two lists mean the same thing. Over the
     // whole page rather than the filtered cut, so the meters do not
     // rescale on every keystroke.
-    let bar_full = processes
-        .iter()
-        .map(|p| p.cpu_usage_percent)
-        .fold(BAR_FLOOR_PERCENT, f32::max);
+    let bar = BarScale::new(
+        state.proc_sort(),
+        processes
+            .iter()
+            .map(|p| p.cpu_usage_percent)
+            .fold(0.0, f32::max),
+        processes.iter().map(shown_memory).max().unwrap_or(0),
+    );
     let chrome = FULL_CHROME_HEIGHT
         + if state.proc_filter_open() {
             FILTER_ROW_HEIGHT
@@ -494,7 +565,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
                 process_row(
                     p,
                     f64::from(p.cpu_usage_percent),
-                    bar_full,
+                    bar,
                     i + 1 == count,
                     state,
                     parent_name,
@@ -1130,6 +1201,53 @@ mod tests {
         assert!(show_user(Some("0"), Some("501")));
         assert!(show_user(Some("501"), None));
         assert!(!show_user(None, Some("501")));
+    }
+
+    /// The colour has two ways in, and the second one is the point: a
+    /// process that never crosses the burst line still earns it by
+    /// holding a share for long enough. The old rule could only see
+    /// bursts, so the daemon that had been at 60% all afternoon looked
+    /// exactly like one at 3%.
+    #[test]
+    fn a_long_hold_is_hot_even_though_it_never_crosses_the_burst_line() {
+        assert!(is_hot(210.0, false), "two cores is a burst");
+        assert!(!is_hot(60.0, false), "a moment at 60% is just work");
+        assert!(is_hot(60.0, true), "the same 60% held long enough is not");
+        assert!(is_hot(0.4, true), "the watcher's own bar is well under 200");
+    }
+
+    /// A list may only draw one ranking. Sorting by memory and filling
+    /// the meters from CPU is two, and the second one reads as the sort
+    /// having failed.
+    #[test]
+    fn the_meter_measures_whatever_the_list_is_sorted_by() {
+        let heavy = snap("heavy", 20.0, 8_000_000_000);
+        let hot = snap("hot", 400.0, 100_000_000);
+
+        let by_cpu = BarScale::new(ProcSort::Cpu, 400.0, 8_000_000_000);
+        assert_eq!(by_cpu.fraction(&hot, 400.0), 1.0, "hottest fills the track");
+        assert_eq!(by_cpu.fraction(&heavy, 20.0), 20.0 / 400.0);
+
+        let by_mem = BarScale::new(ProcSort::Memory, 400.0, 8_000_000_000);
+        assert_eq!(by_mem.fraction(&heavy, 20.0), 1.0, "largest fills it");
+        assert_eq!(
+            by_mem.fraction(&hot, 400.0),
+            100_000_000.0 / 8_000_000_000.0
+        );
+
+        // Name order ranks by no magnitude, so the page's own subject
+        // keeps the track.
+        let by_name = BarScale::new(ProcSort::Name, 400.0, 8_000_000_000);
+        assert_eq!(by_name.fraction(&hot, 400.0), 1.0);
+
+        // A quiet page does not stretch its hottest 8% across the track.
+        let quiet = BarScale::new(ProcSort::Cpu, 8.0, 1_000);
+        assert_eq!(quiet.fraction(&snap("idle", 8.0, 1_000), 8.0), 0.08);
+        // An empty page divides by something.
+        assert_eq!(
+            BarScale::new(ProcSort::Memory, 0.0, 0).fraction(&snap("x", 0.0, 0), 0.0),
+            0.0
+        );
     }
 
     #[test]

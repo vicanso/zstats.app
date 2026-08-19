@@ -22,6 +22,7 @@ use gpui::{
 };
 use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
+use std::collections::HashSet;
 use zstats::snapshot::ProcessGroupSnapshot;
 
 const HOT_PERCENT: f32 = 200.0;
@@ -107,9 +108,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .overflow_y_scroll()
                 .max_h(px(processes::rows_height(state)))
                 .children({
-                    rows.into_iter()
-                        .enumerate()
-                        .map(move |(i, g)| app_row(g, i + 1 == shown, state))
+                    let repeated = repeated_names(rows.iter().map(|g| g.name.as_str()));
+                    rows.into_iter().enumerate().map(move |(i, g)| {
+                        let ambiguous = repeated.contains(g.name.as_str());
+                        app_row(g, i + 1 == shown, state, ambiguous)
+                    })
                 })
                 .when(no_match, |d| {
                     d.child(
@@ -134,6 +137,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
 fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement {
     let groups = data.groups.clone();
+    // Owned, unlike the top list's borrowed set: this closure outlives
+    // the frame that builds it, so it cannot hold a name that belongs to
+    // the tick. Only repeated names allocate, which is normally none.
+    let repeated: HashSet<String> = repeated_names(groups.iter().map(|g| g.name.as_str()))
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let visible = data.visible.clone();
     let count = visible.len();
     let chrome = FULL_CHROME_HEIGHT
@@ -176,7 +186,8 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
             list(data.list.clone(), move |i, _window, cx| {
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let g = &groups[visible[i]];
-                app_row(g, i + 1 == count, state)
+                let ambiguous = repeated.contains(g.name.as_str());
+                app_row(g, i + 1 == count, state, ambiguous)
             })
             .h(px(height)),
         )
@@ -244,7 +255,12 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
-fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> AnyElement {
+fn app_row(
+    g: &ProcessGroupSnapshot,
+    is_last: bool,
+    state: &ZStatsAppState,
+    ambiguous: bool,
+) -> AnyElement {
     let hot = g.cpu_usage_percent > HOT_PERCENT;
     let expanded = state.selected_app() == Some(g.root_pid);
     let root_pid = g.root_pid;
@@ -253,7 +269,9 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
         .id(("app", root_pid as usize))
         .w_full()
         .px(px(13.))
-        .py(px(10.))
+        // Same rhythm as a process row: this list carries less per row
+        // (no meter), so it has no business being the looser of the two.
+        .py(px(7.))
         .when(!is_last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
         })
@@ -289,18 +307,22 @@ fn app_row(g: &ProcessGroupSnapshot, is_last: bool, state: &ZStatsAppState) -> A
                 .items_center()
                 .justify_between()
                 .gap(px(8.))
-                .mt(px(5.))
-                .child(widgets::outline_pill(if g.process_count == 1 {
-                    i18n::tr("apps.one_process")
-                } else {
-                    t!("apps.n_processes", count = g.process_count).to_string()
-                }))
+                .mt(px(3.))
+                .text_size(px(10.))
                 .child(
                     div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme::text_dim())
+                        .child(tree_meta(g, ambiguous)),
+                )
+                .child(
+                    div()
+                        .flex_none()
                         .font_family(font::MONO)
                         .text_size(px(9.5))
                         .text_color(theme::text_muted())
-                        .child(mem_io_line(
+                        .child(io_mem_line(
                             shown_memory(g),
                             g.read_bytes_per_sec,
                             g.write_bytes_per_sec,
@@ -366,9 +388,53 @@ fn shown_memory(g: &ProcessGroupSnapshot) -> u64 {
     g.phys_footprint_bytes.unwrap_or(g.memory_bytes)
 }
 
-fn mem_io_line(memory: u64, read: Option<u64>, write: Option<u64>) -> String {
+/// The row's left-hand facts: how many processes the tree holds, and the
+/// pid at its root.
+///
+/// The count used to wear an outlined pill — the same chrome as the
+/// header's All chip, on something that does not click, repeated down
+/// every row. It is plain text now, like the pid line a process row
+/// carries in the same slot.
+///
+/// The pid is here because names repeat: two `login` trees are two
+/// terminal sessions, and with nothing to tell them apart the list reads
+/// as if it rendered a row twice.
+fn tree_meta(g: &ProcessGroupSnapshot, ambiguous: bool) -> String {
+    let count = if g.process_count == 1 {
+        i18n::tr("apps.one_process")
+    } else {
+        t!("apps.n_processes", count = g.process_count).to_string()
+    };
+    if !ambiguous {
+        return count;
+    }
+    format!("{count} · {}", t!("processes.pid_only", pid = g.root_pid))
+}
+
+/// Which names this listing shows more than once. Only those rows spend
+/// width on a pid: at 320px a busy row already carries
+/// `R 253 kB/s · W 116 kB/s · 1.9 GB` on the right, and an unconditional
+/// pid would push the left half into an ellipsis — truncating the very
+/// digits it was added to disambiguate.
+fn repeated_names<'a>(names: impl Iterator<Item = &'a str>) -> HashSet<&'a str> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut twice: HashSet<&str> = HashSet::new();
+    for name in names {
+        if !seen.insert(name) {
+            twice.insert(name);
+        }
+    }
+    twice
+}
+
+/// Memory **last**, so it lands on the row's right edge in every row and
+/// forms a column the eye can run down. With it first — as it was — the
+/// IO half is what aligns, and IO is the part that comes and goes, so
+/// the memory figure moved horizontally from row to row and could not be
+/// compared at all.
+fn io_mem_line(memory: u64, read: Option<u64>, write: Option<u64>) -> String {
     match io_line(read, write) {
-        Some(io) => format!("{} · {}", format::memory(memory), io),
+        Some(io) => format!("{io} · {}", format::memory(memory)),
         None => format::memory(memory),
     }
 }
@@ -412,6 +478,40 @@ mod tests {
         assert_eq!(shown_memory(&g), 300, "footprint wins where there is one");
     }
 
+    /// Two `login` trees are two terminal sessions; without the pid the
+    /// list reads as if it rendered a row twice. A unique name gets none
+    /// — the row has no width to spare for a disambiguator that
+    /// disambiguates nothing.
+    #[test]
+    fn only_a_repeated_name_earns_a_pid() {
+        let repeated = repeated_names(["login", "Finder", "login", "WeChat"].into_iter());
+        assert!(repeated.contains("login"));
+        assert!(!repeated.contains("Finder"));
+        assert_eq!(repeated.len(), 1, "only the one that actually repeats");
+
+        let g = ProcessGroupSnapshot {
+            root_pid: 4321,
+            name: "login".into(),
+            process_count: 4,
+            cpu_usage_percent: 0.0,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        };
+        // Asserted on the separator this function owns, not on
+        // translated text: the locale files are not loaded here, and a
+        // test that reads one would be testing rust-i18n's fallback.
+        assert!(
+            !tree_meta(&g, false).contains(" · "),
+            "a unique name carries the count alone"
+        );
+        assert!(
+            tree_meta(&g, true).contains(" · "),
+            "a repeated one gains a second fact"
+        );
+    }
+
     #[test]
     fn io_line_stays_off_when_uncollected_or_idle() {
         assert_eq!(io_line(None, None), None);
@@ -424,7 +524,12 @@ mod tests {
             io_line(Some(2048), Some(0)),
             Some("R 2 kB/s · W 0 B/s".into())
         );
-        assert_eq!(mem_io_line(98 * 1024 * 1024, None, None), "98 MB");
-        assert_eq!(mem_io_line(98 * 1024 * 1024, Some(0), Some(0)), "98 MB");
+        assert_eq!(io_mem_line(98 * 1024 * 1024, None, None), "98 MB");
+        assert_eq!(io_mem_line(98 * 1024 * 1024, Some(0), Some(0)), "98 MB");
+        // Memory last, always — that is what gives the column an edge.
+        assert!(
+            io_mem_line(98 * 1024 * 1024, Some(2048), Some(0)).ends_with("98 MB"),
+            "memory has to be the rightmost figure"
+        );
     }
 }

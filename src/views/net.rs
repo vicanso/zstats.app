@@ -19,8 +19,18 @@ use gpui::{
 use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
 
-/// Bar scale: 10 MB/s fills the track.
-const SCALE_BYTES: f32 = 10.0 * 1024.0 * 1024.0;
+/// Floor for the bar scale, below which the busiest row does not get to
+/// define "full".
+///
+/// The track used to be a fixed 10 MB/s, which is a rate a laptop link
+/// almost never sustains: at a normal 11 kB/s the fill was 0.1% — every
+/// bar on the page painted empty, so fourteen tracks carried no
+/// information at all. The scale is the page's own maximum now, the same
+/// shape as the process list's, and this floor is what stops a machine
+/// doing 3 kB/s of housekeeping from painting a full bar and reading as
+/// saturated. 64 KiB/s is roughly where traffic starts being worth
+/// seeing.
+const SCALE_FLOOR_BYTES: f32 = 64.0 * 1024.0;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(tick) = state.latest() else {
@@ -67,6 +77,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             .then_with(|| a.interface.cmp(&b.interface))
     });
 
+    let scale = scale_for(&rows);
     let last = rows.len().saturating_sub(1);
     let list = widgets::list_shell()
         .child(widgets::list_header(
@@ -90,7 +101,12 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 })
                 .child(
                     div()
-                        .w(px(42.))
+                        // 64, not 42: `vmenet0` needs 43 and `bridge100`
+                        // needs ~58, so the old width turned three distinct
+                        // VM adapters into three rows all reading `vmen…`.
+                        // A truncation that erases the difference between
+                        // rows is worse than a narrower bar beside it.
+                        .w(px(64.))
                         .flex_none()
                         .text_size(px(11.))
                         .font_weight(gpui::FontWeight::MEDIUM)
@@ -121,8 +137,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             h_flex()
                                 .gap(px(3.))
                                 .mt(px(5.))
-                                .child(bar(n.received_bytes_per_sec, theme::ink()))
-                                .child(bar(n.transmitted_bytes_per_sec, theme::text_dim())),
+                                .child(bar(n.received_bytes_per_sec, scale, theme::ink()))
+                                .child(bar(n.transmitted_bytes_per_sec, scale, theme::text_dim())),
                         ),
                 )
         }));
@@ -174,7 +190,18 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
         .into_any_element()
 }
 
-fn bar(bytes_per_sec: u64, fill: gpui::Rgba) -> AnyElement {
+/// Both directions share one scale, so ↓ and ↑ can be read against each
+/// other as well as against the other rows.
+fn scale_for(rows: &[&zstats::snapshot::NetworkSnapshot]) -> f32 {
+    rows.iter()
+        .flat_map(|n| [n.received_bytes_per_sec, n.transmitted_bytes_per_sec])
+        .max()
+        .map_or(SCALE_FLOOR_BYTES, |peak| {
+            (peak as f32).max(SCALE_FLOOR_BYTES)
+        })
+}
+
+fn bar(bytes_per_sec: u64, scale: f32, fill: gpui::Rgba) -> AnyElement {
     div()
         .flex_1()
         .h(px(4.))
@@ -184,11 +211,45 @@ fn bar(bytes_per_sec: u64, fill: gpui::Rgba) -> AnyElement {
         .child(
             div()
                 .h_full()
-                .w(relative(
-                    (bytes_per_sec as f32 / SCALE_BYTES).clamp(0.0, 1.0),
-                ))
+                .w(relative((bytes_per_sec as f32 / scale).clamp(0.0, 1.0)))
                 .rounded_full()
                 .bg(fill),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zstats::snapshot::NetworkSnapshot;
+
+    fn net(rx: u64, tx: u64) -> NetworkSnapshot {
+        NetworkSnapshot {
+            interface: "en0".into(),
+            received_bytes_per_sec: rx,
+            transmitted_bytes_per_sec: tx,
+            received_packets_per_sec: None,
+            transmitted_packets_per_sec: None,
+            received_errors_per_sec: None,
+            transmitted_errors_per_sec: None,
+        }
+    }
+
+    /// The track means "against the busiest thing on this page", but not
+    /// below a rate worth drawing: a quiet machine must not paint a full
+    /// bar for a trickle, and a real download must not peg every row.
+    #[test]
+    fn the_track_follows_the_page_but_never_below_the_floor() {
+        let quiet = [net(11_000, 9_000), net(3_000, 7_000)];
+        let scale = scale_for(&quiet.iter().collect::<Vec<_>>());
+        assert_eq!(scale, SCALE_FLOOR_BYTES, "11 kB/s does not get to be full");
+        assert!(11_000.0 / scale > 0.1, "and is still visible");
+
+        let busy = [net(5 * 1024 * 1024, 0), net(1024 * 1024, 0)];
+        let scale = scale_for(&busy.iter().collect::<Vec<_>>());
+        assert_eq!(scale, 5.0 * 1024.0 * 1024.0, "the busiest row defines full");
+
+        // An empty page still divides by something.
+        assert_eq!(scale_for(&[]), SCALE_FLOOR_BYTES);
+    }
 }

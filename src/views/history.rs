@@ -5,7 +5,7 @@
 //! process that never looks busy and yet costs the most over a day — see
 //! [`crate::history`].
 
-use super::widgets::{self, card};
+use super::widgets;
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -69,6 +69,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .max(1);
     let shown: Vec<_> = ordered.into_iter().take(TOP_N).collect();
     let last = shown.len().saturating_sub(1);
+    let has_note = rows.len() > TOP_N;
 
     // Two `yes` rows with different pids read as a duplicate at a squint;
     // a repeated name gets its pid inline so identity is visible without
@@ -80,153 +81,197 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let list = widgets::list_shell()
         .child(widgets::list_header(
-            title,
+            // The note this carries used to be a card of its own under
+            // the list. It is a read-once fact about how the ranking
+            // works, which is what an ⓘ beside the title is for (the
+            // Processes header does the same with its CPU basis) — and
+            // moving it out is what lets the list card be exactly one
+            // screen tall, so the header can stay put for real.
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(title)
+                .child(widgets::info_icon(
+                    "history-basis",
+                    i18n::tr("history.about_body"),
+                )),
             Some(header_controls(state, range)),
         ))
-        .children(shown.into_iter().enumerate().map(|(i, s)| {
+        .child(
+            // The rows scroll under the header rather than taking the
+            // whole card past the top of the panel — the same pinned
+            // model as the Processes and Apps lists, and the reason is
+            // the same: the range and sort controls live in that header,
+            // and a control you have to scroll back up to reach is a
+            // control you stop using.
             v_flex()
-                .px(px(13.))
-                .py(px(9.))
-                .when(i != last, |d| {
-                    d.border_b(px(1.)).border_color(theme::border_subtle())
-                })
-                .child(
-                    h_flex()
-                        .items_baseline()
-                        .justify_between()
-                        .gap(px(8.))
+                .id("history-rows")
+                .track_scroll(state.history_rows_scroll())
+                .overflow_y_scroll()
+                .max_h(px(rows_height(state, has_note)))
+                .children(shown.into_iter().enumerate().map(|(i, s)| {
+                    let repeated = name_counts[s.name.as_str()] > 1;
+                    v_flex()
+                        .px(px(13.))
+                        .py(px(9.))
+                        .when(i != last, |d| {
+                            d.border_b(px(1.)).border_color(theme::border_subtle())
+                        })
                         .child(
                             h_flex()
-                                .flex_1()
-                                .min_w_0()
                                 .items_baseline()
-                                .gap(px(5.))
+                                .justify_between()
+                                .gap(px(8.))
                                 .child(
-                                    div()
+                                    h_flex()
+                                        .flex_1()
                                         .min_w_0()
-                                        .text_size(px(12.))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme::text())
-                                        .truncate()
-                                        .child(s.name.clone()),
-                                )
-                                .when(name_counts[s.name.as_str()] > 1, |d| {
-                                    d.child(
-                                        div()
-                                            .flex_none()
-                                            .font_family(font::MONO)
-                                            .text_size(px(9.5))
-                                            .text_color(theme::text_faint())
-                                            .child(s.pid.to_string()),
-                                    )
-                                }),
-                        )
-                        // The headline figure is core-time, which shares a
-                        // unit *shape* with the wall-clock minutes below —
-                        // the CPU tag is what keeps "30m" from reading as a
-                        // duration of day.
-                        .child(
-                            h_flex()
-                                .flex_none()
-                                .items_baseline()
-                                .gap(px(3.))
-                                .child(
-                                    div()
-                                        .font_family(font::MONO)
-                                        .text_size(px(12.))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(theme::text())
-                                        .child(match sort {
-                                            HistorySort::CpuTime => {
-                                                format::core_time(s.cpu_time_ms)
-                                            }
-                                            HistorySort::PeakMemory => {
-                                                format::memory(s.peak_memory_bytes)
-                                            }
+                                        .items_baseline()
+                                        .gap(px(5.))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_size(px(12.))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .text_color(theme::text())
+                                                .truncate()
+                                                .child(s.name.clone()),
+                                        )
+                                        .when(repeated, |d| {
+                                            d.child(
+                                                div()
+                                                    .flex_none()
+                                                    .font_family(font::MONO)
+                                                    .text_size(px(9.5))
+                                                    .text_color(theme::text_faint())
+                                                    .child(s.pid.to_string()),
+                                            )
                                         }),
                                 )
+                                // The headline figure is core-time, which shares a
+                                // unit *shape* with the wall-clock minutes below —
+                                // the CPU tag is what keeps "30m" from reading as a
+                                // duration of day.
                                 .child(
-                                    div()
-                                        .text_size(px(8.5))
-                                        .text_color(theme::text_dim())
-                                        .child(i18n::tr(match sort {
-                                            HistorySort::CpuTime => "alerts.kind_cpu",
-                                            HistorySort::PeakMemory => "history.peak_tag",
-                                        })),
+                                    h_flex()
+                                        .flex_none()
+                                        .items_baseline()
+                                        .gap(px(3.))
+                                        .child(
+                                            div()
+                                                .font_family(font::MONO)
+                                                .text_size(px(12.))
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(theme::text())
+                                                .child(match sort {
+                                                    HistorySort::CpuTime => {
+                                                        format::core_time(s.cpu_time_ms)
+                                                    }
+                                                    HistorySort::PeakMemory => {
+                                                        format::memory(s.peak_memory_bytes)
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(8.5))
+                                                .text_color(theme::text_dim())
+                                                .child(i18n::tr(match sort {
+                                                    HistorySort::CpuTime => "alerts.kind_cpu",
+                                                    HistorySort::PeakMemory => "history.peak_tag",
+                                                })),
+                                        ),
                                 ),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .gap(px(8.))
-                        .mt(px(2.))
-                        .text_size(px(10.))
-                        .text_color(theme::text_dim())
-                        .child(
-                            div().child(match sort {
-                                HistorySort::CpuTime => t!(
-                                    "history.pid_mem",
-                                    pid = s.pid,
-                                    mem = format::memory(s.peak_memory_bytes)
-                                )
-                                .to_string(),
-                                HistorySort::PeakMemory => t!(
-                                    "history.pid_cpu",
-                                    pid = s.pid,
-                                    cpu = format::core_time(s.cpu_time_ms)
-                                )
-                                .to_string(),
-                            }),
                         )
-                        // Peak beside total on purpose: a small peak next to a
-                        // large total is exactly the process this view exists
-                        // to find, and the pairing is what makes that legible.
                         .child(
-                            div().font_family(font::MONO).child(
-                                t!(
-                                    "history.peak",
-                                    cpu = format::pct(s.peak_cpu_percent),
-                                    minutes = s.minutes
+                            h_flex()
+                                .justify_between()
+                                .gap(px(8.))
+                                .mt(px(2.))
+                                .text_size(px(10.))
+                                .text_color(theme::text_dim())
+                                .child(
+                                    // The pid is said once per row. A repeated
+                                    // name already carries it inline above,
+                                    // where the eye needs it to tell two rows
+                                    // apart; repeating it here was the same
+                                    // fact twice on one row.
+                                    div().child(match (sort, repeated) {
+                                        (HistorySort::CpuTime, false) => t!(
+                                            "history.pid_mem",
+                                            pid = s.pid,
+                                            mem = format::memory(s.peak_memory_bytes)
+                                        )
+                                        .to_string(),
+                                        (HistorySort::CpuTime, true) => t!(
+                                            "history.mem_only",
+                                            mem = format::memory(s.peak_memory_bytes)
+                                        )
+                                        .to_string(),
+                                        (HistorySort::PeakMemory, false) => t!(
+                                            "history.pid_cpu",
+                                            pid = s.pid,
+                                            cpu = format::core_time(s.cpu_time_ms)
+                                        )
+                                        .to_string(),
+                                        (HistorySort::PeakMemory, true) => t!(
+                                            "history.cpu_only",
+                                            cpu = format::core_time(s.cpu_time_ms)
+                                        )
+                                        .to_string(),
+                                    }),
                                 )
-                                .to_string(),
-                            ),
-                        ),
-                )
-                .child(div().mt(px(6.)).child(widgets::meter(
-                    match sort {
-                        HistorySort::CpuTime => s.cpu_time_ms as f32,
-                        HistorySort::PeakMemory => s.peak_memory_bytes as f32,
-                    } / top as f32,
-                    Hsla::from(theme::ink()),
-                    4.,
-                )))
-                .into_any_element()
-        }));
+                                // Peak beside total on purpose: a small peak next to a
+                                // large total is exactly the process this view exists
+                                // to find, and the pairing is what makes that legible.
+                                .child(
+                                    div().font_family(font::MONO).child(
+                                        t!(
+                                            "history.peak",
+                                            cpu = format::pct(s.peak_cpu_percent),
+                                            minutes = s.minutes
+                                        )
+                                        .to_string(),
+                                    ),
+                                ),
+                        )
+                        .child(div().mt(px(6.)).child(widgets::meter(
+                            match sort {
+                                HistorySort::CpuTime => s.cpu_time_ms as f32,
+                                HistorySort::PeakMemory => s.peak_memory_bytes as f32,
+                            } / top as f32,
+                            Hsla::from(theme::ink()),
+                            4.,
+                        )))
+                        .into_any_element()
+                })),
+        );
 
     let mut out = vec![list.into_any_element()];
-    if rows.len() > TOP_N {
+    if has_note {
         out.push(widgets::note(
             t!("history.more", count = rows.len() - TOP_N).to_string(),
         ));
     }
-    out.push(explainer());
     out
 }
 
-/// Why this list disagrees with every other tab, said once where it is read.
-fn explainer() -> AnyElement {
-    card()
-        .child(widgets::card_header(i18n::tr("history.about"), None))
-        .child(
-            div()
-                .mt(px(4.))
-                .text_size(px(10.5))
-                .line_height(gpui::relative(1.4))
-                .text_color(theme::text_muted())
-                .child(i18n::tr("history.about_body")),
-        )
-        .into_any_element()
+/// The "N more processes" note and the gap above it — the only thing
+/// left under this list now that the explainer moved into the header's
+/// ⓘ.
+///
+/// Reserving exactly it is what makes the pin real: the card then adds
+/// up to the body's height with the note, the tab has nothing left to
+/// scroll, and the header cannot be scrolled away no matter what the
+/// wheel is over. Reserved only when the note exists — a list that fits
+/// keeps the row.
+const TRAILING_NOTE: f32 = 26.;
+
+/// The rows region's height — the same budget the Processes list gets,
+/// less the note when there is one.
+fn rows_height(state: &ZStatsAppState, has_note: bool) -> f32 {
+    let trailing = if has_note { TRAILING_NOTE } else { 0. };
+    (super::processes::rows_height(state) - trailing).max(160.)
 }
 
 /// Sort, range and refresh, side by side in the header.

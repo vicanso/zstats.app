@@ -101,22 +101,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .mt(px(3.))
                         .text_size(px(9.5))
                         .text_color(theme::text_muted())
-                        // zstats renders the sentence from the same fields it
-                        // evaluated, so no numbers are re-derived here.
-                        .child(seen.event.summary()),
+                        .child(alert_sentence(&seen.event)),
                 )
                 .children(consumer_rows(i, &seen.event, seen.live))
                 .when_some(seen.event.repeat_after, |d, after| {
                     d.child(div().mt(px(8.)).child(widgets::note(
-                        t!("alerts.follow_up", when = format::uptime(after.as_secs())).to_string(),
+                        t!("alerts.follow_up", when = format::span(after)).to_string(),
                     )))
-                })
-                .when(target.is_some() && !expanded, |d| {
-                    d.child(
-                        div()
-                            .mt(px(8.))
-                            .child(widgets::note(i18n::tr("alerts.set_hint"))),
-                    )
                 })
                 .when_some(target.filter(|_| expanded), |d, tgt| {
                     d.child(threshold_editor(i, &tgt, settings))
@@ -317,7 +308,7 @@ fn alert_head(
                 Some(span) => t!(
                     "alerts.episode_span",
                     ago = format::ago(seen.age()),
-                    span = format::uptime(span.as_secs())
+                    span = format::span(span)
                 )
                 .to_string(),
                 None => format::ago(seen.age()),
@@ -357,16 +348,22 @@ fn alert_head(
             .children(quit_button(index, seen))
             .children(hardware_button(index, &seen.event))
             .children(target.map(|tgt| {
-                Button::new(("edit-threshold", index))
-                    .icon(IconName::Settings2)
-                    .ghost()
-                    .xsmall()
-                    .tooltip(i18n::tr("alerts.edit_threshold"))
-                    .on_click(move |_, _window, cx| {
-                        cx.global::<ZStatsGlobalStore>()
-                            .clone()
-                            .update(cx, |state, cx| state.toggle_alert(tgt.key, &tgt.name, cx));
-                    })
+                // The note this tooltip carries used to be a line of its
+                // own at the foot of every card — one line per card, on
+                // every card, explaining a button that is right here.
+                widgets::with_wrap_tooltip(
+                    ("edit-threshold-tip", index),
+                    i18n::tr("alerts.set_hint"),
+                    Button::new(("edit-threshold", index))
+                        .icon(IconName::Settings2)
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, _window, cx| {
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| state.toggle_alert(tgt.key, &tgt.name, cx));
+                        }),
+                )
             }))
             .child({
                 // The list's only acknowledgement path — and the edge
@@ -421,6 +418,117 @@ fn alert_title(subject: &AlertSubject) -> AnyElement {
         .truncate()
         .child(subject_label(subject))
         .into_any_element()
+}
+
+/// The alert's sentence, in the reader's language.
+///
+/// zstats ships `AlertEvent::summary()`, and its own documentation says
+/// a frontend with its own layout or language should build from the
+/// fields instead — which is exactly what this does. **Nothing is
+/// recomputed**: every figure here is read off the event that fired, and
+/// deciding that it should fire stayed in the rule engine. Only the
+/// wording is ours.
+///
+/// Two things the English summary carries are deliberately dropped,
+/// because this card already shows them better:
+///
+/// - the subject's name, which is the card's title one line above;
+/// - the pressure alert's `top:` list, which the card renders underneath
+///   as real rows with a quit button on each.
+///
+/// The notification banner has its own, terser set of these
+/// (`notify_body`, `alerts.notify_*`): a macOS banner gets two lines, a
+/// card gets as many as it needs. The wording differs on purpose; the
+/// figures cannot drift apart, because both read the same fields off the
+/// same event.
+fn alert_sentence(event: &AlertEvent) -> String {
+    let pct = |v: f64| format!("{v:.0}");
+    match &event.detail {
+        AlertDetail::Cpu {
+            avg_percent,
+            threshold_percent,
+            window,
+            runaway,
+        } => t!(
+            if *runaway {
+                "alerts.msg_cpu_runaway"
+            } else {
+                "alerts.msg_cpu"
+            },
+            window = format::span(*window),
+            avg = pct(*avg_percent),
+            threshold = pct(*threshold_percent)
+        )
+        .to_string(),
+        AlertDetail::Memory {
+            avg_bytes,
+            share_percent,
+            threshold_bytes,
+            threshold_percent,
+            window,
+        } => t!(
+            "alerts.msg_memory",
+            window = format::span(*window),
+            used = format::memory(*avg_bytes),
+            share = pct(*share_percent),
+            // Bytes are the rule's native unit, but the field carries a
+            // serde default of zero, so a card restored from a file an
+            // older build wrote has none. The percent it was always
+            // expressed against is the honest stand-in — "0 B" would be
+            // a threshold nothing could cross.
+            threshold = if *threshold_bytes > 0 {
+                format::memory(*threshold_bytes)
+            } else {
+                format!("{}%", pct(*threshold_percent))
+            }
+        )
+        .to_string(),
+        AlertDetail::Disk {
+            used_percent,
+            threshold_percent,
+            available_bytes,
+            total_bytes,
+        } => t!(
+            "alerts.msg_disk",
+            used = pct(*used_percent),
+            threshold = pct(*threshold_percent),
+            available = format::capacity(*available_bytes),
+            total = format::capacity(*total_bytes)
+        )
+        .to_string(),
+        AlertDetail::Pressure {
+            level,
+            sustained,
+            swap_used_bytes,
+            swap_total_bytes,
+            compressed_bytes,
+            ..
+        } => {
+            // The kernel's own word for the level, the same one the
+            // Overview card shows — not a number, because 2 and 4 are
+            // labels rather than a scale (zstats says so on the field).
+            let level = i18n::tr(if *level >= 4 {
+                "overview.pressure_critical"
+            } else {
+                "overview.pressure_warning"
+            });
+            let mut text = t!(
+                "alerts.msg_pressure",
+                level = level,
+                span = format::span(*sustained),
+                swap_used = format::memory(*swap_used_bytes),
+                swap_total = format::memory(*swap_total_bytes)
+            )
+            .to_string();
+            if let Some(compressed) = compressed_bytes {
+                text.push_str(" · ");
+                text.push_str(
+                    t!("alerts.msg_compressed", size = format::memory(*compressed)).as_ref(),
+                );
+            }
+            text
+        }
+    }
 }
 
 /// Who the alert is about, in the design's compact form.

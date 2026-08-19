@@ -660,6 +660,7 @@ pub struct ZStatsAppState {
     /// own, held here for the same reason as the per-tab ones above.
     proc_rows_scroll: ScrollHandle,
     /// Same, for the Applications card.
+    history_rows_scroll: ScrollHandle,
     app_rows_scroll: ScrollHandle,
 }
 
@@ -761,6 +762,7 @@ impl Default for ZStatsAppState {
             next_seq: 0,
             scroll: array::from_fn(|_| ScrollHandle::new()),
             proc_rows_scroll: ScrollHandle::new(),
+            history_rows_scroll: ScrollHandle::new(),
             app_rows_scroll: ScrollHandle::new(),
         }
     }
@@ -1769,6 +1771,10 @@ impl ZStatsAppState {
 
     pub fn proc_rows_scroll(&self) -> &ScrollHandle {
         &self.proc_rows_scroll
+    }
+
+    pub fn history_rows_scroll(&self) -> &ScrollHandle {
+        &self.history_rows_scroll
     }
 
     pub fn app_rows_scroll(&self) -> &ScrollHandle {

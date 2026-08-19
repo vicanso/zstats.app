@@ -60,7 +60,19 @@ const TAB_STRIP_HEIGHT: f32 = 56.;
 const FOOTER_HEIGHT: f32 = 33.;
 
 /// What the body keeps clear beneath its content.
-const BODY_BOTTOM_PAD: f32 = 6.;
+///
+/// Bigger than the 14px side gutter, and deliberately: the two gaps end
+/// at different kinds of boundary. At the sides the card stops 14 short
+/// of the window's own rounded edge, which has nothing behind it. At the
+/// bottom it stops short of the footer's hairline — a drawn line with a
+/// bar behind it, and a line reads nearer than an empty edge does. 14
+/// there measured equal and looked tight, so it is 18: matched by eye
+/// rather than by the number, which is the only way spacing against
+/// different neighbours can be matched at all.
+///
+/// (Above, the tab strip already contributes 8 of its own, which is why
+/// [`CONTENT_TOP_PAD`] is 6 rather than a full gutter.)
+const BODY_BOTTOM_PAD: f32 = 18.;
 
 /// Space above the first card. The tab strip already ends with 8px, so
 /// this 6 brings tab-well → card to 14 — the same as the side gutter —
