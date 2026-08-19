@@ -255,9 +255,15 @@ fn analysis_pick_chip() -> AnyElement {
     widgets::with_wrap_tooltip("ana-pick-tip", i18n::tr("disk.ana_pick_hint"), button)
 }
 
-/// The "analysis scope" row under the boot volume's title: a dim label,
-/// the two preset chips, and the folder picker. `None` while a walk
-/// runs — the title row's cancel chip is the only control then.
+/// The "analysis scope" row: a dim label, the preset chips, and the
+/// folder picker. `None` while a walk runs — the header's cancel chip is
+/// the only control then.
+///
+/// The label carries the tooltip that says what a scope may be, and that
+/// the whole volume is deliberately not one of the options: the reason
+/// (firmlinks double-count, /System, TCC) belongs where someone looks
+/// for the missing choice, not only in the error they get after picking
+/// `/` in the folder panel.
 fn analysis_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
     if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
         return None;
@@ -270,8 +276,11 @@ fn analysis_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
             .pb(px(8.))
             .child(
                 div()
+                    .id("ana-scope-label")
+                    .flex_none()
                     .text_size(px(10.))
                     .text_color(theme::text_dim())
+                    .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_scope_tip")))
                     .child(i18n::tr("disk.ana_scope_label")),
             )
             .children(analysis_preset_chips())
@@ -280,9 +289,16 @@ fn analysis_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
     )
 }
 
-/// One-click preset scopes (docs/disk-analysis.md's scope table):
-/// `~/Library` — the blind-spot close-up — and the merged cache roots.
-/// Clicking starts the walk immediately, same contract as the picker.
+/// One-click preset scopes (docs/disk-analysis.md's scope table): the
+/// home tree, `~/Library` — the blind-spot close-up — and the merged
+/// cache roots. Clicking starts the walk immediately, same contract as
+/// the picker.
+///
+/// `~` is a chip even though it is also the default, because a scope
+/// sticks once picked: after a `~/Library` run, "re-analyze" means
+/// `~/Library` this launch and the next. Without this chip the only way
+/// back was the ✕, which also deletes the cached result and the Δ
+/// baseline — a heavy price for changing your mind about scope.
 fn analysis_preset_chips() -> Vec<AnyElement> {
     let chip = |id: &'static str,
                 label: String,
@@ -308,8 +324,23 @@ fn analysis_preset_chips() -> Vec<AnyElement> {
     };
     vec![
         chip(
+            "ana-preset-home",
+            // A word, not the path: `~` alone is a one-character chip
+            // that means nothing outside a terminal, and it is the one
+            // scope every reader needs to be able to find. The exact
+            // path rides the tooltip, where `~/Library` beside it keeps
+            // its own — that one is a specific subfolder, and naming it
+            // "Library" would collide with /Library and /System/Library.
+            i18n::tr("disk.ana_preset_home"),
+            i18n::tr("disk.ana_preset_home_tip"),
+            |state, cx| {
+                if let Some(home) = diskscan::default_root() {
+                    state.start_disk_analysis_at(home, cx);
+                }
+            },
+        ),
+        chip(
             "ana-preset-library",
-            // A path, not a phrase — the label needs no translation.
             "~/Library".into(),
             i18n::tr("disk.ana_preset_library_tip"),
             |state, cx| {

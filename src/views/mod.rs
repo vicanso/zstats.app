@@ -62,11 +62,26 @@ const FOOTER_HEIGHT: f32 = 33.;
 /// What the body keeps clear beneath its content.
 const BODY_BOTTOM_PAD: f32 = 6.;
 
+/// Space above the first card. The tab strip already ends with 8px, so
+/// this 6 brings tab-well → card to 14 — the same as the side gutter —
+/// without pulling the cards themselves 14px apart (that would ungroup
+/// the stack). Lists that size against [`body_height`] subtract it too.
+const CONTENT_TOP_PAD: f32 = 6.;
+
+/// Space between cards. Less than the 14px frame so the stack still
+/// reads as one group; more than the old 8px so it does not look
+/// pinched against the sides.
+const CARD_GAP: f32 = 12.;
+
 /// Room the scrolling body actually has, or `None` until the first frame
 /// has reported a window size.
 pub(super) fn body_height(state: &ZStatsAppState) -> Option<f32> {
     state.window_bounds().map(|bounds| {
-        f32::from(bounds.size.height) - TAB_STRIP_HEIGHT - FOOTER_HEIGHT - BODY_BOTTOM_PAD
+        f32::from(bounds.size.height)
+            - TAB_STRIP_HEIGHT
+            - FOOTER_HEIGHT
+            - BODY_BOTTOM_PAD
+            - CONTENT_TOP_PAD
     })
 }
 
@@ -186,8 +201,9 @@ fn content(state: &ZStatsAppState) -> AnyElement {
         .min_h_0()
         .overflow_y_scroll()
         .px(px(14.))
+        .pt(px(CONTENT_TOP_PAD))
         .pb(px(BODY_BOTTOM_PAD))
-        .child(v_flex().gap(px(8.)).children(body))
+        .child(v_flex().gap(px(CARD_GAP)).children(body))
         .into_any_element()
 }
 

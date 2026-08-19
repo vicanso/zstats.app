@@ -226,15 +226,36 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "" "$KEYCHAIN_PATH"
 
-          # import certificate
-          echo "$p12_certificate" | base64 --decode > certificate.p12
-          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
+          # import certificate. $RUNNER_TEMP, never the checkout: a file
+          # left in the workspace makes `git status --porcelain` non-empty,
+          # and build.rs reads that as "not this commit" and stamps the
+          # About page `<sha>-dirty`. A decoded signing certificate also
+          # has no business sitting inside the tree being built.
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$p12_certificate" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
+          rm -f "$CERT_PATH"
 
           # prevent system popup asking for password
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
 
           # set as default keychain
           security list-keychains -d user -s "$KEYCHAIN_PATH"
+      - name: workspace must be clean before the build
+        # build.rs stamps the About page with the HEAD sha, plus `-dirty`
+        # whenever `git status --porcelain` is non-empty at compile time —
+        # untracked files included. A released, signed, notarized binary
+        # that cannot be traced to a commit is a provenance hole, and the
+        # way it happened once was a step writing certificate.p12 into the
+        # checkout. Fail here, before the ten minutes of signing and
+        # notarization, rather than shipping the ambiguity.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "workspace is dirty; About would read <sha>-dirty" >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+          echo "clean at $(git rev-parse --short=12 HEAD)"
       - name: release
         run: cargo bundle --release --target ${{ matrix.target }}
       - name: write LSUIElement into Info.plist
@@ -355,8 +376,10 @@ jobs:
           security create-keychain -p "" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "" "$KEYCHAIN_PATH"
-          echo "$p12_certificate" | base64 --decode > certificate.p12
-          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$p12_certificate" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
+          rm -f "$CERT_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH"
       - name: download per-arch dmgs

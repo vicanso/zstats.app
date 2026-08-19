@@ -12,7 +12,7 @@ use std::env;
 /// Menu-bar panel: 320px matches Control Center / Stats combined popovers
 /// and lets the icon tab strip breathe. Height covers the icon strip,
 /// Processor + Top CPU + Memory, and the footer without clipping.
-pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 678.);
+pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 653.);
 /// Fixed width — the layout is built for exactly this and nothing reflows.
 pub const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
 /// Gap between the tray icon and the top of the window.

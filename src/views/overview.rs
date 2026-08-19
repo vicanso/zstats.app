@@ -101,7 +101,16 @@ fn top_cpu_all() -> AnyElement {
         .id("top-cpu-all")
         .items_center()
         .gap(px(1.))
+        .rounded(px(5.))
+        .px(px(6.))
+        .py(px(2.))
         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .hover(|d| d.bg(theme::chip()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.set_tab(Tab::Processes, cx));
+        })
         .child(
             div()
                 .text_size(px(11.))
@@ -114,12 +123,6 @@ fn top_cpu_all() -> AnyElement {
                 .with_size(Size::Size(px(12.)))
                 .text_color(Hsla::from(theme::text_dim())),
         )
-        .hover(|d| d.text_color(theme::text()))
-        .on_click(|_, _window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.set_tab(Tab::Processes, cx));
-        })
         .into_any_element()
 }
 
@@ -279,8 +282,16 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
     let used_fill = Hsla::from(theme::ink());
     let compressed_fill = Hsla::from(theme::text_muted());
 
-    let mut rows = vec![
-        (i18n::tr("overview.used"), format::gb(mem.used_bytes)),
+    // Total is already in the hero caption ("used of 24 GB"). The bar
+    // shows compressed as a slice but not how many GB that is — and
+    // that number is the early pressure signal. Swap is the other
+    // fact the hero and the bar both omit.
+    let compressed_label = match mem.compressed_bytes {
+        Some(b) => format::gb(b),
+        None if !supported => i18n::tr("common.n_a"),
+        None => format::PLACEHOLDER.to_string(),
+    };
+    let rows = vec![
         (
             i18n::tr("overview.swap"),
             format!(
@@ -289,18 +300,8 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
                 format::gb(mem.swap_total_bytes)
             ),
         ),
+        (i18n::tr("overview.compressed"), compressed_label),
     ];
-    rows.push((
-        i18n::tr("overview.compressed"),
-        // Same split: "this build cannot" keeps the explicit n/a, "not
-        // yet" gets the placeholder every other pending figure uses.
-        match mem.compressed_bytes {
-            Some(b) => format::gb(b),
-            None if !supported => i18n::tr("common.n_a"),
-            None => format::PLACEHOLDER.to_string(),
-        },
-    ));
-    rows.push((i18n::tr("overview.total"), format::gb(mem.total_bytes)));
 
     let mut legend = vec![(
         widgets::LegendMark::Fill(used_fill),
@@ -373,48 +374,69 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
         .into_any_element()
 }
 
-/// Disk + net rates, summed by zstats after its own dedupe. Sat under
-/// Memory rather than as a fourth card.
+/// Disk + net rates, summed by zstats after its own dedupe. A footnote
+/// under Memory, not a fourth card and not a second section — one
+/// muted line so the memory card stays about memory.
+///
+/// Icons, not words: "Disk" / "Network" next to the rates read as one
+/// sentence at this size. The glyphs are the same ones the tab strip
+/// already uses for Hardware and Network, so they carry that meaning
+/// here; the translated name sits on the tooltip.
 fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
     let cells = [
         (
+            "io-disk",
+            IconName::HardDrive,
             i18n::tr("overview.io_disk"),
             io.disk_read_bytes_per_sec,
             io.disk_write_bytes_per_sec,
         ),
         (
+            "io-net",
+            IconName::Network,
             i18n::tr("overview.io_net"),
             io.network_received_bytes_per_sec,
             io.network_transmitted_bytes_per_sec,
         ),
     ];
-    if cells.iter().all(|(_, r, w)| r.is_none() && w.is_none()) {
+    if cells
+        .iter()
+        .all(|(_, _, _, r, w)| r.is_none() && w.is_none())
+    {
         return div().into_any_element();
     }
 
     h_flex()
         .mt(px(8.))
-        .pt(px(7.))
-        .gap(px(6.))
+        .pt(px(6.))
+        .gap(px(16.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
-        .children(cells.into_iter().map(|(label, read, write)| {
-            v_flex()
+        .children(cells.into_iter().map(|(id, icon, label, read, write)| {
+            h_flex()
                 .flex_1()
                 .min_w_0()
+                .items_center()
+                .gap(px(6.))
                 .child(
                     div()
-                        .text_size(px(9.))
-                        .text_color(theme::text_dim())
-                        .child(label),
+                        .id(id)
+                        .flex_none()
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(label.clone()).build(window, cx)
+                        })
+                        .child(
+                            Icon::new(icon)
+                                .with_size(Size::Size(px(12.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        ),
                 )
                 .child(
                     h_flex()
-                        .mt(px(1.))
-                        .gap(px(8.))
+                        .gap(px(6.))
                         .font_family(font::MONO)
                         .text_size(px(10.))
-                        .text_color(theme::text())
+                        .text_color(theme::text_muted())
                         .child(format!("↓ {}", format::rate(read)))
                         .child(format!("↑ {}", format::rate(write))),
                 )
