@@ -1074,10 +1074,39 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
 /// asked yet", and [`big_files_body`] says which of the two it is in a
 /// sentence rather than leaving a blank panel.
 fn big_files_card(state: &ZStatsAppState) -> AnyElement {
+    // A finished listing is twenty rows deep and sits above the
+    // analyser; the ✕ is how you put it away again. Only shown once
+    // there is something to put away — and only for a *finished* one,
+    // because `mdfind` is spawned without a cancel and a control that
+    // cannot stop what it points at would be a lie.
+    let answered = matches!(
+        state.big_files(),
+        BigFiles::Ready { .. } | BigFiles::Failed { .. }
+    );
+    let controls = h_flex()
+        .items_center()
+        .gap(px(4.))
+        .child(big_files_chip(state))
+        .when(answered, |row| {
+            row.child(widgets::with_wrap_tooltip(
+                "bigfiles-dismiss-tip",
+                i18n::tr("disk.big_dismiss_hint"),
+                Button::new("bigfiles-dismiss")
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .on_click(|_, _window, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.clear_big_files(cx));
+                    }),
+            ))
+        })
+        .into_any_element();
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("disk.big_title"),
-            Some(big_files_chip(state)),
+            Some(controls),
         ))
         .child(div().px(px(13.)).pb(px(11.)).child(big_files_body(state)))
         .into_any_element()
@@ -1086,7 +1115,7 @@ fn big_files_card(state: &ZStatsAppState) -> AnyElement {
 fn big_files_chip(state: &ZStatsAppState) -> AnyElement {
     let label = match state.big_files() {
         BigFiles::Running => i18n::tr("disk.big_scanning"),
-        BigFiles::Ready(_) => i18n::tr("disk.big_rescan"),
+        BigFiles::Ready { .. } => i18n::tr("disk.big_rescan"),
         BigFiles::Off | BigFiles::Failed { .. } => i18n::tr("disk.big_scan"),
     };
     let running = matches!(state.big_files(), BigFiles::Running);
@@ -1129,8 +1158,10 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
         BigFiles::Failed {
             indexing_off: false,
         } => padded_note(i18n::tr("disk.big_failed")),
-        BigFiles::Ready(scan) if scan.files.is_empty() => padded_note(i18n::tr("disk.big_none")),
-        BigFiles::Ready(scan) => {
+        BigFiles::Ready { scan, .. } if scan.files.is_empty() => {
+            padded_note(i18n::tr("disk.big_none"))
+        }
+        BigFiles::Ready { scan, added, since } => {
             let caption = {
                 // The bar describes what the rows actually show — the
                 // smallest displayed PHYSICAL size, floored to a clean
@@ -1161,17 +1192,40 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
                     text.push_str(" · ");
                     text.push_str(t!("disk.big_shown", shown = scan.files.len()).as_ref());
                 }
+                // What "new" means, in the one place it can be checked:
+                // the run it is measured against. Without this the marks
+                // would be a claim about an unnamed past.
+                if let Some(since) = since {
+                    text.push_str(" · ");
+                    text.push_str(
+                        t!(
+                            "disk.big_since",
+                            ago = format::ago(since.elapsed().unwrap_or_default())
+                        )
+                        .as_ref(),
+                    );
+                    if !added.is_empty() {
+                        text.push_str(" · ");
+                        text.push_str(t!("disk.big_added", count = added.len()).as_ref());
+                    }
+                }
                 text
             };
             let total = scan.files.len();
+            let since_label = since.map(|t| format::ago(t.elapsed().unwrap_or_default()));
             div()
                 .child(div().pb(px(4.)).child(widgets::note(caption)))
-                .children(
-                    scan.files
-                        .iter()
-                        .enumerate()
-                        .map(|(i, f)| big_file_row(i, f, i + 1 == total)),
-                )
+                .children(scan.files.iter().enumerate().map(|(i, f)| {
+                    big_file_row(
+                        i,
+                        f,
+                        i + 1 == total,
+                        added
+                            .contains(&f.path)
+                            .then(|| since_label.clone())
+                            .flatten(),
+                    )
+                }))
                 .into_any_element()
         }
     }
@@ -1207,7 +1261,17 @@ fn tilde_path(path: &str, home: &str) -> String {
     }
 }
 
-fn big_file_row(index: usize, file: &bigfiles::BigFile, last: bool) -> AnyElement {
+/// `new_since` carries the baseline's age when this row is one the
+/// previous listing would have shown and did not — the pill says "new",
+/// its tooltip says since when. `None` covers both "was there before"
+/// and "cannot tell", which the caption's absence of a baseline line
+/// already explains.
+fn big_file_row(
+    index: usize,
+    file: &bigfiles::BigFile,
+    last: bool,
+    new_since: Option<String>,
+) -> AnyElement {
     let name = file
         .path
         .file_name()
@@ -1257,6 +1321,22 @@ fn big_file_row(index: usize, file: &bigfiles::BigFile, last: bool) -> AnyElemen
                 .tooltip(widgets::wrap_tooltip(full))
                 .child(name),
         )
+        .children(new_since.map(|ago| {
+            // Neutral, like the analyser's "cache" pill: accent is for
+            // over-threshold, and a new file is news, not a problem.
+            div()
+                .id(("bigfile-new", index))
+                .flex_none()
+                .rounded_full()
+                .px(px(5.))
+                .text_size(px(9.))
+                .bg(theme::inset())
+                .text_color(theme::text_muted())
+                .tooltip(widgets::wrap_tooltip(
+                    t!("disk.big_new_tip", ago = ago).to_string(),
+                ))
+                .child(i18n::tr("disk.big_new"))
+        }))
         .child(
             div()
                 .flex_none()

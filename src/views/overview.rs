@@ -422,9 +422,7 @@ fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
                     div()
                         .id(id)
                         .flex_none()
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(label.clone()).build(window, cx)
-                        })
+                        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
                         .child(
                             Icon::new(icon)
                                 .with_size(Size::Size(px(12.)))

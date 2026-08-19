@@ -30,7 +30,7 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use std::array;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::ops::Deref;
 use std::path::Path;
@@ -309,7 +309,16 @@ pub enum BigFiles {
     #[default]
     Off,
     Running,
-    Ready(BigFilesScan),
+    Ready {
+        scan: BigFilesScan,
+        /// Rows the previous listing would have shown and did not — see
+        /// [`bigfiles::Baseline::is_new`]. Empty when there was nothing
+        /// to compare against, which is not the same as "nothing is new".
+        added: HashSet<PathBuf>,
+        /// When that previous listing was taken. `None` on a first run,
+        /// where marking everything new would say nothing at all.
+        since: Option<SystemTime>,
+    },
     /// `indexing_off` selects the honest message: a disabled Spotlight
     /// index would otherwise masquerade as "no big files".
     Failed {
@@ -1604,7 +1613,28 @@ impl ZStatsAppState {
                     return;
                 }
                 state.big_files = match scanned {
-                    Ok(scan) => BigFiles::Ready(scan),
+                    Ok(scan) => {
+                        // Compare first, then rotate: the baseline this
+                        // run is measured against is the one on disk
+                        // before it, and every finished query becomes the
+                        // next one's — so "new" always means "since you
+                        // last looked", with the caption naming when that
+                        // was.
+                        let baseline = bigfiles::load_baseline();
+                        let added = baseline
+                            .as_ref()
+                            .map(|base| {
+                                scan.files
+                                    .iter()
+                                    .filter(|f| base.is_new(f))
+                                    .map(|f| f.path.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let since = baseline.as_ref().map(bigfiles::Baseline::at);
+                        bigfiles::save_baseline(&scan);
+                        BigFiles::Ready { scan, added, since }
+                    }
                     Err(bigfiles::ScanError::IndexingOff) => {
                         BigFiles::Failed { indexing_off: true }
                     }
@@ -1624,14 +1654,24 @@ impl ZStatsAppState {
     /// The delete button's confirmed action: move to the Trash, then drop
     /// the row. A failed trash leaves the row — a file that is still there
     /// must not vanish from the list.
+    /// Put the listing away — back to "not asked yet", which is what the
+    /// card shows before the first query. A view action only: the query
+    /// costs seconds to repeat, and the stored baseline stays, so the
+    /// next listing can still say what it added. Nothing on disk moves.
+    pub fn clear_big_files(&mut self, cx: &mut Context<Self>) {
+        self.big_files = BigFiles::Off;
+        cx.notify();
+    }
+
     pub fn trash_big_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Err(e) = bigfiles::trash(path) {
             eprintln!("trash {}: {e}", path.display());
             return;
         }
-        if let BigFiles::Ready(scan) = &mut self.big_files {
+        if let BigFiles::Ready { scan, added, .. } = &mut self.big_files {
             scan.files.retain(|f| f.path != path);
             scan.total = scan.total.saturating_sub(1);
+            added.remove(path);
         }
         cx.notify();
     }
