@@ -29,14 +29,17 @@ use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult};
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::prefs;
 use crate::state::{BigFiles, DiskAnalysis, Expansion, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
+use gpui::Entity;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex};
 use rust_i18n::t;
 use std::env;
@@ -47,8 +50,8 @@ use std::time::Duration;
 /// the index query first (seconds, no permission prompts, and often
 /// answer enough), the walk second (minutes, and where you go when the
 /// index saw nothing).
-pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
-    vec![big_files_card(state), analysis_card(state)]
+pub fn render(state: &ZStatsAppState, exclude: &Entity<InputState>) -> Vec<AnyElement> {
+    vec![big_files_card(state), analysis_card(state, exclude)]
 }
 
 /// The analyser card: header, scope row, then whatever the current run
@@ -58,7 +61,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 /// because three tables buried the volumes and sensors below them; in a
 /// window of its own there is nothing underneath to bury, and a fold
 /// would only hide the reason the window was opened.
-fn analysis_card(state: &ZStatsAppState) -> AnyElement {
+fn analysis_card(state: &ZStatsAppState, exclude: &Entity<InputState>) -> AnyElement {
     let body =
         match state.disk_analysis() {
             // Nothing asked yet. The sentence explaining what a walk costs
@@ -105,8 +108,144 @@ fn analysis_card(state: &ZStatsAppState) -> AnyElement {
     widgets::list_shell()
         .child(analysis_header(state))
         .children(analysis_scope_row(state))
+        .children(analysis_exclude_row(state, exclude))
         .child(body)
         .into_any_element()
+}
+
+/// Directories this walk leaves alone, and where they are named.
+///
+/// It sits here rather than in the settings window because this is where
+/// the decision is made: the reason to exclude `~/github` occurs to you
+/// while looking at `~/github` sitting at the top of the table, not while
+/// browsing preferences. Same visibility rule as the scope row above —
+/// gone while a walk runs, because changing what a running walk covers
+/// goes through cancel, never a silent restart.
+///
+/// The entries are chips rather than a list: this is a row of a card, and
+/// the whole point is that it stays small enough to live above the
+/// results it shapes.
+fn analysis_exclude_row(
+    state: &ZStatsAppState,
+    exclude: &Entity<InputState>,
+) -> Option<AnyElement> {
+    if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
+        return None;
+    }
+    let home = env::var("HOME").unwrap_or_default();
+    let entries = prefs::analysis_exclude_raw();
+    Some(
+        h_flex()
+            .items_center()
+            .flex_wrap()
+            .gap(px(4.))
+            .px(px(13.))
+            .pb(px(8.))
+            .child(
+                div()
+                    .id("ana-exclude-label")
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_note")))
+                    .child(i18n::tr("disk.ana_exclude")),
+            )
+            .children(entries.iter().enumerate().map(|(i, raw)| {
+                let expanded = match raw.strip_prefix("~/") {
+                    Some(rest) if !home.is_empty() => Path::new(&home).join(rest),
+                    _ => PathBuf::from(raw),
+                };
+                // A path that does not resolve today is dimmed, not
+                // dropped: a directory can come back, and quietly
+                // discarding what someone typed is the worse failure.
+                let present = expanded.is_dir();
+                let drop_me = raw.clone();
+                h_flex()
+                    .id(("ana-exclude-chip", i))
+                    .items_center()
+                    .gap(px(3.))
+                    .flex_none()
+                    .rounded(px(4.))
+                    .bg(theme::inset())
+                    .px(px(5.))
+                    .py(px(1.))
+                    .text_size(px(10.))
+                    .text_color(if present {
+                        theme::text_muted()
+                    } else {
+                        theme::text_dim()
+                    })
+                    .when(!present, |d| {
+                        d.tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_missing")))
+                    })
+                    .child(raw.clone())
+                    .child(
+                        // A glyph, not a button: `xsmall` button chrome
+                        // pushed each chip past 180px, and three of them
+                        // took most of the row. Hover brightening is the
+                        // affordance (views/mod.rs — no hand cursor).
+                        div()
+                            .id(("ana-exclude-drop", i))
+                            .flex_none()
+                            .text_color(theme::text_dim())
+                            .hover(|d| d.text_color(theme::text()))
+                            .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_drop")))
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .with_size(Size::Size(px(9.)))
+                                    .text_color(Hsla::from(theme::text_dim())),
+                            )
+                            .on_click(move |_, _window, cx| {
+                                let kept: Vec<String> = prefs::analysis_exclude_raw()
+                                    .into_iter()
+                                    .filter(|p| *p != drop_me)
+                                    .collect();
+                                prefs::set_analysis_exclude(&kept);
+                                cx.global::<ZStatsGlobalStore>()
+                                    .clone()
+                                    .update(cx, |_, cx| cx.notify());
+                            }),
+                    )
+            }))
+            .child(
+                // Fixed and small: `flex_1` made this the widest thing on
+                // the card — an 870px text box for a control used once a
+                // month, louder than the header above it.
+                div()
+                    .flex_none()
+                    .w(px(160.))
+                    .child(Input::new(exclude).xsmall()),
+            )
+            .child(
+                Button::new("ana-exclude-pick")
+                    .icon(IconName::FolderOpen)
+                    .ghost()
+                    .xsmall()
+                    .tooltip(i18n::tr("disk.ana_exclude_pick"))
+                    .on_click(|_, _window, cx| {
+                        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+                            files: false,
+                            directories: true,
+                            multiple: true,
+                            prompt: Some(i18n::tr("disk.ana_exclude_pick_go").into()),
+                        });
+                        cx.spawn(async move |cx| {
+                            if let Ok(Ok(Some(paths))) = rx.await {
+                                let mut list = prefs::analysis_exclude_raw();
+                                list.extend(paths.iter().map(|p| p.display().to_string()));
+                                prefs::set_analysis_exclude(&list);
+                                cx.update(|cx| {
+                                    cx.global::<ZStatsGlobalStore>()
+                                        .clone()
+                                        .update(cx, |_, cx| cx.notify());
+                                });
+                            }
+                        })
+                        .detach();
+                    }),
+            )
+            .into_any_element(),
+    )
 }
 
 /// Title, the start/cancel control, and the caption that says what the
@@ -437,6 +576,12 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
     if result.skipped_dataless > 0 {
         extras.push(t!("disk.ana_skip_dataless", n = result.skipped_dataless).to_string());
     }
+    // Said out loud for the same reason the other three are: a walk that
+    // left out somebody's whole code tree must not let the totals below
+    // it read as the whole scope.
+    if result.skipped_excluded > 0 {
+        extras.push(t!("disk.ana_skip_excluded", n = result.skipped_excluded).to_string());
+    }
     // Names what the per-row ± compares against. Its absence when no
     // row moved is itself the answer: nothing big changed.
     if let Some(diff) = state.analysis_diff_for(result) {
@@ -735,7 +880,7 @@ fn dir_row_tree(
         // nothing about which of them is the heavy one.
         Some(Expansion::Ready(rows)) if !rows.is_empty() => {
             let max = rows.iter().map(|r| r.bytes).max().unwrap_or(1).max(1);
-            for child in rows.iter().take(EXPAND_ROWS) {
+            for child in rows.iter().take(expand_shown(rows)) {
                 out.extend(dir_row_tree(ctx, child, &hit.path, max, depth + 1));
             }
             if let Some((hidden, bytes)) = expand_hidden(rows) {
@@ -771,13 +916,30 @@ fn dir_row_tree(
     out
 }
 
-/// What an open row is not listing: how many children past [`EXPAND_ROWS`]
-/// and how much they add up to, or `None` when everything is shown.
-/// Counts what the tables retained, exactly like the dirs table's own
-/// "show more" — neither claims to have seen every directory on disk.
+/// Under a megabyte a row reads `0 MB` — `format::memory` has nothing
+/// finer to say at that scale. A line that reads zero spends a row
+/// saying nothing, so those go to the summary instead, which was
+/// already there and can carry them as a total.
+const EXPAND_FLOOR: u64 = 1024 * 1024;
+
+/// How many children an open row lists: the ranked ones, down to where
+/// they stop being distinguishable, and never more than [`EXPAND_ROWS`].
+/// The list is sorted, so this is a prefix.
+fn expand_shown(rows: &[DirHit]) -> usize {
+    rows.iter()
+        .take(EXPAND_ROWS)
+        .take_while(|r| r.bytes >= EXPAND_FLOOR)
+        .count()
+}
+
+/// What an open row is not listing: how many children it held back and
+/// how much they add up to, or `None` when everything is shown. Counts
+/// what the tables retained, exactly like the dirs table's own "show
+/// more" — neither claims to have seen every directory on disk.
 fn expand_hidden(rows: &[DirHit]) -> Option<(usize, u64)> {
-    let hidden = rows.len().checked_sub(EXPAND_ROWS).filter(|n| *n > 0)?;
-    Some((hidden, rows.iter().skip(EXPAND_ROWS).map(|r| r.bytes).sum()))
+    let shown = expand_shown(rows);
+    let hidden = rows.len().checked_sub(shown).filter(|n| *n > 0)?;
+    Some((hidden, rows.iter().skip(shown).map(|r| r.bytes).sum()))
 }
 
 /// The dim line an open row shows in place of children — scanning, empty,
@@ -1103,12 +1265,26 @@ fn big_files_card(state: &ZStatsAppState) -> AnyElement {
             ))
         })
         .into_any_element();
+    // The sentence explaining what this query covers used to be the
+    // card's whole body before anything was asked, ~60pt of prose above
+    // the tables that are this window's point. Same move the History
+    // header made: a read-once fact belongs on an ⓘ.
+    let asked = !matches!(state.big_files(), BigFiles::Off);
     widgets::list_shell()
         .child(widgets::list_header(
-            i18n::tr("disk.big_title"),
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(i18n::tr("disk.big_title"))
+                .child(widgets::info_icon(
+                    "big-files-basis",
+                    i18n::tr("disk.big_hint"),
+                )),
             Some(controls),
         ))
-        .child(div().px(px(13.)).pb(px(11.)).child(big_files_body(state)))
+        .when(asked, |card| {
+            card.child(div().px(px(13.)).pb(px(11.)).child(big_files_body(state)))
+        })
         .into_any_element()
 }
 
@@ -1152,6 +1328,9 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
     // The card body carries the padding; these are plain notes.
     let padded_note = |text: String| div().child(widgets::note(text)).into_any_element();
     match state.big_files() {
+        // Not reached from the card, which draws no body before the
+        // first query — the ⓘ in its header carries this now. Kept as
+        // the arm's honest answer rather than an unreachable panic.
         BigFiles::Off => padded_note(i18n::tr("disk.big_hint")),
         BigFiles::Running => padded_note(i18n::tr("disk.big_running")),
         BigFiles::Failed { indexing_off: true } => padded_note(i18n::tr("disk.big_index_off")),
@@ -1401,14 +1580,23 @@ mod tests {
             bytes,
             kind: HitKind::Plain,
         };
-        let rows: Vec<DirHit> = (1..=EXPAND_ROWS as u64 + 3).map(|n| hit(n * 100)).collect();
+        let big = |n: u64| hit(n * EXPAND_FLOOR);
+        let rows: Vec<DirHit> = (1..=EXPAND_ROWS as u64 + 3).rev().map(big).collect();
         let (hidden, bytes) = expand_hidden(&rows).expect("three past the cut");
         assert_eq!(hidden, 3);
         // The three past the cut, and only those.
-        assert_eq!(bytes, (900 + 1000 + 1100));
+        assert_eq!(bytes, (1 + 2 + 3) * EXPAND_FLOOR);
         // Exactly the cut, and under it, say nothing.
         assert_eq!(expand_hidden(&rows[..EXPAND_ROWS]), None);
         assert_eq!(expand_hidden(&[]), None);
+
+        // A child too small to render as anything but "0 MB" is summed
+        // into the line below instead of spending a row on a zero.
+        let mixed = vec![big(4), big(2), hit(900_000), hit(400_000)];
+        assert_eq!(expand_shown(&mixed), 2, "the two that can be read");
+        let (hidden, bytes) = expand_hidden(&mixed).expect("two below the floor");
+        assert_eq!(hidden, 2);
+        assert_eq!(bytes, 1_300_000);
     }
 
     #[test]

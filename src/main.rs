@@ -648,17 +648,51 @@ struct StorageWindow {
     /// Escape / cmd-w bindings never reach the root's `key_context`.
     focus_handle: gpui::FocusHandle,
     scroll: ScrollHandle,
+    /// Where a directory to leave out of the analysis is typed.
+    /// Committed on Enter, never on a keystroke — half a path is a path
+    /// that excludes the wrong thing.
+    exclude_input: gpui::Entity<gpui_component::input::InputState>,
 }
 
 impl StorageWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = cx.global::<ZStatsGlobalStore>().clone();
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let exclude_input = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder(i18n::tr("disk.ana_exclude_placeholder"))
+        });
+        // `subscribe_in`, not `subscribe`: clearing the field afterwards
+        // needs the window, and this is the only place that has one.
+        cx.subscribe_in(
+            &exclude_input,
+            window,
+            |this, input, event: &gpui_component::input::InputEvent, window, cx| {
+                if !matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let typed = input.read(cx).value().to_string();
+                if typed.trim().is_empty() {
+                    return;
+                }
+                let mut list = prefs::analysis_exclude_raw();
+                list.push(typed);
+                prefs::set_analysis_exclude(&list);
+                // The field is a compose box, not a value: with the entry
+                // now a chip beside it, text left behind only invites
+                // adding the same path twice.
+                this.exclude_input
+                    .update(cx, |state, cx| state.set_value("", window, cx));
+                cx.notify();
+            },
+        )
+        .detach();
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         Self {
             focus_handle,
             scroll: ScrollHandle::new(),
+            exclude_input,
         }
     }
 }
@@ -674,7 +708,7 @@ impl Render for StorageWindow {
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
         let body = gpui_component::v_flex()
             .gap(px(8.))
-            .children(views::storage::render(state));
+            .children(views::storage::render(state, &self.exclude_input));
         div()
             .relative()
             .size_full()

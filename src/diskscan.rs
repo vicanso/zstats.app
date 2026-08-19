@@ -16,6 +16,7 @@
 //! cancelled run says nothing at all (the UI has already moved on).
 
 use crate::cleanhints;
+use crate::prefs;
 use jwalk::{Parallelism, WalkDirGeneric};
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -157,6 +158,11 @@ pub struct ScanResult {
     pub skipped_denied: usize,
     pub skipped_protected: usize,
     pub skipped_dataless: usize,
+    /// Directories the user excluded (`analysis_exclude` in app.toml),
+    /// pruned like the TCC list. Counted and shown, never silent: a walk
+    /// that quietly leaves out 40 GB of somebody's code would make every
+    /// total below it a lie by omission.
+    pub skipped_excluded: usize,
     /// CACHEDIR.TAG trees, largest first.
     pub regenerable: Vec<DirHit>,
     /// The root's level-1 breakdown, each entry chased through dominant
@@ -291,6 +297,10 @@ fn run(
         return Err(format!("{} is not a directory", scope.base.display()));
     }
     let protected = Arc::new(AtomicUsize::new(0));
+    let excluded_hits = Arc::new(AtomicUsize::new(0));
+    // The user's own list, pruned exactly like the TCC one — the
+    // difference is only whose decision it was.
+    let excluded: Vec<PathBuf> = prefs::analysis_exclude();
     let deny: Vec<PathBuf> = env::var("HOME")
         .ok()
         .map(|h| {
@@ -318,6 +328,8 @@ fn run(
     for root in &walked {
         let walk = {
             let deny = deny.clone();
+            let excluded = excluded.clone();
+            let excluded_hits = excluded_hits.clone();
             let protected = protected.clone();
             let cancelled = cancel.clone();
             Walk::new(root)
@@ -338,6 +350,9 @@ fn run(
                                 // no syscall ever lands inside.
                                 child.read_children_path = None;
                                 protected.fetch_add(1, Ordering::Relaxed);
+                            } else if excluded.iter().any(|d| child.path() == *d) {
+                                child.read_children_path = None;
+                                excluded_hits.fetch_add(1, Ordering::Relaxed);
                             }
                         } else if child.file_type.is_file() {
                             // On the worker pool by design — see `Walk`.
@@ -379,6 +394,7 @@ fn run(
                         skipped_denied: denied,
                         skipped_protected: protected.load(Ordering::Relaxed),
                         skipped_dataless: dataless,
+                        skipped_excluded: excluded_hits.load(Ordering::Relaxed),
                         build_index: false,
                     });
                     let _ = tx.try_send(ScanEvent::Partial(Box::new(partial)));
@@ -433,6 +449,7 @@ fn run(
         base: &scope.base,
         roots: &scope.roots,
         took: started.elapsed(),
+        skipped_excluded: excluded_hits.load(Ordering::Relaxed),
         own_bytes,
         plain_dirs: &plain_dirs,
         fold: &fold,
@@ -460,6 +477,7 @@ struct Aggregates<'a> {
     skipped_denied: usize,
     skipped_protected: usize,
     skipped_dataless: usize,
+    skipped_excluded: usize,
     /// Final results build the drill index and the suggestion set;
     /// partial snapshots skip both.
     build_index: bool,
@@ -481,6 +499,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
         skipped_denied,
         skipped_protected,
         skipped_dataless,
+        skipped_excluded,
         build_index,
     } = agg;
     let (totals, children) = rollup(base, own_bytes, plain_dirs, fold);
@@ -517,6 +536,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
         skipped_denied,
         skipped_protected,
         skipped_dataless,
+        skipped_excluded,
         regenerable,
         dirs,
         files,
@@ -609,6 +629,7 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
         skipped_denied: parent.skipped_denied,
         skipped_protected: parent.skipped_protected,
         skipped_dataless: parent.skipped_dataless,
+        skipped_excluded: parent.skipped_excluded,
         regenerable,
         dirs,
         files,
@@ -936,6 +957,19 @@ fn serialise(result: &ScanResult) -> String {
         clamp(result.skipped_dataless as u64),
     );
     doc.insert(
+        "excluded".into(),
+        Value::Array(
+            prefs::analysis_exclude()
+                .iter()
+                .map(|p| Value::String(p.display().to_string()))
+                .collect(),
+        ),
+    );
+    doc.insert(
+        "skipped_excluded".into(),
+        clamp(result.skipped_excluded as u64),
+    );
+    doc.insert(
         "regenerable".into(),
         Value::Array(result.regenerable.iter().map(dir_row).collect()),
     );
@@ -997,6 +1031,22 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
     if stored_roots != roots {
         return None;
     }
+    // A result produced under a different exclusion list answers a
+    // different question. Showing it would look like the list did
+    // nothing — so the cache misses and the card asks to be re-run,
+    // which is what the roots check does for a changed scope.
+    let stored_excluded: Vec<PathBuf> = doc
+        .get("excluded")
+        .and_then(toml::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|v| v.as_str().map(PathBuf::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if stored_excluded != prefs::analysis_exclude() {
+        return None;
+    }
     let int = |key: &str| {
         doc.get(key)
             .and_then(toml::Value::as_integer)
@@ -1046,6 +1096,7 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
         skipped_denied: int("skipped_denied") as usize,
         skipped_protected: int("skipped_protected") as usize,
         skipped_dataless: int("skipped_dataless") as usize,
+        skipped_excluded: int("skipped_excluded") as usize,
         regenerable: dirs_of("regenerable"),
         dirs: dirs_of("dir"),
         files,
@@ -1385,6 +1436,7 @@ mod tests {
             skipped_denied: 0,
             skipped_protected: 0,
             skipped_dataless: 0,
+            skipped_excluded: 0,
             regenerable: Vec::new(),
             dirs: Vec::new(),
             files: Vec::new(),
@@ -1496,6 +1548,7 @@ mod tests {
             skipped_denied: 1,
             skipped_protected: 2,
             skipped_dataless: 3,
+            skipped_excluded: 0,
             regenerable: vec![DirHit {
                 path: p("/r/cache"),
                 bytes: 10,
@@ -1557,6 +1610,7 @@ mod tests {
             skipped_denied: 0,
             skipped_protected: 0,
             skipped_dataless: 0,
+            skipped_excluded: 0,
             regenerable: vec![DirHit {
                 path: p("/r/cache"),
                 bytes: 10,

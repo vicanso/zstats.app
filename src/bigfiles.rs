@@ -21,6 +21,7 @@
 //! reversible requests; it does not destroy.
 
 use crate::opener;
+use crate::prefs;
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::env;
@@ -255,8 +256,14 @@ pub fn scan() -> Result<BigFilesScan, ScanError> {
 /// `len()` against the threshold is what lets the caption say "≥ 500 MB"
 /// and be telling the truth about every row under it.
 fn collect(paths: Vec<PathBuf>, threshold: u64) -> Vec<BigFile> {
+    // The analyser's exclusion list applies here too: a directory the
+    // reader has told the window to leave alone should not come back as
+    // a row in the other half of the same window. Read once per query,
+    // not per hit.
+    let excluded = prefs::analysis_exclude();
     paths
         .into_iter()
+        .filter(|path| !excluded.iter().any(|dir| path.starts_with(dir)))
         .filter_map(|path| {
             let meta = fs::symlink_metadata(&path).ok()?;
             if !meta.is_file() || meta.len() < threshold {

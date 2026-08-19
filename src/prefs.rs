@@ -101,6 +101,10 @@ static PROXY: RwLock<String> = RwLock::new(String::new());
 /// finished top-level walk. Empty means the default home walk, expressed
 /// by leaving the key out (same posture as every other pref here).
 static ANALYSIS_ROOTS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+/// Directories the disk-space window leaves alone, as written in the
+/// file — expanded on read, never by the writer, so the file keeps the
+/// `~` the user typed.
+static ANALYSIS_EXCLUDE: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
 /// Floor accepted from the file or the picker. Below this the built-in
 /// dark/light default is used instead.
@@ -176,6 +180,62 @@ pub fn analysis_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Directories the analyser must not walk and the large-file listing
+/// must not show.
+///
+/// Hand-written into `app.toml` (`analysis_exclude = ["~/github"]`) —
+/// there is no editor for it yet, which is why the writer carries the
+/// key through untouched. `~/` expands against HOME here rather than in
+/// the file, so what the user typed is what stays on disk.
+pub fn analysis_exclude() -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    ANALYSIS_EXCLUDE
+        .read()
+        .expect("analysis exclude pref lock poisoned")
+        .iter()
+        .map(|raw| match raw.strip_prefix("~/") {
+            Some(rest) if !home.is_empty() => Path::new(&home).join(rest),
+            _ => PathBuf::from(raw),
+        })
+        .collect()
+}
+
+/// The exclusion list exactly as stored — what the editor shows and
+/// edits, `~` and all. [`analysis_exclude`] is the expanded form the
+/// walk uses.
+pub fn analysis_exclude_raw() -> Vec<String> {
+    ANALYSIS_EXCLUDE
+        .read()
+        .expect("analysis exclude pref lock poisoned")
+        .clone()
+}
+
+/// Replace the exclusion list. Entries are stored as written, with one
+/// normalisation: a path under HOME is collapsed to `~/…` so a list
+/// built by clicking reads like one written by hand, and survives a
+/// change of user name.
+pub fn set_analysis_exclude(paths: &[String]) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut seen: Vec<String> = Vec::new();
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let stored = match trimmed.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() && rest.starts_with('/') => format!("~{rest}"),
+            _ => trimmed.to_string(),
+        };
+        if !seen.contains(&stored) {
+            seen.push(stored);
+        }
+    }
+    *ANALYSIS_EXCLUDE
+        .write()
+        .expect("analysis exclude pref lock poisoned") = seen;
+    persist();
+}
+
 /// Remember and persist the scope the next launch should restore. Pass
 /// an empty slice for the default home walk — the key is then omitted.
 pub fn set_analysis_roots(roots: &[PathBuf]) {
@@ -200,15 +260,18 @@ fn decode_opacity(raw: u8) -> Option<f32> {
 /// Read `app.toml` into the statics. Call once at startup, before the
 /// theme is first resolved and the locale first pinned.
 pub fn load() {
-    let (language, theme, opacity, proxy, roots) = read(&zstats::settings::default_dir());
-    LANGUAGE.store(encode_language(language), Ordering::Relaxed);
-    THEME.store(encode_theme(theme), Ordering::Relaxed);
-    OPACITY.store(encode_opacity(opacity), Ordering::Relaxed);
-    crate::proxy::set_configured_proxy(&proxy);
-    *PROXY.write().expect("proxy pref lock poisoned") = proxy;
+    let prefs = read(&zstats::settings::default_dir());
+    LANGUAGE.store(encode_language(prefs.language), Ordering::Relaxed);
+    THEME.store(encode_theme(prefs.theme), Ordering::Relaxed);
+    OPACITY.store(encode_opacity(prefs.opacity), Ordering::Relaxed);
+    crate::proxy::set_configured_proxy(&prefs.proxy);
+    *PROXY.write().expect("proxy pref lock poisoned") = prefs.proxy;
     *ANALYSIS_ROOTS
         .write()
-        .expect("analysis roots pref lock poisoned") = roots;
+        .expect("analysis roots pref lock poisoned") = prefs.analysis_roots;
+    *ANALYSIS_EXCLUDE
+        .write()
+        .expect("analysis exclude pref lock poisoned") = prefs.analysis_exclude;
 }
 
 /// Remember and persist a language choice. Only the store is infallible —
@@ -234,11 +297,21 @@ pub fn set_opacity(value: Option<f32>) {
 
 fn persist() {
     let dir = zstats::settings::default_dir();
-    let roots = ANALYSIS_ROOTS
-        .read()
-        .expect("analysis roots pref lock poisoned")
-        .clone();
-    if let Err(e) = write(&dir, language(), theme(), opacity(), &proxy(), &roots) {
+    let prefs = Prefs {
+        language: language(),
+        theme: theme(),
+        opacity: opacity(),
+        proxy: proxy(),
+        analysis_roots: ANALYSIS_ROOTS
+            .read()
+            .expect("analysis roots pref lock poisoned")
+            .clone(),
+        analysis_exclude: ANALYSIS_EXCLUDE
+            .read()
+            .expect("analysis exclude pref lock poisoned")
+            .clone(),
+    };
+    if let Err(e) = write(&dir, &prefs) {
         eprintln!("could not write {}: {e}", file_path(&dir).display());
     }
 }
@@ -247,31 +320,52 @@ fn file_path(dir: &Path) -> PathBuf {
     dir.join("app.toml")
 }
 
-type Prefs = (LanguagePref, ThemePref, Option<f32>, String, Vec<String>);
+/// Everything `app.toml` models — and therefore everything that
+/// survives a write. A struct rather than a widening tuple, because
+/// every field here has to make the round trip and a positional list of
+/// six is where that starts going wrong.
+///
+/// Anything NOT modelled here is dropped the next time a preference
+/// changes, since [`write`] rebuilds the file from these fields alone.
+/// That is why a hand-edited key still has to be read *and* written back
+/// (`analysis_exclude` is exactly that case).
+#[derive(Default, Debug, PartialEq)]
+struct Prefs {
+    language: LanguagePref,
+    theme: ThemePref,
+    opacity: Option<f32>,
+    proxy: String,
+    analysis_roots: Vec<String>,
+    analysis_exclude: Vec<String>,
+}
 
 fn read(dir: &Path) -> Prefs {
     let Ok(text) = fs::read_to_string(file_path(dir)) else {
-        return Default::default();
+        return Prefs::default();
     };
     let Ok(table) = text.parse::<toml::Table>() else {
-        return Default::default();
+        return Prefs::default();
     };
     let get = |key: &str| table.get(key).and_then(|v| v.as_str());
-    (
-        get("language").map_or_else(Default::default, LanguagePref::from_key),
-        get("theme").map_or_else(Default::default, ThemePref::from_key),
-        table.get("opacity").and_then(parse_opacity),
-        get("proxy").unwrap_or_default().trim().to_string(),
+    let list = |key: &str| {
         table
-            .get("analysis_roots")
+            .get(key)
             .and_then(toml::Value::as_array)
             .map(|rows| {
                 rows.iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_default(),
-    )
+            .unwrap_or_default()
+    };
+    Prefs {
+        language: get("language").map_or_else(Default::default, LanguagePref::from_key),
+        theme: get("theme").map_or_else(Default::default, ThemePref::from_key),
+        opacity: table.get("opacity").and_then(parse_opacity),
+        proxy: get("proxy").unwrap_or_default().trim().to_string(),
+        analysis_roots: list("analysis_roots"),
+        analysis_exclude: list("analysis_exclude"),
+    }
 }
 
 /// `None` when the key is missing, unparsable, or below [`OPACITY_MIN`].
@@ -282,14 +376,7 @@ fn parse_opacity(value: &toml::Value) -> Option<f32> {
     (n >= OPACITY_MIN).then_some(n.min(OPACITY_MAX))
 }
 
-fn write(
-    dir: &Path,
-    language: LanguagePref,
-    theme: ThemePref,
-    opacity: Option<f32>,
-    proxy: &str,
-    analysis_roots: &[String],
-) -> io::Result<()> {
+fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     // Serialised by the toml crate, never by hand: an analysis root is
     // a user-chosen path, and macOS allows every byte but `/` and NUL
     // in a filename — including the control characters that are illegal
@@ -297,32 +384,39 @@ fn write(
     // them as-is, the reader would fail to parse the whole file, and
     // `read`'s fallback would silently reset *every* preference here.
     let mut doc = toml::Table::new();
-    if let Some(key) = language.key() {
+    if let Some(key) = prefs.language.key() {
         doc.insert("language".into(), toml::Value::String(key.into()));
     }
-    if let Some(key) = theme.key() {
+    if let Some(key) = prefs.theme.key() {
         doc.insert("theme".into(), toml::Value::String(key.into()));
     }
-    if let Some(value) = opacity.filter(|v| *v >= OPACITY_MIN) {
+    if let Some(value) = prefs.opacity.filter(|v| *v >= OPACITY_MIN) {
         doc.insert(
             "opacity".into(),
             toml::Value::Float(f64::from((value.min(OPACITY_MAX) * 100.0).round() / 100.0)),
         );
     }
-    if !proxy.is_empty() {
-        doc.insert("proxy".into(), toml::Value::String(proxy.into()));
+    if !prefs.proxy.is_empty() {
+        doc.insert("proxy".into(), toml::Value::String(prefs.proxy.clone()));
     }
-    if !analysis_roots.is_empty() {
-        doc.insert(
-            "analysis_roots".into(),
-            toml::Value::Array(
-                analysis_roots
-                    .iter()
-                    .map(|r| toml::Value::String(r.clone()))
-                    .collect(),
-            ),
-        );
-    }
+    let mut list = |key: &str, values: &[String]| {
+        if !values.is_empty() {
+            doc.insert(
+                key.into(),
+                toml::Value::Array(
+                    values
+                        .iter()
+                        .map(|v| toml::Value::String(v.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    };
+    list("analysis_roots", &prefs.analysis_roots);
+    // Written back although nothing in the UI sets it: `write` rebuilds
+    // the file from what it models, so a key it merely ignored would be
+    // gone the first time someone changed the theme.
+    list("analysis_exclude", &prefs.analysis_exclude);
     let body = toml::to_string(&toml::Value::Table(doc))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let out = format!("# UI preferences for zstats.app. An absent key follows the system.\n{body}");
@@ -352,33 +446,38 @@ mod tests {
         let dir = scratch("roundtrip");
         write(
             &dir,
-            LanguagePref::Chinese,
-            ThemePref::Dark,
-            Some(0.8),
-            "http://127.0.0.1:7890",
-            &[
-                "/Users/x/Library".to_string(),
-                "/Users/x/.cache".to_string(),
-            ],
+            &Prefs {
+                language: LanguagePref::Chinese,
+                theme: ThemePref::Dark,
+                opacity: Some(0.8),
+                proxy: "http://127.0.0.1:7890".into(),
+                analysis_roots: vec![
+                    "/Users/x/Library".to_string(),
+                    "/Users/x/.cache".to_string(),
+                ],
+                // Nothing in the UI writes this one; it still has to
+                // come back out, or a theme change would eat it.
+                analysis_exclude: vec!["~/github".to_string()],
+            },
         )
         .unwrap();
+        let back = read(&dir);
+        assert_eq!(back.language, LanguagePref::Chinese);
+        assert_eq!(back.theme, ThemePref::Dark);
+        assert_eq!(back.opacity, Some(0.8));
+        assert_eq!(back.proxy, "http://127.0.0.1:7890");
         assert_eq!(
-            read(&dir),
-            (
-                LanguagePref::Chinese,
-                ThemePref::Dark,
-                Some(0.8),
-                "http://127.0.0.1:7890".to_string(),
-                vec![
-                    "/Users/x/Library".to_string(),
-                    "/Users/x/.cache".to_string()
-                ],
-            )
+            back.analysis_roots,
+            vec![
+                "/Users/x/Library".to_string(),
+                "/Users/x/.cache".to_string()
+            ]
         );
+        assert_eq!(back.analysis_exclude, vec!["~/github".to_string()]);
 
         // Both back to System: the keys disappear rather than being written
         // as a third value. Same for an unset opacity.
-        write(&dir, LanguagePref::System, ThemePref::System, None, "", &[]).unwrap();
+        write(&dir, &Prefs::default()).unwrap();
         let text = fs::read_to_string(file_path(&dir)).unwrap();
         assert!(!text.contains("language"), "System should omit the key");
         assert!(
@@ -390,17 +489,17 @@ mod tests {
             !text.contains("analysis_roots"),
             "the default scope should omit the key"
         );
-        assert_eq!(
-            read(&dir),
-            (
-                LanguagePref::System,
-                ThemePref::System,
-                None,
-                String::new(),
-                Vec::new()
-            )
+        assert!(
+            !text.contains("analysis_exclude"),
+            "an empty exclusion list should omit the key"
         );
-
+        let back = read(&dir);
+        assert_eq!(back.language, LanguagePref::System);
+        assert_eq!(back.theme, ThemePref::System);
+        assert_eq!(back.opacity, None);
+        assert!(back.proxy.is_empty());
+        assert!(back.analysis_roots.is_empty());
+        assert!(back.analysis_exclude.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -420,6 +519,40 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The exclusion list is the one key nothing in the UI writes, so it
+    /// is also the one that a careless writer would drop — a theme
+    /// change would silently un-exclude the reader's directories.
+    #[test]
+    fn a_hand_written_exclusion_survives_a_write_it_had_no_part_in() {
+        let dir = scratch("exclude");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            file_path(&dir),
+            "theme = \"dark\"\nanalysis_exclude = [\"~/github\", \"~/vicanso\"]\n",
+        )
+        .unwrap();
+
+        // What a preference change does: read everything, write it back.
+        let carried = read(&dir);
+        write(
+            &dir,
+            &Prefs {
+                theme: ThemePref::Light,
+                ..carried
+            },
+        )
+        .unwrap();
+
+        let after = read(&dir);
+        assert_eq!(after.theme, ThemePref::Light, "the change landed");
+        assert_eq!(
+            after.analysis_exclude,
+            vec!["~/github".to_string(), "~/vicanso".to_string()],
+            "and took nothing with it"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// macOS filenames may hold newlines and other control characters,
     /// which a hand-rolled TOML quote would emit raw — the file would
     /// then fail to parse and every preference in it would silently
@@ -430,17 +563,27 @@ mod tests {
         let nasty = "/Users/x/we\nird \"quoted\"\\path\ttab";
         write(
             &dir,
-            LanguagePref::Chinese,
-            ThemePref::Dark,
-            Some(0.8),
-            "",
-            &[nasty.to_string()],
+            &Prefs {
+                language: LanguagePref::Chinese,
+                theme: ThemePref::Dark,
+                opacity: Some(0.8),
+                analysis_roots: vec![nasty.to_string()],
+                ..Prefs::default()
+            },
         )
         .unwrap();
         let back = read(&dir);
-        assert_eq!(back.4, vec![nasty.to_string()], "the path comes back whole");
-        assert_eq!(back.0, LanguagePref::Chinese, "and takes the rest with it");
-        assert_eq!(back.2, Some(0.8));
+        assert_eq!(
+            back.analysis_roots,
+            vec![nasty.to_string()],
+            "the path comes back whole"
+        );
+        assert_eq!(
+            back.language,
+            LanguagePref::Chinese,
+            "and takes the rest with it"
+        );
+        assert_eq!(back.opacity, Some(0.8));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -449,21 +592,24 @@ mod tests {
         let dir = scratch("opacity");
         fs::create_dir_all(&dir).unwrap();
         fs::write(file_path(&dir), "opacity = 0.3\n").unwrap();
-        assert_eq!(read(&dir).2, None, "below 0.5 is the built-in default");
+        assert_eq!(
+            read(&dir).opacity,
+            None,
+            "below 0.5 is the built-in default"
+        );
 
         fs::write(file_path(&dir), "opacity = 1\n").unwrap();
-        assert_eq!(read(&dir).2, Some(1.0));
+        assert_eq!(read(&dir).opacity, Some(1.0));
 
         fs::write(file_path(&dir), "opacity = 1.4\n").unwrap();
-        assert_eq!(read(&dir).2, Some(1.0), "above 1.0 clamps");
+        assert_eq!(read(&dir).opacity, Some(1.0), "above 1.0 clamps");
 
         write(
             &dir,
-            LanguagePref::System,
-            ThemePref::System,
-            Some(0.4),
-            "",
-            &[],
+            &Prefs {
+                opacity: Some(0.4),
+                ..Prefs::default()
+            },
         )
         .unwrap();
         let text = fs::read_to_string(file_path(&dir)).unwrap();
