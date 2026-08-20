@@ -198,7 +198,7 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 - **导航**：设计稿是 4×2 缩写文字（Over / Sens / Conf）。320px 塞不下全名，缩写也不像 macOS，所以改成单行图标 + tooltip。
 - **字体**：系统字体做 UI，JetBrains Mono 做指标数字（等宽数位，跳动时不会左右抖）。设计指定的 Archivo 未采用。
 - **Config tab 可写**。开关和间隔走 `apply_add` 后重建 `Monitor`（速率基线会丢，下一次采样的速率是 —）；告警基值走 `reload_settings()`，和 Alerts 卡片同一条路径。
-- **Apps 展开显示聚合详情而非成员进程列表**。`ProcessGroupSnapshot` 只给出整棵树的汇总，不返回成员清单。
+- **Apps 展开列出整棵树的成员**。`ProcessGroupSnapshot` 只有汇总；成员靠对全表走 parent 指针还原。常驻 tick 只物化 `max-processes`，所以点击展开时若 live 表不够，会另采一次不带 CPU 基线的全表（不重建 Monitor、不拉长 `max-processes`）。已在 top-N 里的 pid 继续画 tick 上的 CPU，其余显示 `—`。
 - 设计稿里的假菜单栏和右下角说明文字不实现 —— 那是设计稿自己的展示环境。
 
 ## 系统通知

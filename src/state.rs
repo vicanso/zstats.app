@@ -573,6 +573,21 @@ pub struct FullAppScanData {
     pub list: ListState,
 }
 
+/// One-shot full process table, for naming every member of an expanded
+/// Apps tree. The resident tick only keeps `max-processes`, so a group's
+/// `process_count` can be 37 while the live table names four of them.
+///
+/// CPU on this table is unusable (one pass, no baseline) — the expansion
+/// paints rates from the tick when the pid is there, and `—` otherwise.
+#[derive(Default)]
+pub enum MemberTable {
+    #[default]
+    Off,
+    Running,
+    Ready(Arc<Vec<ProcessSnapshot>>),
+    Failed,
+}
+
 pub struct ZStatsAppState {
     window_bounds: Option<Bounds<Pixels>>,
     scale_factor: f32,
@@ -692,6 +707,10 @@ pub struct ZStatsAppState {
     full_scan: FullScan,
     /// The whole-tree listing for the Apps tab, only ever populated on request.
     full_app_scan: FullAppScan,
+    /// Full process table for Apps expansions. Separate from [`full_scan`]:
+    /// opening All on Processes must not be how you get Chrome's helpers,
+    /// and landing this must not flip that tab into its full listing.
+    member_table: MemberTable,
     /// The name-filter input, created on first open — [`InputState`] needs
     /// a `Window`, which only the toggle click has. Kept once created, so
     /// reopening the filter does not rebuild cursor/undo state.
@@ -817,6 +836,7 @@ impl Default for ZStatsAppState {
             auto_check_inflight: false,
             full_scan: FullScan::default(),
             full_app_scan: FullAppScan::default(),
+            member_table: MemberTable::default(),
             proc_filter: None,
             proc_filter_open: false,
             proc_filter_text: String::new(),
@@ -911,6 +931,14 @@ impl ZStatsAppState {
         }
         self.prune_stale_alerts();
         self.maybe_auto_check_update(cx);
+        // Views cannot start work. An expansion that survived hide →
+        // show (selection is kept, the table is not) has to ask again
+        // from here, or the card would sit on the truncated tick list.
+        if let Some(pid) = self.selected_app
+            && let Some(n) = self.group_process_count(pid)
+        {
+            self.ensure_member_table(pid, n, cx);
+        }
         cx.notify();
         fresh
     }
@@ -1818,6 +1846,7 @@ impl ZStatsAppState {
         }
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
+        self.member_table = MemberTable::Off;
         cx.notify();
     }
 
@@ -2396,7 +2425,91 @@ impl ZStatsAppState {
         } else {
             Some(root_pid)
         };
+        if let Some(pid) = self.selected_app {
+            if matches!(self.member_table, MemberTable::Failed) {
+                self.member_table = MemberTable::Off;
+            }
+            let expected = self.group_process_count(pid).unwrap_or(1);
+            self.ensure_member_table(pid, expected, cx);
+        }
         cx.notify();
+    }
+
+    /// The uncapped process table, once an expansion has asked for it.
+    pub fn member_processes(&self) -> Option<&[ProcessSnapshot]> {
+        match &self.member_table {
+            MemberTable::Ready(ps) => Some(ps.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn member_table_running(&self) -> bool {
+        matches!(self.member_table, MemberTable::Running)
+    }
+
+    fn group_process_count(&self, root: u32) -> Option<u32> {
+        if let FullAppScan::Ready(data) = &self.full_app_scan
+            && let Some(g) = data.groups.iter().find(|g| g.root_pid == root)
+        {
+            return Some(g.process_count);
+        }
+        self.latest
+            .as_ref()?
+            .snapshot
+            .process_groups
+            .as_deref()?
+            .iter()
+            .find(|g| g.root_pid == root)
+            .map(|g| g.process_count)
+    }
+
+    /// Fetch the full table only when the live top-N cannot name the
+    /// tree. A 2-process Finder is already complete; Chrome's helpers
+    /// are why this exists.
+    fn ensure_member_table(&mut self, root: u32, expected: u32, cx: &mut Context<Self>) {
+        if matches!(
+            self.member_table,
+            MemberTable::Ready(_) | MemberTable::Running | MemberTable::Failed
+        ) {
+            return;
+        }
+        if expected <= 1 {
+            return;
+        }
+        let processes = self
+            .latest
+            .as_ref()
+            .and_then(|t| t.snapshot.processes.as_deref().map(Vec::as_slice))
+            .unwrap_or(&[]);
+        if fullscan::tree_members(root, processes).len() as u32 >= expected {
+            return;
+        }
+        self.start_member_table(cx);
+    }
+
+    fn start_member_table(&mut self, cx: &mut Context<Self>) {
+        self.member_table = MemberTable::Running;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_executor()
+                .spawn(async { fullscan::list_processes() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if !matches!(state.member_table, MemberTable::Running) {
+                    return;
+                }
+                state.member_table = match listed {
+                    Ok(ps) => MemberTable::Ready(ps),
+                    Err(e) => {
+                        eprintln!("app member listing failed: {e}");
+                        MemberTable::Failed
+                    }
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn selected_alert(&self) -> Option<&(String, String)> {

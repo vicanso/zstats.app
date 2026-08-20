@@ -15,6 +15,7 @@ use super::widgets;
 use crate::confirm;
 use crate::font;
 use crate::format;
+use crate::fullscan;
 use crate::i18n;
 use crate::state::{AppSort, FullAppScan, FullAppScanData, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
@@ -374,15 +375,17 @@ fn app_row(
 /// is the sum of. Hovering a giant tooltip over those figures (the
 /// previous layout) hid the numbers it was trying to explain.
 fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement {
-    let mut members = state
+    let tick_ps = state
         .latest()
-        .and_then(|t| t.snapshot.processes.as_deref())
-        .map(|ps| tree_members(g.root_pid, ps))
-        .unwrap_or_default();
+        .and_then(|t| t.snapshot.processes.as_deref().map(Vec::as_slice))
+        .unwrap_or(&[]);
+    let source = state.member_processes().unwrap_or(tick_ps);
+    let mut members = fullscan::tree_members(g.root_pid, source);
     members.sort_by_key(|p| Reverse(snap_memory(p)));
-    let shown = members.len().min(MEMBERS_TIP);
-    let missing = (g.process_count as usize).saturating_sub(members.len())
-        + members.len().saturating_sub(shown);
+    let expected = g.process_count as usize;
+    let fetching = state.member_table_running() && members.len() < expected;
+    let missing = expected.saturating_sub(members.len());
+    let live_by_pid: HashMap<u32, &ProcessSnapshot> = tick_ps.iter().map(|p| (p.pid, p)).collect();
     let io = match (g.read_bytes_per_sec, g.write_bytes_per_sec) {
         (None, None) => None,
         (r, w) => Some(format!("R {} · W {}", format::rate(r), format::rate(w))),
@@ -457,21 +460,30 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                 )
                 .child(members_info(g.root_pid)),
         )
-        .children(
-            members
-                .iter()
-                .take(shown)
-                .enumerate()
-                .map(|(i, p)| member_row(p, i + 1 == shown && missing == 0)),
-        )
-        .when(members.is_empty(), |d| {
+        .children(members.iter().enumerate().map(|(i, p)| {
+            let live = live_by_pid.get(&p.pid).copied();
+            let shown = live.unwrap_or(p);
+            member_row(
+                shown,
+                live.map(|l| l.cpu_usage_percent),
+                i + 1 == members.len() && missing == 0 && !fetching,
+            )
+        }))
+        .when(members.is_empty() && !fetching, |d| {
             d.child(
                 div()
                     .mt(px(4.))
                     .child(widgets::note(i18n::tr("apps.members_none"))),
             )
         })
-        .when(missing > 0 && !members.is_empty(), |d| {
+        .when(fetching, |d| {
+            d.child(
+                div()
+                    .mt(px(4.))
+                    .child(widgets::note(i18n::tr("apps.members_loading"))),
+            )
+        })
+        .when(missing > 0 && !members.is_empty() && !fetching, |d| {
             d.child(div().mt(px(4.)).child(widgets::note(
                 t!("apps.members_missing", n = missing).to_string(),
             )))
@@ -557,10 +569,6 @@ fn expand_value(text: impl Into<gpui::SharedString>) -> AnyElement {
         .into_any_element()
 }
 
-/// How many members the expansion names. Past this the tail is idle
-/// helpers; the hog is already in the first lines.
-const MEMBERS_TIP: usize = 12;
-
 fn members_info(root_pid: u32) -> AnyElement {
     div()
         .id(("app-members", root_pid as usize))
@@ -574,7 +582,7 @@ fn members_info(root_pid: u32) -> AnyElement {
         .into_any_element()
 }
 
-fn member_row(p: &ProcessSnapshot, last: bool) -> AnyElement {
+fn member_row(p: &ProcessSnapshot, cpu: Option<f32>, last: bool) -> AnyElement {
     h_flex()
         .items_baseline()
         .justify_between()
@@ -598,38 +606,13 @@ fn member_row(p: &ProcessSnapshot, last: bool) -> AnyElement {
                 .font_family(font::MONO)
                 .text_size(px(10.))
                 .text_color(theme::text_muted())
-                .child(format::pct(p.cpu_usage_percent))
+                .child(
+                    cpu.map(format::pct)
+                        .unwrap_or_else(|| format::PLACEHOLDER.to_string()),
+                )
                 .child(format::memory(snap_memory(p))),
         )
         .into_any_element()
-}
-
-/// Walk parent pointers through the *materialised* process table.
-/// The group count is the full tree; this listing can only name pids
-/// zstats kept in `max-processes`, which is why a 7-process Zed may
-/// only show the handful that were hot enough to rank.
-fn tree_members(root: u32, processes: &[ProcessSnapshot]) -> Vec<&ProcessSnapshot> {
-    let by_pid: HashMap<u32, u32> = processes
-        .iter()
-        .filter_map(|p| p.parent_pid.map(|pp| (p.pid, pp)))
-        .collect();
-    processes
-        .iter()
-        .filter(|p| belongs_to(p.pid, root, &by_pid))
-        .collect()
-}
-
-fn belongs_to(mut pid: u32, root: u32, parent_of: &HashMap<u32, u32>) -> bool {
-    for _ in 0..64 {
-        if pid == root {
-            return true;
-        }
-        match parent_of.get(&pid) {
-            Some(&pp) if pp != 0 && pp != 1 && pp != pid => pid = pp,
-            _ => return false,
-        }
-    }
-    false
 }
 
 fn snap_memory(p: &ProcessSnapshot) -> u64 {
@@ -913,48 +896,5 @@ mod tests {
             bar_fraction(AppSort::Memory, &groups[0], mem_full),
             300.0 / 900.0
         );
-    }
-
-    fn proc(pid: u32, parent: Option<u32>, name: &str) -> ProcessSnapshot {
-        ProcessSnapshot {
-            pid,
-            name: name.into(),
-            cmd: String::new(),
-            cpu_usage_percent: 0.0,
-            cpu_time_ms: 0,
-            memory_bytes: 0,
-            phys_footprint_bytes: None,
-            virtual_memory_bytes: 0,
-            run_time_secs: 0,
-            parent_pid: parent,
-            user_id: None,
-            status: String::new(),
-            read_bytes_per_sec: None,
-            write_bytes_per_sec: None,
-        }
-    }
-
-    #[test]
-    fn tree_members_follow_parent_pointers_through_the_table() {
-        let table = vec![
-            proc(19477, Some(1), "zed"),
-            proc(22573, Some(19477), "rust-analyzer"),
-            proc(22659, Some(22573), "proc-macro"),
-            proc(99, Some(1), "Finder"),
-            proc(50, Some(19477), "login"),
-            // Intermediate parent not in the materialised table.
-            proc(51, Some(20463), "zsh"),
-        ];
-        let names: Vec<&str> = tree_members(19477, &table)
-            .into_iter()
-            .map(|p| p.name.as_str())
-            .collect();
-        assert!(names.contains(&"zed"));
-        assert!(names.contains(&"rust-analyzer"));
-        assert!(names.contains(&"proc-macro"));
-        assert!(names.contains(&"login"), "direct child of the root");
-        assert!(!names.contains(&"zsh"), "broken chain is not guessed");
-        assert!(!names.contains(&"Finder"));
-        assert_eq!(tree_members(99, &table).len(), 1);
     }
 }

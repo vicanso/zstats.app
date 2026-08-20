@@ -24,6 +24,7 @@
 //! actually pays for is one extra pair of sysinfo refreshes, off the UI
 //! thread, and only when clicked.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +51,49 @@ pub struct Scan {
     /// two numbers for the same process that disagree without explanation
     /// are worse than no second number at all.
     pub window: Duration,
+}
+
+/// Identity, parent pointers, memory — the full table, one pass.
+///
+/// CPU% is unusable here (sysinfo has no baseline yet) and the caller
+/// must not paint it. What this is for: naming every member of an Apps
+/// tree. The resident tick only materialises `max-processes`, so a
+/// 37-helper browser is a count with a handful of names; walking this
+/// table is how the expansion lists the rest. No [`SETTLE`]: a sleep
+/// would be paying for a rate this listing then throws away.
+pub fn list_processes() -> Result<Arc<Vec<ProcessSnapshot>>, CollectError> {
+    let mut collector = LocalCollector::new(process_config());
+    let snapshot = collector.collect()?;
+    Ok(snapshot.processes.unwrap_or_default())
+}
+
+/// Every process in `processes` whose parent chain reaches `root`.
+///
+/// The chain has to be intact in *this* table: a missing intermediate
+/// is not guessed, because that would pin idle helpers on the wrong
+/// tree. Same walk zstats uses to build `ProcessGroupSnapshot`.
+pub fn tree_members(root: u32, processes: &[ProcessSnapshot]) -> Vec<&ProcessSnapshot> {
+    let by_pid: HashMap<u32, u32> = processes
+        .iter()
+        .filter_map(|p| p.parent_pid.map(|pp| (p.pid, pp)))
+        .collect();
+    processes
+        .iter()
+        .filter(|p| belongs_to(p.pid, root, &by_pid))
+        .collect()
+}
+
+fn belongs_to(mut pid: u32, root: u32, parent_of: &HashMap<u32, u32>) -> bool {
+    for _ in 0..64 {
+        if pid == root {
+            return true;
+        }
+        match parent_of.get(&pid) {
+            Some(&pp) if pp != 0 && pp != 1 && pp != pid => pid = pp,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Collect the entire process table. Blocking, and sleeps for [`SETTLE`] —
@@ -188,5 +232,65 @@ mod tests {
             scan.groups.iter().any(|g| g.process_count > 1),
             "every tree is a singleton — grouping did not walk descendants"
         );
+    }
+
+    /// One pass, no settle: names and parent pointers for every process,
+    /// which is what an Apps expansion needs. CPU is not part of the
+    /// contract — that is why [`scan`] exists.
+    #[test]
+    fn list_processes_returns_the_uncapped_table() {
+        let processes = list_processes().expect("collect");
+        assert!(
+            processes.len() > 50,
+            "only {} processes — the cap is still being applied",
+            processes.len()
+        );
+        assert!(
+            processes.iter().any(|p| p.parent_pid.is_some()),
+            "no parent pointers — the expansion cannot walk a tree"
+        );
+    }
+
+    fn proc(pid: u32, parent: Option<u32>, name: &str) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            name: name.into(),
+            cmd: String::new(),
+            cpu_usage_percent: 0.0,
+            cpu_time_ms: 0,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            virtual_memory_bytes: 0,
+            run_time_secs: 0,
+            parent_pid: parent,
+            user_id: None,
+            status: String::new(),
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    #[test]
+    fn tree_members_follow_parent_pointers_through_the_table() {
+        let table = vec![
+            proc(19477, Some(1), "zed"),
+            proc(22573, Some(19477), "rust-analyzer"),
+            proc(22659, Some(22573), "proc-macro"),
+            proc(99, Some(1), "Finder"),
+            proc(50, Some(19477), "login"),
+            // Intermediate parent not in the materialised table.
+            proc(51, Some(20463), "zsh"),
+        ];
+        let names: Vec<&str> = tree_members(19477, &table)
+            .into_iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(names.contains(&"zed"));
+        assert!(names.contains(&"rust-analyzer"));
+        assert!(names.contains(&"proc-macro"));
+        assert!(names.contains(&"login"), "direct child of the root");
+        assert!(!names.contains(&"zsh"), "broken chain is not guessed");
+        assert!(!names.contains(&"Finder"));
+        assert_eq!(tree_members(99, &table).len(), 1);
     }
 }
