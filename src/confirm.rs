@@ -33,9 +33,15 @@ pub fn ask(
         let on_ok = on_ok.clone();
         let ok = ok.clone();
         let cancel = cancel.clone();
+        // No backdrop dismissal to ask for: gpui-component deprecated
+        // `AlertDialog::overlay_closable` into a no-op ("disabled by
+        // design"), so the call only produced a warning. Esc still
+        // closes (`keyboard` defaults true) and Cancel is always on the
+        // sheet, so a destructive prompt never traps anyone — and for
+        // this particular sheet, needing an explicit answer rather than
+        // a stray click outside it is the better default anyway.
         alert
             .width(px(252.))
-            .overlay_closable(true)
             .title(
                 div()
                     .text_size(px(13.))

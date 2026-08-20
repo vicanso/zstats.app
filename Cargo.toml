@@ -30,7 +30,7 @@ short_description = "A menu bar metrics panel written in Rust and GPUI."
 # use the same source form (no rev) here and let Cargo.lock pin the commit.
 # Pin only gpui-component's rev; after upgrade, confirm a single gpui via
 # `cargo tree -i gpui` and commit the lockfile.
-# component: bc174a7ec4534b2a4174fddde314b38d30d69093
+# component: 49229371e095bfd2ca77d336b5972b16956f0a87
 # zed (lockfile): 24e25552b1259d56a6fdd7956a419ed9e8a1a25e
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
@@ -43,8 +43,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
 # editor's highlighter, which nothing here uses — dropping it sheds
 # tree-sitter + tree-sitter-json from the binary. If a future component
 # fails to compile wanting LanguageConfig, this is the switch.
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "bc174a7ec4534b2a4174fddde314b38d30d69093" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "bc174a7ec4534b2a4174fddde314b38d30d69093" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "49229371e095bfd2ca77d336b5972b16956f0a87" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "49229371e095bfd2ca77d336b5972b16956f0a87" }
 gpui_macros = { git = "https://github.com/zed-industries/zed" }
 
 # Embedded metrics collection. `frontend` brings the alert rule engine,
