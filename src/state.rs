@@ -157,8 +157,8 @@ impl AppSort {
 pub enum Tab {
     #[default]
     Overview,
-    Processes,
     Apps,
+    Processes,
     /// Disks, temperature sensors and the battery in one place — the
     /// machine's physical substrate, as opposed to the workload tabs.
     Hardware,
@@ -170,8 +170,8 @@ pub enum Tab {
 impl Tab {
     pub const ALL: [Tab; 7] = [
         Tab::Overview,
-        Tab::Processes,
         Tab::Apps,
+        Tab::Processes,
         Tab::Hardware,
         Tab::Net,
         Tab::Alerts,
@@ -187,8 +187,8 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
-            Tab::Processes => "Processes",
             Tab::Apps => "Apps",
+            Tab::Processes => "Processes",
             Tab::Hardware => "Hardware",
             Tab::Net => "Network",
             Tab::Alerts => "Alerts",
@@ -200,8 +200,8 @@ impl Tab {
     pub fn title(self) -> String {
         i18n::tr(match self {
             Tab::Overview => "tabs.overview",
-            Tab::Processes => "tabs.processes",
             Tab::Apps => "tabs.apps",
+            Tab::Processes => "tabs.processes",
             Tab::Hardware => "tabs.hardware",
             Tab::Net => "tabs.network",
             Tab::Alerts => "tabs.alerts",
@@ -501,8 +501,10 @@ impl SeenAlert {
         self.at.elapsed().unwrap_or_default()
     }
 
-    /// How long the episode has been going, once that differs from [`age`]
-    /// by enough to be worth a second timestamp on the card.
+    /// First report to last report, once that differs from [`age`] by
+    /// enough to be worth a second timestamp. Not "still happening":
+    /// zstats goes quiet after the follow-up, so this span can end
+    /// hours before the card is read.
     pub fn span(&self) -> Option<Duration> {
         let span = self.at.duration_since(self.first_at).unwrap_or_default();
         (span >= Duration::from_secs(60)).then_some(span)

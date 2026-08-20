@@ -112,8 +112,8 @@ pub fn root(cx: &App) -> AnyElement {
 fn tab_icon(tab: Tab) -> Icon {
     match tab {
         Tab::Overview => Icon::new(IconName::LayoutDashboard),
-        Tab::Processes => Icon::new(IconName::Cpu),
         Tab::Apps => CustomIconName::AppWindow.into(),
+        Tab::Processes => Icon::new(IconName::Cpu),
         Tab::Hardware => Icon::new(IconName::HardDrive),
         Tab::Net => Icon::new(IconName::Network),
         Tab::Alerts => Icon::new(IconName::Bell),
@@ -187,8 +187,8 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
 fn content(state: &ZStatsAppState) -> AnyElement {
     let body = match state.tab() {
         Tab::Overview => overview::render(state),
-        Tab::Processes => processes::render(state),
         Tab::Apps => apps::render(state),
+        Tab::Processes => processes::render(state),
         // One tab for the machine's physical substrate: volumes, then
         // temperatures, then the battery. Both renderers return card
         // stacks, so merging is concatenation — no layout marriage.

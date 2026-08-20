@@ -86,8 +86,9 @@ impl BarScale {
 /// hardware: the same 110% is red here and there.
 const HOT_PERCENT: f64 = 100.0;
 
-/// Whether a row gets the page's only colour. Shared with Overview so
-/// the same pid is red in both places, or in neither.
+/// Whether a row gets the page's only colour. Overview's top trees use
+/// the burst half of this (`sustained = false`) so a 110% tree is red
+/// here and there.
 ///
 /// Two ways in, because "worth a look" has two shapes. A burst over
 /// [`HOT_PERCENT`] is the obvious one. The other is a process holding a
@@ -155,28 +156,15 @@ pub(super) fn rows_height(state: &ZStatsAppState) -> f32 {
 
 /// Ranked by the 60s rolling average so the order is stable enough to read.
 pub(super) fn ranked(tick: &Tick) -> Option<Vec<(&ProcessSnapshot, f64)>> {
-    ranked_by(tick, true)
-}
-
-/// Same table, instantaneous sample — Overview uses this so the list
-/// agrees with the Processor % above it.
-pub(super) fn ranked_live(tick: &Tick) -> Option<Vec<(&ProcessSnapshot, f64)>> {
-    ranked_by(tick, false)
-}
-
-fn ranked_by(tick: &Tick, rolling: bool) -> Option<Vec<(&ProcessSnapshot, f64)>> {
     let processes = tick.snapshot.processes.as_deref()?;
     let mut rows: Vec<_> = processes
         .iter()
         .map(|p| {
-            let cpu = if rolling {
-                tick.process_stats
-                    .get(&p.pid)
-                    .map(|s| s.cpu_avg)
-                    .unwrap_or(p.cpu_usage_percent as f64)
-            } else {
-                p.cpu_usage_percent as f64
-            };
+            let cpu = tick
+                .process_stats
+                .get(&p.pid)
+                .map(|s| s.cpu_avg)
+                .unwrap_or(p.cpu_usage_percent as f64);
             (p, cpu)
         })
         .collect();
@@ -205,8 +193,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             i18n::tr("processes.off_body"),
         )];
     };
-    // `ranked` hands back CPU order, which Overview also depends on; the
-    // user's choice is applied here so it only affects this tab.
+    // `ranked` hands back CPU order; the user's choice is applied here
+    // so it only affects this tab.
     match state.proc_sort() {
         ProcSort::Cpu => {}
         ProcSort::Memory => rows.sort_by_key(|(p, _)| Reverse(shown_memory(p))),

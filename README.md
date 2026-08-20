@@ -20,8 +20,8 @@ Most menu-bar monitors either paint pretty numbers or nag you. zstats does both,
 
 - Live CPU% beside the tray icon
 - Overview: P/E cores, memory and compression, kernel memory pressure, disk and network throughput
-- Processes ranked by a 60-second average, with a name filter and a one-click full-table scan
 - Apps aggregated by process tree — one row for a browser and all its helpers
+- Processes ranked by a 60-second average, with a name filter and a one-click full-table scan
 - Hardware: volumes, hottest sensors first, battery health
 - History: what actually burned CPU *today*, ranked by accumulated time, not a spike
 

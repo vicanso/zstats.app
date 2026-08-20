@@ -60,7 +60,7 @@ Config 页的「界面」卡片可以把语言（跟随系统 / English / 中文
 
 ## 界面
 
-八个视图：Overview / Processes / Apps / Hardware / Network / Alerts / History / Config，`src/views/` 一个文件一个（Hardware 由 `disk.rs` + `sensors.rs` 两个卡片栈拼接而成——磁盘、温度、电池同属机器的物理层，各占一个 tab 时后两者常年只有半屏内容）。传感器默认只显示最热的 3 个，头部的「显示更多」chip 展开全部（与 Network 的隐藏接口 chip 同一习语）；超过 80 °C 的传感器永远不会被折叠掉——截断只吞安静的那些。导航是单行图标 tab（Control Center / Stats 的做法），全名走 tooltip。设计 token 在 `src/theme.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
+八个视图：Overview / Apps / Processes / Hardware / Network / Alerts / History / Config，`src/views/` 一个文件一个（Hardware 由 `disk.rs` + `sensors.rs` 两个卡片栈拼接而成——磁盘、温度、电池同属机器的物理层，各占一个 tab 时后两者常年只有半屏内容）。传感器默认只显示最热的 3 个，头部的「显示更多」chip 展开全部（与 Network 的隐藏接口 chip 同一习语）；超过 80 °C 的传感器永远不会被折叠掉——截断只吞安静的那些。导航是单行图标 tab（Control Center / Stats 的做法），全名走 tooltip。设计 token 在 `src/theme.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
 
 贯穿全部视图的一条规则：**进度条、柱状图和数字默认中性色（`ink`），只有越过阈值才变品牌红（`accent`）**，由 `theme::fill_for()` / `theme::text_for()` 固化。
 

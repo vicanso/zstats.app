@@ -1,4 +1,4 @@
-//! Overview: processor, top CPU processes, memory.
+//! Overview: processor, top application trees, memory.
 
 use super::processes;
 use super::widgets::{self, card};
@@ -17,8 +17,8 @@ use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use zstats::snapshot::{Capabilities, CpuSnapshot, IoTotalsSnapshot, MemorySnapshot};
 
-/// How many processes the first panel names. Enough to answer "who's
-/// hot" without turning Overview into a second Processes tab.
+/// How many trees the first panel names. Enough to answer "who's
+/// hot" without turning Overview into a second Apps tab.
 const TOP_N: usize = 5;
 
 /// Per-core bar turns accent past this.
@@ -54,49 +54,55 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     };
     vec![
         processor(&snapshot.cpu),
-        top_cpu(state),
+        top_apps(state),
         memory(&snapshot.memory, &snapshot.io_totals, snapshot.capabilities),
     ]
 }
 
-/// Compact "who's using the CPU" list. Battery / watts stay on Sensors —
-/// a glance at the menu bar almost never needs them.
-fn top_cpu(state: &ZStatsAppState) -> AnyElement {
+/// Compact "who's using the CPU" list — whole trees, same ranking as
+/// Apps. A glance that named helpers (`Google Chrome Helper`,
+/// `rust-analyzer`) answered the wrong question. Battery / watts stay
+/// on Sensors.
+fn top_apps(state: &ZStatsAppState) -> AnyElement {
     let Some(tick) = state.latest() else {
         return widgets::empty_card(
             i18n::tr("overview.top_cpu"),
             i18n::tr("common.waiting_sample"),
         );
     };
-    let Some(mut rows) = processes::ranked_live(tick) else {
+    let Some(groups) = tick.snapshot.process_groups.as_deref() else {
         return widgets::empty_card(
             i18n::tr("overview.top_cpu_off"),
             i18n::tr("overview.top_cpu_off_body"),
         );
     };
+    let mut rows: Vec<_> = groups.iter().collect();
+    rows.sort_by(|a, b| b.cpu_usage_percent.total_cmp(&a.cpu_usage_percent));
     rows.truncate(TOP_N);
     let n = rows.len();
 
     widgets::list_shell()
         .child(widgets::list_header(
-            i18n::tr("overview.top_cpu"),
-            Some(top_cpu_all()),
-        ))
-        .children(rows.into_iter().enumerate().map(|(i, (p, avg))| {
-            let sustained = state.sustained_load(p.pid);
-            let hot = processes::is_hot(avg, sustained.is_some());
-            // A red number with nothing beside it is a question. The
-            // Processes row answers it with a visible "sustained" pill;
-            // here, at 320px next to a truncating name, the tooltip is
-            // the proportionate place to say which of the two rules
-            // lit it.
-            let why = state.sustained_load(p.pid).map(|dur| {
-                t!(
-                    "processes.sustained",
-                    duration = format::uptime(dur.as_secs())
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .min_w_0()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(i18n::tr("overview.top_cpu")),
                 )
-                .to_string()
-            });
+                .child(widgets::info_icon(
+                    "overview-top-apps",
+                    i18n::tr("overview.top_apps_tip"),
+                )),
+            Some(top_apps_all()),
+        ))
+        .children(rows.into_iter().enumerate().map(|(i, g)| {
+            // Burst only: a tree has no sustained flag of its own, and
+            // walking members here would make Overview a second Apps tab.
+            let hot = processes::is_hot(f64::from(g.cpu_usage_percent), false);
             h_flex()
                 .items_center()
                 .justify_between()
@@ -107,31 +113,30 @@ fn top_cpu(state: &ZStatsAppState) -> AnyElement {
                     d.border_b(px(1.)).border_color(theme::border_subtle())
                 })
                 .child(widgets::truncating_name(
-                    ("top-cpu-name", p.pid as usize),
-                    p.name.clone(),
+                    ("top-app-name", g.root_pid as usize),
+                    g.name.clone(),
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),
                 ))
                 .child(
                     div()
-                        .id(("top-cpu-pct", i))
+                        .id(("top-app-pct", g.root_pid as usize))
                         .flex_none()
                         .font_family(font::MONO)
                         .text_size(px(12.))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(theme::text_for(hot))
-                        .when_some(why, |d, text| d.tooltip(widgets::wrap_tooltip(text)))
-                        .child(format::pct_col(avg as f32)),
+                        .child(format::pct_col(g.cpu_usage_percent)),
                 )
         }))
         .into_any_element()
 }
 
-fn top_cpu_all() -> AnyElement {
-    let tip = Tab::Processes.title();
+fn top_apps_all() -> AnyElement {
+    let tip = Tab::Apps.title();
     h_flex()
-        .id("top-cpu-all")
+        .id("top-apps-all")
         .items_center()
         .gap(px(1.))
         .rounded(px(5.))
@@ -142,7 +147,7 @@ fn top_cpu_all() -> AnyElement {
         .on_click(|_, _window, cx| {
             cx.global::<ZStatsGlobalStore>()
                 .clone()
-                .update(cx, |state, cx| state.set_tab(Tab::Processes, cx));
+                .update(cx, |state, cx| state.set_tab(Tab::Apps, cx));
         })
         .child(
             div()

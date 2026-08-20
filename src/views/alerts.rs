@@ -387,7 +387,7 @@ fn alert_head(
             .items_center()
             .gap(px(6.))
             // Timestamps live under the title now — this slot used to
-            // hold WARNING + "13m ago · ongoing 30m" + pills + icons,
+            // hold WARNING + "13m ago · lasted 30m" + pills + icons,
             // and at 320px the actions lost.
             // A muted episode says so without being expanded — otherwise
             // "why no banner?" has no visible answer on the card.
