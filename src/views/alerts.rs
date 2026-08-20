@@ -1,8 +1,14 @@
-//! Alerts: conditions that crossed a threshold, newest first.
+//! Alerts: what to look at now, then today's record.
 //!
 //! `Tick::alerts` reports the *moment* a threshold is crossed, not a standing
 //! list, so what is shown here is accumulated by the store (see
 //! `state::SeenAlert`) along with when this process saw it.
+//!
+//! Recency beats type. Live episodes (reported this session) sit first,
+//! newest report first. The sustained-load card joins that group by when
+//! it started being noticed — it is not an alert, but it is happening
+//! now, and burying it under restored cards made the tab look stale.
+//! Episodes restored from earlier today follow, under their own heading.
 //!
 //! Clicking a card expands a per-subject threshold editor. Writes go
 //! through `zstats::settings::apply_add` so they match the CLI, then the
@@ -14,116 +20,155 @@ use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::{SeenAlert, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
 use crate::theme;
+use crate::watch::SUSTAINED_AFTER;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px,
+    div, px, AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{IconName, Sizable};
 use gpui_component::{h_flex, v_flex};
+use gpui_component::{IconName, Sizable};
 use rust_i18n::t;
+use std::time::Duration;
 use zstats::settings::{FileConfig, PressureAlert};
 use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity};
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
-    if state.alerts().is_empty() {
+    let live: Vec<&SeenAlert> = state.alerts().iter().filter(|s| s.live).collect();
+    let earlier: Vec<&SeenAlert> = state.alerts().iter().filter(|s| !s.live).collect();
+    let holdings = state.sustained_active();
+
+    if live.is_empty() && earlier.is_empty() && holdings.is_empty() {
         // An empty list is indistinguishable from a broken watcher unless
         // it says what it is armed with — so quote the thresholds in force.
-        return vec![
-            card()
-                .pt(px(16.))
-                .pb(px(16.))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(i18n::tr("alerts.empty_title")),
-                )
-                .child(
-                    div()
-                        .mt(px(6.))
-                        .text_size(px(11.))
-                        .text_color(theme::text_muted())
-                        .child(i18n::tr("alerts.empty_body")),
-                )
-                .children(armed_line(state).map(|line| {
-                    div()
-                        .mt(px(8.))
-                        .font_family(font::MONO)
-                        .text_size(px(10.))
-                        .text_color(theme::text_dim())
-                        .child(line)
-                }))
-                .into_any_element(),
-        ]
-        .into_iter()
-        .chain(sustained_card(state))
-        .collect();
+        return vec![empty_card(state)];
     }
 
-    let selected = state.selected_alert().cloned();
-    let settings = state.settings();
+    let mut now: Vec<AnyElement> = live.iter().copied().map(|s| alert_card(s, state)).collect();
+    if let (Some(ago), Some(card)) = (newest_noticed_ago(&holdings), sustained_from(&holdings)) {
+        let ages: Vec<Duration> = live.iter().map(|s| s.age()).collect();
+        let at = sustained_insert_at(&ages, ago);
+        now.splice(at..at, std::iter::once(card));
+    }
 
-    let mut cards: Vec<AnyElement> = state
-        .alerts()
-        .iter()
-        .map(|seen| {
-            // Keyed by the episode's own id, never by position: the deque
-            // reorders whenever an episode resurfaces, and an index would hand
-            // this card's hover / expansion state to whichever alert took the
-            // slot.
-            let i = seen.seq as usize;
-            let critical = seen.event.severity() == Severity::Critical;
-            let line = if critical {
-                Hsla::from(theme::accent_wash(45))
-            } else {
-                Hsla::from(theme::border())
-            };
-            let target = override_target(&seen.event);
-            let expanded = target
-                .as_ref()
-                .is_some_and(|t| selected.as_ref() == Some(&(t.key.to_string(), t.name.clone())));
-            let card_id = SharedString::from(format!("alert-{i}"));
-
-            card()
-                .id(card_id)
-                .border_color(line)
-                .when(critical, |d| d.bg(theme::accent_wash(7)))
-                .child(alert_head(i, target.clone(), critical, line, seen, state))
-                .child(alert_title(&seen.event.subject))
-                .child(div().mt(px(2.)).child(alert_when(seen)))
-                .child(
-                    div()
-                        .mt(px(3.))
-                        .text_size(px(9.5))
-                        .text_color(theme::text_muted())
-                        .child(alert_sentence(&seen.event)),
-                )
-                .children(consumer_rows(i, &seen.event, seen.live))
-                .when_some(seen.event.repeat_after, |d, after| {
-                    d.child(div().mt(px(8.)).child(widgets::note(
-                        t!("alerts.follow_up", when = format::span(after)).to_string(),
-                    )))
-                })
-                .when_some(target.filter(|_| expanded), |d, tgt| {
-                    d.child(threshold_editor(i, &tgt, settings))
-                        .child(snooze_row(i, &seen.event, state))
-                })
-                .into_any_element()
-        })
-        .collect();
-
-    cards.extend(sustained_card(state));
+    let mut cards = now;
+    if !earlier.is_empty() {
+        cards.push(earlier_heading());
+        cards.extend(earlier.iter().copied().map(|s| alert_card(s, state)));
+    }
     // Watching belongs here too, not only on the empty list: otherwise
     // one episode leaves half the panel blank and hides what is armed.
     cards.extend(armed_line(state).map(widgets::note));
     cards.push(widgets::note(i18n::tr("alerts.footer_note")));
     cards
+}
+
+fn empty_card(state: &ZStatsAppState) -> AnyElement {
+    card()
+        .pt(px(16.))
+        .pb(px(16.))
+        .child(
+            div()
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::text())
+                .child(i18n::tr("alerts.empty_title")),
+        )
+        .child(
+            div()
+                .mt(px(6.))
+                .text_size(px(11.))
+                .text_color(theme::text_muted())
+                .child(i18n::tr("alerts.empty_body")),
+        )
+        .children(armed_line(state).map(|line| {
+            div()
+                .mt(px(8.))
+                .font_family(font::MONO)
+                .text_size(px(10.))
+                .text_color(theme::text_dim())
+                .child(line)
+        }))
+        .into_any_element()
+}
+
+/// How long ago the watcher started pointing at this stretch: the hold
+/// itself is two hours old by then, but that is the bar, not the news.
+fn newest_noticed_ago(holdings: &[SustainedNotice]) -> Option<Duration> {
+    holdings
+        .iter()
+        .map(|n| n.duration.saturating_sub(SUSTAINED_AFTER))
+        .min()
+}
+
+/// Index in the live list (newest first) the sustained card belongs at.
+/// A hold noticed more recently than a live report sits above it.
+fn sustained_insert_at(live_ages: &[Duration], noticed_ago: Duration) -> usize {
+    live_ages
+        .iter()
+        .position(|age| noticed_ago < *age)
+        .unwrap_or(live_ages.len())
+}
+
+fn earlier_heading() -> AnyElement {
+    div()
+        .px(px(13.))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text_dim())
+        .child(i18n::tr("alerts.earlier"))
+        .into_any_element()
+}
+
+/// One episode card. Keyed by the episode's own id, never by position:
+/// the deque reorders whenever an episode resurfaces, and an index would
+/// hand this card's hover / expansion state to whichever alert took the
+/// slot.
+fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
+    let selected = state.selected_alert();
+    let settings = state.settings();
+    let i = seen.seq as usize;
+    let critical = seen.event.severity() == Severity::Critical;
+    let line = if critical {
+        Hsla::from(theme::accent_wash(45))
+    } else {
+        Hsla::from(theme::border())
+    };
+    let target = override_target(&seen.event);
+    let expanded = target
+        .as_ref()
+        .is_some_and(|t| selected.is_some_and(|(k, n)| k.as_str() == t.key && n == &t.name));
+    let card_id = SharedString::from(format!("alert-{i}"));
+
+    card()
+        .id(card_id)
+        .border_color(line)
+        .when(critical, |d| d.bg(theme::accent_wash(7)))
+        .child(alert_head(i, target.clone(), critical, line, seen, state))
+        .child(alert_title(&seen.event.subject))
+        .child(div().mt(px(2.)).child(alert_when(seen)))
+        .child(
+            div()
+                .mt(px(3.))
+                .text_size(px(9.5))
+                .text_color(theme::text_muted())
+                .child(alert_sentence(&seen.event)),
+        )
+        .children(consumer_rows(i, &seen.event, seen.live))
+        .when_some(seen.event.repeat_after, |d, after| {
+            d.child(div().mt(px(8.)).child(widgets::note(
+                t!("alerts.follow_up", when = format::span(after)).to_string(),
+            )))
+        })
+        .when_some(target.filter(|_| expanded), |d, tgt| {
+            d.child(threshold_editor(i, &tgt, settings))
+                .child(snooze_row(i, &seen.event, state))
+        })
+        .into_any_element()
 }
 
 fn alert_when(seen: &SeenAlert) -> AnyElement {
@@ -144,8 +189,7 @@ fn alert_when(seen: &SeenAlert) -> AnyElement {
 /// judgment lives in watch.rs, never in the rule engine, and the rows
 /// carry no actions on purpose — a steady 12% is information, not an
 /// offence.
-fn sustained_card(state: &ZStatsAppState) -> Option<AnyElement> {
-    let active = state.sustained_active();
+fn sustained_from(active: &[SustainedNotice]) -> Option<AnyElement> {
     if active.is_empty() {
         return None;
     }
@@ -166,7 +210,7 @@ fn sustained_card(state: &ZStatsAppState) -> Option<AnyElement> {
                     .text_color(theme::text_dim())
                     .child(i18n::tr("alerts.sustained_note")),
             )
-            .children(active.into_iter().enumerate().map(|(i, notice)| {
+            .children(active.iter().enumerate().map(|(i, notice)| {
                 h_flex()
                     .items_center()
                     .justify_between()
@@ -264,7 +308,7 @@ fn armed_line(state: &ZStatsAppState) -> Option<String> {
         t!(
             "alerts.watch_sustained",
             cpu = format!("{:.0}%", state.sustained_bar_percent()),
-            hours = crate::watch::SUSTAINED_AFTER.as_secs() / 3600
+            hours = SUSTAINED_AFTER.as_secs() / 3600
         )
         .to_string(),
     );
@@ -1038,6 +1082,43 @@ mod tests {
         let t = override_target(&cpu_process("ghostty")).expect("target");
         assert_eq!(t.key, "alert-cpu");
         assert_eq!(t.name, "ghostty");
+    }
+
+    /// A hold that just crossed the two-hour bar is news; a live alert
+    /// last reported hours ago is not, even though it is a "real" alert.
+    #[test]
+    fn a_just_noticed_hold_sits_above_stale_live_alerts() {
+        let live = [Duration::from_secs(4 * 3600), Duration::from_secs(9 * 3600)];
+        assert_eq!(sustained_insert_at(&live, Duration::from_secs(2 * 60)), 0);
+    }
+
+    #[test]
+    fn a_fresh_live_alert_keeps_the_top() {
+        let live = [Duration::from_secs(30), Duration::from_secs(4 * 3600)];
+        assert_eq!(sustained_insert_at(&live, Duration::from_secs(2 * 60)), 1);
+    }
+
+    #[test]
+    fn with_no_live_alerts_sustained_is_first() {
+        assert_eq!(sustained_insert_at(&[], Duration::from_secs(60)), 0);
+    }
+
+    #[test]
+    fn an_old_hold_falls_through_to_the_bottom_of_live() {
+        let live = [Duration::from_secs(60)];
+        assert_eq!(sustained_insert_at(&live, Duration::from_secs(3 * 3600)), 1);
+    }
+
+    #[test]
+    fn noticed_ago_is_the_hold_minus_the_bar() {
+        let n = SustainedNotice {
+            pid: 1,
+            name: "ghostty".into(),
+            cpu_avg: 23.7,
+            duration: SUSTAINED_AFTER + Duration::from_secs(120),
+        };
+        assert_eq!(newest_noticed_ago(&[n]), Some(Duration::from_secs(120)));
+        assert_eq!(newest_noticed_ago(&[]), None);
     }
 
     #[test]
