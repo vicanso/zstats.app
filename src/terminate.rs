@@ -1,12 +1,13 @@
 //! Asking a process to quit — the panel's one way of acting on a process.
 //!
-//! Two callers, both behind a confirm sheet and never automatic: the quit
-//! button on a memory alert card ([`request_quit`]) and the Quit control on
-//! a process row ([`request_term`]). An unattended kill can take unsaved
-//! work with it, so the app's posture stays "notify and offer", with the
-//! user's click as the trigger. *When* something is over the line remains
-//! zstats' call (the alert button consumes its `AlertEvent`s); this module
-//! only carries out the request.
+//! Three callers, all behind a confirm sheet and never automatic: the quit
+//! button on a memory alert card ([`request_quit`]), the Quit control on
+//! a process row ([`request_term`]), and the Apps expansion's Quit
+//! ([`can_quit_app`] → [`request_quit`]). An unattended kill can take
+//! unsaved work with it, so the app's posture stays "notify and offer",
+//! with the user's click as the trigger. *When* something is over the
+//! line remains zstats' call (the alert button consumes its
+//! `AlertEvent`s); this module only carries out the request.
 //!
 //! [`request_quit`] has two tiers, both refusable by the target:
 //! - pids LaunchServices knows as applications get
@@ -81,6 +82,16 @@ fn running_application(pid: u32) -> Option<objc2::rc::Retained<NSRunningApplicat
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid as libc::pid_t)
 }
 
+/// Whether the Apps expansion should offer Quit for this tree root.
+///
+/// Only LaunchServices applications: ⌘Q is what "quit the whole app"
+/// means, and a `login` tree heading the list is a session, not an
+/// app — SIGTERM on that root would take every shell with it. Same
+/// self/init refusal as [`can_term`].
+pub fn can_quit_app(pid: u32) -> bool {
+    can_term(pid) && can_quit(pid) && matches!(method_for(pid), QuitMethod::App)
+}
+
 /// Whether the process page should offer a Quit for `pid` at all.
 ///
 /// Refuses pid 1 (launchd, which cannot usefully be signalled) and our
@@ -119,6 +130,11 @@ mod tests {
         assert!(!can_term(0));
         assert!(!can_term(1));
         assert!(!can_term(std::process::id()));
+        assert!(
+            !can_quit_app(std::process::id()),
+            "the panel must not offer to quit itself from Apps"
+        );
+        assert!(!can_quit_app(1));
         assert!(can_term(std::process::id().saturating_add(1000).max(2)));
         // The delivering end refuses the same pids, not just the button.
         assert!(!request_term(1));

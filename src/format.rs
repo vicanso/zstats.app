@@ -116,12 +116,25 @@ pub fn memory(bytes: u64) -> String {
 }
 
 /// Disk-style capacity, promoting to TB past a terabyte.
+///
+/// Below 1 GiB this used to round to `0 GB`, so a 400 MB installer
+/// painted "0 GB free of 0 GB · 36% used" — a used percent next to two
+/// zeros looks like a broken collector, not a small volume. Megabytes
+/// until a gigabyte, one decimal under 10 GB (same rule as [`gb`]),
+/// whole GB after that.
 pub fn capacity(bytes: u64) -> String {
     let v = bytes as f64;
     if v >= TIB {
         format!("{:.1} TB", v / TIB)
+    } else if v >= GIB {
+        let gb = v / GIB;
+        if gb < 10.0 {
+            format!("{gb:.1} GB")
+        } else {
+            format!("{gb:.0} GB")
+        }
     } else {
-        format!("{:.0} GB", v / GIB)
+        format!("{:.0} MB", v / MIB)
     }
 }
 
@@ -314,6 +327,15 @@ mod tests {
     fn capacity_promotes_to_terabytes() {
         assert_eq!(capacity((994.0 * GIB) as u64), "994 GB");
         assert_eq!(capacity((2.0 * TIB) as u64), "2.0 TB");
+    }
+
+    #[test]
+    fn capacity_does_not_collapse_small_volumes_to_zero_gb() {
+        // The installer card that read "0 GB free of 0 GB · 36% used".
+        assert_eq!(capacity((400.0 * MIB) as u64), "400 MB");
+        assert_eq!(capacity(0), "0 MB");
+        assert_eq!(capacity((2.5 * GIB) as u64), "2.5 GB");
+        assert_eq!(capacity((23.4 * GIB) as u64), "23 GB");
     }
 
     #[test]

@@ -75,7 +75,9 @@ pub enum CustomIconName {
     AppWindow,
     Cpu,
     History,
+    LogOut,
     Power,
+    RefreshCw,
     Shield,
 }
 
@@ -85,7 +87,9 @@ impl CustomIconName {
             CustomIconName::AppWindow => "icons/app-window.svg",
             CustomIconName::Cpu => "icons/cpu.svg",
             CustomIconName::History => "icons/history.svg",
+            CustomIconName::LogOut => "icons/log-out.svg",
             CustomIconName::Power => "icons/power.svg",
+            CustomIconName::RefreshCw => "icons/refresh-cw.svg",
             CustomIconName::Shield => "icons/shield.svg",
         }
         .into()
@@ -112,7 +116,9 @@ mod tests {
             CustomIconName::AppWindow,
             CustomIconName::Cpu,
             CustomIconName::History,
+            CustomIconName::LogOut,
             CustomIconName::Power,
+            CustomIconName::RefreshCw,
             CustomIconName::Shield,
         ] {
             let path = icon.path();

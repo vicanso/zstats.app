@@ -746,17 +746,28 @@ fn analysis_tables(
             actions.then(|| suggest_clear_button(&result.suggestions, sug_total)),
         ))
         .children({
+            // Suggestions already name the trashable caches. Repeating
+            // them under Big directories (same path, same bytes, no
+            // trash control) reads as a double render — cargo-target
+            // at 46.8 GB twice in the screenshot. Drop those paths
+            // here; the ranking of everything else stays.
+            let dirs: Vec<DirHit> = result
+                .dirs
+                .iter()
+                .filter(|d| result.suggestions.iter().all(|s| s.path != d.path))
+                .cloned()
+                .collect();
             // Default 8–10 rows; "show more" reveals everything retained
             // (up to TABLE_KEEP). The chip states how many are hidden.
             let shown = if show_all_dirs {
-                result.dirs.len()
+                dirs.len()
             } else {
-                diskscan::default_rows(&result.dirs, |d| d.bytes)
+                diskscan::default_rows(&dirs, |d| d.bytes)
             };
-            let hidden = result.dirs.len() - shown;
+            let hidden = dirs.len() - shown;
             section(
                 i18n::tr("disk.ana_dirs"),
-                dir_rows(&result.dirs[..shown], "ana-dir", false),
+                dir_rows(&dirs[..shown], "ana-dir", false),
                 (hidden > 0 || show_all_dirs).then(|| more_chip(hidden, show_all_dirs)),
             )
         })
@@ -1265,16 +1276,44 @@ fn big_files_card(state: &ZStatsAppState) -> AnyElement {
             ))
         })
         .into_any_element();
-    // The sentence explaining what this query covers used to be the
-    // card's whole body before anything was asked, ~60pt of prose above
-    // the tables that are this window's point. Same move the History
-    // header made: a read-once fact belongs on an ⓘ.
-    let asked = !matches!(state.big_files(), BigFiles::Off);
+    // Off is a one-row toolbar, not an empty well sitting above the
+    // analyser. The ⓘ still carries the read-once hint.
+    if matches!(state.big_files(), BigFiles::Off) {
+        return widgets::card()
+            .pt(px(8.))
+            .pb(px(8.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::text())
+                                    .child(i18n::tr("disk.big_title")),
+                            )
+                            .child(widgets::info_icon(
+                                "big-files-basis",
+                                i18n::tr("disk.big_hint"),
+                            )),
+                    )
+                    .child(controls),
+            )
+            .into_any_element();
+    }
     widgets::list_shell()
         .child(widgets::list_header(
             h_flex()
                 .items_center()
                 .gap(px(4.))
+                .min_w_0()
                 .child(i18n::tr("disk.big_title"))
                 .child(widgets::info_icon(
                     "big-files-basis",
@@ -1282,9 +1321,7 @@ fn big_files_card(state: &ZStatsAppState) -> AnyElement {
                 )),
             Some(controls),
         ))
-        .when(asked, |card| {
-            card.child(div().px(px(13.)).pb(px(11.)).child(big_files_body(state)))
-        })
+        .child(div().px(px(13.)).pb(px(11.)).child(big_files_body(state)))
         .into_any_element()
 }
 

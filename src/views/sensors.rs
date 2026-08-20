@@ -78,8 +78,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     // container's own edge and read as a stray line.
                     let total = sorted.len();
                     sorted.into_iter().enumerate().map(move |(i, t)| {
-                        let hot = t.celsius > HOT_CELSIUS;
-                        let scale = t.critical_celsius.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0);
+                        let hot = sensor_hot(t.celsius, t.critical_celsius);
+                        let scale = meter_scale(t.critical_celsius);
                         v_flex()
                             .px(px(13.))
                             // 9, not 10: the tab has to end above the footer
@@ -124,9 +124,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                             )
                                             .child(
                                                 div()
+                                                    .id(("sensor-limit", i))
                                                     .flex_none()
                                                     .text_size(px(10.))
                                                     .text_color(theme::text_faint())
+                                                    .tooltip(widgets::wrap_tooltip(i18n::tr(
+                                                        "sensors.limit_tip",
+                                                    )))
                                                     .child(limits_label(t)),
                                             ),
                                     )
@@ -161,11 +165,12 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     with_battery_card(temps_card, tick)
 }
 
-/// What the firmware says this sensor's ceiling is — the number the
-/// reading is judged against, and the scale the meter is drawn on.
-/// "Nothing reported" is said out loud rather than left blank: the bar
-/// is then drawn against [`ASSUMED_MAX_CELSIUS`], and a silent bar would
-/// let that assumption pass for a measurement.
+/// What the firmware reports beside the reading.
+///
+/// zstats' `max_celsius` is the **highest reading observed**, not a
+/// thermal limit — painting "max 52" next to 51.8 °C read as "at the
+/// ceiling" when the bar (drawn against 110 °C / crit) was only half
+/// full. The label now says *peak*. The bar uses [`meter_scale`].
 fn limits_label(t: &zstats::snapshot::TemperatureSnapshot) -> String {
     match (t.max_celsius, t.critical_celsius) {
         (Some(m), Some(c)) => t!(
@@ -178,6 +183,22 @@ fn limits_label(t: &zstats::snapshot::TemperatureSnapshot) -> String {
         (None, Some(c)) => t!("sensors.crit_only", crit = format!("{c:.0}")).to_string(),
         (None, None) => i18n::tr("sensors.no_limits"),
     }
+}
+
+/// The number the meter is drawn against.
+///
+/// Critical when the firmware reports one — that *is* a ceiling.
+/// Otherwise [`ASSUMED_MAX_CELSIUS`], never the observed peak: the
+/// hottest sensor on the page *is* the peak, so a bar scaled to it
+/// would be full by construction.
+fn meter_scale(crit: Option<f32>) -> f32 {
+    crit.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0)
+}
+
+/// Colour turns past [`HOT_CELSIUS`], or at 90% of a reported critical
+/// point — never against the observed peak, which is not a danger line.
+fn sensor_hot(celsius: f32, crit: Option<f32>) -> bool {
+    celsius > HOT_CELSIUS || crit.is_some_and(|c| c > 0.0 && celsius / c >= 0.9)
 }
 
 /// The expand/collapse control in the header, borrowed from the Network
@@ -326,5 +347,18 @@ mod tests {
             battery_time(&battery(None, None)).is_none(),
             "full and idle has nothing to say, so it says nothing"
         );
+    }
+
+    #[test]
+    fn the_bar_is_not_scaled_to_the_observed_peak() {
+        // The hottest sensor *is* the peak. Scaling to it would paint a
+        // full bar by construction — which is what "max 52" next to
+        // 51.8 °C looked like, even though 51.8 / 110 is half a trough.
+        assert_eq!(meter_scale(None), ASSUMED_MAX_CELSIUS);
+        assert_eq!(meter_scale(Some(100.0)), 100.0);
+        assert!(!sensor_hot(51.8, None), "a peak is not a danger line");
+        assert!(sensor_hot(81.0, None), "80 °C still colours");
+        assert!(sensor_hot(92.0, Some(100.0)), "90% of crit colours");
+        assert!(!sensor_hot(70.0, Some(100.0)));
     }
 }

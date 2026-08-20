@@ -78,72 +78,121 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     });
 
     let scale = scale_for(&rows);
-    let last = rows.len().saturating_sub(1);
+    // Expanding used to dump every silent bridge and VM adapter as a
+    // full 0 B/s row, burying the two or three that actually move.
+    // Full rows stay on interfaces that are live *or* recently so; the
+    // rest collapse to a name line.
+    let (full, compact): (Vec<_>, Vec<_>) = if show_all {
+        rows.into_iter().partition(|n| {
+            n.received_bytes_per_sec + n.transmitted_bytes_per_sec > 0
+                || state.net_is_recent(&n.interface)
+        })
+    } else {
+        (rows, Vec::new())
+    };
+    let last = full.len().saturating_sub(1);
+    let has_compact = !compact.is_empty();
     let list = widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("net.title"),
             Some(more_chip(hideable, show_all)),
         ))
-        .children(rows.into_iter().enumerate().map(|(i, n)| {
-            let active = n.received_bytes_per_sec + n.transmitted_bytes_per_sec > 0;
-            let fg = if active {
-                theme::text()
-            } else {
-                theme::text_faint()
-            };
-            h_flex()
-                .items_center()
-                .gap(px(10.))
-                .px(px(13.))
-                .py(px(10.))
-                .when(i != last, |d| {
-                    d.border_b(px(1.)).border_color(theme::border_subtle())
-                })
-                .child(
-                    div()
-                        // 64, not 42: `vmenet0` needs 43 and `bridge100`
-                        // needs ~58, so the old width turned three distinct
-                        // VM adapters into three rows all reading `vmen…`.
-                        // A truncation that erases the difference between
-                        // rows is worse than a narrower bar beside it.
-                        .w(px(64.))
-                        .flex_none()
-                        .text_size(px(11.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(fg)
-                        .truncate()
-                        .child(n.interface.clone()),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .font_family(font::MONO)
-                                .text_size(px(11.))
-                                .text_color(theme::text_dim())
-                                .child(div().text_color(fg).child(format!(
-                                    "↓ {}",
-                                    format::rate(Some(n.received_bytes_per_sec))
-                                )))
-                                .child(div().text_color(fg).child(format!(
-                                    "↑ {}",
-                                    format::rate(Some(n.transmitted_bytes_per_sec))
-                                ))),
-                        )
-                        .child(
-                            h_flex()
-                                .gap(px(3.))
-                                .mt(px(5.))
-                                .child(bar(n.received_bytes_per_sec, scale, theme::ink()))
-                                .child(bar(n.transmitted_bytes_per_sec, scale, theme::text_dim())),
-                        ),
-                )
-        }));
+        .children(
+            full.into_iter()
+                .enumerate()
+                .map(|(i, n)| iface_row(n, scale, i != last || has_compact)),
+        )
+        .children(idle_compact(&compact));
 
     vec![list.into_any_element()]
+}
+
+fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> AnyElement {
+    let active = n.received_bytes_per_sec + n.transmitted_bytes_per_sec > 0;
+    let fg = if active {
+        theme::text()
+    } else {
+        theme::text_faint()
+    };
+    h_flex()
+        .items_center()
+        .gap(px(10.))
+        .px(px(13.))
+        .py(px(10.))
+        .when(rule, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .child(
+            div()
+                // 64, not 42: `vmenet0` needs 43 and `bridge100`
+                // needs ~58, so the old width turned three distinct
+                // VM adapters into three rows all reading `vmen…`.
+                // A truncation that erases the difference between
+                // rows is worse than a narrower bar beside it.
+                .w(px(64.))
+                .flex_none()
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(fg)
+                .truncate()
+                .child(n.interface.clone()),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .font_family(font::MONO)
+                        .text_size(px(11.))
+                        .text_color(theme::text_dim())
+                        .child(div().text_color(fg).child(format!(
+                            "↓ {}",
+                            format::rate(Some(n.received_bytes_per_sec))
+                        )))
+                        .child(div().text_color(fg).child(format!(
+                            "↑ {}",
+                            format::rate(Some(n.transmitted_bytes_per_sec))
+                        ))),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(3.))
+                        .mt(px(5.))
+                        .child(bar(n.received_bytes_per_sec, scale, theme::ink()))
+                        .child(bar(n.transmitted_bytes_per_sec, scale, theme::text_dim())),
+                ),
+        )
+        .into_any_element()
+}
+
+/// How many idle names the compact line keeps before an ellipsis.
+/// Enough to show the usual suspects (awdl, bridges, a couple of
+/// vmenet) without becoming a second table.
+const IDLE_NAMES: usize = 8;
+
+fn idle_compact(idle: &[&zstats::snapshot::NetworkSnapshot]) -> Option<AnyElement> {
+    if idle.is_empty() {
+        return None;
+    }
+    let mut names: Vec<&str> = idle
+        .iter()
+        .take(IDLE_NAMES)
+        .map(|n| n.interface.as_str())
+        .collect();
+    if idle.len() > IDLE_NAMES {
+        names.push("…");
+    }
+    Some(
+        div()
+            .px(px(13.))
+            .py(px(8.))
+            .child(widgets::note(
+                t!("net.idle_compact", names = names.join(" · ")).to_string(),
+            ))
+            .into_any_element(),
+    )
 }
 
 /// `hideable` is how many rows the filter *would* hide, whether or not they

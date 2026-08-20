@@ -8,8 +8,8 @@ use crate::font;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AnyView, App, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
+    AnyElement, AnyView, App, Div, ElementId, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
@@ -114,21 +114,27 @@ pub fn card_header(title: impl Into<SharedString>, right: Option<AnyElement>) ->
 /// The title is an element, not a string, so a card can put an
 /// [`info_icon`] beside its own name; `String`, `&str` and
 /// `SharedString` all satisfy it unchanged.
+///
+/// The title shrinks and the right slot does not: History used to clip
+/// `Reload` because this row had no `min_w_0` and the shell clips overflow.
 pub fn list_header(title: impl IntoElement, right: Option<AnyElement>) -> AnyElement {
     h_flex()
         .items_center()
         .justify_between()
+        .gap(px(8.))
         .px(px(13.))
         .pt(px(11.))
         .pb(px(9.))
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .text_size(px(12.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::text())
                 .child(title),
         )
-        .children(right)
+        .children(right.map(|el| div().flex_none().child(el)))
         .into_any_element()
 }
 
@@ -149,6 +155,35 @@ pub fn info_icon(id: impl Into<ElementId>, tip: impl Into<SharedString> + 'stati
                 .with_size(Size::Size(px(11.)))
                 .text_color(gpui::Hsla::from(theme::text_dim())),
         )
+        .into_any_element()
+}
+
+/// A name that may ellipsis at 320px. Short names skip the tooltip —
+/// hovering "Finder" to read "Finder" is noise — and the cutoff is
+/// characters, the same proxy [`KV_TIP_FROM`] uses.
+const NAME_TIP_FROM: usize = 16;
+
+/// Truncating label with a hover-to-read-the-tail tooltip when the
+/// string is long enough that the ellipsis is likely real.
+pub fn truncating_name(
+    id: impl Into<ElementId>,
+    name: impl Into<SharedString>,
+    size: f32,
+    weight: FontWeight,
+    color: gpui::Hsla,
+) -> AnyElement {
+    let name = name.into();
+    let long = name.chars().count() >= NAME_TIP_FROM;
+    div()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .text_size(px(size))
+        .font_weight(weight)
+        .text_color(color)
+        .truncate()
+        .when(long, |d| d.tooltip(wrap_tooltip(name.clone())))
+        .child(name)
         .into_any_element()
 }
 
@@ -273,7 +308,17 @@ const KV_TIP_FROM: usize = 12;
 /// One "label ……… value" line with the design's hairline underneath.
 /// `last` suppresses the rule — a separator on the final row has
 /// nothing to separate and lands on the block's own edge.
-pub fn kv_row(k: impl Into<SharedString>, v: impl Into<SharedString>, last: bool) -> AnyElement {
+///
+/// The value is right-aligned in the leftover width so two side-by-side
+/// cells with different value lengths (Swap's `6.0 GB / 7.0 GB` next to
+/// Compressed's `6.4 GB`) still share an edge, instead of the short one
+/// sitting next to its label while the long one fills the column.
+pub fn kv_row(
+    k: impl Into<SharedString>,
+    v: impl Into<SharedString>,
+    last: bool,
+    hot: bool,
+) -> AnyElement {
     let k = k.into();
     let v = v.into();
     let long = v.chars().count() >= KV_TIP_FROM;
@@ -288,19 +333,21 @@ pub fn kv_row(k: impl Into<SharedString>, v: impl Into<SharedString>, last: bool
         .text_color(theme::text_muted())
         .child(div().flex_none().child(k.clone()))
         .child(
-            // A value that outgrows its half-width column (a parent
-            // process name, a long user) truncates instead of spilling
-            // over the label and the column edge; the tooltip carries
-            // what the ellipsis ate.
-            div()
-                .id(SharedString::from(format!("kv-{k}")))
-                .min_w_0()
-                .truncate()
-                .font_family(font::MONO)
-                .font_weight(gpui::FontWeight::NORMAL)
-                .text_color(theme::text())
-                .when(long, |d| d.tooltip(wrap_tooltip(v.clone())))
-                .child(v),
+            h_flex().flex_1().min_w_0().justify_end().child(
+                // A value that outgrows its half-width column (a parent
+                // process name, a long user) truncates instead of spilling
+                // over the label and the column edge; the tooltip carries
+                // what the ellipsis ate.
+                div()
+                    .id(SharedString::from(format!("kv-{k}")))
+                    .min_w_0()
+                    .truncate()
+                    .font_family(font::MONO)
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(theme::text_for(hot))
+                    .when(long, |d| d.tooltip(wrap_tooltip(v.clone())))
+                    .child(v),
+            ),
         )
         .into_any_element()
 }
@@ -308,6 +355,12 @@ pub fn kv_row(k: impl Into<SharedString>, v: impl Into<SharedString>, last: bool
 /// The design lays key/value pairs out two-up. gpui has no CSS grid, so this
 /// splits the list into two columns by hand.
 pub fn kv_columns(rows: Vec<(String, String)>) -> AnyElement {
+    kv_pairs(rows.into_iter().map(|(k, v)| (k, v, false)).collect())
+}
+
+/// [`kv_columns`] with a per-cell colour flag. Display only — `hot` feeds
+/// [`theme::text_for`], it does not produce an alert.
+pub fn kv_pairs(rows: Vec<(String, String, bool)>) -> AnyElement {
     let mid = rows.len().div_ceil(2);
     let (left, right) = rows.split_at(mid.min(rows.len()));
     h_flex()
@@ -315,17 +368,16 @@ pub fn kv_columns(rows: Vec<(String, String)>) -> AnyElement {
         .mt(px(10.))
         .child(
             v_flex().flex_1().min_w_0().children(
-                left.iter()
-                    .enumerate()
-                    .map(|(i, (k, v))| kv_row(k.clone(), v.clone(), i + 1 == left.len())),
+                left.iter().enumerate().map(|(i, (k, v, hot))| {
+                    kv_row(k.clone(), v.clone(), i + 1 == left.len(), *hot)
+                }),
             ),
         )
         .child(
             v_flex().flex_1().min_w_0().children(
-                right
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (k, v))| kv_row(k.clone(), v.clone(), i + 1 == right.len())),
+                right.iter().enumerate().map(|(i, (k, v, hot))| {
+                    kv_row(k.clone(), v.clone(), i + 1 == right.len(), *hot)
+                }),
             ),
         )
         .into_any_element()

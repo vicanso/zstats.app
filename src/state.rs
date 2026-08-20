@@ -108,6 +108,47 @@ impl ProcSort {
     }
 }
 
+/// How to order the Apps list. Separate from [`ProcSort`]: the two tabs
+/// are different sets, and carrying a sort across them would make
+/// switching tabs look like the list had jumped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AppSort {
+    /// Live CPU of each process tree, the collector's own ranking.
+    #[default]
+    Cpu,
+    Memory,
+}
+
+impl AppSort {
+    pub fn next(self) -> Self {
+        match self {
+            AppSort::Cpu => AppSort::Memory,
+            AppSort::Memory => AppSort::Cpu,
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            AppSort::Cpu => "apps.sort_cpu",
+            AppSort::Memory => "apps.sort_memory",
+        }
+    }
+
+    pub fn tip_key(self) -> &'static str {
+        match self {
+            AppSort::Cpu => "apps.sort_cpu_tip",
+            AppSort::Memory => "apps.sort_memory_tip",
+        }
+    }
+
+    pub fn full_tip_key(self) -> &'static str {
+        match self {
+            AppSort::Cpu => "apps.sort_cpu_tip_full",
+            AppSort::Memory => "apps.sort_memory_tip_full",
+        }
+    }
+}
+
 /// The panel's views, in tab-strip order. Config is not here: it lives
 /// in its own window (the footer's gear), where a settings session is
 /// not cut short by the popover auto-hiding on focus loss.
@@ -597,6 +638,7 @@ pub struct ZStatsAppState {
     /// persisted: a snooze means "not now", and a restart is a new now.
     snoozed: HashMap<Episode, Snooze>,
     proc_sort: ProcSort,
+    app_sort: AppSort,
     /// The three observers that answer questions zstats' own rules cannot —
     /// see [`crate::watch`]. They own their clocks and thresholds; this type
     /// only feeds them samples and reads the verdicts back out.
@@ -741,6 +783,7 @@ impl Default for ZStatsAppState {
             banner_sent: HashMap::new(),
             snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
+            app_sort: AppSort::default(),
             sustained: SustainedWatch::default(),
             abnormal: AbnormalWatch::default(),
             net: NetActivity::default(),
@@ -1092,6 +1135,15 @@ impl ZStatsAppState {
 
     pub fn cycle_proc_sort(&mut self, cx: &mut Context<Self>) {
         self.proc_sort = self.proc_sort.next();
+        cx.notify();
+    }
+
+    pub fn app_sort(&self) -> AppSort {
+        self.app_sort
+    }
+
+    pub fn cycle_app_sort(&mut self, cx: &mut Context<Self>) {
+        self.app_sort = self.app_sort.next();
         cx.notify();
     }
 
@@ -2790,6 +2842,12 @@ mod tests {
         }
         assert_eq!(cur, ProcSort::default(), "cycle should return to start");
         assert_eq!(seen.len(), 3, "every ordering should be reachable");
+
+        let mut app = AppSort::default();
+        app = app.next();
+        assert_eq!(app, AppSort::Memory);
+        app = app.next();
+        assert_eq!(app, AppSort::Cpu, "apps cycle is two-way");
     }
 
     #[test]

@@ -4,26 +4,31 @@
 //! app as a whole blows past. zstats sums each tree over the FULL process
 //! table, then keeps only `max-processes` groups (default 50) ranked by
 //! CPU — the same cap as the Processes tab. Idle apps are missing on
-//! purpose, not because their members were dropped. The All chip is the
+//! purpose, not because their members were dropped. Sorting by memory
+//! reorders that already-truncated set; it does not fetch the
+//! memory-hottest trees the collector dropped. The All chip is the
 //! escape hatch: a one-shot scan with the cap off, same reasons as
 //! [`crate::fullscan`].
 
 use super::processes;
 use super::widgets;
+use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::{FullAppScan, FullAppScanData, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{AppSort, FullAppScan, FullAppScanData, ZStatsAppState, ZStatsGlobalStore};
+use crate::terminate;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
-    div, list, px,
+    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
+    Styled, div, list, px,
 };
-use gpui_component::{h_flex, v_flex};
+use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
-use std::collections::HashSet;
-use zstats::snapshot::ProcessGroupSnapshot;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
+use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
 const HOT_PERCENT: f32 = 200.0;
 
@@ -57,6 +62,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let mut rows: Vec<_> = groups.iter().collect();
     rows.sort_by(|a, b| b.cpu_usage_percent.total_cmp(&a.cpu_usage_percent));
+    // Collector already ranked by CPU and capped; this only reorders that
+    // set — same contract as [`ProcSort`] on the process list.
+    let sort = state.app_sort();
+    match sort {
+        AppSort::Cpu => {}
+        AppSort::Memory => rows.sort_by_key(|g| Reverse(shown_memory(g))),
+    }
 
     let filter = state.proc_filter_text();
     if !filter.is_empty() {
@@ -65,13 +77,20 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let shown = rows.len();
     let no_match = !filter.is_empty() && shown == 0;
+    let bar_full = bar_full_for(sort, rows.iter().copied());
 
     let list_el = widgets::list_shell()
         .child(widgets::list_header(
             h_flex()
                 .items_center()
                 .gap(px(4.))
-                .child(t!("apps.count_of", shown = shown).to_string())
+                .min_w_0()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(t!("apps.count_of", shown = shown).to_string()),
+                )
                 .child(widgets::info_icon(
                     "apps-cpu-basis",
                     i18n::tr("apps.cpu_basis_tip"),
@@ -81,20 +100,17 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     .items_center()
                     .gap(px(5.))
                     .child(processes::filter_chip(state))
+                    .child(sort_control(state))
                     .child(full_scan_chip(state))
                     // The whole explanation — what a tree is, why `login`
                     // can legitimately head the list, where the cap comes
-                    // from — lives on this label's tooltip instead of a
-                    // permanent note block: it is worth reading once, not
-                    // worth a paragraph of chrome on every open.
-                    .child(
-                        div()
-                            .id("apps-tree-totals")
-                            .text_size(px(10.))
-                            .text_color(theme::text_dim())
-                            .tooltip(widgets::wrap_tooltip(i18n::tr("apps.cap_note")))
-                            .child(i18n::tr("apps.tree_totals")),
-                    )
+                    // from. Used to be a "tree totals" label that sat next
+                    // to All and read as a third chip; ⓘ is the same idiom
+                    // the title already uses for the CPU-basis note.
+                    .child(widgets::info_icon(
+                        "apps-tree-totals",
+                        i18n::tr("apps.cap_note"),
+                    ))
                     .into_any_element(),
             ),
         ))
@@ -111,7 +127,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     let repeated = repeated_names(rows.iter().map(|g| g.name.as_str()));
                     rows.into_iter().enumerate().map(move |(i, g)| {
                         let ambiguous = repeated.contains(g.name.as_str());
-                        app_row(g, i + 1 == shown, state, ambiguous)
+                        app_row(g, i + 1 == shown, state, ambiguous, sort, bar_full)
                     })
                 })
                 .when(no_match, |d| {
@@ -144,8 +160,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
         .into_iter()
         .map(str::to_string)
         .collect();
-    let visible = data.visible.clone();
-    let count = visible.len();
+    let count = data.visible.len();
     let chrome = FULL_CHROME_HEIGHT
         + if state.proc_filter_open() {
             FILTER_ROW_HEIGHT
@@ -154,6 +169,12 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
         };
     let height =
         (super::body_height(state).unwrap_or(FULL_LIST_FALLBACK) - chrome).max(FULL_LIST_MIN);
+    let sort = state.app_sort();
+    let mut visible = data.visible.clone();
+    sort_indices(&mut visible, &groups, sort);
+    // Whole listing, not the filtered cut — meters must not rescale on
+    // every keystroke, same as the process full-scan card.
+    let bar_full = bar_full_for(sort, groups.iter());
 
     widgets::list_shell()
         .child(widgets::list_header(
@@ -163,6 +184,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
                     .items_center()
                     .gap(px(5.))
                     .child(processes::filter_chip(state))
+                    .child(sort_control(state))
                     .child(full_scan_chip(state))
                     .into_any_element(),
             ),
@@ -187,7 +209,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let g = &groups[visible[i]];
                 let ambiguous = repeated.contains(g.name.as_str());
-                app_row(g, i + 1 == count, state, ambiguous)
+                app_row(g, i + 1 == count, state, ambiguous, sort, bar_full)
             })
             .h(px(height)),
         )
@@ -260,6 +282,8 @@ fn app_row(
     is_last: bool,
     state: &ZStatsAppState,
     ambiguous: bool,
+    sort: AppSort,
+    bar_full: f32,
 ) -> AnyElement {
     let hot = g.cpu_usage_percent > HOT_PERCENT;
     let expanded = state.selected_app() == Some(g.root_pid);
@@ -269,8 +293,8 @@ fn app_row(
         .id(("app", root_pid as usize))
         .w_full()
         .px(px(13.))
-        // Same rhythm as a process row: this list carries less per row
-        // (no meter), so it has no business being the looser of the two.
+        // Same rhythm as a process row, meter included — the two lists
+        // used to disagree about whether a ranking has a trough.
         .py(px(7.))
         .when(!is_last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
@@ -282,16 +306,13 @@ fn app_row(
                 .items_baseline()
                 .justify_between()
                 .gap(px(8.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme::text())
-                        .truncate()
-                        .child(g.name.clone()),
-                )
+                .child(widgets::truncating_name(
+                    ("app-name", root_pid as usize),
+                    g.name.clone(),
+                    12.,
+                    gpui::FontWeight::MEDIUM,
+                    Hsla::from(theme::text()),
+                ))
                 .child(
                     div()
                         .flex_none()
@@ -328,42 +349,15 @@ fn app_row(
                             g.write_bytes_per_sec,
                         )),
                 ),
-        );
+        )
+        .child(div().mt(px(4.)).child(widgets::meter(
+            bar_fraction(sort, g, bar_full),
+            Hsla::from(theme::fill_for(hot)),
+            3.,
+        )));
 
     if expanded {
-        let mut detail = vec![
-            (i18n::tr("apps.root_pid"), g.root_pid.to_string()),
-            (i18n::tr("apps.processes"), g.process_count.to_string()),
-            // Both figures, like the process rows: the row above shows
-            // the footprint, and this is where "80 MB resident, 300 MB
-            // actually held" stops being a contradiction. A group with
-            // no footprint at all reads `—` here rather than repeating
-            // its RSS under the other name.
-            (
-                i18n::tr("processes.mem_footprint"),
-                g.phys_footprint_bytes
-                    .map_or(format::PLACEHOLDER.into(), format::memory),
-            ),
-            (
-                i18n::tr("processes.mem_rss"),
-                format::memory(g.memory_bytes),
-            ),
-            (i18n::tr("apps.cpu"), format::pct(g.cpu_usage_percent)),
-        ];
-        // Real zeros still get rows here — the expansion is where "measured
-        // nothing" and "not collected" (both None) must stay distinguishable.
-        if g.read_bytes_per_sec.is_some() || g.write_bytes_per_sec.is_some() {
-            detail.push((i18n::tr("apps.read"), format::rate(g.read_bytes_per_sec)));
-            detail.push((i18n::tr("apps.write"), format::rate(g.write_bytes_per_sec)));
-        }
-        row = row.child(
-            v_flex()
-                .mt(px(8.))
-                .p(px(10.))
-                .rounded(px(8.))
-                .bg(theme::inset())
-                .child(widgets::kv_columns(detail)),
-        );
+        row = row.child(expand_block(g, state));
     }
 
     row.on_click(move |_, _window, cx| {
@@ -373,6 +367,336 @@ fn app_row(
     })
     .into_any_element()
 }
+
+/// Identity + the two memory figures, then the members the row total
+/// is the sum of. Hovering a giant tooltip over those figures (the
+/// previous layout) hid the numbers it was trying to explain.
+fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement {
+    let mut members = state
+        .latest()
+        .and_then(|t| t.snapshot.processes.as_deref())
+        .map(|ps| tree_members(g.root_pid, ps))
+        .unwrap_or_default();
+    members.sort_by_key(|p| Reverse(snap_memory(p)));
+    let shown = members.len().min(MEMBERS_TIP);
+    let missing = (g.process_count as usize).saturating_sub(members.len())
+        + members.len().saturating_sub(shown);
+    let io = match (g.read_bytes_per_sec, g.write_bytes_per_sec) {
+        (None, None) => None,
+        (r, w) => Some(format!("R {} · W {}", format::rate(r), format::rate(w))),
+    };
+
+    v_flex()
+        .id(("app-expand", g.root_pid as usize))
+        .mt(px(8.))
+        .p(px(10.))
+        .rounded(px(8.))
+        .bg(theme::inset())
+        // The parent row toggles expansion; a click inside the inset
+        // (ⓘ, a member name) must not fold it.
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .child(
+            h_flex()
+                .gap(px(14.))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(expand_row(
+                            i18n::tr("apps.root_pid"),
+                            expand_value(g.root_pid.to_string()),
+                            false,
+                        ))
+                        .child(expand_row(
+                            i18n::tr("processes.mem_footprint"),
+                            expand_value(
+                                g.phys_footprint_bytes
+                                    .map_or(format::PLACEHOLDER.into(), format::memory),
+                            ),
+                            true,
+                        )),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(expand_row(
+                            i18n::tr("apps.cpu"),
+                            expand_value(format::pct(g.cpu_usage_percent)),
+                            false,
+                        ))
+                        .child(expand_row(
+                            i18n::tr("processes.mem_rss"),
+                            expand_value(format::memory(g.memory_bytes)),
+                            true,
+                        )),
+                ),
+        )
+        .when_some(io, |d, text| {
+            d.child(
+                div()
+                    .mt(px(6.))
+                    .font_family(font::MONO)
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(text),
+            )
+        })
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .mt(px(8.))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(theme::text_dim())
+                        .child(i18n::tr("apps.members_section")),
+                )
+                .child(members_info(g.root_pid)),
+        )
+        .children(
+            members
+                .iter()
+                .take(shown)
+                .enumerate()
+                .map(|(i, p)| member_row(p, i + 1 == shown && missing == 0)),
+        )
+        .when(members.is_empty(), |d| {
+            d.child(
+                div()
+                    .mt(px(4.))
+                    .child(widgets::note(i18n::tr("apps.members_none"))),
+            )
+        })
+        .when(missing > 0 && !members.is_empty(), |d| {
+            d.child(div().mt(px(4.)).child(widgets::note(
+                t!("apps.members_missing", n = missing).to_string(),
+            )))
+        })
+        .when(terminate::can_quit_app(g.root_pid), |d| {
+            d.child(
+                h_flex()
+                    .justify_end()
+                    .child(quit_button(g.root_pid, g.name.clone())),
+            )
+        })
+        .into_any_element()
+}
+
+fn quit_button(pid: u32, name: String) -> AnyElement {
+    let label = i18n::tr("apps.quit_ok");
+    div()
+        .id(("app-quit", pid as usize))
+        .mt(px(8.))
+        .h(px(20.))
+        .px(px(8.))
+        .rounded(px(5.))
+        .border_1()
+        .border_color(theme::accent_wash(45))
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|d| d.bg(theme::accent_wash(10)))
+        .on_click(move |_, window, cx| {
+            let name = name.clone();
+            confirm::ask(
+                window,
+                cx,
+                t!("apps.quit_title", name = name.clone()).to_string(),
+                t!("apps.quit_body", name = name).to_string(),
+                i18n::tr("apps.quit_ok"),
+                move |_| {
+                    if !terminate::request_quit(pid) {
+                        eprintln!("quit request for pid {pid} was not delivered");
+                    }
+                },
+            );
+        })
+        .child(
+            div()
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::accent_light())
+                .child(label),
+        )
+        .into_any_element()
+}
+
+fn expand_row(label: String, value: AnyElement, last: bool) -> AnyElement {
+    h_flex()
+        .justify_between()
+        .gap(px(8.))
+        .py(px(5.))
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .text_size(px(11.))
+        .text_color(theme::text_muted())
+        .child(div().flex_none().child(label))
+        .child(value)
+        .into_any_element()
+}
+
+fn expand_value(text: impl Into<gpui::SharedString>) -> AnyElement {
+    let text = text.into();
+    h_flex()
+        .flex_1()
+        .min_w_0()
+        .justify_end()
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_family(font::MONO)
+                .text_color(theme::text())
+                .child(text),
+        )
+        .into_any_element()
+}
+
+/// How many members the expansion names. Past this the tail is idle
+/// helpers; the hog is already in the first lines.
+const MEMBERS_TIP: usize = 12;
+
+fn members_info(root_pid: u32) -> AnyElement {
+    div()
+        .id(("app-members", root_pid as usize))
+        .flex_none()
+        .tooltip(widgets::wrap_tooltip(i18n::tr("apps.members_lead")))
+        .child(
+            Icon::new(IconName::Info)
+                .with_size(Size::Size(px(11.)))
+                .text_color(Hsla::from(theme::text_dim())),
+        )
+        .into_any_element()
+}
+
+fn member_row(p: &ProcessSnapshot, last: bool) -> AnyElement {
+    h_flex()
+        .items_baseline()
+        .justify_between()
+        .gap(px(8.))
+        .mt(px(4.))
+        .py(px(3.))
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .child(widgets::truncating_name(
+            ("app-member", p.pid as usize),
+            p.name.clone(),
+            11.,
+            gpui::FontWeight::MEDIUM,
+            Hsla::from(theme::text()),
+        ))
+        .child(
+            h_flex()
+                .flex_none()
+                .gap(px(8.))
+                .font_family(font::MONO)
+                .text_size(px(10.))
+                .text_color(theme::text_muted())
+                .child(format::pct(p.cpu_usage_percent))
+                .child(format::memory(snap_memory(p))),
+        )
+        .into_any_element()
+}
+
+/// Walk parent pointers through the *materialised* process table.
+/// The group count is the full tree; this listing can only name pids
+/// zstats kept in `max-processes`, which is why a 7-process Zed may
+/// only show the handful that were hot enough to rank.
+fn tree_members(root: u32, processes: &[ProcessSnapshot]) -> Vec<&ProcessSnapshot> {
+    let by_pid: HashMap<u32, u32> = processes
+        .iter()
+        .filter_map(|p| p.parent_pid.map(|pp| (p.pid, pp)))
+        .collect();
+    processes
+        .iter()
+        .filter(|p| belongs_to(p.pid, root, &by_pid))
+        .collect()
+}
+
+fn belongs_to(mut pid: u32, root: u32, parent_of: &HashMap<u32, u32>) -> bool {
+    for _ in 0..64 {
+        if pid == root {
+            return true;
+        }
+        match parent_of.get(&pid) {
+            Some(&pp) if pp != 0 && pp != 1 && pp != pid => pid = pp,
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn snap_memory(p: &ProcessSnapshot) -> u64 {
+    p.phys_footprint_bytes.unwrap_or(p.memory_bytes)
+}
+
+/// Cycles CPU ↔ memory. Name order is omitted on purpose: fifty trees
+/// are still findable with the filter, and a third stop would spend
+/// width the header does not have (filter + All + ⓘ already sit there).
+fn sort_control(state: &ZStatsAppState) -> AnyElement {
+    let sort = state.app_sort();
+    let full = matches!(state.full_app_scan(), FullAppScan::Ready(_));
+    let tip = i18n::tr(if full {
+        sort.full_tip_key()
+    } else {
+        sort.tip_key()
+    });
+    div()
+        .id("sort-apps")
+        .flex_none()
+        .rounded(px(4.))
+        .px(px(5.))
+        .py(px(1.))
+        .text_size(px(9.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text_muted())
+        .hover(|d| d.bg(theme::surface_raised()))
+        .tooltip(widgets::wrap_tooltip(tip))
+        .child(format!("↓ {}", i18n::tr(sort.label_key())))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.cycle_app_sort(cx));
+        })
+        .into_any_element()
+}
+
+/// What a full track means. Memory has no one-core equivalent, so the
+/// largest tree on this page is full; CPU keeps the process list's floor
+/// so a quiet page does not stretch 8% across the trough.
+fn bar_full_for<'a>(sort: AppSort, groups: impl Iterator<Item = &'a ProcessGroupSnapshot>) -> f32 {
+    match sort {
+        AppSort::Cpu => groups
+            .map(|g| g.cpu_usage_percent)
+            .fold(0.0, f32::max)
+            .max(processes::BAR_FLOOR_PERCENT),
+        AppSort::Memory => groups.map(shown_memory).max().unwrap_or(0) as f32,
+    }
+}
+
+fn bar_fraction(sort: AppSort, g: &ProcessGroupSnapshot, full: f32) -> f32 {
+    let full = full.max(1.0);
+    match sort {
+        AppSort::Cpu => g.cpu_usage_percent / full,
+        AppSort::Memory => shown_memory(g) as f32 / full,
+    }
+}
+
+fn sort_indices(indices: &mut [usize], groups: &[ProcessGroupSnapshot], sort: AppSort) {
+    match sort {
+        AppSort::Cpu => indices.sort_by(|&a, &b| {
+            groups[b]
+                .cpu_usage_percent
+                .total_cmp(&groups[a].cpu_usage_percent)
+        }),
+        AppSort::Memory => indices.sort_by_key(|&i| Reverse(shown_memory(&groups[i]))),
+    }
+}
+
 /// The memory figure a group row shows: the summed physical footprint
 /// when zstats could take one, its summed RSS otherwise.
 ///
@@ -531,5 +855,104 @@ mod tests {
             io_mem_line(98 * 1024 * 1024, Some(2048), Some(0)).ends_with("98 MB"),
             "memory has to be the rightmost figure"
         );
+    }
+
+    fn group(name: &str, cpu: f32, mem: u64) -> ProcessGroupSnapshot {
+        ProcessGroupSnapshot {
+            root_pid: 1,
+            name: name.into(),
+            process_count: 1,
+            cpu_usage_percent: cpu,
+            memory_bytes: mem,
+            phys_footprint_bytes: None,
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    #[test]
+    fn the_meter_follows_the_sort_and_the_full_list_reorders() {
+        let groups = vec![
+            group("zed", 2.0, 300),
+            group("Chrome", 40.0, 80),
+            group("ice", 1.0, 900),
+        ];
+        let mut idx = vec![0, 1, 2];
+        sort_indices(&mut idx, &groups, AppSort::Cpu);
+        assert_eq!(idx, vec![1, 0, 2]);
+        sort_indices(&mut idx, &groups, AppSort::Memory);
+        assert_eq!(idx, vec![2, 0, 1]);
+
+        let cpu_full = bar_full_for(AppSort::Cpu, groups.iter());
+        assert_eq!(
+            cpu_full,
+            processes::BAR_FLOOR_PERCENT,
+            "40% must not get to define full"
+        );
+        assert_eq!(
+            bar_fraction(AppSort::Cpu, &groups[1], cpu_full),
+            40.0 / processes::BAR_FLOOR_PERCENT
+        );
+        let hot = group("compile", 210.0, 10);
+        let busy = [hot.clone(), groups[0].clone()];
+        let busy_full = bar_full_for(AppSort::Cpu, busy.iter());
+        assert_eq!(
+            bar_fraction(AppSort::Cpu, &hot, busy_full),
+            1.0,
+            "over a core, the hottest fills"
+        );
+        let mem_full = bar_full_for(AppSort::Memory, groups.iter());
+        assert_eq!(
+            bar_fraction(AppSort::Memory, &groups[2], mem_full),
+            1.0,
+            "largest fills it"
+        );
+        assert_eq!(
+            bar_fraction(AppSort::Memory, &groups[0], mem_full),
+            300.0 / 900.0
+        );
+    }
+
+    fn proc(pid: u32, parent: Option<u32>, name: &str) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            name: name.into(),
+            cmd: String::new(),
+            cpu_usage_percent: 0.0,
+            cpu_time_ms: 0,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            virtual_memory_bytes: 0,
+            run_time_secs: 0,
+            parent_pid: parent,
+            user_id: None,
+            status: String::new(),
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    #[test]
+    fn tree_members_follow_parent_pointers_through_the_table() {
+        let table = vec![
+            proc(19477, Some(1), "zed"),
+            proc(22573, Some(19477), "rust-analyzer"),
+            proc(22659, Some(22573), "proc-macro"),
+            proc(99, Some(1), "Finder"),
+            proc(50, Some(19477), "login"),
+            // Intermediate parent not in the materialised table.
+            proc(51, Some(20463), "zsh"),
+        ];
+        let names: Vec<&str> = tree_members(19477, &table)
+            .into_iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(names.contains(&"zed"));
+        assert!(names.contains(&"rust-analyzer"));
+        assert!(names.contains(&"proc-macro"));
+        assert!(names.contains(&"login"), "direct child of the root");
+        assert!(!names.contains(&"zsh"), "broken chain is not guessed");
+        assert!(!names.contains(&"Finder"));
+        assert_eq!(tree_members(99, &table).len(), 1);
     }
 }

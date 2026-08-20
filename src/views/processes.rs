@@ -33,7 +33,7 @@ use zstats::snapshot::{Capabilities, ProcessSnapshot};
 /// cores), which left every normal row looking empty. One core is the
 /// unit the number is already in; the page max wins if something is
 /// hotter, so the trough still fills on a busy machine.
-const BAR_FLOOR_PERCENT: f32 = 100.0;
+pub(super) const BAR_FLOOR_PERCENT: f32 = 100.0;
 
 /// What a row's meter is drawn from, and what a full track means.
 ///
@@ -261,7 +261,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             h_flex()
                 .items_center()
                 .gap(px(4.))
-                .child(title)
+                .min_w_0()
+                .child(div().min_w_0().truncate().child(title))
                 .child(widgets::info_icon(
                     "proc-cpu-basis",
                     i18n::tr("processes.cpu_basis_tip"),
@@ -381,16 +382,13 @@ fn process_row(
                 .items_baseline()
                 .justify_between()
                 .gap(px(8.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme::text())
-                        .truncate()
-                        .child(p.name.clone()),
-                )
+                .child(widgets::truncating_name(
+                    ("proc-name", pid as usize),
+                    p.name.clone(),
+                    12.,
+                    gpui::FontWeight::MEDIUM,
+                    Hsla::from(theme::text()),
+                ))
                 .child(
                     div()
                         .flex_none()

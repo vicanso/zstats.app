@@ -96,6 +96,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .when(critical, |d| d.bg(theme::accent_wash(7)))
                 .child(alert_head(i, target.clone(), critical, line, seen, state))
                 .child(alert_title(&seen.event.subject))
+                .child(div().mt(px(2.)).child(alert_when(seen)))
                 .child(
                     div()
                         .mt(px(3.))
@@ -118,8 +119,23 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .collect();
 
     cards.extend(sustained_card(state));
+    // Watching belongs here too, not only on the empty list: otherwise
+    // one episode leaves half the panel blank and hides what is armed.
+    cards.extend(armed_line(state).map(widgets::note));
     cards.push(widgets::note(i18n::tr("alerts.footer_note")));
     cards
+}
+
+fn alert_when(seen: &SeenAlert) -> AnyElement {
+    widgets::note(match seen.span() {
+        Some(span) => t!(
+            "alerts.episode_span",
+            ago = format::ago(seen.age()),
+            span = format::span(span)
+        )
+        .to_string(),
+        None => format::ago(seen.age()),
+    })
 }
 
 /// The sustained-load watcher's holdings, as a read-only card. This is
@@ -301,18 +317,9 @@ fn alert_head(
         h_flex()
             .items_center()
             .gap(px(6.))
-            // Two timestamps when they differ: when it was last reported, and
-            // how long the episode has been running. One card per episode
-            // means the second one has nowhere else to live.
-            .child(widgets::note(match seen.span() {
-                Some(span) => t!(
-                    "alerts.episode_span",
-                    ago = format::ago(seen.age()),
-                    span = format::span(span)
-                )
-                .to_string(),
-                None => format::ago(seen.age()),
-            }))
+            // Timestamps live under the title now — this slot used to
+            // hold WARNING + "13m ago · ongoing 30m" + pills + icons,
+            // and at 320px the actions lost.
             // A muted episode says so without being expanded — otherwise
             // "why no banner?" has no visible answer on the card.
             .children(
@@ -497,7 +504,7 @@ fn alert_sentence(event: &AlertEvent) -> String {
         )
         .to_string(),
         AlertDetail::Pressure {
-            level,
+            level: _,
             sustained,
             swap_used_bytes,
             swap_total_bytes,
@@ -507,14 +514,10 @@ fn alert_sentence(event: &AlertEvent) -> String {
             // The kernel's own word for the level, the same one the
             // Overview card shows — not a number, because 2 and 4 are
             // labels rather than a scale (zstats says so on the field).
-            let level = i18n::tr(if *level >= 4 {
-                "overview.pressure_critical"
-            } else {
-                "overview.pressure_warning"
-            });
+            // Level is the WARNING / CRITICAL pill already. Repeating
+            // "Warning" mid-sentence wrapped as a second heading.
             let mut text = t!(
                 "alerts.msg_pressure",
-                level = level,
                 span = format::span(*sustained),
                 swap_used = format::memory(*swap_used_bytes),
                 swap_total = format::memory(*swap_total_bytes)
@@ -592,7 +595,10 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
     use crate::terminate::{self, QuitMethod};
 
     Button::new(id)
-        .icon(gpui_component::Icon::from(assets::CustomIconName::Power))
+        // Log-out, not the footer's power glyph: that one quits *this*
+        // app, and seeing both on the Alerts tab made the two requests
+        // look like the same act.
+        .icon(gpui_component::Icon::from(assets::CustomIconName::LogOut))
         .ghost()
         .xsmall()
         .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())

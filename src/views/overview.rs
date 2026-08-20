@@ -23,6 +23,10 @@ const TOP_N: usize = 5;
 
 /// Per-core bar turns accent past this.
 const CORE_HOT: f32 = 85.0;
+/// Swap past this share of its own allocation is worth colour — display
+/// only. The kernel can still report pressure Normal while swap is
+/// nearly full; this is the signal that badge will not give.
+const SWAP_HOT: f32 = 80.0;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(snapshot) = state.latest().map(|t| &t.snapshot) else {
@@ -85,16 +89,13 @@ fn top_cpu(state: &ZStatsAppState) -> AnyElement {
                 .when(i + 1 < n, |d| {
                     d.border_b(px(1.)).border_color(theme::border_subtle())
                 })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme::text())
-                        .truncate()
-                        .child(p.name.clone()),
-                )
+                .child(widgets::truncating_name(
+                    ("top-cpu-name", p.pid as usize),
+                    p.name.clone(),
+                    12.,
+                    gpui::FontWeight::MEDIUM,
+                    Hsla::from(theme::text()),
+                ))
                 .child(
                     div()
                         .id(("top-cpu-pct", i))
@@ -148,11 +149,18 @@ fn processor(cpu: &CpuSnapshot) -> AnyElement {
             i18n::tr("overview.processor"),
             Some(header_right),
         ))
-        .child(h_flex().items_end().mt(px(4.)).child(widgets::big_number(
-            format::whole_pct(cpu.usage_percent),
-            "%",
-            20.,
-        )));
+        .child(
+            h_flex()
+                .id("cpu-usage")
+                .items_end()
+                .mt(px(4.))
+                .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
+                .child(widgets::big_number(
+                    format::whole_pct(cpu.usage_percent),
+                    "%",
+                    20.,
+                )),
+        );
 
     // Apple Silicon and friends: usage split by performance cluster.
     if let Some(levels) = cpu.perf_levels.as_ref().filter(|l| l.len() > 1) {
@@ -306,6 +314,8 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
         None if !supported => i18n::tr("common.n_a"),
         None => format::PLACEHOLDER.to_string(),
     };
+    let swap_hot = mem.swap_total_bytes > 0
+        && (mem.swap_used_bytes as f32 / mem.swap_total_bytes as f32) * 100.0 >= SWAP_HOT;
     let rows = vec![
         (
             i18n::tr("overview.swap"),
@@ -314,8 +324,9 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
                 format::gb(mem.swap_used_bytes),
                 format::gb(mem.swap_total_bytes)
             ),
+            swap_hot,
         ),
-        (i18n::tr("overview.compressed"), compressed_label),
+        (i18n::tr("overview.compressed"), compressed_label, false),
     ];
 
     let mut legend = vec![(
@@ -384,7 +395,7 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
             6.,
         )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
-        .child(widgets::kv_columns(rows))
+        .child(widgets::kv_pairs(rows))
         .child(io_strip(io))
         .into_any_element()
 }

@@ -59,20 +59,21 @@ const TAB_STRIP_HEIGHT: f32 = 56.;
 /// Height of the footer: 1px top border + 4 + a 22-tall icon row + 6.
 const FOOTER_HEIGHT: f32 = 33.;
 
-/// What the body keeps clear beneath its content.
+/// What the body keeps clear beneath its content — for every tab.
 ///
-/// Bigger than the 14px side gutter, and deliberately: the two gaps end
-/// at different kinds of boundary. At the sides the card stops 14 short
-/// of the window's own rounded edge, which has nothing behind it. At the
-/// bottom it stops short of the footer's hairline — a drawn line with a
-/// bar behind it, and a line reads nearer than an empty edge does. 14
-/// there measured equal and looked tight, so it is 18: matched by eye
-/// rather than by the number, which is the only way spacing against
-/// different neighbours can be matched at all.
+/// Removing it entirely was tried and was wrong: the tabs whose last
+/// card paints rows to its own edge (Processes, Apps, History) then sat
+/// flush against the footer's hairline. This gutter is what those pages
+/// have, so it stays here.
 ///
-/// (Above, the tab strip already contributes 8 of its own, which is why
-/// [`CONTENT_TOP_PAD`] is 6 rather than a full gutter.)
-const BODY_BOTTOM_PAD: f32 = 18.;
+/// What must not happen is a card adding its own on top: the stack that
+/// looked slack at the bottom was Overview, where the memory card's 13
+/// of inner padding landed under a footnote line that needed none. The
+/// fix belongs to that card (`overview::memory`), not to this number —
+/// trimming rows elsewhere to pay for a doubled gap, which is what the
+/// previous attempt did, spends content on a spacing mistake.
+///
+const BODY_BOTTOM_PAD: f32 = 12.;
 
 /// Space above the first card. The tab strip already ends with 8px, so
 /// this 6 brings tab-well → card to 14 — the same as the side gutter —

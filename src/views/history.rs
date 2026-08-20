@@ -6,6 +6,7 @@
 //! [`crate::history`].
 
 use super::widgets;
+use crate::assets::CustomIconName;
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -16,7 +17,7 @@ use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, div, px,
 };
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use gpui_component::{Icon, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -90,7 +91,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             h_flex()
                 .items_center()
                 .gap(px(4.))
-                .child(title)
+                .min_w_0()
+                .child(div().min_w_0().truncate().child(title))
                 .child(widgets::info_icon(
                     "history-basis",
                     i18n::tr("history.about_body"),
@@ -128,15 +130,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         .min_w_0()
                                         .items_baseline()
                                         .gap(px(5.))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_size(px(12.))
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(theme::text())
-                                                .truncate()
-                                                .child(s.name.clone()),
-                                        )
+                                        .child(widgets::truncating_name(
+                                            ("hist-name", s.pid as usize),
+                                            s.name.clone(),
+                                            12.,
+                                            gpui::FontWeight::MEDIUM,
+                                            Hsla::from(theme::text()),
+                                        ))
                                         .when(repeated, |d| {
                                             d.child(
                                                 div()
@@ -196,43 +196,50 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                     // where the eye needs it to tell two rows
                                     // apart; repeating it here was the same
                                     // fact twice on one row.
-                                    div().child(match (sort, repeated) {
-                                        (HistorySort::CpuTime, false) => t!(
-                                            "history.pid_mem",
-                                            pid = s.pid,
-                                            mem = format::memory(s.peak_memory_bytes)
-                                        )
-                                        .to_string(),
-                                        (HistorySort::CpuTime, true) => t!(
-                                            "history.mem_only",
-                                            mem = format::memory(s.peak_memory_bytes)
-                                        )
-                                        .to_string(),
-                                        (HistorySort::PeakMemory, false) => t!(
-                                            "history.pid_cpu",
-                                            pid = s.pid,
-                                            cpu = format::core_time(s.cpu_time_ms)
-                                        )
-                                        .to_string(),
-                                        (HistorySort::PeakMemory, true) => t!(
-                                            "history.cpu_only",
-                                            cpu = format::core_time(s.cpu_time_ms)
-                                        )
-                                        .to_string(),
-                                    }),
+                                    div().flex_1().min_w_0().truncate().child(
+                                        match (sort, repeated) {
+                                            (HistorySort::CpuTime, false) => t!(
+                                                "history.pid_mem",
+                                                pid = s.pid,
+                                                mem = format::memory(s.peak_memory_bytes)
+                                            )
+                                            .to_string(),
+                                            (HistorySort::CpuTime, true) => t!(
+                                                "history.mem_only",
+                                                mem = format::memory(s.peak_memory_bytes)
+                                            )
+                                            .to_string(),
+                                            (HistorySort::PeakMemory, false) => t!(
+                                                "history.pid_cpu",
+                                                pid = s.pid,
+                                                cpu = format::core_time(s.cpu_time_ms)
+                                            )
+                                            .to_string(),
+                                            (HistorySort::PeakMemory, true) => t!(
+                                                "history.cpu_only",
+                                                cpu = format::core_time(s.cpu_time_ms)
+                                            )
+                                            .to_string(),
+                                        },
+                                    ),
                                 )
                                 // Peak beside total on purpose: a small peak next to a
                                 // large total is exactly the process this view exists
                                 // to find, and the pairing is what makes that legible.
                                 .child(
-                                    div().font_family(font::MONO).child(
-                                        t!(
-                                            "history.peak",
-                                            cpu = format::pct(s.peak_cpu_percent),
-                                            minutes = s.minutes
-                                        )
-                                        .to_string(),
-                                    ),
+                                    div()
+                                        .flex_none()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(font::MONO)
+                                        .child(
+                                            t!(
+                                                "history.peak",
+                                                cpu = format::pct(s.peak_cpu_percent),
+                                                minutes = s.minutes
+                                            )
+                                            .to_string(),
+                                        ),
                                 ),
                         )
                         .child(div().mt(px(6.)).child(widgets::meter(
@@ -332,23 +339,22 @@ fn sort_chip(sort: HistorySort) -> AnyElement {
 }
 
 fn refresh_control() -> AnyElement {
-    h_flex()
+    // Icon only: the labelled chip was the first thing `list_header`
+    // clipped at 320px ("Reloa"). The word lives on the tooltip.
+    let tip = i18n::tr("history.refresh");
+    div()
         .id("history-refresh")
-        .items_center()
-        .gap(px(3.))
+        .flex_none()
         .rounded(px(4.))
-        .px(px(5.))
+        .px(px(4.))
         .py(px(1.))
-        .text_size(px(9.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme::text_muted())
-        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+        .hover(|d| d.bg(theme::surface_raised()))
+        .tooltip(widgets::wrap_tooltip(tip))
         .child(
-            Icon::new(IconName::Redo)
+            Icon::from(CustomIconName::RefreshCw)
                 .with_size(Size::Size(px(10.)))
                 .text_color(Hsla::from(theme::text_dim())),
         )
-        .child(i18n::tr("history.refresh"))
         .on_click(|_, _window, cx| {
             cx.global::<ZStatsGlobalStore>()
                 .clone()
