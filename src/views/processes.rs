@@ -78,11 +78,13 @@ impl BarScale {
     }
 }
 
-/// A burst this big is worth flagging on its own — two whole cores.
-/// Deliberately not scaled by core count: the percentage means the same
-/// thing on every machine, and a line that moved with the hardware would
-/// make the same number red here and grey there.
-const HOT_PERCENT: f64 = 200.0;
+/// A burst this big is worth colour — one whole core.
+///
+/// Used to be two cores (200%). On a 12-core machine that is a sixth of
+/// the box, so the list stayed ink all day and the bar lost its only
+/// severity cue. One core is still a fixed percentage, not scaled by
+/// hardware: the same 110% is red here and there.
+const HOT_PERCENT: f64 = 100.0;
 
 /// Whether a row gets the page's only colour. Shared with Overview so
 /// the same pid is red in both places, or in neither.
@@ -91,11 +93,9 @@ const HOT_PERCENT: f64 = 200.0;
 /// [`HOT_PERCENT`] is the obvious one. The other is a process holding a
 /// low-but-real share for a long time (`watch.rs`), which **by
 /// definition never crosses a threshold** — it was the whole reason that
-/// watcher exists, and the colour used to ignore it: a compile spiking
-/// to 210% for two seconds lit up, while a daemon sitting on 60% for
-/// four hours looked exactly like one at 3%. On a 12-core machine the
-/// burst line is a sixth of the box, so in practice the old rule almost
-/// never fired at all.
+/// watcher exists, and the colour used to ignore it: a compile pegged
+/// at 110% lit up, while a daemon sitting on 60% for four hours looked
+/// exactly like one at 3%.
 ///
 /// Display only, like every threshold in `views/` — the alert engine is
 /// untouched, and the sustained watcher still notifies on its own terms.
@@ -1208,10 +1208,11 @@ mod tests {
     /// exactly like one at 3%.
     #[test]
     fn a_long_hold_is_hot_even_though_it_never_crosses_the_burst_line() {
-        assert!(is_hot(210.0, false), "two cores is a burst");
+        assert!(is_hot(110.0, false), "one core and a bit is a burst");
+        assert!(!is_hot(100.0, false), "exactly one core is the line, not over it");
         assert!(!is_hot(60.0, false), "a moment at 60% is just work");
         assert!(is_hot(60.0, true), "the same 60% held long enough is not");
-        assert!(is_hot(0.4, true), "the watcher's own bar is well under 200");
+        assert!(is_hot(0.4, true), "the watcher's own bar is well under 100");
     }
 
     /// A list may only draw one ranking. Sorting by memory and filling

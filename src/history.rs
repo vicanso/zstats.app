@@ -17,7 +17,34 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 use zstats::records::{MetricRecord, read_range};
+
+/// How the CPU was burned, from the shape of the already-written minutes.
+/// Display only — the file is biased toward loud minutes, so this is never
+/// an alert.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HistoryShape {
+    /// Brief: first-to-last span shorter than [`SHORT_SPAN`].
+    Spike,
+    /// Spread out, and the peak is not far from the span-average.
+    Sustained,
+    /// Spread out, but the peak is several times the span-average —
+    /// quiet gaps with bursts in between.
+    Intermittent,
+}
+
+/// Below this, a run is a spike even if the peak sits on the average
+/// (a ten-minute compile is not "steady"). Fifteen minutes is a quarter
+/// of an hour — long enough that "it ran flat the whole time" starts to
+/// mean something, short enough that a typical encode still counts as a
+/// burst.
+const SHORT_SPAN: Duration = Duration::from_secs(15 * 60);
+
+/// Peak / span-average at or above this, over a long span, is bursts
+/// rather than a flat load. Three is enough that 8% all day (peak ≈ avg)
+/// stays Sustained, while 100% spikes in an otherwise quiet day do not.
+const BURST_RATIO: f32 = 3.0;
 
 /// One process's share of the chosen window.
 pub struct Spender {
@@ -33,6 +60,11 @@ pub struct Spender {
     /// Minutes this process was recorded. Fewer than the wall clock: a
     /// process only lands in the file on the minutes it qualifies.
     pub minutes: usize,
+    /// First record to last, including unrecorded gaps. `minutes` is the
+    /// count of files lines, not this.
+    pub span: Duration,
+    /// `None` when there are not two samples to difference.
+    pub shape: Option<HistoryShape>,
 }
 
 /// Read the last `days` days of history (today included) and rank them.
@@ -77,14 +109,16 @@ pub fn rank(mut records: Vec<MetricRecord>) -> Vec<Spender> {
                 .windows(2)
                 .map(|w| w[1].cpu_time_ms.saturating_sub(w[0].cpu_time_ms))
                 .sum();
+            let peak_cpu_percent = samples
+                .iter()
+                .map(|r| r.cpu_avg_percent)
+                .fold(0.0, f32::max);
+            let span = span_of(&samples);
             Spender {
                 pid,
                 name,
                 cpu_time_ms,
-                peak_cpu_percent: samples
-                    .iter()
-                    .map(|r| r.cpu_avg_percent)
-                    .fold(0.0, f32::max),
+                peak_cpu_percent,
                 peak_memory_bytes: samples
                     .iter()
                     // Footprint when the record carries it (zstats ≥ 0.5;
@@ -95,6 +129,8 @@ pub fn rank(mut records: Vec<MetricRecord>) -> Vec<Spender> {
                     .max()
                     .unwrap_or(0),
                 minutes: samples.len(),
+                span,
+                shape: classify(cpu_time_ms, peak_cpu_percent, span, samples.len()),
             }
         })
         .collect();
@@ -105,6 +141,38 @@ pub fn rank(mut records: Vec<MetricRecord>) -> Vec<Spender> {
             .then_with(|| a.name.cmp(&b.name))
     });
     spenders
+}
+
+fn span_of(samples: &[MetricRecord]) -> Duration {
+    let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
+        return Duration::ZERO;
+    };
+    let secs = last
+        .timestamp
+        .as_second()
+        .saturating_sub(first.timestamp.as_second());
+    Duration::from_secs(u64::try_from(secs).unwrap_or(0))
+}
+
+/// Classify from the already-written minutes. `minutes` is how many
+/// lines landed, not how long the process ran — the span is first-to-last
+/// wall time, and the average is total burn over that span (gaps included).
+fn classify(cpu_time_ms: u64, peak: f32, span: Duration, samples: usize) -> Option<HistoryShape> {
+    if samples < 2 || cpu_time_ms == 0 {
+        return None;
+    }
+    let span_ms = span.as_millis();
+    if span_ms == 0 {
+        return None;
+    }
+    if span < SHORT_SPAN {
+        return Some(HistoryShape::Spike);
+    }
+    let avg = cpu_time_ms as f64 / span_ms as f64 * 100.0;
+    if avg > 0.0 && f64::from(peak) >= f64::from(BURST_RATIO) * avg {
+        return Some(HistoryShape::Intermittent);
+    }
+    Some(HistoryShape::Sustained)
 }
 
 #[cfg(test)]
@@ -141,7 +209,30 @@ mod tests {
         assert_eq!(ranked[0].name, "quiet");
         assert_eq!(ranked[0].cpu_time_ms, 288_000);
         assert!((ranked[0].peak_cpu_percent - 8.0).abs() < f32::EPSILON);
+        assert_eq!(ranked[0].shape, Some(HistoryShape::Sustained));
         assert_eq!(ranked[1].name, "spike");
+        assert_eq!(ranked[1].shape, Some(HistoryShape::Spike));
+    }
+
+    #[test]
+    fn a_long_span_with_a_tall_peak_is_bursts_not_steady() {
+        // 100% for two minutes, eight times over seven hours.
+        let mut records = Vec::new();
+        for i in 0..8_i64 {
+            let m = i * 60;
+            let burnt = (i as u64) * 120_000;
+            records.push(record(1, "bursty", m, burnt, 100.0));
+            records.push(record(1, "bursty", m + 2, burnt + 120_000, 100.0));
+        }
+        let ranked = rank(records);
+        assert_eq!(ranked[0].shape, Some(HistoryShape::Intermittent));
+        assert!(ranked[0].span >= Duration::from_secs(6 * 3600));
+    }
+
+    #[test]
+    fn two_samples_on_the_same_instant_have_no_shape() {
+        let ranked = rank(vec![record(1, "p", 0, 0, 8.0), record(1, "p", 0, 100, 8.0)]);
+        assert_eq!(ranked[0].shape, None);
     }
 
     /// A process drops out of the file on minutes it does not qualify.
@@ -182,6 +273,7 @@ mod tests {
     fn a_single_sample_claims_nothing() {
         let ranked = rank(vec![record(1, "p", 0, 9_999_999, 5.0)]);
         assert_eq!(ranked[0].cpu_time_ms, 0);
+        assert_eq!(ranked[0].shape, None);
     }
 
     #[test]

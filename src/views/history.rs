@@ -9,6 +9,7 @@ use super::widgets;
 use crate::assets::CustomIconName;
 use crate::font;
 use crate::format;
+use crate::history::HistoryShape;
 use crate::i18n;
 use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
@@ -21,6 +22,7 @@ use gpui_component::{Icon, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// How many rows to name. Beyond this the tail is all daemons doing their job.
 const TOP_N: usize = 12;
@@ -191,37 +193,53 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                 .text_size(px(10.))
                                 .text_color(theme::text_dim())
                                 .child(
-                                    // The pid is said once per row. A repeated
-                                    // name already carries it inline above,
-                                    // where the eye needs it to tell two rows
-                                    // apart; repeating it here was the same
-                                    // fact twice on one row.
-                                    div().flex_1().min_w_0().truncate().child(
-                                        match (sort, repeated) {
-                                            (HistorySort::CpuTime, false) => t!(
-                                                "history.pid_mem",
-                                                pid = s.pid,
-                                                mem = format::memory(s.peak_memory_bytes)
+                                    h_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .children(s.shape.map(|shape| {
+                                            shape_pill(
+                                                ("hist-shape", s.pid as usize),
+                                                shape,
+                                                s.peak_cpu_percent,
+                                                s.span,
+                                                s.minutes,
                                             )
-                                            .to_string(),
-                                            (HistorySort::CpuTime, true) => t!(
-                                                "history.mem_only",
-                                                mem = format::memory(s.peak_memory_bytes)
-                                            )
-                                            .to_string(),
-                                            (HistorySort::PeakMemory, false) => t!(
-                                                "history.pid_cpu",
-                                                pid = s.pid,
-                                                cpu = format::core_time(s.cpu_time_ms)
-                                            )
-                                            .to_string(),
-                                            (HistorySort::PeakMemory, true) => t!(
-                                                "history.cpu_only",
-                                                cpu = format::core_time(s.cpu_time_ms)
-                                            )
-                                            .to_string(),
-                                        },
-                                    ),
+                                        }))
+                                        .child(
+                                            // The pid is said once per row. A repeated
+                                            // name already carries it inline above,
+                                            // where the eye needs it to tell two rows
+                                            // apart; repeating it here was the same
+                                            // fact twice on one row.
+                                            div().min_w_0().truncate().child(
+                                                match (sort, repeated) {
+                                                    (HistorySort::CpuTime, false) => t!(
+                                                        "history.pid_mem",
+                                                        pid = s.pid,
+                                                        mem = format::memory(s.peak_memory_bytes)
+                                                    )
+                                                    .to_string(),
+                                                    (HistorySort::CpuTime, true) => t!(
+                                                        "history.mem_only",
+                                                        mem = format::memory(s.peak_memory_bytes)
+                                                    )
+                                                    .to_string(),
+                                                    (HistorySort::PeakMemory, false) => t!(
+                                                        "history.pid_cpu",
+                                                        pid = s.pid,
+                                                        cpu = format::core_time(s.cpu_time_ms)
+                                                    )
+                                                    .to_string(),
+                                                    (HistorySort::PeakMemory, true) => t!(
+                                                        "history.cpu_only",
+                                                        cpu = format::core_time(s.cpu_time_ms)
+                                                    )
+                                                    .to_string(),
+                                                },
+                                            ),
+                                        ),
                                 )
                                 // Peak beside total on purpose: a small peak next to a
                                 // large total is exactly the process this view exists
@@ -310,6 +328,38 @@ fn header_controls(state: &ZStatsAppState, current: HistoryRange) -> AnyElement 
                 })
         }))
         .child(refresh_control())
+        .into_any_element()
+}
+
+fn shape_pill(
+    id: impl Into<gpui::ElementId>,
+    shape: HistoryShape,
+    peak: f32,
+    span: Duration,
+    minutes: usize,
+) -> AnyElement {
+    let label = i18n::tr(match shape {
+        HistoryShape::Spike => "history.shape_spike",
+        HistoryShape::Sustained => "history.shape_sustained",
+        HistoryShape::Intermittent => "history.shape_intermittent",
+    });
+    let tip = t!(
+        "history.shape_tip",
+        peak = format::pct(peak),
+        span = format::span(span),
+        minutes = minutes
+    )
+    .to_string();
+    div()
+        .id(id)
+        .flex_none()
+        .rounded(px(3.))
+        .px(px(4.))
+        .bg(theme::inset())
+        .text_size(px(9.))
+        .text_color(theme::text_muted())
+        .tooltip(widgets::wrap_tooltip(tip))
+        .child(label)
         .into_any_element()
 }
 

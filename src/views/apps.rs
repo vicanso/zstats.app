@@ -30,7 +30,9 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
-const HOT_PERCENT: f32 = 200.0;
+/// Same one-core colour line as [`super::processes`] — a tree and a
+/// process that both read 110% must agree about "hot". Display only.
+const HOT_PERCENT: f32 = 100.0;
 
 /// Header + caveat line. Same budget as the process full-scan card so
 /// the list fills the panel instead of leaving a strip of empty card.
