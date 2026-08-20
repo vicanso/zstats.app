@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.1.6](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.6) - 2026-08-20
+
+### ⛰️  Features
+
+- Alerts leads with what still needs you — the hold ranks by when it was noticed - ([37c6229](https://github.com/vicanso/zstats.app/commit/37c622992e1b22b013e5627b913a31cb1d231570))
+- The alert table catches up — validated before it lands, never written for nothing - ([592a930](https://github.com/vicanso/zstats.app/commit/592a9309e96cb89e0c1aaf2d6fe0710785717f1b))
+- History names its shape, and one core is finally colour - ([9a3eff0](https://github.com/vicanso/zstats.app/commit/9a3eff0a031468166b1c4c6344123626e5d242ac))
+- A second dimension for Apps, and a clearer answer everywhere else - ([358fdb1](https://github.com/vicanso/zstats.app/commit/358fdb162302494039ba56ff9747363d20d9fab8))
+- Tell the analysis what to leave out — pruned, counted, never silent - ([7fa5c55](https://github.com/vicanso/zstats.app/commit/7fa5c554288829bb40674235fcbd8ee18d9368bb))
+- Large files remember the last listing, and can be put away again - ([625d06d](https://github.com/vicanso/zstats.app/commit/625d06d49bc63702594de23fc2abbbf446018c98))
+- A scope you can get back to — Home, and why / is not offered - ([038c1b9](https://github.com/vicanso/zstats.app/commit/038c1b98b2a69d1807820abf6fa6a5e2563926e9))
+- Disk space gets a window — rows open in place, no re-rooting - ([75da7ec](https://github.com/vicanso/zstats.app/commit/75da7ec288cb869d31c239dbf2798a110cd72815))
+- One program, one number — Apps memory moves to footprint, an ⓘ for the CPU - ([fcdb017](https://github.com/vicanso/zstats.app/commit/fcdb0177e0c6ec38d8e374b5ebf3ffd6f0735548))
+- The update trail — a dot into About, a button that fills, notes that fit - ([1207dba](https://github.com/vicanso/zstats.app/commit/1207dba6db2bff2025758edcffa4e5552a9e0422))
+- Two banners is enough — a flapping subject goes quiet - ([994a12c](https://github.com/vicanso/zstats.app/commit/994a12c7673fdea714467b66c00e34bb7bb91ef6))
+- Today's alerts outlive the app - ([2ede1ed](https://github.com/vicanso/zstats.app/commit/2ede1ed57b961f31b6c3a4959d9d656262d5c3cd))
+- Updates announce themselves — a dot, a skip, and no busywork - ([f147e0f](https://github.com/vicanso/zstats.app/commit/f147e0fb26301b7ff7cf6b6add40b7ff13a48b8a))
+- Scope grows up — own row, named in captions, restored at launch - ([053edaa](https://github.com/vicanso/zstats.app/commit/053edaad1c76e8cd6ec7678b7c694654f342d19f))
+
+### 🐛 Bug Fixes
+
+- Fix fmt - ([9044d3b](https://github.com/vicanso/zstats.app/commit/9044d3b6ee3081def3c4da7ce8189e2e2725712f))
+- An ejected volume leaves with the drive, not the cadence - ([8bd0d64](https://github.com/vicanso/zstats.app/commit/8bd0d6428f2f5e4fa93f3ea3b69ce0ddbed51a89))
+- Stale cards, silent resets, and a checksum that only looked like one - ([934ee21](https://github.com/vicanso/zstats.app/commit/934ee21174b63d9473495329cf157236beaaf638))
+- Reap our zombies, and a fistful of paper cuts - ([76c2b25](https://github.com/vicanso/zstats.app/commit/76c2b250d7a4da0d407a0fa8a270de2de2945d69))
+
+### 🚜 Refactor
+
+- A pass over every tab — one ranking per list, one fact per row - ([3e9f1a5](https://github.com/vicanso/zstats.app/commit/3e9f1a55a85e9220875e69c85759101adf884da4))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.1.5 - ([6b64ed5](https://github.com/vicanso/zstats.app/commit/6b64ed573f1aecf3145008fdb30d223b11eb8218))
+- Version 0.1.4 - ([8697678](https://github.com/vicanso/zstats.app/commit/869767844b83917406c3ebbd798b362593dd7a93))
+- Version 0.1.3 - ([1c675e5](https://github.com/vicanso/zstats.app/commit/1c675e59cc906892de43f679162329d0b507ee5b))
+
 ## [0.1.5](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.5) - 2026-08-19
 
 ### ⛰️  Features
