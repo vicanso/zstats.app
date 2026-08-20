@@ -62,7 +62,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
     // Watching belongs here too, not only on the empty list: otherwise
     // one episode leaves half the panel blank and hides what is armed.
-    cards.extend(armed_line(state).map(widgets::note));
+    cards.extend(armed_block(state));
     cards.push(widgets::note(i18n::tr("alerts.footer_note")));
     cards
 }
@@ -85,14 +85,7 @@ fn empty_card(state: &ZStatsAppState) -> AnyElement {
                 .text_color(theme::text_muted())
                 .child(i18n::tr("alerts.empty_body")),
         )
-        .children(armed_line(state).map(|line| {
-            div()
-                .mt(px(8.))
-                .font_family(font::MONO)
-                .text_size(px(10.))
-                .text_color(theme::text_dim())
-                .child(line)
-        }))
+        .children(armed_block(state).map(|block| div().mt(px(8.)).child(block)))
         .into_any_element()
 }
 
@@ -250,16 +243,17 @@ fn sustained_from(active: &[SustainedNotice]) -> Option<AnyElement> {
     )
 }
 
-/// "CPU 30% · MEM 25% · disk 90% · cooldown 10m" — the rules the engine is
-/// armed with right now, resolved through zstats' own [`ActiveThresholds`]
-/// (same source as the Config tab, so the two can never disagree). `None`
-/// with no readable config: the body already covers the waiting state.
-fn armed_line(state: &ZStatsAppState) -> Option<String> {
+/// The rules the engine is armed with right now, resolved through
+/// zstats' own [`ActiveThresholds`] (same source as the Config tab, so
+/// the two can never disagree). One pair per rule — a single joined
+/// line wrapped mid-token at 320px (`CPU 30 Memory:`). `None` with no
+/// readable config: the empty body already covers the waiting state.
+fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
     let file = state.settings()?;
     let eff = zstats::alerts::ActiveThresholds::from_config(&file.alerts);
-    let mut items = Vec::new();
+    let mut rows = Vec::new();
     if let Some(v) = eff.cpu.base() {
-        items.push(format!("{} {v:.0}%", i18n::tr("alerts.kind_cpu")));
+        rows.push((i18n::tr("alerts.kind_cpu"), format!("{v:.0}%")));
     }
     // Memory bars are the LOWER of a share and an absolute ceiling, so
     // the percentage alone overstates them: 25% reads as 16 GB on a
@@ -269,16 +263,12 @@ fn armed_line(state: &ZStatsAppState) -> Option<String> {
     // "the base bar" means here.
     let total = state.latest().map(|tick| tick.snapshot.memory.total_bytes);
     match total.and_then(|t| eff.memory_bar_bytes("", t)) {
-        Some(bytes) => items.push(format!(
-            "{} {}",
-            i18n::tr("alerts.kind_mem"),
-            format::memory(bytes)
-        )),
+        Some(bytes) => rows.push((i18n::tr("alerts.kind_mem"), format::memory(bytes))),
         // Before the first sample there is no total to resolve against;
         // the share is all that can be said honestly.
         None => {
             if let Some(f) = eff.memory.base() {
-                items.push(format!("{} {:.0}%", i18n::tr("alerts.kind_mem"), f * 100.0));
+                rows.push((i18n::tr("alerts.kind_mem"), format!("{:.0}%", f * 100.0)));
             }
         }
     }
@@ -288,38 +278,73 @@ fn armed_line(state: &ZStatsAppState) -> Option<String> {
     // half of what "per-program thresholds" means, so an armed list
     // that omits them understates the watch.
     if let Some(v) = eff.app_cpu.base() {
-        items.push(format!("{} {v:.0}%", i18n::tr("alerts.kind_app_cpu")));
+        rows.push((i18n::tr("alerts.kind_app_cpu"), format!("{v:.0}%")));
     }
     if let Some(bytes) = total.and_then(|t| eff.app_memory_bar_bytes("", t)) {
-        items.push(format!(
-            "{} {}",
-            i18n::tr("alerts.kind_app_mem"),
-            format::memory(bytes)
-        ));
+        rows.push((i18n::tr("alerts.kind_app_mem"), format::memory(bytes)));
     }
     if let Some(f) = eff.disk.base() {
-        items.push(format!(
-            "{} {:.0}%",
+        rows.push((
             i18n::tr("alerts.kind_disk"),
-            f64::from(f) * 100.0
+            format!("{:.0}%", f64::from(f) * 100.0),
         ));
     }
-    items.push(
+    rows.push((
+        i18n::tr("alerts.kind_sustained"),
         t!(
             "alerts.watch_sustained",
             cpu = format!("{:.0}%", state.sustained_bar_percent()),
             hours = SUSTAINED_AFTER.as_secs() / 3600
         )
         .to_string(),
-    );
-    items.push(
-        t!(
-            "alerts.empty_cooldown",
-            value = super::config::humanize(eff.cooldown)
-        )
-        .to_string(),
-    );
-    Some(t!("alerts.empty_watching", items = items.join(" · ")).to_string())
+    ));
+    rows.push((
+        i18n::tr("alerts.empty_cooldown"),
+        super::config::humanize(eff.cooldown),
+    ));
+    Some(rows)
+}
+
+fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
+    let rows = armed_rows(state)?;
+    let last = rows.len().saturating_sub(1);
+    Some(
+        v_flex()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("alerts.empty_watching")),
+            )
+            .children(rows.into_iter().enumerate().map(|(i, (k, v))| {
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap(px(8.))
+                    .pt(px(4.))
+                    .when(i != last, |d| d.pb(px(4.)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.))
+                            .text_color(theme::text_dim())
+                            .child(k),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(font::MONO)
+                            .text_size(px(10.))
+                            .text_color(theme::text_muted())
+                            .child(v),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    )
 }
 
 fn alert_head(
