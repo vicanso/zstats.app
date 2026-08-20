@@ -26,12 +26,12 @@ use crate::theme;
 use crate::watch::SUSTAINED_AFTER;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled,
+    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{h_flex, v_flex};
 use gpui_component::{IconName, Sizable};
+use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
 use zstats::settings::{FileConfig, PressureAlert};
