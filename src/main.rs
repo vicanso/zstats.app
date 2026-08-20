@@ -24,6 +24,7 @@ compile_error!(
 
 mod about;
 mod alertlog;
+mod alerttpl;
 mod assets;
 mod autostart;
 mod bigfiles;

@@ -9,6 +9,7 @@
 //! whether or not a window exists at all.
 
 use crate::alertlog;
+use crate::alerttpl;
 use crate::bigfiles;
 use crate::bigfiles::BigFilesScan;
 use crate::cleanhints;
@@ -393,6 +394,21 @@ pub enum HintsSync {
     Done(cleanhints::RemoteUpdate),
 }
 
+/// The alert-template fetch, and the revert beside it, for the Config
+/// page's status line. Both land here because they are the same
+/// question to the reader — "what did that button just do to the table
+/// zstats is running with" — and only one of them can be in flight.
+pub enum TemplateSync {
+    Running,
+    Done(alerttpl::RemoteUpdate),
+    /// The override was deleted and the compiled-in table is live again.
+    Reverted,
+    /// There was no override to delete — the built-in table was already
+    /// what zstats was using.
+    NothingToRevert,
+    RevertFailed(String),
+}
+
 /// A successfully ejected volume stays hidden at most this long.
 ///
 /// The normal exit is the snapshot dropping it, which happens on the
@@ -655,6 +671,7 @@ pub struct ZStatsAppState {
     history_sort: HistorySort,
     /// The last (or in-flight) clean-hints update fetch.
     hints_sync: Option<HintsSync>,
+    template_sync: Option<TemplateSync>,
     /// Throttle for the alert list's midnight sweep.
     alert_day_checked_at: Option<Instant>,
     /// A newer release a silent check found (its tag) — the settings
@@ -791,6 +808,7 @@ impl Default for ZStatsAppState {
             history_range: HistoryRange::default(),
             history_sort: HistorySort::default(),
             hints_sync: None,
+            template_sync: None,
             update_status: None,
             alert_day_checked_at: None,
             update_nudge: updater::nudge(),
@@ -2061,6 +2079,47 @@ impl ZStatsAppState {
             });
         })
         .detach();
+    }
+
+    pub fn template_sync(&self) -> Option<&TemplateSync> {
+        self.template_sync.as_ref()
+    }
+
+    /// Fetch the published alert table on the background executor. One
+    /// at a time, same as the clean hints — a second press while one
+    /// runs is a no-op, not a queue.
+    ///
+    /// The collector reload is [`alerttpl`]'s own doing, next to the
+    /// write: whether zstats has to re-read its thresholds is a fact
+    /// about the file having changed, not about a view having asked.
+    pub fn update_alert_template(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.template_sync, Some(TemplateSync::Running)) {
+            return;
+        }
+        self.template_sync = Some(TemplateSync::Running);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async { alerttpl::update_from_remote() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.template_sync = Some(TemplateSync::Done(outcome));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drop the override and go back to the table compiled into zstats.
+    /// Local file work only — no executor hop, unlike the fetch above.
+    pub fn use_builtin_alert_template(&mut self, cx: &mut Context<Self>) {
+        self.template_sync = Some(match alerttpl::use_builtin() {
+            Ok(true) => TemplateSync::Reverted,
+            Ok(false) => TemplateSync::NothingToRevert,
+            Err(e) => TemplateSync::RevertFailed(e),
+        });
+        cx.notify();
     }
 
     pub fn history_sort(&self) -> HistorySort {

@@ -1209,7 +1209,10 @@ mod tests {
     #[test]
     fn a_long_hold_is_hot_even_though_it_never_crosses_the_burst_line() {
         assert!(is_hot(110.0, false), "one core and a bit is a burst");
-        assert!(!is_hot(100.0, false), "exactly one core is the line, not over it");
+        assert!(
+            !is_hot(100.0, false),
+            "exactly one core is the line, not over it"
+        );
         assert!(!is_hot(60.0, false), "a moment at 60% is just work");
         assert!(is_hot(60.0, true), "the same 60% held long enough is not");
         assert!(is_hot(0.4, true), "the watcher's own bar is well under 100");

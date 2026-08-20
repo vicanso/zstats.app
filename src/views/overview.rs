@@ -23,10 +23,27 @@ const TOP_N: usize = 5;
 
 /// Per-core bar turns accent past this.
 const CORE_HOT: f32 = 85.0;
-/// Swap past this share of its own allocation is worth colour — display
-/// only. The kernel can still report pressure Normal while swap is
-/// nearly full; this is the signal that badge will not give.
-const SWAP_HOT: f32 = 80.0;
+/// Swap past this share of **physical memory** is worth colour — display
+/// only. The kernel can still report pressure Normal while a lot of the
+/// working set has been pushed to disk; that is the signal the badge
+/// will not give, and it is what this is for.
+///
+/// Measured against RAM, and not against swap's own allocation, because
+/// macOS sizes swap on demand: `/System/Volumes/VM/` holds uniform 1 GB
+/// files and the kernel adds one whenever free swap drops to roughly a
+/// file's worth. Steady state is therefore `used/total ≈ (N-1)/N` for N
+/// files, which *rises toward 100% as the machine swaps more* — 80% at
+/// five files, 86% at seven, 93% at fourteen. A share-of-allocation bar
+/// is consequently permanently crossed on any Mac that ever grew past
+/// about five swapfiles, and was observed painting red on a machine
+/// sitting at 55% memory free. Against RAM the same reading is 24%, and
+/// the number means the same thing on a 16 GB laptop as on a 128 GB
+/// desktop.
+///
+/// 50 is a judgement, not a derivation: half the physical memory's worth
+/// of pages living on disk. Apple Silicon swaps readily well below that
+/// without anything being wrong.
+const SWAP_HOT: f32 = 50.0;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(snapshot) = state.latest().map(|t| &t.snapshot) else {
@@ -314,8 +331,17 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
         None if !supported => i18n::tr("common.n_a"),
         None => format::PLACEHOLDER.to_string(),
     };
-    let swap_hot = mem.swap_total_bytes > 0
-        && (mem.swap_used_bytes as f32 / mem.swap_total_bytes as f32) * 100.0 >= SWAP_HOT;
+    // Deliberately not `mem.swap_used_percent`: that field *is* swap
+    // against its own allocation, the ratio [`SWAP_HOT`] explains is
+    // unusable here. Dividing those two bytes locally would also have
+    // been a second copy of a figure zstats already reports, which
+    // CLAUDE.md forbids. This asks something zstats does not answer, and
+    // only ever to pick a colour.
+    //
+    // The `> 0` is not division safety — `total` is already floored at 1
+    // — but a guard against a collector reporting no memory at all, where
+    // that floor would turn any swap into a huge percentage and paint red.
+    let swap_hot = mem.total_bytes > 0 && (mem.swap_used_bytes as f32 / total) * 100.0 >= SWAP_HOT;
     let rows = vec![
         (
             i18n::tr("overview.swap"),

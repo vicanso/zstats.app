@@ -18,6 +18,7 @@
 
 use super::widgets::{self, card};
 use crate::about;
+use crate::alerttpl;
 use crate::assets;
 use crate::autostart;
 use crate::cleanhints;
@@ -26,7 +27,7 @@ use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs::{self, LanguagePref, ThemePref};
-use crate::state::{HintsSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use crate::updater;
 use gpui::Entity;
@@ -188,6 +189,10 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
             let collector = file.collector.clone().unwrap_or_default();
             cards.push(collection_card(&collector));
             cards.push(thresholds_card(file));
+            // Directly under the thresholds it sits between: the table
+            // is the layer below a hand-written override and above the
+            // base rule.
+            cards.push(template_card(state));
         }
     }
     cards.push(hints_card(state));
@@ -984,6 +989,159 @@ fn pref_row<T: Copy + PartialEq + 'static>(
                         .child(text)
                 })),
         )
+        .into_any_element()
+}
+
+/// zstats' per-process threshold table: which one is live, and the two
+/// buttons that change that.
+///
+/// Sits under the thresholds it modifies, because that is what it is —
+/// the layer between a base rule and a hand-written override, raising
+/// (or zeroing) the bar for programs that are busy or large by design.
+/// Editing it is the same act as the Alerts tab's own writes: bytes into
+/// zstats' config, with zstats still doing every evaluation.
+///
+/// The source line leads because the table is invisible otherwise. A
+/// refused override especially: zstats then applies no `[alerts]` change
+/// at all, and without a line saying so the Alerts tab would look like
+/// it had simply stopped working.
+fn template_card(state: &ZStatsAppState) -> AnyElement {
+    let source = alerttpl::info();
+    let line = match source.as_ref() {
+        alerttpl::Source::Builtin(n) => t!("config.template_builtin", n = n).to_string(),
+        alerttpl::Source::User(n) => t!("config.template_user", n = n).to_string(),
+        alerttpl::Source::Broken(_) => i18n::tr("config.template_broken"),
+    };
+    widgets::list_shell()
+        .child(widgets::list_header(
+            i18n::tr("config.template"),
+            Some(widgets::note(line)),
+        ))
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .px(px(13.))
+                .py(px(8.))
+                .child(div().flex_1().min_w_0().child(widgets::note(
+                    // Names the platform file it pulls, because the
+                    // local name cannot: zstats fixes the override at
+                    // `template.toml` with no platform in it, and
+                    // ~/.zstats may be synced between machines whose
+                    // process names have nothing in common.
+                    t!("config.template_note", file = alerttpl::FILE).to_string(),
+                )))
+                .child(template_update_chip(state))
+                .children(source.has_override().then(template_builtin_chip)),
+        )
+        .children(match source.as_ref() {
+            alerttpl::Source::Broken(e) => Some(template_line(
+                t!("config.template_broken_body", e = e.as_str()).to_string(),
+            )),
+            _ => None,
+        })
+        .children(template_sync_note(state))
+        .into_any_element()
+}
+
+/// "Update" — fetches the published table, validates, writes, reloads.
+/// Inert while a fetch runs, same as the clean-hints chip.
+fn template_update_chip(state: &ZStatsAppState) -> AnyElement {
+    let running = matches!(state.template_sync(), Some(TemplateSync::Running));
+    let chip = template_chip("cfg-template-update")
+        .text_color(if running {
+            theme::text_dim()
+        } else {
+            theme::text()
+        })
+        .child(i18n::tr(if running {
+            "config.template_updating"
+        } else {
+            "config.template_update"
+        }));
+    if running {
+        return chip.into_any_element();
+    }
+    chip.hover(|d| d.bg(theme::surface_raised()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.update_alert_template(cx));
+        })
+        .into_any_element()
+}
+
+/// The way back. Rendered only when an override exists, so it is never
+/// a button that can do nothing — and it matters more here than for the
+/// clean hints: an override replaces the table wholesale, and a refused
+/// one stops every `[alerts]` change from applying.
+fn template_builtin_chip() -> AnyElement {
+    template_chip("cfg-template-builtin")
+        .text_color(theme::text())
+        .hover(|d| d.bg(theme::surface_raised()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.use_builtin_alert_template(cx));
+        })
+        .child(i18n::tr("config.template_use_builtin"))
+        .into_any_element()
+}
+
+/// Shared chrome for the two chips — same shape as the clean hints'.
+fn template_chip(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::inset())
+        .px(px(10.))
+        .py(px(3.))
+        .text_size(px(11.))
+}
+
+/// The last press's outcome, in one honest line under the row.
+fn template_sync_note(state: &ZStatsAppState) -> Option<AnyElement> {
+    use crate::alerttpl::RemoteUpdate;
+    let text = match state.template_sync()? {
+        TemplateSync::Running => return None,
+        TemplateSync::Done(RemoteUpdate::Updated(n)) => {
+            t!("config.template_updated", n = n).to_string()
+        }
+        TemplateSync::Done(RemoteUpdate::AlreadyCurrent) => i18n::tr("config.template_current"),
+        // Named as its own outcome, never folded into a failure: a
+        // format the local zstats cannot read is answered by updating
+        // the app, and "download failed" would send someone to check
+        // their network instead.
+        TemplateSync::Done(RemoteUpdate::VersionMismatch { found, expected }) => t!(
+            "config.template_version",
+            found = found.map_or_else(|| "—".to_string(), |v| v.to_string()),
+            expected = expected
+        )
+        .to_string(),
+        TemplateSync::Done(RemoteUpdate::Invalid(e)) => {
+            t!("config.template_invalid", e = e.as_str()).to_string()
+        }
+        TemplateSync::Done(RemoteUpdate::Failed(e)) => {
+            t!("config.template_failed", e = e.as_str()).to_string()
+        }
+        TemplateSync::Reverted => i18n::tr("config.template_reverted"),
+        TemplateSync::NothingToRevert => i18n::tr("config.template_nothing"),
+        TemplateSync::RevertFailed(e) => {
+            t!("config.template_revert_failed", e = e.as_str()).to_string()
+        }
+    };
+    Some(template_line(text))
+}
+
+fn template_line(text: String) -> AnyElement {
+    div()
+        .px(px(13.))
+        .pb(px(10.))
+        .child(widgets::note(text))
         .into_any_element()
 }
 
