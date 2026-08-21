@@ -102,19 +102,34 @@ impl Source {
     }
 }
 
-/// Cached so the settings window, which repaints on every tick, does not
-/// re-read and re-parse a 14 KB file at the collector's cadence. Dropped
-/// by [`reload`], which every path that touches the file calls.
-static CACHE: RwLock<Option<Arc<Source>>> = RwLock::new(None);
+/// The cached verdict *and* the table it was reached about: the Config
+/// card reads `source`, and the process/app expansions resolve their
+/// per-name alert bars against `template` — sharing the one parse
+/// instead of re-reading a 14 KB file per repaint.
+pub struct Loaded {
+    pub source: Source,
+    /// The table the engine is running with: the parsed override when
+    /// there is a good one, the compiled-in table otherwise. For a
+    /// *refused* override this is an approximation — the engine kept
+    /// whatever it last applied — but the card is announcing Broken
+    /// right beside any number a view shows against it.
+    pub template: Template,
+}
 
-/// What the Config page's source line reads.
-pub fn info() -> Arc<Source> {
+/// Cached so the windows, which repaint on every tick, do not re-read
+/// and re-parse the file at the collector's cadence. Dropped by
+/// [`reload`], which every path that touches the file calls.
+static CACHE: RwLock<Option<Arc<Loaded>>> = RwLock::new(None);
+
+/// The Config page's source line, and the live table for anything that
+/// resolves per-name thresholds for display.
+pub fn info() -> Arc<Loaded> {
     if let Some(cached) = CACHE.read().unwrap().as_ref() {
         return cached.clone();
     }
-    let source = Arc::new(read_source());
-    *CACHE.write().unwrap() = Some(source.clone());
-    source
+    let loaded = Arc::new(read_source());
+    *CACHE.write().unwrap() = Some(loaded.clone());
+    loaded
 }
 
 /// Drop the cached verdict; the next [`info`] re-reads the file. Called
@@ -124,18 +139,27 @@ pub fn reload() {
     *CACHE.write().unwrap() = None;
 }
 
-fn read_source() -> Source {
+fn read_source() -> Loaded {
     let dir = zstats::settings::default_dir();
     let path = zstats::settings::template_path(&dir);
     let Ok(text) = fs::read_to_string(&path) else {
         // Unreadable is reported as built-in on purpose: that is also
         // what zstats does for a missing file, and a permissions error
         // on a file that is not there is not worth a scary line.
-        return Source::Builtin(entries(Template::builtin()));
+        return Loaded {
+            source: Source::Builtin(entries(Template::builtin())),
+            template: Template::builtin().clone(),
+        };
     };
     match Template::parse(&text) {
-        Ok(template) => Source::User(entries(&template)),
-        Err(e) => Source::Broken(e),
+        Ok(template) => Loaded {
+            source: Source::User(entries(&template)),
+            template,
+        },
+        Err(e) => Loaded {
+            source: Source::Broken(e),
+            template: Template::builtin().clone(),
+        },
     }
 }
 

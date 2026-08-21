@@ -1006,8 +1006,8 @@ fn pref_row<T: Copy + PartialEq + 'static>(
 /// at all, and without a line saying so the Alerts tab would look like
 /// it had simply stopped working.
 fn template_card(state: &ZStatsAppState) -> AnyElement {
-    let source = alerttpl::info();
-    let line = match source.as_ref() {
+    let loaded = alerttpl::info();
+    let line = match &loaded.source {
         alerttpl::Source::Builtin(n) => t!("config.template_builtin", n = n).to_string(),
         alerttpl::Source::User(n) => t!("config.template_user", n = n).to_string(),
         alerttpl::Source::Broken(_) => i18n::tr("config.template_broken"),
@@ -1033,9 +1033,9 @@ fn template_card(state: &ZStatsAppState) -> AnyElement {
                     t!("config.template_note", file = alerttpl::FILE).to_string(),
                 )))
                 .child(template_update_chip(state))
-                .children(source.has_override().then(template_builtin_chip)),
+                .children(loaded.source.has_override().then(template_builtin_chip)),
         )
-        .children(match source.as_ref() {
+        .children(match &loaded.source {
             alerttpl::Source::Broken(e) => Some(template_line(
                 t!("config.template_broken_body", e = e.as_str()).to_string(),
             )),

@@ -12,6 +12,7 @@
 
 use super::processes;
 use super::widgets;
+use crate::alerttpl;
 use crate::confirm;
 use crate::font;
 use crate::format;
@@ -29,6 +30,7 @@ use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use zstats::alerts::ActiveThresholds;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
 /// Same one-core colour line as [`super::processes`] — a tree and a
@@ -374,7 +376,28 @@ fn app_row(
 /// Identity + the two memory figures, then the members the row total
 /// is the sum of. Hovering a giant tooltip over those figures (the
 /// previous layout) hid the numbers it was trying to explain.
+/// Both whole-app alert bars for this tree's name — zstats' `app_cpu` /
+/// `app_mem` rules resolved through the live template table, in the
+/// same words as the process expansion (`processes::pct_bar_text`).
+fn app_bars(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> (String, String) {
+    let Some(file) = state.settings() else {
+        return (format::PLACEHOLDER.into(), format::PLACEHOLDER.into());
+    };
+    let loaded = alerttpl::info();
+    let eff = ActiveThresholds::from_config_with_template(&file.alerts, &loaded.template);
+    let total = state.latest().map(|t| t.snapshot.memory.total_bytes);
+    (
+        processes::pct_bar_text(eff.app_cpu.override_for(&g.name), eff.app_cpu.base()),
+        processes::mem_bar_text(
+            eff.app_memory.override_for(&g.name),
+            total.and_then(|t| eff.app_memory_bar_bytes(&g.name, t)),
+            eff.app_memory.base(),
+        ),
+    )
+}
+
 fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement {
+    let (cpu_bar, mem_bar) = app_bars(g, state);
     let tick_ps = state
         .latest()
         .and_then(|t| t.snapshot.processes.as_deref().map(Vec::as_slice))
@@ -418,6 +441,16 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                                 g.phys_footprint_bytes
                                     .map_or(format::PLACEHOLDER.into(), format::memory),
                             ),
+                            false,
+                        ))
+                        .child(expand_row(
+                            // The whole-app alert bars, beside the totals
+                            // they judge — the answer to "why is this
+                            // tree at 300% and quiet". Same live
+                            // resolution as the process expansion; see
+                            // `processes::pct_bar_text`.
+                            i18n::tr("processes.bar_cpu"),
+                            expand_value(cpu_bar),
                             true,
                         )),
                 )
@@ -433,6 +466,11 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                         .child(expand_row(
                             i18n::tr("processes.mem_rss"),
                             expand_value(format::memory(g.memory_bytes)),
+                            false,
+                        ))
+                        .child(expand_row(
+                            i18n::tr("processes.bar_mem"),
+                            expand_value(mem_bar),
                             true,
                         )),
                 ),

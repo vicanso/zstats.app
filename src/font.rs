@@ -16,10 +16,11 @@
 //! face mid-sentence is noise without an alignment payoff. The split is
 //! also what keeps the panel reading as a native card, not a terminal.
 
-use gpui::{App, SharedString};
+use gpui::{App, Div, SharedString, Styled};
 use gpui_component::Theme;
 
 use crate::assets;
+use crate::i18n;
 
 /// Family name inside the bundled TTF. Must match the name table exactly.
 ///
@@ -27,6 +28,28 @@ use crate::assets;
 /// Semibold have no face — gpui will silently pick another family. Headline
 /// figures use Bold; everything else stays Regular.
 pub const MONO: &str = "JetBrains Mono";
+
+/// [`MONO`], unless the element's text is a translated sentence.
+///
+/// JetBrains Mono has no Han glyphs at all, so "读 12 MB/s · 写 3 MB/s"
+/// in it is the worst text in the app: every Han character falls back to
+/// PingFang at a size chosen for digits, inside a face picked for
+/// tabular figures it cannot supply. The sites that render a whole
+/// translated string as one value (the volume card's R/W line, History's
+/// peak line) hand the element back to the UI face in a CJK locale and
+/// keep mono everywhere else, where the alignment it buys is real.
+/// Layout-neutral by construction: the line box is size × line-height,
+/// independent of family — only widths shift.
+///
+/// Not a general escape hatch: a standalone figure stays on [`MONO`]
+/// unconditionally — `format` emits ASCII only.
+pub fn mono_unless_cjk(d: Div) -> Div {
+    if i18n::is_cjk() {
+        d
+    } else {
+        d.font_family(MONO)
+    }
+}
 
 /// Load the two faces into gpui's text system. Call once, before the first
 /// frame that paints a metric. Bytes come from [`assets`] (compressed in

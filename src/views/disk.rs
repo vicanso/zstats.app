@@ -135,7 +135,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .text_size(px(10.))
                         .text_color(theme::text_dim())
                         .child(
-                            div().font_family(font::MONO).child(
+                            // A sentence with numbers in it, and the zh
+                            // twin spends Han characters on the labels —
+                            // which the bundled mono face cannot draw at
+                            // all. Mono keeps the two rates from
+                            // jittering where it has the glyphs, and
+                            // gets out of the way where it does not.
+                            font::mono_unless_cjk(div()).child(
                                 t!(
                                     "disk.rw",
                                     read = format::rate(d.read_bytes_per_sec),

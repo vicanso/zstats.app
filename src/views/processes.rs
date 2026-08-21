@@ -7,6 +7,7 @@
 //! then a meter — the trough is what keeps each row from floating.
 
 use super::widgets;
+use crate::alerttpl;
 use crate::confirm;
 use crate::font;
 use crate::format;
@@ -27,6 +28,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::process;
 use zstats::Tick;
+use zstats::alerts::ActiveThresholds;
 use zstats::snapshot::{Capabilities, ProcessSnapshot};
 
 /// Floor for the per-row CPU bar. The original scale was 800% (eight
@@ -453,6 +455,7 @@ fn process_row(
             parent_name,
             current_user_id().as_deref(),
             caps,
+            state,
         ));
     }
 
@@ -681,11 +684,83 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
+/// The words for a percent-style alert bar (CPU here, app CPU on the
+/// Apps expansion), resolved from what zstats' own `Thresholds` said
+/// about this name. Pure text so both pages and the tests share one
+/// vocabulary. "override" means a per-name entry matched — the user's
+/// own or the template table's; zstats does not say which layer won,
+/// and re-matching here to find out would be a second implementation
+/// of its precedence.
+pub(super) fn pct_bar_text(matched: Option<Option<f32>>, base: Option<f32>) -> String {
+    match matched {
+        Some(Some(v)) => t!("processes.bar_override", value = format!("{v:.0}%")).to_string(),
+        Some(None) => i18n::tr("processes.bar_off_override"),
+        None => match base {
+            Some(v) => format!("{v:.0}%"),
+            None => i18n::tr("processes.bar_rule_off"),
+        },
+    }
+}
+
+/// Same vocabulary for the memory bar, whose effective figure is bytes
+/// (zstats resolves share-vs-ceiling itself — `bytes` is its answer for
+/// this name). `base_share` is the fallback wording for the frame or
+/// two before a tick has reported a total to resolve against.
+pub(super) fn mem_bar_text(
+    matched: Option<Option<f64>>,
+    bytes: Option<u64>,
+    base_share: Option<f64>,
+) -> String {
+    match matched {
+        Some(Some(_)) => match bytes {
+            Some(b) => t!("processes.bar_override", value = format::memory(b)).to_string(),
+            None => i18n::tr("processes.bar_rule_off"),
+        },
+        Some(None) => i18n::tr("processes.bar_off_override"),
+        None => match bytes {
+            Some(b) => format::memory(b),
+            None => match base_share {
+                Some(f) => format!("{:.0}%", f * 100.0),
+                None => i18n::tr("processes.bar_rule_off"),
+            },
+        },
+    }
+}
+
+/// The two alert bars zstats holds for exactly this name — the answer
+/// to "why is this row at 300% and quiet". Resolved through zstats' own
+/// `ActiveThresholds` against the live template table ([`alerttpl`]),
+/// the same resolution the engine armed itself with; nothing here
+/// evaluates a condition, it only reads the line back out.
+fn alert_bar_rows(name: &str, state: &ZStatsAppState) -> Vec<(String, String)> {
+    let Some(file) = state.settings() else {
+        return Vec::new();
+    };
+    let loaded = alerttpl::info();
+    let eff = ActiveThresholds::from_config_with_template(&file.alerts, &loaded.template);
+    let total = state.latest().map(|t| t.snapshot.memory.total_bytes);
+    vec![
+        (
+            i18n::tr("processes.bar_cpu"),
+            pct_bar_text(eff.cpu.override_for(name), eff.cpu.base()),
+        ),
+        (
+            i18n::tr("processes.bar_mem"),
+            mem_bar_text(
+                eff.memory.override_for(name),
+                total.and_then(|t| eff.memory_bar_bytes(name, t)),
+                eff.memory.base(),
+            ),
+        ),
+    ]
+}
+
 fn expand_block(
     p: &ProcessSnapshot,
     parent_name: Option<&str>,
     current_uid: Option<&str>,
     caps: Capabilities,
+    state: &ZStatsAppState,
 ) -> AnyElement {
     let pid = p.pid;
     let mut detail = vec![
@@ -729,6 +804,9 @@ fn expand_block(
                 .unwrap_or_else(|| format::PLACEHOLDER.into()),
         ));
     }
+    // Last, after the measurements: these two are policy, not readings —
+    // what has to happen before this process makes the Alerts tab.
+    detail.extend(alert_bar_rows(&p.name, state));
 
     let cmd = p.cmd.clone();
     let headline = cmd_headline(&cmd).to_string();
@@ -1281,5 +1359,44 @@ mod tests {
         assert_eq!(idx, vec![2, 0, 1]);
         sort_indices(&mut idx, &processes, ProcSort::Name);
         assert_eq!(idx, vec![1, 2, 0]); // Chrome, ice, zed
+    }
+
+    /// The expansion's alert-bar rows answer "why is this at 300% and
+    /// quiet" — so the wording must distinguish a matched per-name entry
+    /// (user's or the template's) from the base rule, and a disabled
+    /// rule from one that simply sits high.
+    #[test]
+    fn a_bar_says_whether_a_per_name_entry_decided_it() {
+        // Base rule, no match: just the number.
+        assert_eq!(pct_bar_text(None, Some(80.0)), "80%");
+        // A matched entry carries the override marker — this is the
+        // kernel_task case, the row the question is usually about.
+        assert_eq!(
+            pct_bar_text(Some(Some(300.0)), Some(80.0)),
+            "300% · override"
+        );
+        // Matched and disabled: off, and it says why.
+        assert_eq!(pct_bar_text(Some(None), Some(80.0)), "off · override");
+        // Rule off entirely.
+        assert_eq!(pct_bar_text(None, None), "off");
+    }
+
+    #[test]
+    fn the_memory_bar_prefers_zstats_resolved_bytes() {
+        // zstats resolves share-vs-ceiling itself; the row shows its
+        // answer, never a locally derived one.
+        assert_eq!(
+            mem_bar_text(None, Some(4 * 1024 * 1024 * 1024), Some(0.25)),
+            "4.0 GB"
+        );
+        assert_eq!(
+            mem_bar_text(Some(Some(0.7)), Some(45 * 1024 * 1024 * 1024), Some(0.25)),
+            "45.0 GB · override"
+        );
+        assert_eq!(mem_bar_text(Some(None), None, Some(0.25)), "off · override");
+        // Before the first tick there is no total to resolve against —
+        // the share is all that can be said honestly.
+        assert_eq!(mem_bar_text(None, None, Some(0.25)), "25%");
+        assert_eq!(mem_bar_text(None, None, None), "off");
     }
 }

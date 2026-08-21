@@ -245,11 +245,15 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                 // large total is exactly the process this view exists
                                 // to find, and the pairing is what makes that legible.
                                 .child(
-                                    div()
+                                    // Same as the volume card's R/W
+                                    // line: zh spells this "峰值 … ·
+                                    // … 分钟", Han characters the
+                                    // bundled mono face has no glyph
+                                    // for.
+                                    font::mono_unless_cjk(div())
                                         .flex_none()
                                         .min_w_0()
                                         .truncate()
-                                        .font_family(font::MONO)
                                         .child(
                                             t!(
                                                 "history.peak",
