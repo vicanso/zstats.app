@@ -22,7 +22,7 @@ use crate::metrics;
 use crate::prefs;
 use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
-use crate::trend::AppTrend;
+use crate::trend::{self, AppTrend};
 use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedWatch};
@@ -932,7 +932,7 @@ impl ZStatsAppState {
                 minute,
                 groups
                     .iter()
-                    .map(|g| (g.name.as_str(), g.cpu_usage_percent)),
+                    .map(|g| (trend::tree_key(g), g.cpu_usage_percent)),
             );
         }
 
@@ -2728,6 +2728,7 @@ mod tests {
         ProcessSnapshot {
             pid,
             name: name.into(),
+            display_name: None,
             cmd: String::new(),
             cpu_usage_percent: 0.0,
             cpu_time_ms: 0,
@@ -2788,6 +2789,7 @@ mod tests {
             subject: AlertSubject::Process {
                 pid,
                 name: format!("p{pid}"),
+                display_name: None,
             },
             detail: AlertDetail::Cpu {
                 avg_percent: 90.0,
@@ -2804,6 +2806,7 @@ mod tests {
             subject: AlertSubject::Process {
                 pid,
                 name: format!("p{pid}"),
+                display_name: None,
             },
             detail: AlertDetail::Memory {
                 avg_bytes: 1 << 30,

@@ -21,6 +21,7 @@ use crate::i18n;
 use crate::state::{AppSort, FullAppScan, FullAppScanData, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
 use crate::theme;
+use crate::trend;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
@@ -77,7 +78,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let filter = state.proc_filter_text();
     if !filter.is_empty() {
-        rows.retain(|g| g.name.to_lowercase().contains(filter));
+        // Either identity matches: the user may know the app by its
+        // bundle name ("codebuddy") or by what Activity Monitor's
+        // process column shows ("electron").
+        rows.retain(|g| {
+            g.name.to_lowercase().contains(filter)
+                || trend::tree_key(g).to_lowercase().contains(filter)
+        });
     }
 
     let shown = rows.len();
@@ -129,9 +136,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .overflow_y_scroll()
                 .max_h(px(processes::rows_height(state)))
                 .children({
-                    let repeated = repeated_names(rows.iter().map(|g| g.name.as_str()));
+                    // Ambiguity is about what is on screen: two
+                    // stock-Electron trees showing distinct bundle
+                    // names are not ambiguous, two identical shown
+                    // names are — whichever field they came from.
+                    let repeated = repeated_names(rows.iter().map(|g| trend::tree_key(g)));
                     rows.into_iter().enumerate().map(move |(i, g)| {
-                        let ambiguous = repeated.contains(g.name.as_str());
+                        let ambiguous = repeated.contains(trend::tree_key(g));
                         app_row(g, i + 1 == shown, state, ambiguous, sort, bar_full)
                     })
                 })
@@ -161,7 +172,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
     // Owned, unlike the top list's borrowed set: this closure outlives
     // the frame that builds it, so it cannot hold a name that belongs to
     // the tick. Only repeated names allocate, which is normally none.
-    let repeated: HashSet<String> = repeated_names(groups.iter().map(|g| g.name.as_str()))
+    let repeated: HashSet<String> = repeated_names(groups.iter().map(trend::tree_key))
         .into_iter()
         .map(str::to_string)
         .collect();
@@ -213,7 +224,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
             list(data.list.clone(), move |i, _window, cx| {
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let g = &groups[visible[i]];
-                let ambiguous = repeated.contains(g.name.as_str());
+                let ambiguous = repeated.contains(trend::tree_key(g));
                 app_row(g, i + 1 == count, state, ambiguous, sort, bar_full)
             })
             .h(px(height)),
@@ -313,7 +324,13 @@ fn app_row(
                 .gap(px(8.))
                 .child(widgets::truncating_name(
                     ("app-name", root_pid as usize),
-                    g.name.clone(),
+                    // The presented identity (`trend::tree_key`): the
+                    // bundle's name where the executable's own says
+                    // nothing — a stock-packaged Electron app reads as
+                    // itself, not as `Electron`. The matchable name
+                    // stays in the expansion, beside the bars that key
+                    // on it.
+                    trend::tree_key(g).to_string(),
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),
@@ -475,6 +492,20 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                         )),
                 ),
         )
+        // When the row's title is a bundle name, the matchable identity
+        // still has to be readable somewhere — it is what the alert
+        // bars above key on, what the template's entries are written
+        // against, and what the Processes tab will call the same
+        // program.
+        .when(g.display_name.is_some(), |d| {
+            d.child(
+                div()
+                    .mt(px(6.))
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(t!("apps.exec_name", name = g.name.clone()).to_string()),
+            )
+        })
         .when_some(io, |d, text| {
             d.child(
                 div()
@@ -530,7 +561,7 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
             d.child(
                 h_flex()
                     .justify_end()
-                    .child(quit_button(g.root_pid, g.name.clone())),
+                    .child(quit_button(g.root_pid, trend::tree_key(g).to_string())),
             )
         })
         .into_any_element()
@@ -632,7 +663,7 @@ fn member_row(p: &ProcessSnapshot, cpu: Option<f32>, last: bool) -> AnyElement {
         })
         .child(widgets::truncating_name(
             ("app-member", p.pid as usize),
-            p.name.clone(),
+            p.display_name.clone().unwrap_or_else(|| p.name.clone()),
             11.,
             gpui::FontWeight::MEDIUM,
             Hsla::from(theme::text()),
@@ -813,6 +844,7 @@ mod tests {
         let mut g = ProcessGroupSnapshot {
             root_pid: 1,
             name: "Google Chrome".into(),
+            display_name: None,
             process_count: 37,
             cpu_usage_percent: 0.0,
             memory_bytes: 80,
@@ -839,6 +871,7 @@ mod tests {
         let g = ProcessGroupSnapshot {
             root_pid: 4321,
             name: "login".into(),
+            display_name: None,
             process_count: 4,
             cpu_usage_percent: 0.0,
             memory_bytes: 0,
@@ -884,6 +917,7 @@ mod tests {
         ProcessGroupSnapshot {
             root_pid: 1,
             name: name.into(),
+            display_name: None,
             process_count: 1,
             cpu_usage_percent: cpu,
             memory_bytes: mem,

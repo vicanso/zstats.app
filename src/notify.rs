@@ -287,7 +287,14 @@ fn signal_click() {
 
 fn subject_title(subject: &AlertSubject) -> String {
     match subject {
-        AlertSubject::Process { name, .. } | AlertSubject::App { name, .. } => name.clone(),
+        // The banner is pure presentation — the display name where the
+        // executable's own says nothing (zstats 0.5.3).
+        AlertSubject::Process {
+            name, display_name, ..
+        }
+        | AlertSubject::App {
+            name, display_name, ..
+        } => display_name.clone().unwrap_or_else(|| name.clone()),
         AlertSubject::Volume { mount_point } => {
             t!("alerts.volume", mount = mount_point.clone()).to_string()
         }

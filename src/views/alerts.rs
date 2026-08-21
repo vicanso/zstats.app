@@ -608,14 +608,31 @@ fn alert_sentence(event: &AlertEvent) -> String {
 /// Who the alert is about, in the design's compact form.
 fn subject_label(subject: &AlertSubject) -> String {
     match subject {
-        AlertSubject::Process { pid, name } => {
-            t!("alerts.process", name = name.clone(), pid = *pid).to_string()
-        }
+        // Display name first (zstats 0.5.3): the card is read by a
+        // person, and "Electron" names every stock-packaged Electron
+        // app at once. The matchable identity is still `name` — the
+        // gear's threshold editor below keys on it, deliberately.
+        AlertSubject::Process {
+            pid,
+            name,
+            display_name,
+        } => t!(
+            "alerts.process",
+            name = display_name.as_deref().unwrap_or(name),
+            pid = *pid
+        )
+        .to_string(),
         AlertSubject::App {
             name,
+            display_name,
             process_count,
             ..
-        } => t!("alerts.app", name = name.clone(), count = *process_count).to_string(),
+        } => t!(
+            "alerts.app",
+            name = display_name.as_deref().unwrap_or(name),
+            count = *process_count
+        )
+        .to_string(),
         AlertSubject::Volume { mount_point } => {
             t!("alerts.volume", mount = mount_point.clone()).to_string()
         }
@@ -639,11 +656,29 @@ fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
         return None;
     }
     let event = &seen.event;
+    // The confirm sheet speaks the name a person recognises; delivery
+    // is by pid either way, so the display name risks nothing.
     let (pid, name) = match (&event.subject, event.kind()) {
-        (AlertSubject::Process { pid, name }, AlertKind::Memory) => (*pid, name.clone()),
-        (AlertSubject::App { root_pid, name, .. }, AlertKind::AppMemory) => {
-            (*root_pid, name.clone())
-        }
+        (
+            AlertSubject::Process {
+                pid,
+                name,
+                display_name,
+            },
+            AlertKind::Memory,
+        ) => (*pid, display_name.clone().unwrap_or_else(|| name.clone())),
+        (
+            AlertSubject::App {
+                root_pid,
+                name,
+                display_name,
+                ..
+            },
+            AlertKind::AppMemory,
+        ) => (
+            *root_pid,
+            display_name.clone().unwrap_or_else(|| name.clone()),
+        ),
         _ => return None,
     };
     // No control that could only fail: a subject this user cannot signal
@@ -733,7 +768,10 @@ fn consumer_rows(index: usize, event: &AlertEvent, live: bool) -> Option<AnyElem
                             .text_size(px(11.))
                             .text_color(theme::text())
                             .truncate()
-                            .child(c.name.clone()),
+                            // "The half of a pressure alert a person
+                            // acts on" — zstats' own reason for putting
+                            // the display name on the consumer.
+                            .child(c.display_name.clone().unwrap_or_else(|| c.name.clone())),
                     )
                     .child(
                         h_flex()
@@ -1093,6 +1131,7 @@ mod tests {
             subject: AlertSubject::Process {
                 pid: 1,
                 name: name.into(),
+                display_name: None,
             },
             detail: AlertDetail::Cpu {
                 avg_percent: 90.0,

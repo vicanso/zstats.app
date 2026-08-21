@@ -1330,6 +1330,7 @@ mod tests {
         ProcessSnapshot {
             pid: 1,
             name: name.into(),
+            display_name: None,
             cmd: String::new(),
             cpu_usage_percent: cpu,
             cpu_time_ms: 0,

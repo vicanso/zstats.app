@@ -79,7 +79,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // reading the caption line.
     let mut name_counts: HashMap<&str, usize> = HashMap::new();
     for s in &shown {
-        *name_counts.entry(s.name.as_str()).or_default() += 1;
+        *name_counts.entry(shown_name(s)).or_default() += 1;
     }
 
     let list = widgets::list_shell()
@@ -114,7 +114,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .overflow_y_scroll()
                 .max_h(px(rows_height(state, has_note)))
                 .children(shown.into_iter().enumerate().map(|(i, s)| {
-                    let repeated = name_counts[s.name.as_str()] > 1;
+                    let repeated = name_counts[shown_name(s)] > 1;
                     v_flex()
                         .px(px(13.))
                         .py(px(9.))
@@ -134,7 +134,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         .gap(px(5.))
                                         .child(widgets::truncating_name(
                                             ("hist-name", s.pid as usize),
-                                            s.name.clone(),
+                                            shown_name(s).to_string(),
                                             12.,
                                             gpui::FontWeight::MEDIUM,
                                             Hsla::from(theme::text()),
@@ -296,6 +296,15 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ));
     }
     out
+}
+
+/// What a row is titled: the record's display name where it carries one
+/// (zstats 0.5.3 — "a history that cannot be read against the
+/// notifications it explains is a worse history"), the matched name
+/// otherwise. The ambiguity pids key on this too: ambiguity is about
+/// what is on screen.
+fn shown_name(s: &crate::history::Spender) -> &str {
+    s.display_name.as_deref().unwrap_or(&s.name)
 }
 
 /// One day of a process's recorded half-hours: 00:00 at the left edge,

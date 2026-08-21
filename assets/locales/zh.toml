@@ -149,6 +149,7 @@ members_lead = "合计是各成员 footprint 之和。活动监视器里该 App 
 members_missing = "这棵树里还有 %{n} 个进程未能列入。"
 members_none = "此刻无法列出这棵树的进程。"
 members_loading = "正在列出其余子进程…"
+exec_name = "进程名 %{name}——阈值与模板匹配的是它"
 members_section = "这棵树里"
 quit_ok = "退出"
 quit_title = "退出 %{name}？"

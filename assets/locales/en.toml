@@ -149,6 +149,7 @@ members_lead = "The total sums each member’s footprint. Activity Monitor’s a
 members_missing = "%{n} more in this tree are not in this listing."
 members_none = "None of this tree’s processes could be named right now."
 members_loading = "Listing the rest of the tree…"
+exec_name = "process name %{name} — what thresholds and the template match on"
 members_section = "In this tree"
 quit_ok = "Quit"
 quit_title = "Quit %{name}?"

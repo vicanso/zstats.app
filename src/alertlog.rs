@@ -176,6 +176,7 @@ mod tests {
             subject: AlertSubject::Process {
                 pid,
                 name: "hog".into(),
+                display_name: None,
             },
             detail: AlertDetail::Cpu {
                 avg_percent: 190.0,
@@ -219,7 +220,7 @@ mod tests {
             "the episode keeps its span across the restart"
         );
         match &loaded[0].event.subject {
-            AlertSubject::Process { pid, name } => {
+            AlertSubject::Process { pid, name, .. } => {
                 assert_eq!(*pid, 7);
                 assert_eq!(name, "hog");
             }

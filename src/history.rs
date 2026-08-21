@@ -90,6 +90,13 @@ pub type Band = [Option<f32>; BAND_BUCKETS];
 pub struct Spender {
     pub pid: u32,
     pub name: String,
+    /// The application `name` belongs to, where the executable's own
+    /// name does not say it — carried on the records (zstats 0.5.3) "so
+    /// a history can be read against the notifications it explains":
+    /// the banner said CodeBuddy CN, the row must not say Electron.
+    /// Presentation only, like everywhere else; grouping stays on
+    /// `(pid, name)`.
+    pub display_name: Option<String>,
     /// Single-core milliseconds burnt across the period.
     pub cpu_time_ms: u64,
     /// Highest 1-minute average seen. Context for the total, not the ranking:
@@ -164,6 +171,9 @@ pub fn rank(mut records: Vec<MetricRecord>, band_day: Option<jiff::civil::Date>)
             let span = span_of(&samples);
             Spender {
                 pid,
+                // Any sample's Some will do — the bundle does not change
+                // under a running pid; older lines predate the field.
+                display_name: samples.iter().find_map(|r| r.display_name.clone()),
                 name,
                 cpu_time_ms,
                 peak_cpu_percent,
@@ -277,6 +287,7 @@ mod tests {
             timestamp: Timestamp::from_second(1_700_000_000 + minute * 60).unwrap(),
             pid,
             name: name.into(),
+            display_name: None,
             cpu_avg_percent: cpu,
             memory_avg_bytes: 1 << 20,
             memory_footprint_bytes: None,

@@ -7,6 +7,7 @@ use crate::format;
 use crate::i18n;
 use crate::state::{Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
+use crate::trend;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
@@ -92,7 +93,7 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
         .iter()
         .filter_map(|g| {
             state
-                .app_rise(&g.name)
+                .app_rise(trend::tree_key(g))
                 .filter(|delta| *delta >= RISE_FLOOR)
                 .map(|delta| (g, delta))
         })
@@ -146,7 +147,10 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 })
                 .child(widgets::truncating_name(
                     ("top-app-name", g.root_pid as usize),
-                    g.name.clone(),
+                    // Same presented identity the trend is keyed on —
+                    // the lookup above and this label must be the same
+                    // string or a rise vanishes between them.
+                    trend::tree_key(g).to_string(),
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),

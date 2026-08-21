@@ -126,6 +126,21 @@ pub struct AppTrend {
     apps: HashMap<String, Ring>,
 }
 
+/// The one presented identity of a tree — the trend's key, the Overview
+/// row's title, the Apps row's title. Defined here because the *feeder*
+/// (`state.rs`) and every *reader* must agree on the string, or a rise
+/// recorded under one name is looked up under another and vanishes.
+///
+/// `display_name` first (zstats 0.5.3): the bundle's name where the
+/// executable's own says nothing — every stock-packaged Electron app
+/// reports `Electron` to the kernel, and keying the trend on that merged
+/// unrelated programs into one curve. Presentation-layer identity may be
+/// finer than the *matchable* name (which stays `g.name` — thresholds,
+/// templates and quit delivery never touch this).
+pub fn tree_key(g: &zstats::snapshot::ProcessGroupSnapshot) -> &str {
+    g.display_name.as_deref().unwrap_or(&g.name)
+}
+
 impl AppTrend {
     /// Feed one tick's application trees. `minute` is minutes since the
     /// Unix epoch — wall clock, not `Instant`, because the slots must
