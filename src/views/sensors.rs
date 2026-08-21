@@ -15,16 +15,32 @@ use gpui::{
 use gpui_component::{h_flex, v_flex};
 use rust_i18n::t;
 
-/// Above this a sensor reads as hot. Only a display rule — the real limits
-/// come from the sensor itself when it reports them.
-const HOT_CELSIUS: f32 = 80.0;
-/// Bar scale when a sensor reports no critical point of its own.
+/// A sensor reads as hot at this fraction of its own ceiling — the same
+/// `celsius / meter_scale` the bar paints, so red always means "bar
+/// nearly full". Only a display rule, like every threshold in `views/`.
+///
+/// A fraction, not degrees, because a flat line cannot rank hardware
+/// with different ceilings. The old absolute 80 °C did two things wrong
+/// at once: on an Apple Silicon machine working hard, *every* pACC/eACC
+/// channel sits at 81–84 °C — 34 red rows carry exactly as much
+/// information as zero — while a battery cell at 55 °C, five degrees
+/// from its own 60 °C limit, stayed neutral. Ninety percent of the
+/// firmware's own number colours the one that is actually near its
+/// line and lets the merely-warm stay quiet.
+const HOT_FRACTION: f32 = 0.9;
+/// Bar scale when a sensor reports no critical point of its own. With
+/// [`HOT_FRACTION`] this puts the no-crit colour line at 99 °C — far
+/// above the old 80, deliberately: for hardware whose ceiling we do not
+/// know, "hot" was a guess, and a CPU genuinely at 99 °C is past any
+/// plausible one.
 const ASSUMED_MAX_CELSIUS: f32 = 110.0;
 /// Rows shown before "show more". Apple Silicon firmware exposes dozens of
-/// channels and most sit within a degree of each other; the hottest few
-/// carry the story, and the full list would bury the disk and battery
-/// cards that share this tab. Hot sensors are never hidden — the cap only
-/// ever swallows quiet ones.
+/// channels and most sit within a degree of each other; the few nearest
+/// their own limits carry the story, and the full list would bury the disk
+/// and battery cards that share this tab. Hot sensors are never hidden —
+/// the cap only ever swallows quiet ones, and since the sort key and the
+/// colour key are the same fraction, the hot rows are always a prefix the
+/// truncation cannot reach into.
 ///
 /// Four, not three, because this card is what fills the tab: with one
 /// volume and a battery at the default window height, three rows left a
@@ -53,17 +69,27 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             i18n::tr("sensors.nothing_body"),
         ),
         Some(temps) => {
-            // Hottest first, sorted here rather than trusted from the
-            // collector: the preview below is a prefix of this list, so
-            // the sort is what makes "the few that matter" and "the top
-            // of the list" the same set.
+            // Closest to its own limit first — the fraction the bar
+            // paints, not raw degrees. Raw degrees cannot rank hardware
+            // with different ceilings: an 84 °C core with crit 110 has
+            // a quarter of its range left, a 55 °C battery cell with
+            // crit 60 has five degrees. Sorting by the bar's own
+            // fraction puts the second one on top where it belongs,
+            // and makes the bars a descending staircase — the order
+            // explains itself. It also makes "hot rows are a prefix"
+            // structural: sort key and colour key are the same number,
+            // where the old absolute sort could push a near-its-limit
+            // sensor below the preview cut and hide it.
             let mut sorted: Vec<_> = temps.iter().collect();
-            sorted.sort_by(|a, b| b.celsius.total_cmp(&a.celsius));
+            sorted.sort_by(|a, b| crit_fraction(b).total_cmp(&crit_fraction(a)));
             let show_all = state.show_all_sensors();
             // How many the collapse would hide, independent of the current
             // state — same rule as the Network chip, so the control stays
             // a toggle instead of going inert once expanded.
-            let hot = sorted.iter().filter(|t| t.celsius > HOT_CELSIUS).count();
+            let hot = sorted
+                .iter()
+                .filter(|t| sensor_hot(t.celsius, t.critical_celsius))
+                .count();
             let hideable = sorted.len().saturating_sub(SENSOR_PREVIEW.max(hot));
             if !show_all {
                 sorted.truncate(SENSOR_PREVIEW.max(hot));
@@ -79,7 +105,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     let total = sorted.len();
                     sorted.into_iter().enumerate().map(move |(i, t)| {
                         let hot = sensor_hot(t.celsius, t.critical_celsius);
-                        let scale = meter_scale(t.critical_celsius);
                         v_flex()
                             .px(px(13.))
                             // 9, not 10: the tab has to end above the footer
@@ -151,7 +176,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             // grew by, which is what put this tab back over
                             // the fold).
                             .child(div().mt(px(4.)).child(widgets::meter(
-                                t.celsius / scale,
+                                crit_fraction(t),
                                 Hsla::from(theme::fill_for(hot)),
                                 4.,
                             )))
@@ -195,10 +220,20 @@ fn meter_scale(crit: Option<f32>) -> f32 {
     crit.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0)
 }
 
-/// Colour turns past [`HOT_CELSIUS`], or at 90% of a reported critical
-/// point — never against the observed peak, which is not a danger line.
+/// How much of its own range this sensor has used — the bar's fill, the
+/// list's sort key, and (against [`HOT_FRACTION`]) the colour's input.
+/// One definition so the three can never disagree: the row with the
+/// longest bar is the top row is the first to turn red.
+fn crit_fraction(t: &zstats::snapshot::TemperatureSnapshot) -> f32 {
+    t.celsius / meter_scale(t.critical_celsius)
+}
+
+/// Colour turns at [`HOT_FRACTION`] of the sensor's own ceiling — never
+/// against the observed peak, which is not a danger line, and never
+/// against a flat degree count, which cannot tell a core five degrees
+/// into its range from a battery cell five degrees from its limit.
 fn sensor_hot(celsius: f32, crit: Option<f32>) -> bool {
-    celsius > HOT_CELSIUS || crit.is_some_and(|c| c > 0.0 && celsius / c >= 0.9)
+    celsius / meter_scale(crit) >= HOT_FRACTION
 }
 
 /// The expand/collapse control in the header, borrowed from the Network
@@ -303,6 +338,7 @@ fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElem
                 .chain(battery_time(b))
                 .collect(),
             ))
+            .pb_2()
             .into_any_element(),
     };
 
@@ -356,9 +392,44 @@ mod tests {
         // 51.8 °C looked like, even though 51.8 / 110 is half a trough.
         assert_eq!(meter_scale(None), ASSUMED_MAX_CELSIUS);
         assert_eq!(meter_scale(Some(100.0)), 100.0);
-        assert!(!sensor_hot(51.8, None), "a peak is not a danger line");
-        assert!(sensor_hot(81.0, None), "80 °C still colours");
+    }
+
+    fn temp(celsius: f32, crit: Option<f32>) -> zstats::snapshot::TemperatureSnapshot {
+        zstats::snapshot::TemperatureSnapshot {
+            label: "t".into(),
+            celsius,
+            max_celsius: None,
+            critical_celsius: crit,
+        }
+    }
+
+    #[test]
+    fn hot_means_near_its_own_ceiling_not_past_a_flat_line() {
+        // The all-red machine: every cluster channel at 81–84 °C against
+        // a 110 °C assumed ceiling is warm, not near a limit. Under the
+        // old flat 80 °C line all 34 rows coloured and the colour said
+        // nothing.
+        assert!(!sensor_hot(84.0, None));
+        assert!(!sensor_hot(84.0, Some(110.0)));
+        // The one the flat line missed: five degrees from its own limit.
+        assert!(sensor_hot(55.0, Some(60.0)));
         assert!(sensor_hot(92.0, Some(100.0)), "90% of crit colours");
         assert!(!sensor_hot(70.0, Some(100.0)));
+        assert!(sensor_hot(99.5, None), "no-crit line sits at 90% of 110");
+    }
+
+    #[test]
+    fn the_ranking_puts_the_endangered_sensor_above_the_merely_warm() {
+        // 55/60 has used 92% of its range; 84/110 has used 76%. Raw
+        // degrees would bury the battery cell under every cluster
+        // channel — the exact row the page exists to surface.
+        let battery = temp(55.0, Some(60.0));
+        let core = temp(84.0, Some(110.0));
+        assert!(crit_fraction(&battery) > crit_fraction(&core));
+        // And the sort key IS the colour key, so the hot set is always
+        // a prefix of the list — the preview truncation can only ever
+        // swallow quiet rows.
+        assert!(sensor_hot(battery.celsius, battery.critical_celsius));
+        assert!(!sensor_hot(core.celsius, core.critical_celsius));
     }
 }

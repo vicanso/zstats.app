@@ -4,6 +4,7 @@
 //! — dark (white washes) and light (black washes) — selected by [`set_dark`].
 //! Brand red is reserved for over-threshold states.
 
+use crate::i18n;
 use gpui::{Rgba, rgb, rgba};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -115,6 +116,31 @@ pub fn text_muted() -> Rgba {
 #[inline]
 pub fn text_dim() -> Rgba {
     rgb(0x8e8e93)
+}
+
+/// Ink for a tiny fixed label — the ≤9.5px pills, tags and footnote
+/// sentences: `base` in a Latin locale, full [`text`] in a CJK one.
+///
+/// The concession exists because small Han glyphs lose on four fronts at
+/// once: the UI family (SF Pro) has no Han glyphs, so Chinese renders in
+/// PingFang — a fallback with no optical-size axis, meaning the English
+/// half of a line gets small-size stem thickening and the Chinese half
+/// does not; a Han glyph packs ~20 strokes into the box a Latin letter
+/// spends on three, so at 9px @2x single strokes antialias into grey;
+/// gpui rasterises grayscale-only on macOS (no subpixel sharpening); and
+/// the panel is glass, so those grey edges composite against wallpaper.
+/// Raising the *size* was tried and reverted — one point times gpui's
+/// 1.618 line box moved the whole panel's rhythm. Contrast is the lever
+/// that costs no layout: muted grey Chinese at 9px is mush, full-ink
+/// Chinese at 9px is small but sharp. Latin keeps the designed hierarchy.
+///
+/// **Labels only, never controls.** A toggle's resting colour is its
+/// state (`showing ? text() : muted`), a sort chip's muted resting tone
+/// is what its hover lifts from — routing those through here would lie
+/// about state, so they stay on their own colours in every locale.
+#[inline]
+pub fn tiny_label(base: Rgba) -> Rgba {
+    if i18n::is_cjk() { text() } else { base }
 }
 
 /// Quaternary text: limits, tick marks.

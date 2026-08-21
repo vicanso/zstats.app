@@ -8,7 +8,7 @@ VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 # Debug build + launch. `cargo run` keeps the console attached, so tracing /
 # panics land in the terminal (release builds detach on Windows).
 dev:
-	cargo run
+	bacon run
 
 debug:
 	RUST_LOG=debug $(MAKE) dev

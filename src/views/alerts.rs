@@ -148,7 +148,7 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
             div()
                 .mt(px(3.))
                 .text_size(px(9.5))
-                .text_color(theme::text_muted())
+                .text_color(theme::tiny_label(theme::text_muted()))
                 .child(alert_sentence(&seen.event)),
         )
         .children(consumer_rows(i, &seen.event, seen.live))
@@ -374,7 +374,9 @@ fn alert_head(
             .text_color(if critical {
                 gpui::white()
             } else {
-                Hsla::from(theme::text_muted())
+                // The label arm only: the tier is carried by the fill
+                // and border (red vs quiet), not by this grey.
+                Hsla::from(theme::tiny_label(theme::text_muted()))
             })
             .child(if critical {
                 i18n::tr("alerts.critical")

@@ -989,7 +989,7 @@ fn kind_pill(key: &SharedString, kind: HitKind) -> Option<AnyElement> {
             .px(px(5.))
             .text_size(px(9.))
             .bg(theme::inset())
-            .text_color(theme::text_muted())
+            .text_color(theme::tiny_label(theme::text_muted()))
             .tooltip(widgets::wrap_tooltip(i18n::tr("disk.kind_tag_tip")))
             .child(i18n::tr("disk.kind_tag"))
             .into_any_element(),
@@ -1547,7 +1547,7 @@ fn big_file_row(
                 .px(px(5.))
                 .text_size(px(9.))
                 .bg(theme::inset())
-                .text_color(theme::text_muted())
+                .text_color(theme::tiny_label(theme::text_muted()))
                 .tooltip(widgets::wrap_tooltip(
                     t!("disk.big_new_tip", ago = ago).to_string(),
                 ))

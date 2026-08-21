@@ -60,11 +60,13 @@ Config 页的「界面」卡片可以把语言（跟随系统 / English / 中文
 
 ## 界面
 
-八个视图：Overview / Apps / Processes / Hardware / Network / Alerts / History / Config，`src/views/` 一个文件一个（Hardware 由 `disk.rs` + `sensors.rs` 两个卡片栈拼接而成——磁盘、温度、电池同属机器的物理层，各占一个 tab 时后两者常年只有半屏内容）。传感器默认只显示最热的 3 个，头部的「显示更多」chip 展开全部（与 Network 的隐藏接口 chip 同一习语）；超过 80 °C 的传感器永远不会被折叠掉——截断只吞安静的那些。导航是单行图标 tab（Control Center / Stats 的做法），全名走 tooltip。设计 token 在 `src/theme.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
+八个视图：Overview / Apps / Processes / Hardware / Network / Alerts / History / Config，`src/views/` 一个文件一个（Hardware 由 `disk.rs` + `sensors.rs` 两个卡片栈拼接而成——磁盘、温度、电池同属机器的物理层，各占一个 tab 时后两者常年只有半屏内容）。传感器默认只显示 4 个，按**距各自上限的占比**排序（条子画的就是这个占比，所以列表天然是一段递减的阶梯）而不是按绝对温度——一刀切的 80 °C 线在满载的 Apple Silicon 上会把全部 pACC/eACC 通道染红（34 条红等于零条红），却让一颗离自身 60 °C 上限只差 5 度的电池传感器保持中性。着色同样按占比（≥90% 才红），排序键和着色键是同一个数，于是「贴近上限的永不被折叠」是结构性成立的——截断只吞安静的那些。头部的「显示更多」chip 展开全部（与 Network 的隐藏接口 chip 同一习语）。导航是单行图标 tab（Control Center / Stats 的做法），全名走 tooltip。设计 token 在 `src/theme.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
 
 贯穿全部视图的一条规则：**进度条、柱状图和数字默认中性色（`ink`），只有越过阈值才变品牌红（`accent`）**，由 `theme::fill_for()` / `theme::text_for()` 固化。
 
 第二条规则（`views/mod.rs` 有完整说明）：**macOS 不会在可点击元素上改变鼠标指针**，所以 `cursor_pointer` 不能作为「这里能点」的唯一信号。每个可点元素都必须有*看得见*的反馈——hover 填充、边框提亮、或真正的按钮外观。当点击目标是一整张卡片而不是按钮形状的东西时，hover 也不够，要给显式控件：这就是 Alerts 卡片上那个齿轮按钮的由来。
+
+第三条规则（`theme::tiny_label` 有完整推导）：**≤9.5px 的固定标签走 `theme::tiny_label(base)`**——英文原样返回 `base`，中文提到全对比 `text()`。小字号汉字四面受敌：UI 字族（SF Pro）没有汉字、回退到没有 optical size 轴的 PingFang，笔画密度是拉丁的近十倍，gpui 在 macOS 只做灰度抗锯齿，而面板还是毛玻璃。抬字号试过并退回（一个点乘上 1.618 行盒会动整页节奏），对比度是唯一零布局代价的杠杆。**只限标签、绝不用于控件**：开关的静默灰是状态（`showing ? text() : muted`），排序 chip 的灰是 hover 提亮的起点，套进去等于谎报状态。
 
 ### zstats 告警看不到的三件事（`watch.rs`）
 

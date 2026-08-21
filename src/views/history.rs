@@ -177,7 +177,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         .child(
                                             div()
                                                 .text_size(px(8.5))
-                                                .text_color(theme::text_dim())
+                                                .text_color(theme::tiny_label(theme::text_dim()))
                                                 .child(i18n::tr(match sort {
                                                     HistorySort::CpuTime => "alerts.kind_cpu",
                                                     HistorySort::PeakMemory => "history.peak_tag",
@@ -357,7 +357,7 @@ fn shape_pill(
         .px(px(4.))
         .bg(theme::inset())
         .text_size(px(9.))
-        .text_color(theme::text_muted())
+        .text_color(theme::tiny_label(theme::text_muted()))
         .tooltip(widgets::wrap_tooltip(tip))
         .child(label)
         .into_any_element()

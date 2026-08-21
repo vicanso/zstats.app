@@ -775,7 +775,7 @@ fn pill(text: impl Into<gpui::SharedString>, accent: bool) -> AnyElement {
         .text_color(if accent {
             theme::accent_light()
         } else {
-            theme::text_muted()
+            theme::tiny_label(theme::text_muted())
         })
         .child(text.into())
         .into_any_element()
@@ -795,7 +795,7 @@ fn avg_chip() -> AnyElement {
         .py(px(1.))
         .text_size(px(9.))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme::text_muted())
+        .text_color(theme::tiny_label(theme::text_muted()))
         .tooltip(widgets::wrap_tooltip(tip))
         .child(i18n::tr("processes.avg_window"))
         .into_any_element()
@@ -992,7 +992,7 @@ fn abnormal_rows(
                         .gap(px(8.))
                         .mt(px(2.))
                         .text_size(px(9.))
-                        .text_color(theme::text_dim())
+                        .text_color(theme::tiny_label(theme::text_dim()))
                         .child(
                             div().child(
                                 t!(
