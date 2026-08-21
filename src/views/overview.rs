@@ -59,10 +59,22 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     ]
 }
 
-/// Compact "who's using the CPU" list — whole trees, same ranking as
-/// Apps. A glance that named helpers (`Google Chrome Helper`,
-/// `rust-analyzer`) answered the wrong question. Battery / watts stay
-/// on Sensors.
+/// A tree's recent minutes must sit this many percent-of-one-core
+/// points above its earlier-hour average before the card calls it
+/// climbing. Below ~an eighth of a core the delta is scheduler mood and
+/// short blips — ranking by it would be ranking noise. Display only,
+/// like every threshold in `views/`: a climb fires nothing.
+const RISE_FLOOR: f32 = 15.0;
+
+/// Compact "who changed" list — whole trees, ranked by their hour-window
+/// climb (`trend.rs`) when anything is climbing, by current CPU when
+/// nothing is. The panel usually gets opened because the machine *got*
+/// loud, and the instantaneous top cannot answer that: the resident
+/// that is always first is normal, the tree that climbed out of nowhere
+/// is the reason — and a steady 30% outranks a 2%→21% climber in any
+/// snapshot ranking. The steady top is one click away under All, so the
+/// first screen spends its rows on the news. Battery / watts stay on
+/// Sensors.
 fn top_apps(state: &ZStatsAppState) -> AnyElement {
     let Some(tick) = state.latest() else {
         return widgets::empty_card(
@@ -76,9 +88,37 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
             i18n::tr("overview.top_cpu_off_body"),
         );
     };
-    let mut rows: Vec<_> = groups.iter().collect();
-    rows.sort_by(|a, b| b.cpu_usage_percent.total_cmp(&a.cpu_usage_percent));
-    rows.truncate(TOP_N);
+    let mut risers: Vec<_> = groups
+        .iter()
+        .filter_map(|g| {
+            state
+                .app_rise(&g.name)
+                .filter(|delta| *delta >= RISE_FLOOR)
+                .map(|delta| (g, delta))
+        })
+        .collect();
+    // Two modes, one card: risers when there are any, the current top
+    // otherwise — a quiet hour ranked by ±noise deltas would be worse
+    // than the ranking it replaced. The header says which question is
+    // being answered.
+    let (title_key, tip_key, rows): (_, _, Vec<_>) = if risers.is_empty() {
+        let mut rows: Vec<_> = groups.iter().collect();
+        rows.sort_by(|a, b| b.cpu_usage_percent.total_cmp(&a.cpu_usage_percent));
+        rows.truncate(TOP_N);
+        (
+            "overview.top_cpu",
+            "overview.top_apps_tip",
+            rows.into_iter().map(|g| (g, None)).collect(),
+        )
+    } else {
+        risers.sort_by(|a, b| b.1.total_cmp(&a.1));
+        risers.truncate(TOP_N);
+        (
+            "overview.rising_title",
+            "overview.rising_tip",
+            risers.into_iter().map(|(g, d)| (g, Some(d))).collect(),
+        )
+    };
     let n = rows.len();
 
     widgets::list_shell()
@@ -87,19 +127,11 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 .items_center()
                 .gap(px(4.))
                 .min_w_0()
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(i18n::tr("overview.top_cpu")),
-                )
-                .child(widgets::info_icon(
-                    "overview-top-apps",
-                    i18n::tr("overview.top_apps_tip"),
-                )),
+                .child(div().min_w_0().truncate().child(i18n::tr(title_key)))
+                .child(widgets::info_icon("overview-top-apps", i18n::tr(tip_key))),
             Some(top_apps_all()),
         ))
-        .children(rows.into_iter().enumerate().map(|(i, g)| {
+        .children(rows.into_iter().enumerate().map(|(i, (g, delta))| {
             // Burst only: a tree has no sustained flag of its own, and
             // walking members here would make Overview a second Apps tab.
             let hot = processes::is_hot(f64::from(g.cpu_usage_percent), false);
@@ -119,6 +151,21 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),
                 ))
+                // The climb, next to the level it led to. Muted on
+                // purpose: a rise is news, not a threshold, and accent
+                // stays reserved for over-the-line (`theme.rs`).
+                .children(delta.map(|delta| {
+                    div()
+                        .id(("top-app-rise", g.root_pid as usize))
+                        .flex_none()
+                        .font_family(font::MONO)
+                        .text_size(px(10.))
+                        .text_color(theme::text_muted())
+                        .tooltip(widgets::wrap_tooltip(
+                            t!("overview.rise_row_tip", delta = format::pct(delta)).to_string(),
+                        ))
+                        .child(format!("↑{}", format::pct(delta)))
+                }))
                 .child(
                     div()
                         .id(("top-app-pct", g.root_pid as usize))

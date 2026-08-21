@@ -22,6 +22,7 @@ use crate::metrics;
 use crate::prefs;
 use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
+use crate::trend::AppTrend;
 use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedWatch};
@@ -39,7 +40,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zstats::settings::FileConfig;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 use zstats::{AlertEvent, AlertKind, AlertSubject, Tick};
@@ -678,6 +679,9 @@ pub struct ZStatsAppState {
     sustained: SustainedWatch,
     abnormal: AbnormalWatch,
     net: NetActivity,
+    /// The hour of per-tree CPU history behind Overview's climbing rows
+    /// — same observer class as the three above (see `trend.rs`).
+    trend: AppTrend,
     /// Today's history, ranked. `None` until the tab is first opened — the
     /// read walks a day of JSONL and there is no reason to pay for it before
     /// somebody asks.
@@ -825,6 +829,7 @@ impl Default for ZStatsAppState {
             sustained: SustainedWatch::default(),
             abnormal: AbnormalWatch::default(),
             net: NetActivity::default(),
+            trend: AppTrend::default(),
             history: None,
             history_range: HistoryRange::default(),
             history_sort: HistorySort::default(),
@@ -911,6 +916,20 @@ impl ZStatsAppState {
         }
         if let Some(nets) = tick.snapshot.networks.as_deref() {
             self.net.record(nets, now);
+        }
+        if let Some(groups) = tick.snapshot.process_groups.as_deref() {
+            // Wall clock, not `Instant`: the trend's minute slots must
+            // line up across a sleep, which a monotonic clock spans
+            // inconsistently across platforms.
+            let minute = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() / 60);
+            self.trend.sample(
+                minute,
+                groups
+                    .iter()
+                    .map(|g| (g.name.as_str(), g.cpu_usage_percent)),
+            );
         }
 
         if !self.ejected.is_empty() {
@@ -1175,6 +1194,13 @@ impl ZStatsAppState {
     /// Whether an interface has carried traffic recently enough for a row.
     pub fn net_is_recent(&self, interface: &str) -> bool {
         self.net.is_recent(interface)
+    }
+
+    /// How far this tree's recent minutes sit above its earlier-hour
+    /// average, in percent-of-one-core points. `None` until the trend
+    /// has enough reported history for a verdict.
+    pub fn app_rise(&self, name: &str) -> Option<f32> {
+        self.trend.rise(name)
     }
 
     pub fn proc_sort(&self) -> ProcSort {
