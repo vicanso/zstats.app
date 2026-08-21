@@ -1041,6 +1041,36 @@ fn template_card(state: &ZStatsAppState) -> AnyElement {
             )),
             _ => None,
         })
+        // The gear dot's landing spot: the probe found a clean,
+        // different table. The line names the news; the Update chip
+        // above is the action; "not this one" is display-layer only,
+        // like the updater's skip.
+        .children(state.template_nudge().then(|| {
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .px(px(13.))
+                .pb(px(10.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::note(i18n::tr("config.template_offer"))),
+                )
+                .child(
+                    template_chip("cfg-template-ignore")
+                        .text_color(theme::text())
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .on_click(|_, _window, cx| {
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| state.ignore_template_offer(cx));
+                        })
+                        .child(i18n::tr("config.template_offer_ignore")),
+                )
+                .into_any_element()
+        }))
         .children(template_sync_note(state))
         .into_any_element()
 }

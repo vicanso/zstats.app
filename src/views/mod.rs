@@ -243,11 +243,18 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
             // Config lives in its own window, not a tab: a settings
             // session should not be cut short by the popover auto-hiding
             // on focus loss. The gear opens (or refocuses) it.
-            let settings_tip = match &nudge {
+            //
+            // One dot, two possible reasons — a second dot at this size
+            // would be noise, and both answers are the same act (open
+            // settings). The tooltip is what says which.
+            let template_nudge = state.template_nudge();
+            let settings_tip = match (&nudge, template_nudge) {
+                (Some(v), true) => t!("config.both_nudge_tip", v = v).to_string(),
                 // The dot's words: a silent check found a newer release;
                 // the About page has the download.
-                Some(v) => t!("config.update_nudge_tip", v = v).to_string(),
-                None => i18n::tr("tabs.config"),
+                (Some(v), false) => t!("config.update_nudge_tip", v = v).to_string(),
+                (None, true) => i18n::tr("config.template_nudge_tip"),
+                (None, false) => i18n::tr("tabs.config"),
             };
             div()
                 .id("settings")
@@ -266,7 +273,7 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
                         )
                         // The nudge dot: paint only, no layout — the
                         // gear must not shift when it appears.
-                        .when(nudge.is_some(), |d| {
+                        .when(nudge.is_some() || template_nudge, |d| {
                             d.child(
                                 div()
                                     .absolute()

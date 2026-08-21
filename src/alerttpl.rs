@@ -35,13 +35,22 @@
 //!   that outranks every *future* built-in, quietly pinning the machine
 //!   to today's thresholds. See [`write_template`].
 //!
-//! Strictly user-triggered, one fetch at a time, through
-//! [`proxy::app_proxy`] like every other request this app makes.
+//! **Writing stays strictly user-triggered.** A silent probe
+//! ([`silent_check`], riding the updater's two-day clock) may fetch the
+//! published table to *compare* — never to apply — and lights the
+//! settings gear's dot when a clean, applicable, different table is
+//! waiting. The distinction is harder here than for the app update it
+//! borrows the idiom from: this table decides *what alarms*, and a
+//! schedule that applied remote content would be remote control of the
+//! alert engine. The dot only says "the button has something to do".
+//! Every fetch goes through [`proxy::app_proxy`] like every other
+//! request this app makes.
 
 use crate::about;
 use crate::metrics;
 use crate::proxy;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use zstats::alerts::{TEMPLATE_VERSION, Template};
@@ -200,26 +209,32 @@ pub enum RemoteUpdate {
 /// Validated before a byte lands. Blocking — call on the background
 /// executor.
 pub fn update_from_remote() -> RemoteUpdate {
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(FETCH_TIMEOUT))
-        .proxy(proxy::app_proxy())
-        .build()
-        .new_agent();
-    let text = match agent
-        .get(format!("{REMOTE_DIR}{FILE}"))
-        .header("User-Agent", format!("zstats/{}", about::version()))
-        .call()
-    {
-        Ok(response) => match response.into_body().read_to_string() {
-            Ok(text) => text,
-            Err(e) => return RemoteUpdate::Failed(e.to_string()),
-        },
-        Err(e) => return RemoteUpdate::Failed(e.to_string()),
+    let text = match fetch_text() {
+        Ok(text) => text,
+        Err(e) => return RemoteUpdate::Failed(e),
     };
     match validate(&text) {
         Ok(template) => write_template(&text, &template),
         Err(refusal) => refusal,
     }
+}
+
+/// One GET of the published table — shared by the button and the silent
+/// probe, so the two cannot drift in what they consider "the remote".
+fn fetch_text() -> Result<String, String> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(FETCH_TIMEOUT))
+        .proxy(proxy::app_proxy())
+        .build()
+        .new_agent();
+    agent
+        .get(format!("{REMOTE_DIR}{FILE}"))
+        .header("User-Agent", format!("zstats/{}", about::version()))
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())
 }
 
 /// Parse and refuse, in the order that produces the most useful message.
@@ -281,6 +296,9 @@ fn write_template(text: &str, template: &Template) -> RemoteUpdate {
         .as_ref()
         .is_some_and(|live| same_thresholds(live, template))
     {
+        // Local already says what the remote says — the standing offer,
+        // if any, is honoured by existing.
+        clear_offer_in(&dir);
         return RemoteUpdate::AlreadyCurrent;
     }
     if let Err(e) = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, text)) {
@@ -288,6 +306,9 @@ fn write_template(text: &str, template: &Template) -> RemoteUpdate {
     }
     reload();
     metrics::request_reload();
+    // Applying is the other way an offer is honoured; the dot goes out
+    // by the state changing, not by bookkeeping racing it.
+    clear_offer_in(&dir);
     RemoteUpdate::Updated(entries(template))
 }
 
@@ -310,9 +331,175 @@ pub fn use_builtin() -> Result<bool, String> {
     }
 }
 
+// ---- silent periodic probe (shares the settings gear's dot) ------------
+//
+// The idiom is `updater`'s, borrowed deliberately — same file shape,
+// same display-only ignore, same "the dot goes out by comparison, not
+// bookkeeping" stance. It even rides the updater's two-day clock (the
+// caller in `state.rs` runs both in one background pass) rather than
+// keeping a clock of its own: one rhythm of unprompted network for the
+// whole app, not one per feature.
+
+fn check_path(dir: &Path) -> PathBuf {
+    dir.join("template-check.toml")
+}
+
+/// What the probe file holds. `offered` is the fingerprint of a
+/// published table that parsed clean and differed from the live one —
+/// the meaning of the dot's template half. `ignored` is the user's
+/// "not this one": it silences the dot for exactly that content, and a
+/// later, different table brings the dot back on its own.
+#[derive(Default)]
+struct CheckFile {
+    offered: Option<String>,
+    ignored: Option<String>,
+}
+
+fn read_check_in(dir: &Path) -> CheckFile {
+    let doc = fs::read_to_string(check_path(dir))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok());
+    let Some(doc) = doc else {
+        return CheckFile::default();
+    };
+    let get = |k: &str| doc.get(k).and_then(toml::Value::as_str).map(str::to_string);
+    CheckFile {
+        offered: get("offered"),
+        ignored: get("ignored"),
+    }
+}
+
+fn write_check_in(dir: &Path, file: &CheckFile) {
+    // Fingerprints are our own hex; the escape is belt only.
+    let clean = |v: &str| v.replace(['\\', '"'], "");
+    let mut out = String::new();
+    if let Some(v) = &file.offered {
+        out.push_str(&format!("offered = \"{}\"\n", clean(v)));
+    }
+    if let Some(v) = &file.ignored {
+        out.push_str(&format!("ignored = \"{}\"\n", clean(v)));
+    }
+    let _ = fs::create_dir_all(dir);
+    let _ = fs::write(check_path(dir), out);
+}
+
+/// A stable name for what a table *does*: the four threshold maps,
+/// hashed in their own (BTreeMap) order. Comments and formatting do not
+/// move it — the same reason [`same_thresholds`] compares values and
+/// not bytes — so an upstream rewording can neither light the dot nor
+/// defeat an ignore.
+fn fingerprint(template: &Template) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for (map, tag) in [(&template.cpu, "cpu"), (&template.app_cpu, "app_cpu")] {
+        hasher.update(tag);
+        for (name, value) in map.iter() {
+            hasher.update(name);
+            hasher.update(value.to_le_bytes());
+        }
+    }
+    for (map, tag) in [(&template.mem, "mem"), (&template.app_mem, "app_mem")] {
+        hasher.update(tag);
+        for (name, value) in map.iter() {
+            hasher.update(name);
+            hasher.update(value.to_le_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    // Eight bytes is plenty for "same content or not".
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What one probe of the published table learned.
+enum RemoteVerdict {
+    /// Clean, applicable, and saying something the live table does not.
+    Different(String),
+    /// Clean but identical in thresholds — nothing to offer.
+    Current,
+    /// Version mismatch or invalid: the update button could not apply
+    /// it, and a dot pointing at a button that fails is torment. (A
+    /// format bump ships with a release, which the updater's own half
+    /// of the dot covers.)
+    Unusable,
+    /// Network said nothing about the table; it only spent the attempt.
+    Failed,
+}
+
+/// Fetch the published table to *compare* — never to write. Blocking —
+/// call on the background executor, on the updater's clock.
+pub fn silent_check() {
+    let verdict = match fetch_text() {
+        Err(_) => RemoteVerdict::Failed,
+        Ok(text) => match validate(&text) {
+            Err(_) => RemoteVerdict::Unusable,
+            Ok(remote) => {
+                if same_thresholds(&info().template, &remote) {
+                    RemoteVerdict::Current
+                } else {
+                    RemoteVerdict::Different(fingerprint(&remote))
+                }
+            }
+        },
+    };
+    record_probe_in(&zstats::settings::default_dir(), verdict);
+}
+
+/// Fold a probe's verdict into the file. `Failed` keeps what the last
+/// successful probe learned — a network error says nothing about the
+/// table; `Unusable`/`Current` withdraw any standing offer.
+fn record_probe_in(dir: &Path, verdict: RemoteVerdict) {
+    let mut file = read_check_in(dir);
+    match verdict {
+        RemoteVerdict::Different(fp) => file.offered = Some(fp),
+        RemoteVerdict::Current | RemoteVerdict::Unusable => file.offered = None,
+        RemoteVerdict::Failed => {}
+    }
+    write_check_in(dir, &file);
+}
+
+fn clear_offer_in(dir: &Path) {
+    let mut file = read_check_in(dir);
+    if file.offered.take().is_some() {
+        write_check_in(dir, &file);
+    }
+}
+
+/// Whether the gear's dot owes its template half: a probe found a
+/// clean, different table and the user has not waved this one away.
+pub fn nudge() -> bool {
+    nudge_in(&zstats::settings::default_dir())
+}
+
+fn nudge_in(dir: &Path) -> bool {
+    let file = read_check_in(dir);
+    match file.offered {
+        Some(fp) => file.ignored.as_deref() != Some(fp.as_str()),
+        None => false,
+    }
+}
+
+/// Mute the dot for exactly the table on offer. Display-layer only,
+/// like the updater's skip and the banner snooze: probes keep running,
+/// the card's button keeps telling the truth — the unsolicited reminder
+/// is what stops. A later, different table lights the dot again.
+pub fn ignore_offer() {
+    ignore_offer_in(&zstats::settings::default_dir());
+}
+
+fn ignore_offer_in(dir: &Path) {
+    let mut file = read_check_in(dir);
+    if let Some(fp) = file.offered.clone() {
+        file.ignored = Some(fp);
+        write_check_in(dir, &file);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RemoteUpdate, entries, same_thresholds, validate};
+    use super::{
+        RemoteUpdate, RemoteVerdict, clear_offer_in, entries, fingerprint, ignore_offer_in,
+        nudge_in, read_check_in, record_probe_in, same_thresholds, validate,
+    };
     use zstats::alerts::{TEMPLATE_VERSION, Template};
 
     #[test]
@@ -411,5 +598,81 @@ mod tests {
         let a = validate(&a).unwrap_or_else(|_| panic!("a parses"));
         let b = validate(&b).unwrap_or_else(|_| panic!("b parses"));
         assert!(same_thresholds(&a, &b));
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("zstats-alerttpl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_fingerprint_names_thresholds_not_prose() {
+        let a = validate(&format!(
+            "version = {TEMPLATE_VERSION}\n[cpu]\ngopls = 42.0\nrustc = 90.0\n"
+        ))
+        .unwrap_or_else(|_| panic!("parses"));
+        let b = validate(&format!(
+            "# reworded\nversion = {TEMPLATE_VERSION}\n[cpu]\nrustc = 90.0\ngopls = 42.0\n"
+        ))
+        .unwrap_or_else(|_| panic!("parses"));
+        assert_eq!(
+            fingerprint(&a),
+            fingerprint(&b),
+            "comments and key order must not move it"
+        );
+        let c = validate(&format!(
+            "version = {TEMPLATE_VERSION}\n[cpu]\ngopls = 43.0\nrustc = 90.0\n"
+        ))
+        .unwrap_or_else(|_| panic!("parses"));
+        assert_ne!(fingerprint(&a), fingerprint(&c), "one value must");
+    }
+
+    #[test]
+    fn the_probe_round_trip_offers_ignores_and_withdraws() {
+        let dir = scratch("probe");
+        assert!(!nudge_in(&dir), "nothing found yet, no dot");
+
+        // A clean different table lights the dot.
+        record_probe_in(&dir, RemoteVerdict::Different("abcd".into()));
+        assert!(nudge_in(&dir));
+
+        // A network failure says nothing about the table — the offer
+        // (and the dot) survive the outage.
+        record_probe_in(&dir, RemoteVerdict::Failed);
+        assert!(nudge_in(&dir), "an outage must not withdraw the offer");
+
+        // The user waves THIS table away: dot out, but only for it.
+        ignore_offer_in(&dir);
+        assert!(!nudge_in(&dir));
+        record_probe_in(&dir, RemoteVerdict::Different("abcd".into()));
+        assert!(!nudge_in(&dir), "the same content stays waved away");
+        record_probe_in(&dir, RemoteVerdict::Different("ef01".into()));
+        assert!(nudge_in(&dir), "a different table speaks up again");
+
+        // Remote caught up to local (or stopped being applicable):
+        // nothing to offer, whatever was ignored.
+        record_probe_in(&dir, RemoteVerdict::Current);
+        assert!(!nudge_in(&dir));
+        record_probe_in(&dir, RemoteVerdict::Different("2222".into()));
+        record_probe_in(&dir, RemoteVerdict::Unusable);
+        assert!(
+            !nudge_in(&dir),
+            "an unapplicable table must not point at the button"
+        );
+    }
+
+    #[test]
+    fn applying_the_update_is_what_puts_the_dot_out() {
+        let dir = scratch("applied");
+        record_probe_in(&dir, RemoteVerdict::Different("abcd".into()));
+        assert!(nudge_in(&dir));
+        // The write path calls this on Updated / AlreadyCurrent.
+        clear_offer_in(&dir);
+        assert!(!nudge_in(&dir));
+        // And the ignore mark, if any, is untouched history.
+        assert!(read_check_in(&dir).offered.is_none());
     }
 }

@@ -699,6 +699,9 @@ pub struct ZStatsAppState {
     /// gear's dot. Loaded from the check file at launch, refreshed by
     /// every check, cleared by comparison once the update is installed.
     update_nudge: Option<String>,
+    /// The gear dot's other half: a probe found a published alert table
+    /// that differs from the one in force (`alerttpl::nudge`).
+    template_nudge: bool,
     /// The version the user chose to skip, while it still applies. The
     /// About page states it rather than going blank, and offers the way
     /// back — a choice with no visible record reads as a dead button.
@@ -838,6 +841,7 @@ impl Default for ZStatsAppState {
             update_status: None,
             alert_day_checked_at: None,
             update_nudge: updater::nudge(),
+            template_nudge: alerttpl::nudge(),
             update_ignored: updater::ignored(),
             auto_check_probe_at: None,
             auto_check_inflight: false,
@@ -1940,6 +1944,18 @@ impl ZStatsAppState {
         self.update_nudge.as_deref()
     }
 
+    pub fn template_nudge(&self) -> bool {
+        self.template_nudge
+    }
+
+    /// Wave the offered table away: dot out for exactly this content,
+    /// probes keep running, the card's button keeps telling the truth.
+    pub fn ignore_template_offer(&mut self, cx: &mut Context<Self>) {
+        alerttpl::ignore_offer();
+        self.template_nudge = alerttpl::nudge();
+        cx.notify();
+    }
+
     /// A silent finding but no check this session: run one, so the
     /// About row carries the release notes the silent check does not
     /// retain. Solicited — the user just opened the update surface.
@@ -2003,12 +2019,21 @@ impl ZStatsAppState {
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async { updater::check() })
+                .spawn(async {
+                    let outcome = updater::check();
+                    // The template probe rides the same two-day clock —
+                    // one rhythm of unprompted network for the whole
+                    // app, not one per feature. Compare-only: applying
+                    // stays behind the card's button (`alerttpl`).
+                    alerttpl::silent_check();
+                    outcome
+                })
                 .await;
             let _ = this.update(cx, |state, cx| {
                 state.auto_check_inflight = false;
                 updater::record_outcome(SystemTime::now(), &outcome);
                 state.update_nudge = updater::nudge();
+                state.template_nudge = alerttpl::nudge();
                 cx.notify();
             });
         })
@@ -2162,6 +2187,9 @@ impl ZStatsAppState {
                 .await;
             let _ = this.update(cx, |state, cx| {
                 state.template_sync = Some(TemplateSync::Done(outcome));
+                // Applying (or finding local already current) withdrew
+                // the standing offer; the dot follows the file.
+                state.template_nudge = alerttpl::nudge();
                 cx.notify();
             });
         })
@@ -2176,6 +2204,7 @@ impl ZStatsAppState {
             Ok(false) => TemplateSync::NothingToRevert,
             Err(e) => TemplateSync::RevertFailed(e),
         });
+        self.template_nudge = alerttpl::nudge();
         cx.notify();
     }
 
