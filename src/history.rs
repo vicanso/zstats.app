@@ -42,9 +42,49 @@ pub enum HistoryShape {
 const SHORT_SPAN: Duration = Duration::from_secs(15 * 60);
 
 /// Peak / span-average at or above this, over a long span, is bursts
-/// rather than a flat load. Three is enough that 8% all day (peak ≈ avg)
-/// stays Sustained, while 100% spikes in an otherwise quiet day do not.
+/// rather than a flat load — necessary for Intermittent, no longer
+/// sufficient: the ratio is dimensionless, and the time band exposed
+/// what that misses (both fixes below have their own constant).
 const BURST_RATIO: f32 = 3.0;
+
+/// A burst has to BE a burst: below a quarter of a core, "3× the
+/// average" is the normal wobble of a flat daemon, not intermittency.
+/// The tombstone case is Activity Monitor — peak 4.0% over a ~1.3%
+/// average, labelled intermittent, when nothing about it ever burst.
+/// Same one-core unit every CPU figure in the app speaks.
+const BURST_FLOOR_PERCENT: f32 = 25.0;
+
+/// Recorded-minute coverage of the span at or above this reads as
+/// continuously present — there are no quiet gaps for bursts to sit
+/// between, which is what "intermittent" claims. The tombstone: a chat
+/// app recorded 547 of ~560 minutes (a near-solid band on screen),
+/// labelled intermittent purely on peak/average ratio, while Chrome —
+/// 106 scattered minutes, real gaps — wore the same word. File-biased
+/// like everything here: an absent minute means "did not qualify",
+/// which is exactly what a gap is.
+const DENSE_COVERAGE: f32 = 0.75;
+
+/// Half-hour cells across one local day: 48 of them, [`BAND_BUCKET_MINUTES`]
+/// wide. Coarse on purpose — inside a 320px panel a cell is ~6px, enough
+/// to place "that stretch around three" without turning twelve rows into
+/// hundreds of elements.
+pub const BAND_BUCKETS: usize = 48;
+/// Width of one band cell, in minutes of the local day.
+pub const BAND_BUCKET_MINUTES: usize = 24 * 60 / BAND_BUCKETS;
+
+/// One day of "when", per process: each cell holds the highest 1-minute
+/// average recorded in that half hour, `None` where no minute qualified.
+///
+/// `None` is a statement about the *file*, not about the process — the
+/// record is conditional (over a threshold, or in that minute's top
+/// five), so an empty cell means "not recorded", never "idle". That is
+/// exactly why this is a band of cells and not a line chart: a line
+/// must invent a value for every x, and zero would be a lie.
+///
+/// Cells hold the **max** of their minutes, same reasoning as the trend
+/// buffer: "when did it burn" asks what a stretch reached, and a mean
+/// would let one quiet minute talk a real burst back down.
+pub type Band = [Option<f32>; BAND_BUCKETS];
 
 /// One process's share of the chosen window.
 pub struct Spender {
@@ -65,6 +105,11 @@ pub struct Spender {
     pub span: Duration,
     /// `None` when there are not two samples to difference.
     pub shape: Option<HistoryShape>,
+    /// When today's burn happened, half-hour resolution — only for the
+    /// one-day view. A multi-day range would fold every day onto the
+    /// same 24-hour axis and paint a superposition nobody lived through,
+    /// so wider windows carry `None` and keep the share meter instead.
+    pub band: Option<Band>,
 }
 
 /// Read the last `days` days of history (today included) and rank them.
@@ -77,7 +122,10 @@ pub fn spenders(config_dir: &Path, days: u16) -> io::Result<Vec<Spender>> {
     let start = end
         .checked_sub(jiff::Span::new().days(i64::from(days.max(1)) - 1))
         .unwrap_or(end);
-    Ok(rank(read_range(config_dir, start, end)?))
+    // The band exists only when the window IS one local day — see
+    // `Spender::band` for why a wider window must not get one.
+    let band_day = (days <= 1).then_some(end);
+    Ok(rank(read_range(config_dir, start, end)?, band_day))
 }
 
 /// Sum each process's consumption across its records.
@@ -90,7 +138,7 @@ pub fn spenders(config_dir: &Path, days: u16) -> io::Result<Vec<Spender>> {
 ///   any such gap, where summing per-window deltas would undercount.
 /// - the counter going *backwards* means the pid was reused by an unrelated
 ///   process, and that step contributes nothing rather than a wild negative.
-pub fn rank(mut records: Vec<MetricRecord>) -> Vec<Spender> {
+pub fn rank(mut records: Vec<MetricRecord>, band_day: Option<jiff::civil::Date>) -> Vec<Spender> {
     // Keyed by name as well as pid: on reuse the name almost always changes,
     // and splitting there keeps two unrelated processes from sharing a row.
     let mut by_process: HashMap<(u32, String), Vec<MetricRecord>> = HashMap::new();
@@ -131,6 +179,12 @@ pub fn rank(mut records: Vec<MetricRecord>) -> Vec<Spender> {
                 minutes: samples.len(),
                 span,
                 shape: classify(cpu_time_ms, peak_cpu_percent, span, samples.len()),
+                band: band_day.map(|day| {
+                    assemble_band(samples.iter().filter_map(|r| {
+                        let (date, minute) = local_day_minute(r.timestamp);
+                        (date == day).then_some((minute, r.cpu_avg_percent))
+                    }))
+                }),
             }
         })
         .collect();
@@ -141,6 +195,33 @@ pub fn rank(mut records: Vec<MetricRecord>) -> Vec<Spender> {
             .then_with(|| a.name.cmp(&b.name))
     });
     spenders
+}
+
+/// Which local day a record fell on, and how many minutes into it.
+/// System timezone on purpose: the files are named by local date and the
+/// axis the band draws under is the user's wall clock.
+fn local_day_minute(ts: jiff::Timestamp) -> (jiff::civil::Date, u16) {
+    let zoned = ts.to_zoned(jiff::tz::TimeZone::system());
+    (
+        zoned.date(),
+        zoned.hour() as u16 * 60 + zoned.minute() as u16,
+    )
+}
+
+/// Fold (minute-of-day, 1-minute average) pairs into the half-hour
+/// cells. Pure — the timezone stays in [`local_day_minute`] so this can
+/// be tested against plain minute numbers.
+fn assemble_band(minutes: impl Iterator<Item = (u16, f32)>) -> Band {
+    let mut band: Band = [None; BAND_BUCKETS];
+    for (minute, cpu) in minutes {
+        let Some(cell) = band.get_mut(usize::from(minute) / BAND_BUCKET_MINUTES) else {
+            // A minute past 23:59 can only be a corrupt line; it gets
+            // no cell rather than a panic or a wrapped slot.
+            continue;
+        };
+        *cell = Some(cell.map_or(cpu, |held: f32| held.max(cpu)));
+    }
+    band
 }
 
 fn span_of(samples: &[MetricRecord]) -> Duration {
@@ -157,6 +238,13 @@ fn span_of(samples: &[MetricRecord]) -> Duration {
 /// Classify from the already-written minutes. `minutes` is how many
 /// lines landed, not how long the process ran — the span is first-to-last
 /// wall time, and the average is total burn over that span (gaps included).
+///
+/// Intermittent takes three conditions together, because each catches a
+/// different impostor: the peak/average ratio alone (the original rule)
+/// also fires on a flat daemon's normal wobble ([`BURST_FLOOR_PERCENT`])
+/// and on a continuously-present process with one loud stretch
+/// ([`DENSE_COVERAGE`]) — both of which the time band now shows beside
+/// the pill, so the pill has to tell the same story the band does.
 fn classify(cpu_time_ms: u64, peak: f32, span: Duration, samples: usize) -> Option<HistoryShape> {
     if samples < 2 || cpu_time_ms == 0 {
         return None;
@@ -169,7 +257,11 @@ fn classify(cpu_time_ms: u64, peak: f32, span: Duration, samples: usize) -> Opti
         return Some(HistoryShape::Spike);
     }
     let avg = cpu_time_ms as f64 / span_ms as f64 * 100.0;
-    if avg > 0.0 && f64::from(peak) >= f64::from(BURST_RATIO) * avg {
+    // +1: a span of N minutes has N+1 recordable minute marks (both
+    // endpoints carry a record by construction of `span_of`).
+    let coverage = samples as f32 / (span.as_secs() / 60 + 1) as f32;
+    let bursts = avg > 0.0 && f64::from(peak) >= f64::from(BURST_RATIO) * avg;
+    if bursts && peak >= BURST_FLOOR_PERCENT && coverage < DENSE_COVERAGE {
         return Some(HistoryShape::Intermittent);
     }
     Some(HistoryShape::Sustained)
@@ -198,14 +290,17 @@ mod tests {
     /// these in the opposite order.
     #[test]
     fn ranks_by_total_burnt_not_by_peak() {
-        let ranked = rank(vec![
-            // 8% for an hour = 288 core-seconds, never alarming.
-            record(1, "quiet", 0, 0, 8.0),
-            record(1, "quiet", 60, 288_000, 8.0),
-            // 100% for ten minutes = 60 core-seconds, and it looks dramatic.
-            record(2, "spike", 0, 0, 100.0),
-            record(2, "spike", 10, 60_000, 100.0),
-        ]);
+        let ranked = rank(
+            vec![
+                // 8% for an hour = 288 core-seconds, never alarming.
+                record(1, "quiet", 0, 0, 8.0),
+                record(1, "quiet", 60, 288_000, 8.0),
+                // 100% for ten minutes = 60 core-seconds, and it looks dramatic.
+                record(2, "spike", 0, 0, 100.0),
+                record(2, "spike", 10, 60_000, 100.0),
+            ],
+            None,
+        );
         assert_eq!(ranked[0].name, "quiet");
         assert_eq!(ranked[0].cpu_time_ms, 288_000);
         assert!((ranked[0].peak_cpu_percent - 8.0).abs() < f32::EPSILON);
@@ -224,14 +319,17 @@ mod tests {
             records.push(record(1, "bursty", m, burnt, 100.0));
             records.push(record(1, "bursty", m + 2, burnt + 120_000, 100.0));
         }
-        let ranked = rank(records);
+        let ranked = rank(records, None);
         assert_eq!(ranked[0].shape, Some(HistoryShape::Intermittent));
         assert!(ranked[0].span >= Duration::from_secs(6 * 3600));
     }
 
     #[test]
     fn two_samples_on_the_same_instant_have_no_shape() {
-        let ranked = rank(vec![record(1, "p", 0, 0, 8.0), record(1, "p", 0, 100, 8.0)]);
+        let ranked = rank(
+            vec![record(1, "p", 0, 0, 8.0), record(1, "p", 0, 100, 8.0)],
+            None,
+        );
         assert_eq!(ranked[0].shape, None);
     }
 
@@ -239,12 +337,15 @@ mod tests {
     /// Differencing a cumulative counter has to stay exact across the hole.
     #[test]
     fn gaps_do_not_undercount() {
-        let ranked = rank(vec![
-            record(1, "p", 0, 1_000, 5.0),
-            record(1, "p", 1, 2_000, 5.0),
-            // minutes 2..9 missing
-            record(1, "p", 10, 30_000, 5.0),
-        ]);
+        let ranked = rank(
+            vec![
+                record(1, "p", 0, 1_000, 5.0),
+                record(1, "p", 1, 2_000, 5.0),
+                // minutes 2..9 missing
+                record(1, "p", 10, 30_000, 5.0),
+            ],
+            None,
+        );
         assert_eq!(ranked[0].cpu_time_ms, 29_000, "1000→2000→30000");
         assert_eq!(ranked[0].minutes, 3);
     }
@@ -253,13 +354,16 @@ mod tests {
     /// tenants are unrelated and must not be summed into one number.
     #[test]
     fn pid_reuse_does_not_produce_a_negative_or_a_merge() {
-        let ranked = rank(vec![
-            record(1, "old", 0, 500_000, 5.0),
-            record(1, "old", 1, 510_000, 5.0),
-            // Same pid, new process, counter restarts near zero.
-            record(1, "new", 2, 100, 5.0),
-            record(1, "new", 3, 5_100, 5.0),
-        ]);
+        let ranked = rank(
+            vec![
+                record(1, "old", 0, 500_000, 5.0),
+                record(1, "old", 1, 510_000, 5.0),
+                // Same pid, new process, counter restarts near zero.
+                record(1, "new", 2, 100, 5.0),
+                record(1, "new", 3, 5_100, 5.0),
+            ],
+            None,
+        );
         assert_eq!(ranked.len(), 2, "different tenants stay apart");
         let new = ranked.iter().find(|s| s.name == "new").unwrap();
         assert_eq!(new.cpu_time_ms, 5_000);
@@ -271,13 +375,101 @@ mod tests {
     /// than its lifetime total — which would count time burnt before today.
     #[test]
     fn a_single_sample_claims_nothing() {
-        let ranked = rank(vec![record(1, "p", 0, 9_999_999, 5.0)]);
+        let ranked = rank(vec![record(1, "p", 0, 9_999_999, 5.0)], None);
         assert_eq!(ranked[0].cpu_time_ms, 0);
         assert_eq!(ranked[0].shape, None);
     }
 
     #[test]
     fn no_records_is_not_an_error() {
-        assert!(rank(vec![]).is_empty());
+        assert!(rank(vec![], None).is_empty());
+    }
+
+    /// The Activity Monitor case: peak 4% over a ~1.3% average trips
+    /// the ratio, but nothing about a process that never reached a
+    /// twenty-fifth of a core ever "burst". The ratio is dimensionless;
+    /// the floor is what gives it a unit.
+    #[test]
+    fn a_flat_daemons_wobble_is_not_intermittency() {
+        // Sparse coverage and ratio ≥ 3 — the old rule's intermittent —
+        // but the peak is 4%.
+        let mut records = Vec::new();
+        for i in 0..10_i64 {
+            records.push(record(1, "monitor", i * 90, (i as u64) * 70_000, 4.0));
+        }
+        let ranked = rank(records, None);
+        assert_eq!(ranked[0].shape, Some(HistoryShape::Sustained));
+    }
+
+    /// The chat-app case: recorded nearly every minute of its span (a
+    /// near-solid band on screen), with one loud stretch tripping the
+    /// ratio. "Intermittent" claims quiet gaps, and it has none — the
+    /// pill must tell the same story the band does.
+    #[test]
+    fn continuously_present_with_one_loud_stretch_is_sustained() {
+        let mut records = Vec::new();
+        for i in 0..120_i64 {
+            // Every single minute for two hours: coverage ≈ 1.0.
+            let burnt = (i as u64) * 2_000; // ~3.3% baseline
+            records.push(record(
+                1,
+                "chat",
+                i,
+                burnt,
+                if i == 60 { 90.0 } else { 4.0 },
+            ));
+        }
+        let ranked = rank(records, None);
+        assert!(
+            ranked[0].minutes >= 120,
+            "the premise: it was recorded the whole time"
+        );
+        assert_eq!(ranked[0].shape, Some(HistoryShape::Sustained));
+    }
+
+    /// And the genuine article keeps its word: scattered minutes, real
+    /// gaps, a peak that is actually a burst.
+    #[test]
+    fn sparse_real_bursts_stay_intermittent() {
+        let mut records = Vec::new();
+        for i in 0..8_i64 {
+            let m = i * 60;
+            let burnt = (i as u64) * 120_000;
+            records.push(record(1, "chrome", m, burnt, 110.0));
+            records.push(record(1, "chrome", m + 2, burnt + 120_000, 110.0));
+        }
+        let ranked = rank(records, None);
+        assert_eq!(ranked[0].shape, Some(HistoryShape::Intermittent));
+    }
+
+    #[test]
+    fn a_cell_keeps_the_loudest_minute_and_an_empty_cell_stays_a_gap() {
+        // Two minutes inside 14:00–14:30 (840 and 855), one at 09:05.
+        let band = assemble_band([(840, 12.0), (855, 38.0), (545, 5.0)].into_iter());
+        assert_eq!(band[840 / BAND_BUCKET_MINUTES], Some(38.0), "max, not last");
+        assert_eq!(band[545 / BAND_BUCKET_MINUTES], Some(5.0));
+        // Everything unrecorded is a gap — "no line in the file", which
+        // must never be paintable as zero.
+        let filled = band.iter().flatten().count();
+        assert_eq!(filled, 2);
+    }
+
+    #[test]
+    fn the_day_edges_land_in_the_first_and_last_cell() {
+        let band = assemble_band([(0, 1.0), (1439, 2.0), (1440, 99.0)].into_iter());
+        assert_eq!(band[0], Some(1.0));
+        assert_eq!(band[BAND_BUCKETS - 1], Some(2.0), "23:59 is the last cell");
+        // Minute 1440 does not exist in a day; a corrupt line gets no
+        // cell rather than a wrapped slot or a panic.
+        assert_eq!(band.iter().flatten().count(), 2);
+    }
+
+    #[test]
+    fn only_the_one_day_view_carries_a_band() {
+        // The wide windows would fold several days onto one 24h axis —
+        // a superposition nobody lived through — so they carry None and
+        // the view keeps the share meter.
+        let ranked = rank(vec![record(1, "p", 0, 0, 8.0)], None);
+        assert!(ranked[0].band.is_none());
     }
 }

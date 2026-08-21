@@ -9,7 +9,7 @@ use super::widgets;
 use crate::assets::CustomIconName;
 use crate::font;
 use crate::format;
-use crate::history::HistoryShape;
+use crate::history::{self, HistoryShape};
 use crate::i18n;
 use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
@@ -264,14 +264,27 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         ),
                                 ),
                         )
-                        .child(div().mt(px(6.)).child(widgets::meter(
-                            match sort {
-                                HistorySort::CpuTime => s.cpu_time_ms as f32,
-                                HistorySort::PeakMemory => s.peak_memory_bytes as f32,
-                            } / top as f32,
-                            Hsla::from(theme::ink()),
-                            4.,
-                        )))
+                        .child(div().mt(px(6.)).child(match &s.band {
+                            // Today: WHEN it burned, on a shared
+                            // 00:00 → now axis — the share meter it
+                            // replaces repeated what the rank order
+                            // and the headline number already said.
+                            // Deliberately under both sorts: the axis
+                            // is time, not a magnitude comparison, so
+                            // reordering the rows does not change what
+                            // a row's band means.
+                            Some(cells) => band(cells),
+                            // Wider windows: no single day to draw, the
+                            // share meter stays.
+                            None => widgets::meter(
+                                match sort {
+                                    HistorySort::CpuTime => s.cpu_time_ms as f32,
+                                    HistorySort::PeakMemory => s.peak_memory_bytes as f32,
+                                } / top as f32,
+                                Hsla::from(theme::ink()),
+                                4.,
+                            ),
+                        }))
                         .into_any_element()
                 })),
         );
@@ -283,6 +296,60 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ));
     }
     out
+}
+
+/// One day of a process's recorded half-hours: 00:00 at the left edge,
+/// now at the right. Every row shares the axis, so two rows dark in the
+/// same column were burning at the same time — the cross-process
+/// correlation the ranked totals could never show.
+///
+/// Cells are quantized ink opacity, not a red ramp: accent is reserved
+/// for over-threshold, and what a cell encodes is magnitude — the same
+/// job a meter's length does, done in the same ink. The track showing
+/// through means "no line in the file for this half hour", which is not
+/// zero (records are conditional — see `history::Band`) and therefore
+/// must not be painted as a value.
+fn band(cells: &history::Band) -> AnyElement {
+    // Only the lived part of the day: at nine in the morning a fixed
+    // 24-hour axis would read as fifteen hours of mysterious quiet, and
+    // squeeze the real morning into a quarter of the width.
+    let now = jiff::Zoned::now();
+    let lived_minutes = now.hour().max(0) as usize * 60 + now.minute().max(0) as usize;
+    let lived = (lived_minutes / history::BAND_BUCKET_MINUTES + 1).min(history::BAND_BUCKETS);
+    h_flex()
+        .h(px(8.))
+        .rounded(px(2.))
+        .overflow_hidden()
+        // `trough`, not `inset`: in dark mode inset is a heavy black,
+        // and black segments alternating with lit cells read as a
+        // barcode — figure and ground become guessable, and "black =
+        // strong" is a print instinct that guesses wrong. The trough is
+        // a near-card lift, so the picture is unambiguous: lit cells
+        // float on an almost-invisible track, nothing reads as a black
+        // value. Light mode is untouched in practice (the two tokens
+        // nearly coincide there), where the white ground was never
+        // ambiguous to begin with.
+        .bg(theme::trough())
+        .children((0..lived).map(|i| {
+            div().flex_1().h_full().when_some(cells[i], |d, peak| {
+                d.bg(Hsla::from(theme::ink()).opacity(band_alpha(peak)))
+            })
+        }))
+        .into_any_element()
+}
+
+/// Four intensity steps for a cell's loudest minute. Quantized rather
+/// than continuous so adjacent cells read as "same-ish" or "different"
+/// instead of a smear; the breakpoints are a quarter of a core, one
+/// core, three cores — the same one-core unit every CPU figure in the
+/// app speaks. Display only, like every threshold in `views/`.
+fn band_alpha(peak: f32) -> f32 {
+    match peak {
+        p if p < 25.0 => 0.30,
+        p if p < 100.0 => 0.55,
+        p if p < 300.0 => 0.80,
+        _ => 1.0,
+    }
 }
 
 /// The "N more processes" note and the gap above it — the only thing
