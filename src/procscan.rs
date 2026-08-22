@@ -73,8 +73,13 @@ pub fn scan() -> Vec<AbnormalProcess> {
         return Vec::new();
     };
     let mut found: Vec<AbnormalProcess> = raw
-        .chunks_exact(KINFO_PROC_SIZE)
-        .filter_map(parse_entry)
+        .as_chunks::<KINFO_PROC_SIZE>()
+        .0
+        .iter()
+        // A closure, not `filter_map(parse_entry)`: the items are now
+        // `&[u8; 648]` and the unsized coercion to `&[u8]` only happens
+        // at a call site.
+        .filter_map(|entry| parse_entry(entry))
         .collect();
     // Resolve parent names from the same snapshot: a second pass over
     // the buffer already in hand, only for the pids actually needed. A
@@ -83,7 +88,7 @@ pub fn scan() -> Vec<AbnormalProcess> {
     if !found.is_empty() {
         let wanted: HashSet<u32> = found.iter().map(|p| p.parent_pid).collect();
         let mut names: HashMap<u32, String> = HashMap::new();
-        for chunk in raw.chunks_exact(KINFO_PROC_SIZE) {
+        for chunk in raw.as_chunks::<KINFO_PROC_SIZE>().0 {
             let pid = read_i32(chunk, OFF_PID);
             if pid > 0 && wanted.contains(&(pid as u32)) {
                 names.insert(pid as u32, read_name(&chunk[OFF_COMM..OFF_COMM + COMM_LEN]));

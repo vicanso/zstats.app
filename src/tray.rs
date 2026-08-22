@@ -114,7 +114,7 @@ fn rasterise_icon_scaled(size: u32, glyph_scale: f32) -> Option<Vec<u8>> {
     // Flatten to black and keep only alpha. tiny-skia hands back premultiplied
     // colour, which `Icon::from_rgba` would read as straight — moot here,
     // since a template image is recoloured by the system from alpha alone.
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel[0] = 0;
         pixel[1] = 0;
         pixel[2] = 0;
@@ -250,7 +250,7 @@ mod tests {
         let rgba = rasterise_icon(ICON_SIZE).expect("icon should rasterise");
         assert_eq!(rgba.len() as u32, ICON_SIZE * ICON_SIZE * 4);
 
-        let opaque = rgba.chunks_exact(4).filter(|px| px[3] > 32).count();
+        let opaque = rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 32).count();
         let total = (ICON_SIZE * ICON_SIZE) as usize;
         let coverage = opaque as f32 / total as f32;
 
