@@ -49,6 +49,17 @@ pub fn whole_pct(v: f32) -> String {
     }
 }
 
+/// A load-average figure for the Processor card's footnote. One decimal
+/// is where the signal lives — a 10-core machine's 9.6 and 10.4 read on
+/// opposite sides of the core count — and past 100 even that is noise.
+pub fn load(v: f64) -> String {
+    if v < 100.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.0}")
+    }
+}
+
 fn integer_digits(formatted: &str) -> usize {
     formatted
         .trim_start()
@@ -247,6 +258,14 @@ pub fn span(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_keeps_one_decimal_until_it_stops_mattering() {
+        assert_eq!(load(0.0), "0.0");
+        assert_eq!(load(9.96), "10.0");
+        assert_eq!(load(10.44), "10.4");
+        assert_eq!(load(123.4), "123");
+    }
 
     #[test]
     fn thousands_groups_digits() {

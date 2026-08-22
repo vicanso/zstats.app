@@ -18,7 +18,7 @@ use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::collections::HashSet;
 use zstats::snapshot::{
-    Capabilities, CpuSnapshot, IoTotalsSnapshot, MemorySnapshot, ProcessGroupSnapshot,
+    Capabilities, CpuSnapshot, IoTotalsSnapshot, LoadSnapshot, MemorySnapshot, ProcessGroupSnapshot,
 };
 
 /// How many trees the first panel names. Enough to answer "who's
@@ -57,7 +57,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         )];
     };
     vec![
-        processor(&snapshot.cpu),
+        processor(&snapshot.cpu, &snapshot.load),
         top_apps(state),
         memory(&snapshot.memory, &snapshot.io_totals, snapshot.capabilities),
     ]
@@ -241,7 +241,7 @@ fn top_apps_all() -> AnyElement {
         .into_any_element()
 }
 
-fn processor(cpu: &CpuSnapshot) -> AnyElement {
+fn processor(cpu: &CpuSnapshot, load: &LoadSnapshot) -> AnyElement {
     let header_right = processor_caption(cpu);
     let mut body = card()
         .child(widgets::card_header(
@@ -249,16 +249,25 @@ fn processor(cpu: &CpuSnapshot) -> AnyElement {
             Some(header_right),
         ))
         .child(
+            // Baseline-aligned so the footnote sits on the headline's
+            // line, not on the bottom of its taller box. Two hit areas,
+            // two tooltips: the figure explains its weighting, the load
+            // explains what a count means against this core count.
             h_flex()
-                .id("cpu-usage")
-                .items_end()
+                .items_baseline()
                 .mt(px(4.))
-                .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
-                .child(widgets::big_number(
-                    format::whole_pct(cpu.usage_percent),
-                    "%",
-                    20.,
-                )),
+                .gap(px(10.))
+                .child(
+                    div()
+                        .id("cpu-usage")
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
+                        .child(widgets::big_number(
+                            format::whole_pct(cpu.usage_percent),
+                            "%",
+                            20.,
+                        )),
+                )
+                .child(load_caption(load, cpu.logical_cores)),
         );
 
     // Apple Silicon and friends: usage split by performance cluster.
@@ -329,6 +338,33 @@ fn processor_caption(cpu: &CpuSnapshot) -> AnyElement {
         .truncate()
         .tooltip(widgets::wrap_tooltip(tip))
         .child(widgets::note(text))
+        .into_any_element()
+}
+
+/// The 1 / 5 / 15-minute load averages beside the usage figure. Usage
+/// says how busy the cores are; load says how much work is *waiting*
+/// for one — a machine pinned at 100% with load 3 and one at 100% with
+/// load 30 are two different conditions, and only the count tells them
+/// apart. Footnote-sized on purpose: it qualifies the headline, it does
+/// not compete with it. The tooltip carries the core count so the
+/// reader has the line to compare against. Display only — zstats has
+/// no load rule, and this adds none.
+fn load_caption(load: &LoadSnapshot, cores: u32) -> AnyElement {
+    let text = t!(
+        "overview.load",
+        one = format::load(load.load1),
+        five = format::load(load.load5),
+        fifteen = format::load(load.load15)
+    )
+    .to_string();
+    let tip = t!("overview.load_tip", cores = cores).to_string();
+    div()
+        .id("cpu-load")
+        .font_family(font::MONO)
+        .text_size(px(10.))
+        .text_color(theme::text_dim())
+        .tooltip(widgets::wrap_tooltip(tip))
+        .child(text)
         .into_any_element()
 }
 
@@ -542,7 +578,10 @@ fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
 
     h_flex()
         .mt(px(8.))
-        .pt(px(6.))
+        // Extra padding above the rates, not margin: the hairline stays
+        // with this row, and the extra air sits *inside* the footnote
+        // instead of as a gap that read as the card ending early.
+        .pt(px(14.))
         .gap(px(16.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
