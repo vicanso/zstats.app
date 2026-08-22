@@ -16,7 +16,10 @@ use gpui::{
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
-use zstats::snapshot::{Capabilities, CpuSnapshot, IoTotalsSnapshot, MemorySnapshot};
+use std::collections::HashSet;
+use zstats::snapshot::{
+    Capabilities, CpuSnapshot, IoTotalsSnapshot, MemorySnapshot, ProcessGroupSnapshot,
+};
 
 /// How many trees the first panel names. Enough to answer "who's
 /// hot" without turning Overview into a second Apps tab.
@@ -73,9 +76,10 @@ const RISE_FLOOR: f32 = 15.0;
 /// loud, and the instantaneous top cannot answer that: the resident
 /// that is always first is normal, the tree that climbed out of nowhere
 /// is the reason — and a steady 30% outranks a 2%→21% climber in any
-/// snapshot ranking. The steady top is one click away under All, so the
-/// first screen spends its rows on the news. Battery / watts stay on
-/// Sensors.
+/// snapshot ranking. Always [`TOP_N`] rows: climbers take the top, the
+/// rest of the slots keep the current CPU ranking so a quiet climb
+/// (two trees) does not leave the card three rows short of the window.
+/// All still opens the full Apps list. Battery / watts stay on Sensors.
 fn top_apps(state: &ZStatsAppState) -> AnyElement {
     let Some(tick) = state.latest() else {
         return widgets::empty_card(
@@ -103,21 +107,17 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
     // than the ranking it replaced. The header says which question is
     // being answered.
     let (title_key, tip_key, rows): (_, _, Vec<_>) = if risers.is_empty() {
-        let mut rows: Vec<_> = groups.iter().collect();
-        rows.sort_by(|a, b| b.cpu_usage_percent.total_cmp(&a.cpu_usage_percent));
-        rows.truncate(TOP_N);
         (
             "overview.top_cpu",
             "overview.top_apps_tip",
-            rows.into_iter().map(|g| (g, None)).collect(),
+            pad_rising(Vec::new(), groups, TOP_N),
         )
     } else {
         risers.sort_by(|a, b| b.1.total_cmp(&a.1));
-        risers.truncate(TOP_N);
         (
             "overview.rising_title",
             "overview.rising_tip",
-            risers.into_iter().map(|(g, d)| (g, Some(d))).collect(),
+            pad_rising(risers, groups, TOP_N),
         )
     };
     let n = rows.len();
@@ -182,6 +182,32 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 )
         }))
         .into_any_element()
+}
+
+/// Climbers first (with their delta), then current CPU to fill `n`.
+/// A two-tree climb used to leave the card three rows short of the
+/// window it was sized for.
+fn pad_rising<'a>(
+    risers: Vec<(&'a ProcessGroupSnapshot, f32)>,
+    groups: &'a [ProcessGroupSnapshot],
+    n: usize,
+) -> Vec<(&'a ProcessGroupSnapshot, Option<f32>)> {
+    let mut rows: Vec<_> = risers
+        .into_iter()
+        .take(n)
+        .map(|(g, d)| (g, Some(d)))
+        .collect();
+    if rows.len() >= n {
+        return rows;
+    }
+    let taken: HashSet<&str> = rows.iter().map(|(g, _)| trend::tree_key(g)).collect();
+    let mut rest: Vec<_> = groups
+        .iter()
+        .filter(|g| !taken.contains(trend::tree_key(g)))
+        .collect();
+    rest.sort_by(|a, b| b.cpu_usage_percent.total_cmp(&a.cpu_usage_percent));
+    rows.extend(rest.into_iter().take(n - rows.len()).map(|g| (g, None)));
+    rows
 }
 
 fn top_apps_all() -> AnyElement {
@@ -548,4 +574,58 @@ fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
                 )
         }))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(pid: u32, name: &str, cpu: f32) -> ProcessGroupSnapshot {
+        ProcessGroupSnapshot {
+            root_pid: pid,
+            name: name.into(),
+            display_name: None,
+            process_count: 1,
+            cpu_usage_percent: cpu,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    /// Two climbers used to be a two-row card in a window sized for five.
+    #[test]
+    fn a_short_climb_keeps_five_rows() {
+        let groups = vec![
+            group(1, "Zed", 0.7),
+            group(2, "Ghostty", 6.5),
+            group(3, "Chrome", 40.0),
+            group(4, "Finder", 8.0),
+            group(5, "WindowServer", 5.0),
+        ];
+        let risers = vec![(&groups[0], 216.0), (&groups[1], 22.8)];
+        let rows = pad_rising(risers, &groups, 5);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(trend::tree_key(rows[0].0), "Zed");
+        assert_eq!(rows[0].1, Some(216.0));
+        assert_eq!(trend::tree_key(rows[1].0), "Ghostty");
+        assert_eq!(rows[1].1, Some(22.8));
+        // Leftover slots are current CPU, skip the climbers already named.
+        assert_eq!(trend::tree_key(rows[2].0), "Chrome");
+        assert!(rows[2].1.is_none());
+        assert_eq!(trend::tree_key(rows[3].0), "Finder");
+        assert_eq!(trend::tree_key(rows[4].0), "WindowServer");
+    }
+
+    #[test]
+    fn five_climbers_are_not_padded() {
+        let groups: Vec<_> = (0..5)
+            .map(|i| group(i, &format!("a{i}"), 10.0 + i as f32))
+            .collect();
+        let risers: Vec<_> = groups.iter().map(|g| (g, 20.0)).collect();
+        let rows = pad_rising(risers, &groups, 5);
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|(_, d)| d.is_some()));
+    }
 }
