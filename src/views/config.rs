@@ -26,15 +26,15 @@ use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::prefs::{self, LanguagePref, ThemePref};
+use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
 use crate::state::{HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use crate::updater;
 use gpui::Entity;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Stateful,
-    StatefulInteractiveElement, Styled, div, img, px, relative,
+    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, div, img, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::switch::Switch;
@@ -738,7 +738,7 @@ fn interface_card(proxy_input: &Entity<InputState>, proxy_valid: bool) -> AnyEle
             ],
             prefs::language(),
             crate::set_language_pref,
-            false,
+            None,
         ))
         .child(pref_row(
             "pref-theme",
@@ -750,7 +750,20 @@ fn interface_card(proxy_input: &Entity<InputState>, proxy_valid: bool) -> AnyEle
             ],
             prefs::theme(),
             crate::set_theme_pref,
-            false,
+            None,
+        ))
+        .child(pref_row(
+            "pref-tray",
+            i18n::tr("config.tray"),
+            vec![
+                (i18n::tr("config.tray_auto"), TrayPref::Auto),
+                ("CPU".into(), TrayPref::Cpu),
+                (i18n::tr("config.tray_memory"), TrayPref::Memory),
+                (i18n::tr("config.tray_both"), TrayPref::Both),
+            ],
+            prefs::tray(),
+            crate::set_tray_pref,
+            Some(i18n::tr("config.tray_tip")),
         ))
         .child(autostart_row())
         .child(proxy_row(proxy_input, proxy_valid))
@@ -931,29 +944,47 @@ fn opacity_row() -> AnyElement {
         .into_any_element()
 }
 
-/// One "label · option chips" row. `apply` is a plain fn pointer — both
-/// handlers just forward to `main`, nothing to capture.
+/// One "label · option chips" row. `apply` is a plain fn pointer — the
+/// handlers just forward to `main`, nothing to capture. `tip`, when
+/// given, hangs the same ⓘ the switch rows carry off the label — for a
+/// row whose options are not self-explanatory (what "Auto" means).
 fn pref_row<T: Copy + PartialEq + 'static>(
     id: &'static str,
     label: String,
     options: Vec<(String, T)>,
     current: T,
     apply: fn(T, &mut App),
-    last: bool,
+    tip: Option<String>,
 ) -> AnyElement {
     h_flex()
         .items_center()
         .justify_between()
         .px(px(13.))
         .py(px(8.))
-        .when(!last, |d| {
-            d.border_b(px(1.)).border_color(theme::border_subtle())
-        })
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
         .child(
-            div()
-                .text_size(px(11.))
-                .text_color(theme::ink())
-                .child(label),
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(label),
+                )
+                .children(tip.map(|tip| {
+                    div()
+                        .id(SharedString::from(format!("{id}-info")))
+                        .flex_none()
+                        .p(px(1.))
+                        .tooltip(widgets::wrap_tooltip(tip))
+                        .child(
+                            Icon::new(IconName::Info)
+                                .with_size(Size::Size(px(12.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        )
+                })),
         )
         .child(
             h_flex()

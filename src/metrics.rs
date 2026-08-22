@@ -260,9 +260,6 @@ pub fn start(cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Ok(tick) = rx.recv().await {
             cx.update(|cx| {
-                #[cfg(not(target_os = "linux"))]
-                tray::set_cpu_title(cx, tick.snapshot.cpu.usage_percent);
-
                 cx.global::<ZStatsGlobalStore>()
                     .clone()
                     .update(cx, |state, cx| {
@@ -307,6 +304,12 @@ pub fn start(cx: &mut App) {
                             );
                             notify::post_sustained(&notice);
                         }
+                        // After ingest, not before: the tray's auto
+                        // mode reads the episode list this tick just
+                        // merged into, and a memory alert should turn
+                        // the face on the sample that reported it.
+                        #[cfg(not(target_os = "linux"))]
+                        tray::sync(cx, state);
                     });
             });
         }

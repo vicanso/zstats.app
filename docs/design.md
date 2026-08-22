@@ -264,10 +264,16 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
 - **重绘要按可见性门控**。窗口是移出屏幕而不是销毁的，gpui 并不知道它看不见，会老老实实继续渲染一个没人能看到的面板——实测空闲 CPU 因此从 0.6% 涨到 2.0%。`CollectorPace::is_visible()` 同时管采样节奏和「这次 tick 要不要重绘」。
 - **跨 Space**。普通窗口属于它被创建时的那个桌面，从别的桌面唤起会让 macOS 切回去——对一个从菜单栏召唤出来的东西来说很突兀。`NSWindowCollectionBehavior::CanJoinAllSpaces | FullScreenAuxiliary`（后者保证在全屏应用之上唤起时不会先退出全屏）。gpui 的 `WindowKind::PopUp` 自带这个行为，但那是 nonactivating panel，拿不到键盘焦点。
 - **托盘点击的 toggle**：点图标会先让窗口失焦（触发自动收起），点击事件随后才到。所以 `TOGGLE_GRACE`（300ms）内如果刚发生过自动收起，这次点击就不再开窗 —— 于是表现为 toggle。`took_recent_auto_hide` 会取走标记，只生效一次。
-- **托盘图标**：`assets/icons/cpu.svg` 在启动时由 `resvg` 光栅化。用 CPU 而不是趋势箭头：箭头对数据下了断言（「数字在涨」），而主体本身不下断言。
+- **托盘图标**：`assets/icons/cpu.svg` 与 `memory-stick.svg` 在启动时由 `resvg` 光栅化成两张位图缓存在 `TrayHandle` 里。用主体（CPU die / 内存条）而不是趋势箭头：箭头对数据下了断言（「数字在涨」），而主体本身不下断言。
+
+  **图标会换脸，但换脸不是面板自己的判断。** `app.toml` 的 `tray` 偏好四档（`tray.rs` 的 `face_for`）：`cpu` / `memory` 钉死一项；`both` 放**两个** `NSStatusItem`——AppKit 把新建的状态项插在已有项的**左边**（`tray-icon` 不设 `autosaveName`，位置不会被记住），所以后建的 `second` 在左、戴 CPU，常驻的 `primary` 戴内存，左→右正好是选择器写的「CPU + 内存」；两个项共用同一套菜单和点击线程，点到哪个就以哪个的 rect 为锚点，切档时建或 drop 第二个项（drop 即从菜单栏移除），启动时若已是 both 则两个一起建，不让第二个晚几秒才长出来；缺省的 Auto 平时是 CPU，只有一个触发条件——`state.rs` 的 `memory_needs_attention()`：本次会话报告过、尚未关掉的一条内存类 episode（Memory / AppMemory / Pressure）。这是 zstats 规则引擎已经做出的裁决，这里不评估任何阈值；「关掉卡片」就是确认路径，和 Alerts 页签的着色读的是同一张表；昨天恢复的 episode 不算——托盘说的是现在。
+
+  **有意不读最新样本上的原始 `pressure_level`。** 它会抖——zstats 自己的注释记录了一个连续的压力条件在 5.5 小时里产出四次「新」warning——所以 zstats 的压力规则要求 warning 持续 5 分钟（critical 1 分钟）才报，回到 normal 也要保持 5 分钟才算 episode 结束。托盘如果绕开这层直接读原始值，就是把 zstats 刚去掉的抖动重新漏到菜单栏上，用一个更粗的裁决覆盖一个更细的。结果是脸和横幅同一时刻切换、从不早于横幅，也就不需要自己的最小切换周期：切过去的时机由 zstats 的持续要求决定，切回来的时机由用户关卡片决定，两端都不是 tick 级的量。CPU 是静息脸，所以一条 CPU 告警什么也不改（它关心的数字本来就在那里）；两边都有事时内存赢，因为 macOS 会把内存一路升级（压缩、swap、jetsam），而 CPU 忙只是忙。脸和旁边的百分比永远一致：CPU 脸配 `cpu.usage_percent`，内存脸配 `memory.used_percent`，都是 zstats 的字段。同步点在 `metrics.rs` 每次 `ingest` **之后**（这一 tick 合并进去的 episode 要在同一 tick 生效）以及选择器改动时。
+
+  换图**不能**用 `TrayIcon::set_icon`：macOS 实现里它把 template 写死为 `false`，而我们的位图已被抹成纯黑只靠 alpha——换进去在深色菜单栏上就是一块黑。要用 `set_icon_with_as_template(icon, true)`，这正是 crate 为此准备的入口。
 
   `tray-icon` **不支持 SVG**，只接受原始 RGBA（内部再编码成 PNG 交给 `NSImage`）。两个要点：macOS 会把图标缩放到 **18pt 高**，所以按 2x（36px）出图才不会在 Retina 上发虚；注册为 template image 后**只有 alpha 通道有效**，颜色由系统按明暗模式重新上色，因此渲染后把 RGB 抹成黑色。glyph 只占画布 78%——lucide 画到 24×24 viewBox 的边缘，1.0 的话图标会有整整 18pt 高，压过旁边约 12pt 的标题文字，系统图标都是自带留白的。另外 lucide 的 `stroke="currentColor"` 是 CSS 上下文关键字，usvg 解析不了，加载前需替换成具体颜色。有单测校验光栅化结果的覆盖率——解析失败会得到一张全透明位图，不报任何错，只表现为图标消失。
-- **托盘交互**：左键单击 toggle 窗口，右键弹出菜单（Show Window / Quit）。实现上是 `with_menu_on_left_click(false)` 关掉左键弹菜单，再监听 `TrayIconEvent::Click`；`MenuEvent` 和 `TrayIconEvent` 各用一个阻塞线程，汇入同一个 `smol::channel`。托盘标题显示整机 CPU%，取整到个位（菜单栏很挤，小数会让它每次采样都抖），并且和上次相同就不重设（设标题会让菜单栏重新布局）。
+- **托盘交互**：左键单击 toggle 窗口，右键弹出菜单（Show Window / Quit）。实现上是 `with_menu_on_left_click(false)` 关掉左键弹菜单，再监听 `TrayIconEvent::Click`；`MenuEvent` 和 `TrayIconEvent` 各用一个阻塞线程，汇入同一个 `smol::channel`。托盘标题显示当前那张脸的百分比（整机 CPU% 或内存 used%），取整到个位（菜单栏很挤，小数会让它每次采样都抖），并且标题和图标都是「和上次相同就不重设」（设标题会让菜单栏重新布局，换图标还要重建 `NSImage`）。
 - **无标题栏**：macOS 上 `WindowOptions.titlebar` 留 `None`，而且**必须显式写出来**——`WindowOptions::default().titlebar` 是 `Some(..)`，字段留空会装回一个默认的（不透明、带红绿灯的）标题栏。
 
   留 `None` 时 gpui 用 `Titled | FullSizeContentView` 的 style mask，且**不含** `Closable`/`Miniaturizable`/`Resizable`（所以没有红绿灯、也不可缩放），同时照样会设 `titlebarAppearsTransparent` + `titleHidden`（`gpui_macos/src/window.rs:815,977`）。得到的仍是普通 titled window，系统圆角和阴影都在，也能正常拿键盘焦点。

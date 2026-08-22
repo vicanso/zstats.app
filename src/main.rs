@@ -304,6 +304,19 @@ pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
     repaint(cx);
 }
 
+/// The Interface page's tray picker: persist, then re-face the tray from
+/// the store as it stands — the next tick would do it too, but at the idle
+/// cadence that is five seconds of a chip that looks ignored.
+pub fn set_tray_pref(pref: prefs::TrayPref, cx: &mut App) {
+    prefs::set_tray(pref);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let store = cx.global::<ZStatsGlobalStore>().clone();
+        store.update(cx, |state, cx| tray::sync(cx, state));
+    }
+    repaint(cx);
+}
+
 /// The Config tab's language picker: persist, re-pin the locale, and rebuild
 /// the chrome that snapshotted translated strings when it was built — the
 /// tray menu and the app menu. Everything else re-translates on repaint.

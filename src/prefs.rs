@@ -1,5 +1,5 @@
-//! UI preferences — language, theme, panel opacity, the outbound proxy,
-//! and the analyser's last scope — persisted in `app.toml`.
+//! UI preferences — language, theme, the tray's face, panel opacity, the
+//! outbound proxy, and the analyser's last scope — persisted in `app.toml`.
 //!
 //! Deliberately *not* in the shared `config.toml`: `zstats::settings::save`
 //! serialises only the sections the CLI models (`collector` / `daemon` /
@@ -34,6 +34,20 @@ pub enum ThemePref {
     System,
     Light,
     Dark,
+}
+
+/// What the menu bar shows. `Auto` is the default and the only mode that
+/// moves: CPU until memory is the thing that needs attention, then
+/// memory until it is not (`tray::face_for` says exactly when). The two
+/// pinned modes are for the reader who always wants the same figure
+/// there; `Both` keeps two status items, CPU to the left of memory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TrayPref {
+    #[default]
+    Auto,
+    Cpu,
+    Memory,
+    Both,
 }
 
 impl LanguagePref {
@@ -81,11 +95,34 @@ impl ThemePref {
     }
 }
 
+impl TrayPref {
+    fn key(self) -> Option<&'static str> {
+        match self {
+            TrayPref::Auto => None,
+            TrayPref::Cpu => Some("cpu"),
+            TrayPref::Memory => Some("memory"),
+            TrayPref::Both => Some("both"),
+        }
+    }
+
+    fn from_key(key: &str) -> Self {
+        match key {
+            "cpu" => TrayPref::Cpu,
+            "memory" => TrayPref::Memory,
+            "both" => TrayPref::Both,
+            _ => TrayPref::Auto,
+        }
+    }
+}
+
 // Held in statics rather than app state: the theme resolves before the
 // first frame and the locale pins before the first `t!`, both ahead of the
 // state entity existing. Same pattern as `theme::DARK`.
 static LANGUAGE: AtomicU8 = AtomicU8::new(0);
 static THEME: AtomicU8 = AtomicU8::new(0);
+/// Read on every tick by the tray, so an atomic like its neighbours
+/// rather than a lock the collector's hand-off would have to take.
+static TRAY: AtomicU8 = AtomicU8::new(0);
 /// Hundredths of opacity. `0` means "unset — use the mode default".
 /// One copy, read per frame by the root view's wash — a picker change
 /// lands on the very next repaint. (Hand-edits to `app.toml` still wait
@@ -143,12 +180,34 @@ fn decode_theme(raw: u8) -> ThemePref {
     }
 }
 
+fn encode_tray(pref: TrayPref) -> u8 {
+    match pref {
+        TrayPref::Auto => 0,
+        TrayPref::Cpu => 1,
+        TrayPref::Memory => 2,
+        TrayPref::Both => 3,
+    }
+}
+
+fn decode_tray(raw: u8) -> TrayPref {
+    match raw {
+        1 => TrayPref::Cpu,
+        2 => TrayPref::Memory,
+        3 => TrayPref::Both,
+        _ => TrayPref::Auto,
+    }
+}
+
 pub fn language() -> LanguagePref {
     decode_language(LANGUAGE.load(Ordering::Relaxed))
 }
 
 pub fn theme() -> ThemePref {
     decode_theme(THEME.load(Ordering::Relaxed))
+}
+
+pub fn tray() -> TrayPref {
+    decode_tray(TRAY.load(Ordering::Relaxed))
 }
 
 /// The panel opacity — what the Interface page shows and what the root
@@ -263,6 +322,7 @@ pub fn load() {
     let prefs = read(&zstats::settings::default_dir());
     LANGUAGE.store(encode_language(prefs.language), Ordering::Relaxed);
     THEME.store(encode_theme(prefs.theme), Ordering::Relaxed);
+    TRAY.store(encode_tray(prefs.tray), Ordering::Relaxed);
     OPACITY.store(encode_opacity(prefs.opacity), Ordering::Relaxed);
     crate::proxy::set_configured_proxy(&prefs.proxy);
     *PROXY.write().expect("proxy pref lock poisoned") = prefs.proxy;
@@ -288,6 +348,14 @@ pub fn set_theme(pref: ThemePref) {
     persist();
 }
 
+/// Remember and persist what the tray shows. The caller re-syncs the
+/// tray itself (`tray::sync`) — the next tick would, but a picker that
+/// takes up to five seconds to answer looks broken.
+pub fn set_tray(pref: TrayPref) {
+    TRAY.store(encode_tray(pref), Ordering::Relaxed);
+    persist();
+}
+
 /// Remember, persist and apply a panel opacity — the root view reads
 /// it per frame, so the caller's repaint makes it land immediately.
 pub fn set_opacity(value: Option<f32>) {
@@ -300,6 +368,7 @@ fn persist() {
     let prefs = Prefs {
         language: language(),
         theme: theme(),
+        tray: tray(),
         opacity: opacity(),
         proxy: proxy(),
         analysis_roots: ANALYSIS_ROOTS
@@ -333,6 +402,7 @@ fn file_path(dir: &Path) -> PathBuf {
 struct Prefs {
     language: LanguagePref,
     theme: ThemePref,
+    tray: TrayPref,
     opacity: Option<f32>,
     proxy: String,
     analysis_roots: Vec<String>,
@@ -361,6 +431,7 @@ fn read(dir: &Path) -> Prefs {
     Prefs {
         language: get("language").map_or_else(Default::default, LanguagePref::from_key),
         theme: get("theme").map_or_else(Default::default, ThemePref::from_key),
+        tray: get("tray").map_or_else(Default::default, TrayPref::from_key),
         opacity: table.get("opacity").and_then(parse_opacity),
         proxy: get("proxy").unwrap_or_default().trim().to_string(),
         analysis_roots: list("analysis_roots"),
@@ -389,6 +460,9 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     }
     if let Some(key) = prefs.theme.key() {
         doc.insert("theme".into(), toml::Value::String(key.into()));
+    }
+    if let Some(key) = prefs.tray.key() {
+        doc.insert("tray".into(), toml::Value::String(key.into()));
     }
     if let Some(value) = prefs.opacity.filter(|v| *v >= OPACITY_MIN) {
         doc.insert(
@@ -449,6 +523,7 @@ mod tests {
             &Prefs {
                 language: LanguagePref::Chinese,
                 theme: ThemePref::Dark,
+                tray: TrayPref::Memory,
                 opacity: Some(0.8),
                 proxy: "http://127.0.0.1:7890".into(),
                 analysis_roots: vec![
@@ -464,6 +539,7 @@ mod tests {
         let back = read(&dir);
         assert_eq!(back.language, LanguagePref::Chinese);
         assert_eq!(back.theme, ThemePref::Dark);
+        assert_eq!(back.tray, TrayPref::Memory);
         assert_eq!(back.opacity, Some(0.8));
         assert_eq!(back.proxy, "http://127.0.0.1:7890");
         assert_eq!(
@@ -480,6 +556,7 @@ mod tests {
         write(&dir, &Prefs::default()).unwrap();
         let text = fs::read_to_string(file_path(&dir)).unwrap();
         assert!(!text.contains("language"), "System should omit the key");
+        assert!(!text.contains("tray"), "Auto should omit the key");
         assert!(
             !text.contains("opacity"),
             "unset opacity should omit the key"
@@ -496,10 +573,35 @@ mod tests {
         let back = read(&dir);
         assert_eq!(back.language, LanguagePref::System);
         assert_eq!(back.theme, ThemePref::System);
+        assert_eq!(back.tray, TrayPref::Auto);
         assert_eq!(back.opacity, None);
         assert!(back.proxy.is_empty());
         assert!(back.analysis_roots.is_empty());
         assert!(back.analysis_exclude.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every tray mode survives the file, including the one that is not
+    /// a single face.
+    #[test]
+    fn every_tray_mode_round_trips() {
+        let dir = scratch("tray");
+        for pref in [
+            TrayPref::Auto,
+            TrayPref::Cpu,
+            TrayPref::Memory,
+            TrayPref::Both,
+        ] {
+            write(
+                &dir,
+                &Prefs {
+                    tray: pref,
+                    ..Prefs::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(read(&dir).tray, pref, "{pref:?} should round-trip");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -513,7 +615,11 @@ mod tests {
         fs::write(file_path(&dir), "not [valid toml").unwrap();
         assert_eq!(read(&dir), system);
 
-        fs::write(file_path(&dir), "language = \"ja\"\ntheme = \"sepia\"\n").unwrap();
+        fs::write(
+            file_path(&dir),
+            "language = \"ja\"\ntheme = \"sepia\"\ntray = \"gpu\"\n",
+        )
+        .unwrap();
         assert_eq!(read(&dir), system);
 
         let _ = fs::remove_dir_all(&dir);

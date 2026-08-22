@@ -1147,6 +1147,35 @@ impl ZStatsAppState {
         &self.alerts
     }
 
+    /// The one question the tray's auto mode asks the store: is memory
+    /// what needs attention right now? One input: a memory-class episode
+    /// (process, application, or kernel pressure) reported *this
+    /// session* and not yet dismissed — read exactly as the Alerts tab's
+    /// tint reads the list. Dismissing the card is the acknowledgement,
+    /// and a condition that still holds re-opens it on the next report.
+    /// Restored episodes do not count: they are yesterday-shaped records,
+    /// and the tray is about now.
+    ///
+    /// Deliberately *not* the raw `pressure_level` on the latest sample.
+    /// zstats' pressure rule exists because that level flaps — its own
+    /// comment records four "new" warnings in 5.5h for one continuous
+    /// condition — so it reports only after warning has held five
+    /// minutes (critical one), and ends the episode only after normal
+    /// has held five more. Reading the level underneath that would put
+    /// the flapping zstats removed straight back on the menu bar, and
+    /// replace a considered verdict with a cruder one. The face turns
+    /// when the banner would, and not before. Nothing here evaluates a
+    /// threshold.
+    pub fn memory_needs_attention(&self) -> bool {
+        self.alerts.iter().any(|seen| {
+            seen.live
+                && matches!(
+                    seen.event.kind(),
+                    AlertKind::Memory | AlertKind::AppMemory | AlertKind::Pressure
+                )
+        })
+    }
+
     /// What the collector is running with. Seeded at startup, then replaced
     /// whenever the Config tab or an Alerts chip writes through
     /// [`Self::apply_setting`].
