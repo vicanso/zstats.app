@@ -18,6 +18,8 @@ make release  # cargo build --release
 make bundle   # .app + writes LSUIElement into Info.plist (needs cargo-bundle)
 ```
 
+**After every change set, run `make fmt` and then `make lint` before finishing.** CI runs `cargo fmt --check`, so one over-wide line that clippy and the tests never notice still fails the build — which has happened. `make lint` alone is not enough: clippy does not check formatting.
+
 Single test: `cargo test <name>` (e.g. `cargo test anchored_origin`) — tests are inline `#[cfg(test)] mod tests` at the bottom of each module, not a `tests/` directory.
 
 `ZSTATS_DEBUG_POSITION=1` prints the whole tray-anchor → window-origin conversion chain; use it for multi-display placement bugs.

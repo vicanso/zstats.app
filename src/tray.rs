@@ -250,7 +250,12 @@ mod tests {
         let rgba = rasterise_icon(ICON_SIZE).expect("icon should rasterise");
         assert_eq!(rgba.len() as u32, ICON_SIZE * ICON_SIZE * 4);
 
-        let opaque = rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 32).count();
+        let opaque = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[3] > 32)
+            .count();
         let total = (ICON_SIZE * ICON_SIZE) as usize;
         let coverage = opaque as f32 / total as f32;
 
