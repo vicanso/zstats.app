@@ -576,18 +576,26 @@ pub struct FullAppScanData {
     pub list: ListState,
 }
 
-/// One-shot full process table, for naming every member of an expanded
-/// Apps tree. The resident tick only keeps `max-processes`, so a group's
+/// Full process table, for naming every member of an expanded Apps tree.
+/// The resident tick only keeps `max-processes`, so a group's
 /// `process_count` can be 37 while the live table names four of them.
 ///
 /// CPU on this table is unusable (one pass, no baseline) — the expansion
 /// paints rates from the tick when the pid is there, and `—` otherwise.
+/// Dropped on collapse so a re-open is a new photograph; while held
+/// open it refreshes on the process cadence
+/// ([`metrics::PANEL_PROCESS_INTERVAL`]), not the 2s CPU tick.
 #[derive(Default)]
 pub enum MemberTable {
     #[default]
     Off,
     Running,
-    Ready(Arc<Vec<ProcessSnapshot>>),
+    Ready {
+        processes: Arc<Vec<ProcessSnapshot>>,
+        at: Instant,
+        /// A refresh in flight keeps the last photograph on screen.
+        refreshing: bool,
+    },
     Failed,
 }
 
@@ -956,9 +964,10 @@ impl ZStatsAppState {
         }
         self.prune_stale_alerts();
         self.maybe_auto_check_update(cx);
-        // Views cannot start work. An expansion that survived hide →
-        // show (selection is kept, the table is not) has to ask again
-        // from here, or the card would sit on the truncated tick list.
+        // Views cannot start work. Collapse drops the table; hide does
+        // too. A still-open expansion asks from here so a 15s-old
+        // photograph is replaced, and a hide → show with the row still
+        // selected is not stuck on the truncated tick list.
         if let Some(pid) = self.selected_app
             && let Some(n) = self.group_process_count(pid)
         {
@@ -2477,17 +2486,18 @@ impl ZStatsAppState {
     }
 
     pub fn toggle_app(&mut self, root_pid: u32, cx: &mut Context<Self>) {
-        self.selected_app = if self.selected_app == Some(root_pid) {
-            None
+        if self.selected_app == Some(root_pid) {
+            self.selected_app = None;
+            // Collapse drops the photograph: the next open is a new
+            // look, not the same rust-analyzers that have since exited.
+            self.member_table = MemberTable::Off;
         } else {
-            Some(root_pid)
-        };
-        if let Some(pid) = self.selected_app {
+            self.selected_app = Some(root_pid);
             if matches!(self.member_table, MemberTable::Failed) {
                 self.member_table = MemberTable::Off;
             }
-            let expected = self.group_process_count(pid).unwrap_or(1);
-            self.ensure_member_table(pid, expected, cx);
+            let expected = self.group_process_count(root_pid).unwrap_or(1);
+            self.ensure_member_table(root_pid, expected, cx);
         }
         cx.notify();
     }
@@ -2495,7 +2505,7 @@ impl ZStatsAppState {
     /// The uncapped process table, once an expansion has asked for it.
     pub fn member_processes(&self) -> Option<&[ProcessSnapshot]> {
         match &self.member_table {
-            MemberTable::Ready(ps) => Some(ps.as_slice()),
+            MemberTable::Ready { processes, .. } => Some(processes.as_slice()),
             _ => None,
         }
     }
@@ -2520,15 +2530,25 @@ impl ZStatsAppState {
             .map(|g| g.process_count)
     }
 
-    /// Fetch the full table only when the live top-N cannot name the
-    /// tree. A 2-process Finder is already complete; Chrome's helpers
-    /// are why this exists.
+    /// Fetch the full table when the live top-N cannot name the tree,
+    /// and again when a held expansion's photograph is older than the
+    /// process cadence. A 2-process Finder is already complete; Chrome's
+    /// helpers are why the first fetch exists.
     fn ensure_member_table(&mut self, root: u32, expected: u32, cx: &mut Context<Self>) {
-        if matches!(
-            self.member_table,
-            MemberTable::Ready(_) | MemberTable::Running | MemberTable::Failed
-        ) {
-            return;
+        match &self.member_table {
+            MemberTable::Running => return,
+            MemberTable::Failed => return,
+            MemberTable::Ready {
+                refreshing: true, ..
+            } => return,
+            MemberTable::Ready { at, .. } if at.elapsed() < metrics::PANEL_PROCESS_INTERVAL => {
+                return;
+            }
+            MemberTable::Ready { .. } => {
+                self.start_member_table(cx);
+                return;
+            }
+            MemberTable::Off => {}
         }
         if expected <= 1 {
             return;
@@ -2545,22 +2565,42 @@ impl ZStatsAppState {
     }
 
     fn start_member_table(&mut self, cx: &mut Context<Self>) {
-        self.member_table = MemberTable::Running;
-        cx.notify();
+        match &mut self.member_table {
+            MemberTable::Running => return,
+            MemberTable::Ready {
+                refreshing: true, ..
+            } => return,
+            MemberTable::Ready { refreshing, .. } => *refreshing = true,
+            _ => {
+                self.member_table = MemberTable::Running;
+                cx.notify();
+            }
+        }
         cx.spawn(async move |this, cx| {
             let listed = cx
                 .background_executor()
                 .spawn(async { fullscan::list_processes() })
                 .await;
             let _ = this.update(cx, |state, cx| {
-                if !matches!(state.member_table, MemberTable::Running) {
+                if matches!(state.member_table, MemberTable::Off) {
                     return;
                 }
                 state.member_table = match listed {
-                    Ok(ps) => MemberTable::Ready(ps),
+                    Ok(ps) => MemberTable::Ready {
+                        processes: ps,
+                        at: Instant::now(),
+                        refreshing: false,
+                    },
                     Err(e) => {
                         tracing::warn!("app member listing failed: {e}");
-                        MemberTable::Failed
+                        match &state.member_table {
+                            MemberTable::Ready { processes, at, .. } => MemberTable::Ready {
+                                processes: Arc::clone(processes),
+                                at: *at,
+                                refreshing: false,
+                            },
+                            _ => MemberTable::Failed,
+                        }
                     }
                 };
                 cx.notify();
