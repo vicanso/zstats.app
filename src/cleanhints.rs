@@ -209,7 +209,7 @@ fn adopt_legacy_user_file(dir: &Path) {
         return;
     }
     if let Err(e) = fs::rename(&legacy, &current) {
-        eprintln!("cleanhints: could not adopt {}: {e}", legacy.display());
+        tracing::warn!("cleanhints: could not adopt {}: {e}", legacy.display());
     }
 }
 
@@ -229,7 +229,7 @@ fn load(dir: &Path, home: &Path) -> Loaded {
         }
         // A present-but-broken file falls back rather than silently
         // stripping every row of its hint.
-        eprintln!(
+        tracing::warn!(
             "cleanhints: no valid entries in {}, using built-ins",
             user.display()
         );

@@ -60,6 +60,10 @@ pub fn method_for(pid: u32) -> QuitMethod {
 /// process is already gone, or permissions changed since [`can_quit`]) —
 /// *not* that the target refused, which both tiers are free to do.
 pub fn request_quit(pid: u32) -> bool {
+    // The audit line for the app's rarest act: asking something to die.
+    // Logged at the delivery point so every caller (alert card, Apps
+    // expansion) is covered once.
+    tracing::info!(pid, "quit requested (app-level, SIGTERM fallback)");
     if let Some(app) = running_application(pid) {
         // `terminate` returns false when the request could not even be
         // delivered; a live app that chooses to show a save dialog instead
@@ -109,14 +113,15 @@ pub fn can_term(pid: u32) -> bool {
 /// a reason to signal something. `false` means nothing was sent.
 pub fn request_term(pid: u32) -> bool {
     if !can_term(pid) {
-        eprintln!("refusing to signal pid {pid}");
+        tracing::warn!(pid, "refusing to signal");
         return false;
     }
+    tracing::info!(pid, "SIGTERM requested");
     // SAFETY: SIGTERM to a pid this user may signal; the kernel does the
     // permission check and reports failure through the return value.
     let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
     if !sent {
-        eprintln!("SIGTERM to pid {pid} was not delivered");
+        tracing::warn!(pid, "SIGTERM was not delivered");
     }
     sent
 }

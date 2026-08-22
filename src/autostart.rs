@@ -30,7 +30,7 @@ pub fn set_enabled(enabled: bool) {
     if let Err(e) = result {
         // Not fatal — the common cause is a bundle-less debug run. The
         // chip re-reads status() next frame, so the UI stays truthful.
-        eprintln!(
+        tracing::warn!(
             "launch-at-login {}: {e}",
             if enabled { "on" } else { "off" }
         );

@@ -586,7 +586,7 @@ fn quit_button(pid: u32, name: String) -> AnyElement {
                 i18n::tr("apps.quit_ok"),
                 move |_| {
                     if !terminate::request_quit(pid) {
-                        eprintln!("quit request for pid {pid} was not delivered");
+                        tracing::warn!("quit request for pid {pid} was not delivered");
                     }
                 },
             );

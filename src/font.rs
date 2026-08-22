@@ -63,13 +63,13 @@ pub fn register(cx: &App) {
     .filter_map(|p| {
         let bytes = assets::get(p);
         if bytes.is_none() {
-            eprintln!("missing bundled font: {p}");
+            tracing::error!("missing bundled font: {p}");
         }
         bytes
     })
     .collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
-        eprintln!("failed to register JetBrains Mono: {e}");
+        tracing::error!("failed to register JetBrains Mono: {e}");
     }
 }
 

@@ -726,7 +726,7 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
                 i18n::tr("alerts.quit_ok"),
                 move |_| {
                     if !terminate::request_quit(pid) {
-                        eprintln!("quit request for pid {pid} was not delivered");
+                        tracing::warn!("quit request for pid {pid} was not delivered");
                     }
                 },
             );
@@ -980,7 +980,7 @@ fn threshold_editor(
                                     if let Err(e) =
                                         state.apply_alert_override(key, &name, &value, cx)
                                     {
-                                        eprintln!("alert override failed: {e}");
+                                        tracing::error!("alert override failed: {e}");
                                     }
                                 });
                         })

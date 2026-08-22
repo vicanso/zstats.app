@@ -314,7 +314,7 @@ fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
 /// the row goes away because the OS no longer lists the volume.
 fn eject(mount: &str, cx: &mut gpui::App) {
     if !safe_to_eject(mount) {
-        eprintln!("refusing to eject {mount}");
+        tracing::warn!("refusing to eject {mount}");
         return;
     }
     let mount = mount.to_string();
@@ -356,7 +356,7 @@ fn run_eject(mount: &str) -> bool {
     match result {
         Ok(out) if out.status.success() => true,
         Ok(out) => {
-            eprintln!(
+            tracing::warn!(
                 "eject {mount} failed ({}): {}",
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -364,7 +364,7 @@ fn run_eject(mount: &str) -> bool {
             false
         }
         Err(e) => {
-            eprintln!("eject {mount}: {e}");
+            tracing::warn!("eject {mount}: {e}");
             false
         }
     }

@@ -649,7 +649,7 @@ fn apply(key: &'static str, value: impl Into<String>, cx: &mut App) {
         .clone()
         .update(cx, |state, cx| {
             if let Err(e) = state.apply_setting(key, &value, cx) {
-                eprintln!("apply {key}={value}: {e}");
+                tracing::error!("apply {key}={value}: {e}");
             }
         });
 }
@@ -691,7 +691,7 @@ fn reset_card() -> AnyElement {
                                         cx,
                                         |state, cx| {
                                             if let Err(e) = state.reset_settings(cx) {
-                                                eprintln!("reset settings: {e}");
+                                                tracing::error!("reset settings: {e}");
                                             }
                                         },
                                     );

@@ -312,7 +312,7 @@ fn persist() {
             .clone(),
     };
     if let Err(e) = write(&dir, &prefs) {
-        eprintln!("could not write {}: {e}", file_path(&dir).display());
+        tracing::error!("could not write {}: {e}", file_path(&dir).display());
     }
 }
 

@@ -22,6 +22,8 @@ Single test: `cargo test <name>` (e.g. `cargo test anchored_origin`) — tests a
 
 `ZSTATS_DEBUG_POSITION=1` prints the whole tray-anchor → window-origin conversion chain; use it for multi-display placement bugs.
 
+Logs land in `~/.zstats/logs/zstats-app.log.<date>` (daily-rolling, 90-day prune; `logger.rs`, the zedis logger adapted). INFO by default, `RUST_LOG` overrides — `make debug` finally means something. The alert-class trail lives there: every reported `AlertEvent` with its banner verdict (delivered / snoozed / auto-quieted), every quit/SIGTERM request, every move-to-Trash. New failure paths use `tracing::warn!`/`error!`, never `eprintln!` — under LaunchServices stderr goes nowhere, which is how ~30 of those lines vanished for months (the two survivors are deliberate: logger's own bootstrap error, and `ZSTATS_DEBUG_POSITION`'s on-demand chain).
+
 ## Platform reality
 
 macOS is the only supported target, and as of now the crate **does not compile anywhere else**: `procscan`, `terminate` and `window_ext` are declared `#[cfg(target_os = "macos")]` in `main.rs`, but six files `use` them unconditionally (`metrics.rs`, `state.rs`, `watch.rs`, `views/processes.rs`, `views/alerts.rs`, `placement.rs`) — six unresolved imports off macOS. The `#[cfg(not(target_os = "macos"))]` branches that do exist (window destroy-instead-of-hide, `cx.displays()` lookup, no vibrancy) have therefore never been built, let alone run; Linux additionally has no tray at all (`tray.rs` is entirely cfg'd out, and `tray-icon` is declared only under `cfg(not(target_os = "linux"))` — its Linux backend never emits click events anyway). Keep those branches for whoever ports this, but do not describe them as supported, tested, or even compiling.

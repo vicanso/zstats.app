@@ -107,6 +107,17 @@ jwalk = "0.8"
 # the tree via gpui, so nothing extra gets built.
 anyhow = "1"
 
+# Tracing to stdout + a daily-rolling file under ~/.zstats/logs
+# (logger.rs, the zedis logger adapted). The zstats crate already emits
+# tracing events (scheduler, alert engine) that were dropped for want of
+# a subscriber; the app's own alert-class trail (deliveries, quits,
+# trashes) lands there too. `local-time` gives the file local RFC 3339
+# stamps; `time` is the fallback offset when detection fails.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["local-time"] }
+tracing-appender = "0.2"
+time = "0.3"
+
 # Tray. Linux is excluded on purpose — see "已知问题 / TODO" in README.md.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.24.1"

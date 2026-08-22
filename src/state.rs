@@ -1362,7 +1362,7 @@ impl ZStatsAppState {
                 let landed = match event {
                     ScanEvent::Done(result) => Expansion::Ready(result.dirs),
                     ScanEvent::Failed(e) => {
-                        eprintln!("expand {}: {e}", path.display());
+                        tracing::warn!("expand {}: {e}", path.display());
                         Expansion::Failed
                     }
                     _ => continue,
@@ -1771,7 +1771,7 @@ impl ZStatsAppState {
                         BigFiles::Failed { indexing_off: true }
                     }
                     Err(bigfiles::ScanError::Other(e)) => {
-                        eprintln!("large-file query failed: {e}");
+                        tracing::error!("large-file query failed: {e}");
                         BigFiles::Failed {
                             indexing_off: false,
                         }
@@ -1797,7 +1797,7 @@ impl ZStatsAppState {
 
     pub fn trash_big_file(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Err(e) = bigfiles::trash(path) {
-            eprintln!("trash {}: {e}", path.display());
+            tracing::warn!("trash {}: {e}", path.display());
             return;
         }
         if let BigFiles::Ready { scan, added, .. } = &mut self.big_files {
@@ -1819,7 +1819,7 @@ impl ZStatsAppState {
         for path in paths {
             match bigfiles::trash(path) {
                 Ok(()) => gone.push(path),
-                Err(e) => eprintln!("trash {}: {e}", path.display()),
+                Err(e) => tracing::warn!("trash {}: {e}", path.display()),
             }
         }
         if gone.is_empty() {
@@ -2245,7 +2245,7 @@ impl ZStatsAppState {
                 .spawn(async move {
                     history::spenders(&zstats::settings::default_dir(), range.days())
                         .unwrap_or_else(|e| {
-                            eprintln!("could not read history: {e}");
+                            tracing::error!("could not read history: {e}");
                             Vec::new()
                         })
                 })
@@ -2331,7 +2331,7 @@ impl ZStatsAppState {
                         })
                     }
                     Err(e) => {
-                        eprintln!("full application scan failed: {e}");
+                        tracing::error!("full application scan failed: {e}");
                         FullAppScan::Failed
                     }
                 };
@@ -2379,7 +2379,7 @@ impl ZStatsAppState {
                         })
                     }
                     Err(e) => {
-                        eprintln!("full process scan failed: {e}");
+                        tracing::error!("full process scan failed: {e}");
                         FullScan::Failed
                     }
                 };
@@ -2559,7 +2559,7 @@ impl ZStatsAppState {
                 state.member_table = match listed {
                     Ok(ps) => MemberTable::Ready(ps),
                     Err(e) => {
-                        eprintln!("app member listing failed: {e}");
+                        tracing::warn!("app member listing failed: {e}");
                         MemberTable::Failed
                     }
                 };

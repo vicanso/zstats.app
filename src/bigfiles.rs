@@ -289,6 +289,13 @@ pub fn trash(path: &Path) -> Result<(), String> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(path));
     NSFileManager::defaultManager()
         .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map(|()| {
+            // The audit line for the app's other act on the system,
+            // at the one delivery point both confirm-gated callers
+            // share. Recoverable (it is Finder's own Trash), but a
+            // move a person may want to trace is a move worth a line.
+            tracing::info!(path, "moved to Trash");
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -303,7 +310,7 @@ pub fn trash(_path: &Path) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 pub fn reveal(path: &Path) {
     if let Err(e) = opener::open([OsStr::new("-R"), path.as_os_str()]) {
-        eprintln!("reveal {}: {e}", path.display());
+        tracing::warn!("reveal {}: {e}", path.display());
     }
 }
 

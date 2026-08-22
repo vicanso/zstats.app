@@ -168,7 +168,7 @@ fn enqueue(banner: Banner) {
         return; // start() never ran — no window, no notifications
     };
     if let Err(mpsc::TrySendError::Full(dropped)) = tx.try_send(banner) {
-        eprintln!("notification queue full, dropping: {}", dropped.title);
+        tracing::warn!("notification queue full, dropping: {}", dropped.title);
     }
 }
 
@@ -191,7 +191,7 @@ fn deliver(banner: &Banner) {
                 signal_click();
             }
         }),
-        Err(e) => eprintln!("notification failed: {e}"),
+        Err(e) => tracing::warn!("notification failed: {e}"),
     }
 }
 
@@ -217,7 +217,7 @@ pub fn start(cx: &mut gpui::App) {
         // debugger at all — and why they quietly don't when no zstats.app
         // is installed.
         if let Err(e) = notify_rust::set_application(BUNDLE_ID) {
-            eprintln!("could not claim notification identity: {e}");
+            tracing::warn!("could not claim notification identity: {e}");
         }
         native::install();
     }

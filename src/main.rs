@@ -39,6 +39,7 @@ mod fullscan;
 mod history;
 mod i18n;
 mod i18n_loader;
+mod logger;
 mod metrics;
 mod notify;
 mod opener;
@@ -924,7 +925,7 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     );
     match opened {
         Ok(_) => cx.global::<metrics::CollectorPace>().shown(),
-        Err(e) => eprintln!("failed to open main window: {e}"),
+        Err(e) => tracing::error!("failed to open main window: {e}"),
     }
 }
 
@@ -1040,6 +1041,11 @@ pub fn show_main_window(cx: &mut App) {
 }
 
 fn main() {
+    // First, before the collector thread exists to race it: the log
+    // subscriber. The guard flushes the rolling file's worker; dropping
+    // it at the end of main is what makes the last lines land.
+    let _log_guard = logger::init();
+
     // Before anything else, and specifically before gpui starts the run loop:
     // this neuters the `setActivationPolicy(Regular)` it would otherwise make
     // during `applicationDidFinishLaunching`.

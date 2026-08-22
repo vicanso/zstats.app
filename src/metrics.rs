@@ -169,7 +169,7 @@ pub fn start(cx: &mut App) {
                 .clone()
                 .update(cx, |state, _| state.set_settings(settings));
         }
-        Err(e) => eprintln!("could not read {}/config.toml: {e}", dir.display()),
+        Err(e) => tracing::error!("could not read {}/config.toml: {e}", dir.display()),
     }
 
     let visible = Arc::new(AtomicBool::new(false));
@@ -195,7 +195,7 @@ pub fn start(cx: &mut App) {
         {
             Ok(monitor) => monitor,
             Err(e) => {
-                eprintln!("metrics collection unavailable ({}): {e}", dir.display());
+                tracing::error!("metrics collection unavailable ({}): {e}", dir.display());
                 return;
             }
         };
@@ -209,15 +209,15 @@ pub fn start(cx: &mut App) {
                         interval = settings.daemon.interval.unwrap_or(DEFAULT_INTERVAL);
                         match Monitor::with_settings(&dir, with_always_on(settings)) {
                             Ok(next) => monitor = next,
-                            Err(e) => eprintln!("rebuild collector failed: {e}"),
+                            Err(e) => tracing::error!("rebuild collector failed: {e}"),
                         }
                     }
-                    Err(e) => eprintln!("rebuild collector failed: {e}"),
+                    Err(e) => tracing::error!("rebuild collector failed: {e}"),
                 }
             } else if RELOAD.swap(false, Ordering::AcqRel)
                 && let Err(e) = monitor.reload_settings()
             {
-                eprintln!("reload_settings failed: {e}");
+                tracing::error!("reload_settings failed: {e}");
             }
             // Derived fresh every round rather than carried across: a failed
             // sample says nothing about load, and a stale `true` would hold
@@ -233,7 +233,7 @@ pub fn start(cx: &mut App) {
                 }
                 // One failed sample shouldn't end sampling.
                 Err(e) => {
-                    eprintln!("collect failed: {e}");
+                    tracing::warn!("collect failed: {e}");
                     false
                 }
             };
@@ -273,12 +273,38 @@ pub fn start(cx: &mut App) {
                             // gates: the snooze the user asked for, and
                             // the auto-quiet for a subject that has
                             // already interrupted twice this hour.
-                            if state.banner_snoozed(&event) || state.banner_damped(&event, now) {
+                            //
+                            // Each verdict is logged: a banner that
+                            // silently stayed away is indistinguishable
+                            // from a rule that stopped firing (the same
+                            // reason the card wears a pill), and the log
+                            // is where that question gets answered a day
+                            // later.
+                            let snoozed = state.banner_snoozed(&event);
+                            let damped = !snoozed && state.banner_damped(&event, now);
+                            tracing::info!(
+                                kind = ?event.kind(),
+                                subject = ?event.subject,
+                                banner = if snoozed {
+                                    "snoozed"
+                                } else if damped {
+                                    "auto-quieted"
+                                } else {
+                                    "delivered"
+                                },
+                                "alert reported"
+                            );
+                            if snoozed || damped {
                                 continue;
                             }
                             notify::post(&event);
                         }
                         for notice in state.take_sustained_notices() {
+                            tracing::info!(
+                                pid = notice.pid,
+                                name = %notice.name,
+                                "sustained-load notice delivered"
+                            );
                             notify::post_sustained(&notice);
                         }
                     });

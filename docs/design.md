@@ -221,6 +221,12 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 - **Apps 展开列出整棵树的成员**。`ProcessGroupSnapshot` 只有汇总；成员靠对全表走 parent 指针还原。常驻 tick 只物化 `max-processes`，所以点击展开时若 live 表不够，会另采一次不带 CPU 基线的全表（不重建 Monitor、不拉长 `max-processes`）。已在 top-N 里的 pid 继续画 tick 上的 CPU，其余显示 `—`。
 - 设计稿里的假菜单栏和右下角说明文字不实现 —— 那是设计稿自己的展示环境。
 
+## 日志（`logger.rs`）
+
+zedis 的 logger 原样适配：stdout + `~/.zstats/logs/zstats-app.log.<日期>` 每日滚动（**文件名日期是 UTC**——tracing-appender 写死 now_utc，UTC+8 下本地 0~8 点的行落在前一天名字的文件里、早上 8 点换文件；行内时间戳是本地的，按内容时间查而不是按文件名）、90 天清理（**仅启动时执行**，按 mtime 判旧；常驻数月不重启就不清，KB/天的量级无所谓）、`RUST_LOG` 控级（默认 INFO）、non-blocking writer 的 guard 由 `main` 持有到进程结束。目录与 CLI 共享，所以**文件名携带写入者**——和 cleanhints 文件名携带平台是同一条理由。
+
+它落盘的核心是**告警类轨迹**：每条上报的 `AlertEvent` 连同横幅裁决（delivered / snoozed / auto-quieted——一条悄悄没出现的横幅和一条不再触发的规则从外面看一样，卡片上的 pill 答当下，日志答隔天的追问）、每次 quit/SIGTERM 请求、每次移入废纸篓（都在唯一投递点打一行，两个确认门的调用方共享）。此前 app 有约 30 处裸 `eprintln!` 且没装 subscriber——LaunchServices 下 stderr 无人可见，而且 **zstats 库自己发的 tracing 事件（调度器、告警引擎）一直在被丢弃**；现在全部收编，失败路径一律 `tracing::warn!/error!`。
+
 ## 系统通知
 
 告警触发时发原生横幅，macOS 走 `NSUserNotification`。点击横幅会打开 popover 并切到 Alerts 页。系统横幅的外观不能自定义。

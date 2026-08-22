@@ -171,7 +171,7 @@ pub fn init_tray(cx: &mut App) {
         Ok(tray) => tray,
         Err(e) => {
             // Not fatal: the window still works, the app just has no tray.
-            eprintln!("failed to create tray icon: {e}");
+            tracing::error!("failed to create tray icon: {e}");
             return;
         }
     };
