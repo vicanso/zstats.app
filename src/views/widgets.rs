@@ -331,23 +331,22 @@ pub fn kv_row(
         })
         .text_size(px(11.))
         .text_color(theme::text_muted())
-        .child(div().flex_none().child(k.clone()))
+        // Label yields. A long flex_none label used to squeeze the
+        // figure into an ellipsis. A long parent name still truncates
+        // — the value is capped at half the cell.
+        .child(div().flex_1().min_w_0().truncate().child(k.clone()))
         .child(
-            h_flex().flex_1().min_w_0().justify_end().child(
-                // A value that outgrows its half-width column (a parent
-                // process name, a long user) truncates instead of spilling
-                // over the label and the column edge; the tooltip carries
-                // what the ellipsis ate.
-                div()
-                    .id(SharedString::from(format!("kv-{k}")))
-                    .min_w_0()
-                    .truncate()
-                    .font_family(font::MONO)
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(theme::text_for(hot))
-                    .when(long, |d| d.tooltip(wrap_tooltip(v.clone())))
-                    .child(v),
-            ),
+            div()
+                .id(SharedString::from(format!("kv-{k}")))
+                .flex_none()
+                .max_w(relative(0.55))
+                .min_w_0()
+                .truncate()
+                .font_family(font::MONO)
+                .font_weight(FontWeight::NORMAL)
+                .text_color(theme::text_for(hot))
+                .when(long, |d| d.tooltip(wrap_tooltip(v.clone())))
+                .child(v),
         )
         .into_any_element()
 }
@@ -356,6 +355,40 @@ pub fn kv_row(
 /// splits the list into two columns by hand.
 pub fn kv_columns(rows: Vec<(String, String)>) -> AnyElement {
     kv_pairs(rows.into_iter().map(|(k, v)| (k, v, false)).collect())
+}
+
+/// One row of packed pairs: label sits next to its figure, then a gap,
+/// then the next pair. For a single line there is no column of numbers
+/// to align, so [`kv_row`]'s right-pin would leave a hole (Compressed
+/// `8.8 GB` hanging on the card edge). Multi-row two-up still uses
+/// [`kv_pairs`].
+pub fn kv_packed(rows: Vec<(String, String, bool)>) -> AnyElement {
+    h_flex()
+        .mt(px(10.))
+        .gap(px(16.))
+        .children(rows.into_iter().enumerate().map(|(i, (k, v, hot))| {
+            h_flex()
+                .id(("kv-packed", i))
+                .gap(px(8.))
+                .items_baseline()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(theme::text_muted())
+                        .child(k),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(font::MONO)
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(theme::text_for(hot))
+                        .child(v),
+                )
+        }))
+        .into_any_element()
 }
 
 /// [`kv_columns`] with a per-cell colour flag. Display only — `hot` feeds

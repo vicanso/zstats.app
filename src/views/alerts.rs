@@ -1027,9 +1027,9 @@ fn presets(key: &str) -> Vec<(String, &'static str)> {
             (i18n::tr("alerts.off"), "0"),
         ],
         "alert-pressure" => vec![
-            (i18n::tr("alerts.off"), "off"),
             (i18n::tr("alerts.warning"), "warning"),
             (i18n::tr("alerts.critical"), "critical"),
+            (i18n::tr("alerts.off"), "off"),
         ],
         _ => Vec::new(),
     }

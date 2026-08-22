@@ -1622,9 +1622,9 @@ fn threshold_chips(key: &'static str, current: &str) -> AnyElement {
             (off, "0"),
         ],
         "alert-pressure" => vec![
-            (i18n::tr("alerts.off"), "off"),
             (i18n::tr("alerts.warning"), "warning"),
             (i18n::tr("alerts.critical"), "critical"),
+            (i18n::tr("alerts.off"), "off"),
         ],
         "alert-cooldown" => vec![
             ("5m".into(), "5m"),

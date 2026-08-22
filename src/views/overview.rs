@@ -503,7 +503,7 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
             6.,
         )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
-        .child(widgets::kv_pairs(rows))
+        .child(widgets::kv_packed(rows))
         .child(io_strip(io))
         .into_any_element()
 }

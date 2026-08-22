@@ -461,11 +461,6 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                             false,
                         ))
                         .child(expand_row(
-                            // The whole-app alert bars, beside the totals
-                            // they judge — the answer to "why is this
-                            // tree at 300% and quiet". Same live
-                            // resolution as the process expansion; see
-                            // `processes::pct_bar_text`.
                             i18n::tr("processes.bar_cpu"),
                             expand_value(cpu_bar),
                             true,
@@ -616,25 +611,19 @@ fn expand_row(label: String, value: AnyElement, last: bool) -> AnyElement {
         })
         .text_size(px(11.))
         .text_color(theme::text_muted())
-        .child(div().flex_none().child(label))
+        // Label yields: a long label used to be flex_none and the
+        // number truncated. The figure is the fact.
+        .child(div().flex_1().min_w_0().truncate().child(label))
         .child(value)
         .into_any_element()
 }
 
 fn expand_value(text: impl Into<gpui::SharedString>) -> AnyElement {
-    let text = text.into();
-    h_flex()
-        .flex_1()
-        .min_w_0()
-        .justify_end()
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .font_family(font::MONO)
-                .text_color(theme::text())
-                .child(text),
-        )
+    div()
+        .flex_none()
+        .font_family(font::MONO)
+        .text_color(theme::text())
+        .child(text.into())
         .into_any_element()
 }
 
