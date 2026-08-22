@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.8](https://github.com/vicanso/zstats.app/compare/v0.1.7..v0.1.8) - 2026-08-22
+
+### ⛰️  Features
+
+- An Apps expansion takes a new photograph on reopen, and again every 15s - ([c076716](https://github.com/vicanso/zstats.app/commit/c0767161800ed44089902b8fe4e80af339046456))
+- The app keeps a diary — alerts with their verdicts, and stderr stops eating the evidence - ([be0c8f1](https://github.com/vicanso/zstats.app/commit/be0c8f1ee8608c728c5047168f7b0ea7e00d4b26))
+- Climbing still fills five rows, so the window does not go hollow - ([98a5f97](https://github.com/vicanso/zstats.app/commit/98a5f97912fadb65e469a4d6e1e92df6f087ebc1))
+- Battery says charging in the title, so the grid is three and three - ([5ca54a7](https://github.com/vicanso/zstats.app/commit/5ca54a7979cb6e4c4abde964f8e319c9e03b3665))
+
+### 🐛 Bug Fixes
+
+- Labels yield to their figures — and one-line pairs pack instead of pinning - ([21b649f](https://github.com/vicanso/zstats.app/commit/21b649fd645fccd87f8f69614f4e43f1bd5328ea))
+
+### ⚙️ Miscellaneous Tasks
+
+- Fmt the line CI caught, and write the fmt-then-lint rule down - ([7d59079](https://github.com/vicanso/zstats.app/commit/7d590798077363bb2601403d62d193b1538ff8a0))
+- Chunks become typed — 1.98's clippy asks, as_chunks answers - ([dc62134](https://github.com/vicanso/zstats.app/commit/dc62134048fdad8f91387904ff2237f79f8513e3))
+- Update rust to 1.98.0 - ([3d2cee7](https://github.com/vicanso/zstats.app/commit/3d2cee74000f864648b4e582db0cd5133b74f682))
+
 ## [0.1.7](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.7) - 2026-08-21
 
 ### ⛰️  Features
