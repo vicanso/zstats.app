@@ -78,12 +78,12 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let filter = state.proc_filter_text();
     if !filter.is_empty() {
-        // Either identity matches: the user may know the app by its
-        // bundle name ("codebuddy") or by what Activity Monitor's
-        // process column shows ("electron").
+        // Bundle, executable, or the face a session-leader tree wears
+        // (a `login` compile shows as `rustc`).
         rows.retain(|g| {
             g.name.to_lowercase().contains(filter)
                 || trend::tree_key(g).to_lowercase().contains(filter)
+                || face_of(g, state).to_lowercase().contains(filter)
         });
     }
 
@@ -139,10 +139,16 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     // Ambiguity is about what is on screen: two
                     // stock-Electron trees showing distinct bundle
                     // names are not ambiguous, two identical shown
-                    // names are — whichever field they came from.
-                    let repeated = repeated_names(rows.iter().map(|g| trend::tree_key(g)));
+                    // names are — including two login compiles both
+                    // wearing `rustc`.
+                    let shown_names: Vec<String> = rows.iter().map(|g| face_of(g, state)).collect();
+                    let repeated: HashSet<String> =
+                        repeated_names(shown_names.iter().map(String::as_str))
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect();
                     rows.into_iter().enumerate().map(move |(i, g)| {
-                        let ambiguous = repeated.contains(trend::tree_key(g));
+                        let ambiguous = repeated.contains(&shown_names[i]);
                         app_row(g, i + 1 == shown, state, ambiguous, sort, bar_full)
                     })
                 })
@@ -172,7 +178,8 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
     // Owned, unlike the top list's borrowed set: this closure outlives
     // the frame that builds it, so it cannot hold a name that belongs to
     // the tick. Only repeated names allocate, which is normally none.
-    let repeated: HashSet<String> = repeated_names(groups.iter().map(trend::tree_key))
+    let faces: Vec<String> = groups.iter().map(|g| face_of(g, state)).collect();
+    let repeated: HashSet<String> = repeated_names(faces.iter().map(String::as_str))
         .into_iter()
         .map(str::to_string)
         .collect();
@@ -224,7 +231,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
             list(data.list.clone(), move |i, _window, cx| {
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let g = &groups[visible[i]];
-                let ambiguous = repeated.contains(trend::tree_key(g));
+                let ambiguous = repeated.contains(face_of(g, state).as_str());
                 app_row(g, i + 1 == count, state, ambiguous, sort, bar_full)
             })
             .h(px(height)),
@@ -293,6 +300,19 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
+/// Tick rates, plus the full table once Apps has asked for topology
+/// (a session-leader face, or an expansion). The listing is one-pass
+/// (CPU 0); the face scores the hog from the tick, same overlay the
+/// member rows already paint.
+fn face_of(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> String {
+    let live = state
+        .latest()
+        .and_then(|t| t.snapshot.processes.as_deref())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    trend::tree_face(g, state.member_processes().unwrap_or(live), live)
+}
+
 fn app_row(
     g: &ProcessGroupSnapshot,
     is_last: bool,
@@ -304,6 +324,7 @@ fn app_row(
     let hot = g.cpu_usage_percent > HOT_PERCENT;
     let expanded = state.selected_app() == Some(g.root_pid);
     let root_pid = g.root_pid;
+    let face = face_of(g, state);
 
     let mut row = v_flex()
         .id(("app", root_pid as usize))
@@ -324,13 +345,10 @@ fn app_row(
                 .gap(px(8.))
                 .child(widgets::truncating_name(
                     ("app-name", root_pid as usize),
-                    // The presented identity (`trend::tree_key`): the
-                    // bundle's name where the executable's own says
-                    // nothing — a stock-packaged Electron app reads as
-                    // itself, not as `Electron`. The matchable name
-                    // stays in the expansion, beside the bars that key
-                    // on it.
-                    trend::tree_key(g).to_string(),
+                    // Bundle name, or a session-leader's hog (`rustc`
+                    // instead of `login`). The matchable name stays in
+                    // the expansion, beside the bars that key on it.
+                    face,
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),
@@ -487,12 +505,10 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                         )),
                 ),
         )
-        // When the row's title is a bundle name, the matchable identity
-        // still has to be readable somewhere — it is what the alert
-        // bars above key on, what the template's entries are written
-        // against, and what the Processes tab will call the same
-        // program.
-        .when(g.display_name.is_some(), |d| {
+        // Title is not the matchable name: bundle vs Electron, or
+        // rustc vs the login session that spawned it. The bars above
+        // key on `g.name`; this line is that name.
+        .when(face_of(g, state) != g.name, |d| {
             d.child(
                 div()
                     .mt(px(6.))

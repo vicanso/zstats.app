@@ -93,6 +93,13 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
             i18n::tr("overview.top_cpu_off_body"),
         );
     };
+    let processes = tick
+        .snapshot
+        .processes
+        .as_deref()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let topology = state.member_processes().unwrap_or(processes);
     let mut risers: Vec<_> = groups
         .iter()
         .filter_map(|g| {
@@ -147,10 +154,10 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 })
                 .child(widgets::truncating_name(
                     ("top-app-name", g.root_pid as usize),
-                    // Same presented identity the trend is keyed on —
-                    // the lookup above and this label must be the same
-                    // string or a rise vanishes between them.
-                    trend::tree_key(g).to_string(),
+                    // Face, not [`trend::tree_key`]: a login compile
+                    // shows as rustc. The rise is still looked up on
+                    // the launchd child so the hour does not split.
+                    trend::tree_face(g, topology, processes),
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),

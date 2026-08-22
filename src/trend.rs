@@ -42,7 +42,9 @@
 //! No gpui types, minutes handed in by the caller — testable against
 //! hand-built sequences, like `watch.rs`.
 
+use crate::fullscan;
 use std::collections::HashMap;
+use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
 /// Minutes of history per tree: the hour the card talks about.
 const SLOTS: usize = 60;
@@ -126,19 +128,68 @@ pub struct AppTrend {
     apps: HashMap<String, Ring>,
 }
 
-/// The one presented identity of a tree — the trend's key, the Overview
-/// row's title, the Apps row's title. Defined here because the *feeder*
-/// (`state.rs`) and every *reader* must agree on the string, or a rise
-/// recorded under one name is looked up under another and vanishes.
+/// Stable identity for the trend, filters that mean "this tree", and
+/// the expansion's matchable name. Not the row title — see [`tree_face`].
 ///
 /// `display_name` first (zstats 0.5.3): the bundle's name where the
 /// executable's own says nothing — every stock-packaged Electron app
 /// reports `Electron` to the kernel, and keying the trend on that merged
-/// unrelated programs into one curve. Presentation-layer identity may be
-/// finer than the *matchable* name (which stays `g.name` — thresholds,
-/// templates and quit delivery never touch this).
-pub fn tree_key(g: &zstats::snapshot::ProcessGroupSnapshot) -> &str {
+/// unrelated programs into one curve. Thresholds, templates and quit
+/// still use `g.name`.
+pub fn tree_key(g: &ProcessGroupSnapshot) -> &str {
     g.display_name.as_deref().unwrap_or(&g.name)
+}
+
+/// A descendant must own at least this share of the tree's CPU before
+/// a session-leader row wears its name. Below a third, the session is
+/// still the story (idle `login` + a 2% compile is not "rustc").
+const FACE_SHARE: f32 = 1.0 / 3.0;
+
+/// What the list should call this tree. Session leaders (`login`,
+/// `zsh`, …) whose CPU is a descendant's show that program — a compile
+/// started from Zed's terminal is `rustc`, not `login`. [`tree_key`]
+/// stays on the launchd child so the hour-window and the alert bars
+/// do not jump mid-compile.
+///
+/// `topology` is who belongs to the tree (the expansion's full table
+/// when we have one — ppid chains intact — otherwise the tick). `live`
+/// is who has a rate this tick: overlay those percentages when scoring
+/// the hog, same as the member rows. A one-pass listing's CPU is 0 by
+/// construction and must not decide the name; empty `live` falls back
+/// to whatever `topology` itself carried.
+pub fn tree_face(
+    g: &ProcessGroupSnapshot,
+    topology: &[ProcessSnapshot],
+    live: &[ProcessSnapshot],
+) -> String {
+    let presented = tree_key(g);
+    if !is_session_leader(&g.name) {
+        return presented.to_string();
+    }
+    let tree_cpu = g.cpu_usage_percent;
+    if tree_cpu <= 0.0 {
+        return presented.to_string();
+    }
+    let live_cpu: HashMap<u32, f32> = live.iter().map(|p| (p.pid, p.cpu_usage_percent)).collect();
+    let cpu_of = |p: &ProcessSnapshot| live_cpu.get(&p.pid).copied().unwrap_or(p.cpu_usage_percent);
+    let Some(hog) = fullscan::tree_members(g.root_pid, topology)
+        .into_iter()
+        .filter(|p| !is_session_leader(&p.name))
+        .max_by(|a, b| cpu_of(a).total_cmp(&cpu_of(b)))
+    else {
+        return presented.to_string();
+    };
+    if cpu_of(hog) / tree_cpu < FACE_SHARE {
+        return presented.to_string();
+    }
+    hog.display_name.clone().unwrap_or_else(|| hog.name.clone())
+}
+
+pub(crate) fn is_session_leader(name: &str) -> bool {
+    matches!(
+        name,
+        "login" | "zsh" | "bash" | "fish" | "tmux" | "sh" | "-zsh" | "-bash" | "-fish" | "-sh"
+    )
 }
 
 impl AppTrend {
@@ -308,6 +359,106 @@ mod tests {
         edge.sample(5, [("zed", 400.0)].into_iter());
         edge.sample(64, [("zed", 10.0)].into_iter());
         assert_eq!(edge.apps.get("zed").unwrap().at(5), Some(400));
+    }
+
+    fn proc(pid: u32, parent: Option<u32>, name: &str, cpu: f32) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            name: name.into(),
+            display_name: None,
+            cmd: String::new(),
+            cpu_usage_percent: cpu,
+            cpu_time_ms: 0,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            virtual_memory_bytes: 0,
+            run_time_secs: 0,
+            parent_pid: parent,
+            user_id: None,
+            status: String::new(),
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    fn group(root: u32, name: &str, cpu: f32) -> ProcessGroupSnapshot {
+        ProcessGroupSnapshot {
+            root_pid: root,
+            name: name.into(),
+            display_name: None,
+            process_count: 1,
+            cpu_usage_percent: cpu,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    /// A compile started from a login shell is the news; the session
+    /// leader is not. [`tree_key`] stays `login` so the trend does not
+    /// jump when rustc exits.
+    #[test]
+    fn a_login_tree_dominated_by_rustc_wears_rustc() {
+        let g = group(10, "login", 100.0);
+        let table = vec![
+            proc(10, Some(1), "login", 0.0),
+            proc(11, Some(10), "zsh", 0.1),
+            proc(12, Some(11), "cargo", 0.2),
+            proc(13, Some(12), "rustc", 99.7),
+        ];
+        assert_eq!(tree_key(&g), "login");
+        assert_eq!(tree_face(&g, &table, &[]), "rustc");
+    }
+
+    #[test]
+    fn a_quiet_login_tree_keeps_its_own_name() {
+        let g = group(10, "login", 8.0);
+        let table = vec![
+            proc(10, Some(1), "login", 0.0),
+            proc(11, Some(10), "zsh", 0.1),
+            proc(12, Some(11), "rustc", 2.0),
+        ];
+        assert_eq!(tree_face(&g, &table, &[]), "login");
+    }
+
+    #[test]
+    fn a_real_app_is_not_rebranded() {
+        let mut g = group(1, "Electron", 40.0);
+        g.display_name = Some("CodeBuddy CN".into());
+        assert_eq!(tree_key(&g), "CodeBuddy CN");
+        assert_eq!(tree_face(&g, &[], &[]), "CodeBuddy CN");
+    }
+
+    /// The expansion's full table is one-pass: every CPU is 0. The
+    /// member rows already overlay the tick; the face must too, or a
+    /// `login` whose cargo is 17% of 17% stays titled `login`.
+    #[test]
+    fn a_login_tree_scores_the_hog_from_live_cpu() {
+        let g = group(10, "login", 17.0);
+        let topology = vec![
+            proc(10, Some(1), "login", 0.0),
+            proc(11, Some(10), "zsh", 0.0),
+            proc(12, Some(11), "cargo", 0.0),
+            proc(13, Some(12), "rustc", 0.0),
+        ];
+        let live = vec![proc(12, Some(11), "cargo", 17.0)];
+        assert_eq!(tree_face(&g, &topology, &[]), "login");
+        assert_eq!(tree_face(&g, &topology, &live), "cargo");
+    }
+
+    /// The tick's top-N usually drops the idle shell. cargo is sitting
+    /// right there with the tree's 17%, but `tree_members` will not
+    /// guess a broken ppid chain — which is why a collapsed row reads
+    /// `login` until the full table lands.
+    #[test]
+    fn a_tick_missing_the_shell_cannot_name_the_hog() {
+        let g = group(10, "login", 17.0);
+        let tick = vec![
+            proc(10, Some(1), "login", 0.0),
+            proc(12, Some(11), "cargo", 17.0),
+        ];
+        assert_eq!(tree_face(&g, &tick, &tick), "login");
     }
 
     #[test]

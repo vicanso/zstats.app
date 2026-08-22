@@ -582,9 +582,13 @@ pub struct FullAppScanData {
 ///
 /// CPU on this table is unusable (one pass, no baseline) — the expansion
 /// paints rates from the tick when the pid is there, and `—` otherwise.
-/// Dropped on collapse so a re-open is a new photograph; while held
-/// open it refreshes on the process cadence
-/// ([`metrics::PANEL_PROCESS_INTERVAL`]), not the 2s CPU tick.
+/// Same photograph feeds session-leader faces (`login` → `cargo`): the
+/// tick drops the idle shell, so a collapsed row cannot walk login →
+/// zsh → cargo until this lands. Hide still drops it; collapse does
+/// not, or folding would rename the row back to `login`. While Apps or
+/// Overview is on screen (or a row is held open) it refreshes on the
+/// process cadence ([`metrics::PANEL_PROCESS_INTERVAL`]), not the 2s
+/// CPU tick.
 #[derive(Default)]
 pub enum MemberTable {
     #[default]
@@ -964,15 +968,11 @@ impl ZStatsAppState {
         }
         self.prune_stale_alerts();
         self.maybe_auto_check_update(cx);
-        // Views cannot start work. Collapse drops the table; hide does
-        // too. A still-open expansion asks from here so a 15s-old
-        // photograph is replaced, and a hide → show with the row still
-        // selected is not stuck on the truncated tick list.
-        if let Some(pid) = self.selected_app
-            && let Some(n) = self.group_process_count(pid)
-        {
-            self.ensure_member_table(pid, n, cx);
-        }
+        // Views cannot start work. Hide drops the table. A still-open
+        // expansion, or a session-leader face the tick cannot name,
+        // asks from here so the row title is `cargo` before anyone
+        // clicks, and a 15s-old photograph is replaced.
+        self.ensure_apps_topology(cx);
         cx.notify();
         fresh
     }
@@ -1962,6 +1962,12 @@ impl ZStatsAppState {
             if tab == Tab::History {
                 self.load_history(cx);
             }
+            // Apps / Overview titles need the full ppid chain for a
+            // session-leader face. Kick it here so the first paint after
+            // the switch is not waiting on the next collector tick.
+            if matches!(tab, Tab::Apps | Tab::Overview) {
+                self.ensure_apps_topology(cx);
+            }
             cx.notify();
         }
     }
@@ -2517,9 +2523,8 @@ impl ZStatsAppState {
     pub fn toggle_app(&mut self, root_pid: u32, cx: &mut Context<Self>) {
         if self.selected_app == Some(root_pid) {
             self.selected_app = None;
-            // Collapse drops the photograph: the next open is a new
-            // look, not the same rust-analyzers that have since exited.
-            self.member_table = MemberTable::Off;
+            // Keep the photograph: collapsing must not rename a
+            // session-leader row back to `login`. Hide still drops it.
         } else {
             self.selected_app = Some(root_pid);
             if matches!(self.member_table, MemberTable::Failed) {
@@ -2531,7 +2536,8 @@ impl ZStatsAppState {
         cx.notify();
     }
 
-    /// The uncapped process table, once an expansion has asked for it.
+    /// The uncapped process table, once Apps/Overview needed a
+    /// session-leader face or an expansion asked for members.
     pub fn member_processes(&self) -> Option<&[ProcessSnapshot]> {
         match &self.member_table {
             MemberTable::Ready { processes, .. } => Some(processes.as_slice()),
@@ -2559,10 +2565,51 @@ impl ZStatsAppState {
             .map(|g| g.process_count)
     }
 
-    /// Fetch the full table when the live top-N cannot name the tree,
-    /// and again when a held expansion's photograph is older than the
-    /// process cadence. A 2-process Finder is already complete; Chrome's
-    /// helpers are why the first fetch exists.
+    /// Fetch the full table when the live top-N cannot name the tree
+    /// (members *or* a session-leader face), and again when a held
+    /// photograph is older than the process cadence. A 2-process Finder
+    /// is already complete; Chrome's helpers and a `login` compile whose
+    /// `zsh` was ranked out are why the first fetch exists.
+    fn ensure_apps_topology(&mut self, cx: &mut Context<Self>) {
+        if let Some(pid) = self.selected_app
+            && let Some(n) = self.group_process_count(pid)
+        {
+            self.ensure_member_table(pid, n, cx);
+        }
+        let visible = cx
+            .try_global::<metrics::CollectorPace>()
+            .is_some_and(|p| p.is_visible());
+        if !visible || !matches!(self.tab, Tab::Apps | Tab::Overview) {
+            return;
+        }
+        if let Some((root, n)) = self.session_leader_needing_topology() {
+            self.ensure_member_table(root, n, cx);
+        }
+    }
+
+    /// A session-leader group whose descendants are not all in the tick:
+    /// the idle shell was ranked out, so `tree_face` cannot walk to cargo.
+    fn session_leader_needing_topology(&self) -> Option<(u32, u32)> {
+        let tick = self.latest.as_ref()?;
+        let groups = tick.snapshot.process_groups.as_deref()?;
+        let processes = tick
+            .snapshot
+            .processes
+            .as_deref()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        groups.iter().find_map(|g| {
+            if !trend::is_session_leader(&g.name)
+                || g.cpu_usage_percent <= 0.0
+                || g.process_count <= 1
+            {
+                return None;
+            }
+            let named = fullscan::tree_members(g.root_pid, processes).len() as u32;
+            (named < g.process_count).then_some((g.root_pid, g.process_count))
+        })
+    }
+
     fn ensure_member_table(&mut self, root: u32, expected: u32, cx: &mut Context<Self>) {
         match &self.member_table {
             MemberTable::Running => return,
