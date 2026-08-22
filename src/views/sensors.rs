@@ -288,8 +288,8 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
 /// "Time left" and "To full" guaranteed that one of them was a dash —
 /// and on a full, idle machine both were. One adaptive cell says the
 /// same thing when there is something to say, and a full battery gets
-/// the card back a whole row (the grid pairs cells, so six entries take
-/// three rows where eight took four).
+/// the card back a whole row. State lives in the title so the grid is
+/// six cells (three and three), not seven (four and three).
 fn battery_time(b: &zstats::snapshot::BatterySnapshot) -> Option<(String, String)> {
     match (b.time_to_empty_secs, b.time_to_full_secs) {
         (Some(secs), _) => Some((i18n::tr("sensors.empty_in"), format::uptime(secs))),
@@ -302,16 +302,12 @@ fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElem
     let battery_card = match tick.snapshot.battery.as_ref() {
         None => widgets::empty_card(i18n::tr("sensors.battery"), i18n::tr("sensors.no_battery")),
         Some(b) => card()
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
-                    .child(i18n::tr("sensors.battery")),
-            )
+            .child(widgets::card_header(
+                i18n::tr("sensors.battery"),
+                Some(widgets::note(b.state.clone())),
+            ))
             .child(widgets::kv_columns(
                 vec![
-                    (i18n::tr("sensors.state"), b.state.clone()),
                     (i18n::tr("sensors.charge"), format::pct(b.charge_percent)),
                     (
                         i18n::tr("sensors.draw"),
