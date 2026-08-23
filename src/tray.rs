@@ -4,12 +4,14 @@
 //! main loop there, which can't coexist with gpui's own event loop.
 
 use crate::assets::{self, CustomIconName};
+use crate::format;
 use crate::i18n;
 use crate::prefs::{self, TrayPref};
 use crate::state::{TrayAnchor, ZStatsAppState};
 use crate::{APP_NAME, show_main_window, toggle_main_window};
 use gpui::{App, Global};
 use resvg::{tiny_skia, usvg};
+use rust_i18n::t;
 use std::cell::{Cell, RefCell};
 use std::str;
 use std::thread;
@@ -89,10 +91,10 @@ impl TrayHandle {
 
 impl Item {
     /// Put a face and, once there is a sample, its figure on the item.
-    fn wear(&self, face: TrayFace, percent: Option<f32>, faces: &Faces) {
+    fn wear(&self, face: TrayFace, figure: Option<Figure>, faces: &Faces) {
         self.set_face(face, faces);
-        if let Some(percent) = percent {
-            self.set_title(percent);
+        if let Some(figure) = figure {
+            self.set_title(figure);
         }
     }
 
@@ -127,17 +129,57 @@ impl Item {
         self.face.set(Some(face));
     }
 
-    fn set_title(&self, percent: f32) {
-        // Whole percent: the menu bar is cramped, and a decimal would make
-        // the title twitch on every sample even when load is flat.
-        let title = format!("{percent:.0}%");
+    fn set_title(&self, figure: Figure) {
         let mut last = self.title.borrow_mut();
-        if *last == title {
+        if *last == figure.title {
             // Setting a title re-lays out the menu bar, so skip the no-ops.
             return;
         }
-        self.icon.set_title(Some(&title));
-        *last = title;
+        self.icon.set_title(Some(&figure.title));
+        // The tooltip is what makes a bare `8.1G` readable — it spells
+        // out which quantity the glyph stands for. Rides the title's
+        // change gate: same cadence, and it cannot change alone.
+        let _ = self.icon.set_tooltip(Some(&figure.tip));
+        *last = figure.title;
+    }
+}
+
+/// What an item shows for a face: the title beside the glyph, and the
+/// tooltip that says what it is.
+struct Figure {
+    title: String,
+    tip: String,
+}
+
+impl Figure {
+    /// Whole percent: the menu bar is cramped, and a decimal would make
+    /// the title twitch on every sample even when load is flat.
+    fn cpu(percent: f32) -> Self {
+        let pct = format!("{percent:.0}%");
+        Figure {
+            tip: format!("{APP_NAME} · {}", t!("tray.cpu_tip", pct = pct)),
+            title: pct,
+        }
+    }
+
+    /// Available memory, not used percent. macOS runs high-used by
+    /// design — the cache fills whatever is free — so used% sits in the
+    /// sixties on a healthy machine and says nothing when the face
+    /// turns. Available is the figure that actually falls as the
+    /// machine tightens, and it is the one the Overview hero pairs with
+    /// the total (`format::gb`, same rounding).
+    fn memory(available: u64, total: u64) -> Self {
+        Figure {
+            title: format::gb_short(available),
+            tip: format!(
+                "{APP_NAME} · {}",
+                t!(
+                    "tray.memory_tip",
+                    avail = format::gb(available),
+                    total = format::gb(total)
+                )
+            ),
+        }
     }
 }
 
@@ -205,7 +247,7 @@ pub fn face_for(pref: TrayPref, memory_needs_attention: bool) -> TrayFace {
 /// Bring the menu bar in line with the store: how many items the
 /// preference wants, the face from the preference and the store's memory
 /// signal, the figure from the latest sample — `cpu.usage_percent` or
-/// `memory.used_percent`, both zstats' own fields. Called after every
+/// `memory.available_bytes`, both zstats' own fields. Called after every
 /// ingest and when the picker changes; before the first sample there is
 /// a face but no figure. A no-op if the tray failed to build.
 pub fn sync(cx: &App, state: &ZStatsAppState) {
@@ -216,8 +258,11 @@ pub fn sync(cx: &App, state: &ZStatsAppState) {
     handle.set_both(pref == TrayPref::Both);
     let figure = |face| {
         state.latest().map(|tick| match face {
-            TrayFace::Cpu => tick.snapshot.cpu.usage_percent,
-            TrayFace::Memory => tick.snapshot.memory.used_percent,
+            TrayFace::Cpu => Figure::cpu(tick.snapshot.cpu.usage_percent),
+            TrayFace::Memory => {
+                let mem = &tick.snapshot.memory;
+                Figure::memory(mem.available_bytes, mem.total_bytes)
+            }
         })
     };
     let face = face_for(pref, state.memory_needs_attention());

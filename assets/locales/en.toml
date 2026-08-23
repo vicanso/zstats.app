@@ -17,6 +17,10 @@ waiting_sample_body = "Collection starts with the app; rates need a second sampl
 n_a = "n/a"
 cancel = "Cancel"
 
+[tray]
+cpu_tip = "CPU %{pct}"
+memory_tip = "%{avail} of %{total} available"
+
 [overview]
 processor = "Processor"
 top_cpu = "Top apps"
@@ -137,7 +141,7 @@ sort_cpu_tip = "Live CPU among the trees the collector already kept."
 sort_memory_tip = "Memory order among the trees already in this list — not the machine’s biggest. The collector ranks this list by CPU first."
 sort_cpu_tip_full = "CPU over the short window this listing was taken in, not the live tick."
 sort_memory_tip_full = "Summed physical footprint (RSS where unreadable), every tree."
-cap_note = "Each row is a launchd child plus every descendant, summed over the full table. A tree rooted in a bare executable — a terminal session, an SSH login, a daemon — is labelled by the job holding its CPU, as the kernel groups it: a build typed into a shell reads `cargo`, whether one compiler or ten is running. The root's own name is in the expansion. Only the hottest trees are listed, same cap as Processes."
+cap_note = "Each row is a launchd child plus every descendant, summed over the full table. A tree rooted in a bare executable — a terminal session, an SSH login, a daemon — is labelled by the job holding its CPU, as the kernel groups it: a build typed into a shell reads `cargo`, whether one compiler or ten is running. The root's own name is in the expansion. An application whose tree such a job burns keeps its name and gains the job as a tail — `Zed · cargo` for a build in Zed's terminal — while its own helpers never rename it. Only the hottest trees are listed, same cap as Processes."
 filter_no_match = "No application name matches."
 n_processes = "%{count} processes"
 one_process = "1 process"
@@ -379,7 +383,7 @@ tray = "Menu bar shows"
 tray_auto = "Auto"
 tray_memory = "Memory"
 tray_both = "CPU + Memory"
-tray_tip = "Auto shows CPU% beside a chip, and switches to memory% beside a memory stick while a memory alert from this session — a process, an app, or kernel pressure — is still on the Alerts tab. It turns when the banner does, never on a momentary reading; dismiss the card and it switches back. CPU and Memory pin one figure there for good. CPU + Memory keeps two items, CPU to the left; either one opens the panel."
+tray_tip = "Auto shows CPU% beside a chip, and switches to available memory beside a memory stick while a memory alert from this session — a process, an app, or kernel pressure — is still on the Alerts tab. It turns when the banner does, never on a momentary reading; dismiss the card and it switches back. CPU and Memory pin one figure there for good. CPU + Memory keeps two items, CPU to the left; either one opens the panel. Memory is shown as what is available, not used% — on macOS the cache fills whatever is free, so used% sits high on a healthy machine; available is the figure that actually falls as the machine tightens."
 opacity = "Opacity"
 opacity_default = "Default"
 opacity_tip = "How solid the panel glass is — higher is less see-through; changes apply immediately. A value below 50% in the file is ignored and the built-in default is used (55% dark, 80% light on macOS)."

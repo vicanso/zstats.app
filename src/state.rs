@@ -2597,22 +2597,24 @@ impl ZStatsAppState {
         if !visible || !matches!(self.tab, Tab::Apps | Tab::Overview) {
             return;
         }
-        if let Some((root, n)) = self.bare_tree_needing_topology() {
+        if let Some((root, n)) = self.tree_needing_topology() {
             self.ensure_member_table(root, n, cx);
         }
     }
 
-    /// A bare-rooted tree (no bundle) with company and CPU: its face is
-    /// the job holding that CPU, and the job boundaries come only with
-    /// the photograph — the tick carries no process groups, and usually
-    /// not the idle shell either. Not gated on "members missing from the
-    /// tick" any more: a tree fully present in the tick still has no
-    /// pgids there.
-    fn bare_tree_needing_topology(&self) -> Option<(u32, u32)> {
+    /// A tree with company and CPU: its face may be the job holding
+    /// that CPU — the title of a bare tree, the tail of an application's
+    /// (`Zed · cargo`) — and the job boundaries come only with the
+    /// photograph: the tick carries no process groups, and usually not
+    /// the idle shell either. Not gated on bundle or on "members missing
+    /// from the tick": a tree fully present in the tick still has no
+    /// pgids there. One fetch serves every tree, so the broader gate
+    /// costs nothing extra.
+    fn tree_needing_topology(&self) -> Option<(u32, u32)> {
         let tick = self.latest.as_ref()?;
         let groups = tick.snapshot.process_groups.as_deref()?;
         groups.iter().find_map(|g| {
-            (g.display_name.is_none() && g.cpu_usage_percent > 0.0 && g.process_count > 1)
+            (g.cpu_usage_percent > 0.0 && g.process_count > 1)
                 .then_some((g.root_pid, g.process_count))
         })
     }

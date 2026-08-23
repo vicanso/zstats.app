@@ -187,6 +187,45 @@ pub fn truncating_name(
         .into_any_element()
 }
 
+/// [`truncating_name`] with a muted tail that survives the ellipsis:
+/// `Zed · cargo` keeps `· cargo` when the title has to truncate, because
+/// the tail is the news and the title is what the reader already knows.
+/// Two runs in one row rather than one string, so the tail can take a
+/// second colour — gpui lays nested divs out as blocks, not inline text.
+pub fn truncating_name_tailed(
+    id: impl Into<ElementId>,
+    name: impl Into<SharedString>,
+    tail: Option<SharedString>,
+    size: f32,
+    weight: FontWeight,
+    color: gpui::Hsla,
+) -> AnyElement {
+    let name = name.into();
+    let Some(tail) = tail else {
+        return truncating_name(id, name, size, weight, color);
+    };
+    let full: SharedString = format!("{name} · {tail}").into();
+    let long = full.chars().count() >= NAME_TIP_FROM;
+    h_flex()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .items_baseline()
+        .gap(px(4.))
+        .text_size(px(size))
+        .font_weight(weight)
+        .when(long, |d| d.tooltip(wrap_tooltip(full.clone())))
+        .child(div().min_w_0().truncate().text_color(color).child(name))
+        .child(
+            div()
+                .flex_none()
+                .font_weight(FontWeight::NORMAL)
+                .text_color(theme::text_muted())
+                .child(format!("· {tail}")),
+        )
+        .into_any_element()
+}
+
 /// Neutral outlined pill — "30s", quiet status.
 pub fn outline_pill(text: impl Into<SharedString>) -> AnyElement {
     div()

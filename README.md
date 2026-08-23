@@ -18,7 +18,7 @@ Most menu-bar monitors either paint pretty numbers or nag you. zstats does both,
 
 ## Watch
 
-- Live CPU% beside the tray icon — and while a memory alert you have not dismissed is on the Alerts tab (a process, an app, or kernel pressure), the item turns into a memory stick with memory% instead. Or pin it to CPU or memory for good, or keep both side by side
+- Live CPU% beside the tray icon — and while a memory alert you have not dismissed is on the Alerts tab (a process, an app, or kernel pressure), the item turns into a memory stick with the memory still available instead. Or pin it to CPU or memory for good, or keep both side by side
 - Overview: P/E cores, memory and compression, kernel memory pressure, disk and network throughput
 - Apps aggregated by process tree — one row for a browser and all its helpers
 - Processes ranked by a 60-second average, with a name filter and a one-click full-table scan

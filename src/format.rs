@@ -69,6 +69,18 @@ fn integer_digits(formatted: &str) -> usize {
         .map_or(0, str::len)
 }
 
+/// [`gb`] for the menu bar: the same rounding, no unit word — `8.1G`,
+/// `12G`. The bar is cramped and the icon beside it already says what
+/// the figure is; the status item's tooltip spells it out.
+pub fn gb_short(bytes: u64) -> String {
+    let v = bytes as f64 / GIB;
+    if v < 10.0 {
+        format!("{v:.1}G")
+    } else {
+        format!("{v:.0}G")
+    }
+}
+
 /// Memory-style capacity, always in GB: "23.4 GB" under ten, "112 GB" over.
 pub fn gb(bytes: u64) -> String {
     let v = bytes as f64 / GIB;
@@ -258,6 +270,13 @@ pub fn span(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gb_short_rounds_like_gb_without_the_unit() {
+        assert_eq!(gb_short(8_100_000_000), "7.5G");
+        assert_eq!(gb_short(12 * 1024 * 1024 * 1024), "12G");
+        assert_eq!(gb_short(0), "0.0G");
+    }
 
     #[test]
     fn load_keeps_one_decimal_until_it_stops_mattering() {

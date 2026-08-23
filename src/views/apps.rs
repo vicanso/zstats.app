@@ -83,7 +83,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         rows.retain(|g| {
             g.name.to_lowercase().contains(filter)
                 || trend::tree_key(g).to_lowercase().contains(filter)
-                || face_of(g, state).to_lowercase().contains(filter)
+                || face_of(g, state).text().to_lowercase().contains(filter)
         });
     }
 
@@ -140,8 +140,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     // stock-Electron trees showing distinct bundle
                     // names are not ambiguous, two identical shown
                     // names are — including two login compiles both
-                    // wearing `rustc`.
-                    let shown_names: Vec<String> = rows.iter().map(|g| face_of(g, state)).collect();
+                    // wearing `cargo`. The tail counts: `Zed · cargo`
+                    // and `Zed` are two different things on screen.
+                    let shown_names: Vec<String> =
+                        rows.iter().map(|g| face_of(g, state).text()).collect();
                     let repeated: HashSet<String> =
                         repeated_names(shown_names.iter().map(String::as_str))
                             .into_iter()
@@ -178,7 +180,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
     // Owned, unlike the top list's borrowed set: this closure outlives
     // the frame that builds it, so it cannot hold a name that belongs to
     // the tick. Only repeated names allocate, which is normally none.
-    let faces: Vec<String> = groups.iter().map(|g| face_of(g, state)).collect();
+    let faces: Vec<String> = groups.iter().map(|g| face_of(g, state).text()).collect();
     let repeated: HashSet<String> = repeated_names(faces.iter().map(String::as_str))
         .into_iter()
         .map(str::to_string)
@@ -231,7 +233,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
             list(data.list.clone(), move |i, _window, cx| {
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let g = &groups[visible[i]];
-                let ambiguous = repeated.contains(face_of(g, state).as_str());
+                let ambiguous = repeated.contains(face_of(g, state).text().as_str());
                 app_row(g, i + 1 == count, state, ambiguous, sort, bar_full)
             })
             .h(px(height)),
@@ -304,7 +306,7 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
 /// asked for topology (a job face, or an expansion). The listing is
 /// one-pass (CPU 0); the face scores the jobs from the tick, same
 /// overlay the member rows already paint.
-fn face_of(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> String {
+fn face_of(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> trend::Face {
     let live = state
         .latest()
         .and_then(|t| t.snapshot.processes.as_deref())
@@ -348,12 +350,16 @@ fn app_row(
                 .items_baseline()
                 .justify_between()
                 .gap(px(8.))
-                .child(widgets::truncating_name(
+                .child(widgets::truncating_name_tailed(
                     ("app-name", root_pid as usize),
                     // Bundle name, or a bare tree's job (`cargo`
-                    // instead of `login`). The matchable name stays in
-                    // the expansion, beside the bars that key on it.
-                    face,
+                    // instead of `login`); an app whose tree a bare
+                    // job burns keeps its name and gains the job as a
+                    // muted tail (`Zed · cargo`). The matchable name
+                    // stays in the expansion, beside the bars that key
+                    // on it.
+                    face.title,
+                    face.job.map(gpui::SharedString::from),
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),
@@ -511,9 +517,9 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                 ),
         )
         // Title is not the matchable name: bundle vs Electron, or
-        // rustc vs the login session that spawned it. The bars above
+        // cargo vs the login session that spawned it. The bars above
         // key on `g.name`; this line is that name.
-        .when(face_of(g, state) != g.name, |d| {
+        .when(face_of(g, state).text() != g.name, |d| {
             d.child(
                 div()
                     .mt(px(6.))

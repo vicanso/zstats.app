@@ -152,16 +152,21 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 .when(i + 1 < n, |d| {
                     d.border_b(px(1.)).border_color(theme::border_subtle())
                 })
-                .child(widgets::truncating_name(
-                    ("top-app-name", g.root_pid as usize),
+                .child({
                     // Face, not [`trend::tree_key`]: a login compile
-                    // shows as cargo. The rise is still looked up on
-                    // the launchd child so the hour does not split.
-                    trend::tree_face(g, topology, processes, state.member_pgids()),
-                    12.,
-                    gpui::FontWeight::MEDIUM,
-                    Hsla::from(theme::text()),
-                ))
+                    // shows as cargo, a compile in Zed's terminal as
+                    // `Zed · cargo`. The rise is still looked up on the
+                    // launchd child so the hour does not split.
+                    let face = trend::tree_face(g, topology, processes, state.member_pgids());
+                    widgets::truncating_name_tailed(
+                        ("top-app-name", g.root_pid as usize),
+                        face.title,
+                        face.job.map(gpui::SharedString::from),
+                        12.,
+                        gpui::FontWeight::MEDIUM,
+                        Hsla::from(theme::text()),
+                    )
+                })
                 // The climb, next to the level it led to. Muted on
                 // purpose: a rise is news, not a threshold, and accent
                 // stays reserved for over-the-line (`theme.rs`).

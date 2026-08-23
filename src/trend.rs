@@ -145,9 +145,61 @@ pub fn tree_key(g: &ProcessGroupSnapshot) -> &str {
 /// story (idle `login` + a 2% compile is not "cargo").
 const FACE_SHARE: f32 = 1.0 / 3.0;
 
+/// What a tree row is called: the title, and — for an application whose
+/// tree a bare job is burning — that job as a muted tail (`Zed · cargo`).
+/// Two fields rather than one string so the views can paint the tail
+/// in a second colour; [`Face::text`] is the one-string form for filters
+/// and tooltips.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Face {
+    pub title: String,
+    pub job: Option<String>,
+}
+
+impl Face {
+    fn plain(title: &str) -> Self {
+        Face {
+            title: title.to_string(),
+            job: None,
+        }
+    }
+
+    /// `Zed · cargo`, or just the title.
+    pub fn text(&self) -> String {
+        match &self.job {
+            Some(job) => format!("{} · {job}", self.title),
+            None => self.title.clone(),
+        }
+    }
+}
+
+/// The tests read a face as the string a person would: `"Zed · cargo"`.
+#[cfg(test)]
+impl PartialEq<&str> for Face {
+    fn eq(&self, other: &&str) -> bool {
+        self.text() == *other
+    }
+}
+
+/// The outermost `.app` bundle an executable runs from, read off its
+/// command line's argv[0]: `/Applications/Zed.app/` for Zed and for
+/// every helper under `Zed.app/Contents/…`, `None` for a bare
+/// executable. This, and not `display_name`, is the bundle test:
+/// zstats leaves `display_name` `None` both for a bare executable and
+/// for a bundle that merely repeats the process name — `Google Chrome`
+/// and every one of its helpers — so that field cannot tell `login`
+/// from Chrome.
+fn bundle_of(cmd: &str) -> Option<&str> {
+    if !cmd.starts_with('/') {
+        return None;
+    }
+    let end = cmd.find(".app/")? + ".app/".len();
+    Some(&cmd[..end])
+}
+
 /// What the list should call this tree.
 ///
-/// A tree rooted in a bare executable — no bundle, so no `display_name`:
+/// A tree rooted in a bare executable — not in any bundle (`bundle_of`):
 /// `login`, `sshd-session`, `tmux`, a daemon — is named after the **job**
 /// its CPU belongs to. A job is the kernel's own unit: a job-control
 /// shell gives every command it launches a fresh process group, and what
@@ -161,7 +213,13 @@ const FACE_SHARE: f32 = 1.0 / 3.0;
 ///
 /// A bundle root is an application, and its helpers are its own
 /// business: a renderer in its own process group must not rebrand the
-/// app it belongs to, so the gate is structural, not a name.
+/// app it belongs to, so the gate is structural, not a name. But a
+/// bare job under an application's tree is not one of its helpers — a
+/// build typed into Zed's terminal is `Zed → … → login → zsh → cargo`,
+/// and "Zed 800%" reads as Zed running away. That tree keeps its title
+/// and gains a muted tail, `Zed · cargo`: whose tree, and who is
+/// burning. The tail needs what the face needs — a job leader from
+/// outside the app's own bundle, holding a third of the tree.
 ///
 /// [`tree_key`] stays on the launchd child so the hour-window and the
 /// alert bars do not jump mid-compile.
@@ -179,14 +237,14 @@ pub fn tree_face(
     topology: &[ProcessSnapshot],
     live: &[ProcessSnapshot],
     pgids: &HashMap<u32, u32>,
-) -> String {
+) -> Face {
     let presented = tree_key(g);
-    if g.display_name.is_some() || pgids.is_empty() {
-        return presented.to_string();
+    if pgids.is_empty() {
+        return Face::plain(presented);
     }
     let tree_cpu = g.cpu_usage_percent;
     if tree_cpu <= 0.0 {
-        return presented.to_string();
+        return Face::plain(presented);
     }
     let live_cpu: HashMap<u32, f32> = live.iter().map(|p| (p.pid, p.cpu_usage_percent)).collect();
     let cpu_of = |p: &ProcessSnapshot| live_cpu.get(&p.pid).copied().unwrap_or(p.cpu_usage_percent);
@@ -198,10 +256,10 @@ pub fn tree_face(
         *by_job.entry(job_of(m)).or_default() += cpu_of(m);
     }
     let Some((&job, &cpu)) = by_job.iter().max_by(|a, b| a.1.total_cmp(b.1)) else {
-        return presented.to_string();
+        return Face::plain(presented);
     };
     if cpu / tree_cpu < FACE_SHARE {
-        return presented.to_string();
+        return Face::plain(presented);
     }
     // The leader (pid == pgid) while the tree still has it. A job whose
     // leader exited keeps running under its pgid — name the member
@@ -222,7 +280,7 @@ pub fn tree_face(
         }
         steps
     };
-    let face = members
+    let Some(leader) = members
         .iter()
         .find(|m| m.pid == job)
         .or_else(|| {
@@ -231,10 +289,28 @@ pub fn tree_face(
                 .filter(|m| job_of(m) == job)
                 .min_by_key(|m| depth(m.pid))
         })
-        .copied();
-    match face {
-        Some(p) => p.display_name.clone().unwrap_or_else(|| p.name.clone()),
-        None => presented.to_string(),
+        .copied()
+    else {
+        return Face::plain(presented);
+    };
+    let job_name = leader.display_name.as_deref().unwrap_or(&leader.name);
+    let Some(root) = members.iter().find(|m| m.pid == g.root_pid) else {
+        // The photograph has the members but not the root: nothing to
+        // reason about, and the tree's own name is never wrong.
+        return Face::plain(presented);
+    };
+    let Some(bundle) = bundle_of(&root.cmd) else {
+        // A bare tree is called by its job outright.
+        return Face::plain(job_name);
+    };
+    // An application keeps its title. A leader from outside its bundle
+    // — so not one of its own helpers, and not the app itself — rides
+    // along as the tail. Same-bundle is the test, not "has a bundle":
+    // Xcode's `make` has one, and it is still foreign to Zed's tree.
+    let own = leader.pid == g.root_pid || bundle_of(&leader.cmd) == Some(bundle);
+    Face {
+        title: presented.to_string(),
+        job: (!own).then(|| job_name.to_string()),
     }
 }
 
@@ -427,6 +503,13 @@ mod tests {
         }
     }
 
+    /// [`proc`] with a command line — argv[0] is what `bundle_of` reads.
+    fn proc_at(pid: u32, parent: Option<u32>, name: &str, cpu: f32, cmd: &str) -> ProcessSnapshot {
+        let mut p = proc(pid, parent, name, cpu);
+        p.cmd = cmd.into();
+        p
+    }
+
     fn group(root: u32, name: &str, cpu: f32) -> ProcessGroupSnapshot {
         ProcessGroupSnapshot {
             root_pid: root,
@@ -530,13 +613,27 @@ mod tests {
     /// still the app — the gate is the bundle, not a name.
     #[test]
     fn a_real_app_is_not_rebranded() {
-        let mut g = group(1, "Electron", 40.0);
+        let mut g = group(100, "Electron", 40.0);
         g.display_name = Some("CodeBuddy CN".into());
         let table = vec![
-            proc(1, Some(0), "Electron", 0.0),
-            proc(2, Some(1), "Electron Helper (Renderer)", 40.0),
+            proc_at(
+                100,
+                Some(1),
+                "Electron",
+                0.0,
+                "/Applications/CodeBuddy CN.app/Contents/MacOS/Electron",
+            ),
+            proc_at(
+                2,
+                Some(100),
+                "CodeBuddy CN Helper (Renderer)",
+                40.0,
+                "/Applications/CodeBuddy CN.app/Contents/Frameworks/\
+                 CodeBuddy CN Helper (Renderer).app/Contents/MacOS/\
+                 CodeBuddy CN Helper (Renderer) --type=renderer",
+            ),
         ];
-        let pg = jobs(&[(1, 1), (2, 2)]);
+        let pg = jobs(&[(100, 100), (2, 2)]);
         assert_eq!(tree_key(&g), "CodeBuddy CN");
         assert_eq!(tree_face(&g, &table, &[], &pg), "CodeBuddy CN");
     }
@@ -588,6 +685,82 @@ mod tests {
         assert_eq!(tree_face(&g, &tick, &tick, &HashMap::new()), "login");
         let pg = jobs(&[(10, 10), (12, 12)]);
         assert_eq!(tree_face(&g, &tick, &tick, &pg), "login");
+    }
+
+    /// A build typed into an editor's terminal: the tree is Zed's, the
+    /// CPU is cargo's. The title stays Zed — it is Zed's tree, and the
+    /// app-level bars key on it — and cargo rides along as the tail,
+    /// so "800%" is not read as Zed running away.
+    #[test]
+    fn an_app_whose_tree_a_bare_job_burns_wears_the_job_as_a_tail() {
+        let mut g = group(100, "zed", 800.0);
+        g.display_name = Some("Zed".into());
+        let mut root = proc_at(100, Some(1), "zed", 20.0, ZED);
+        root.display_name = Some("Zed".into());
+        let table = vec![
+            root,
+            proc_at(2, Some(100), "login", 0.0, "/usr/bin/login -fp tree"),
+            proc_at(3, Some(2), "zsh", 0.0, "-zsh"),
+            proc_at(4, Some(3), "cargo", 1.0, "cargo build"),
+            proc(5, Some(4), "rustc", 390.0),
+            proc(6, Some(4), "rustc", 389.0),
+        ];
+        let pg = jobs(&[(100, 100), (2, 2), (3, 3), (4, 4), (5, 4), (6, 4)]);
+        let face = tree_face(&g, &table, &[], &pg);
+        assert_eq!(face, "Zed · cargo");
+        assert_eq!(face.title, "Zed");
+        assert_eq!(face.job.as_deref(), Some("cargo"));
+
+        // Xcode's make has a bundle of its own — still foreign to Zed's
+        // tree, still the tail (and, since zstats 0.5.4, still `make`).
+        let table = vec![
+            proc_at(100, Some(1), "zed", 20.0, ZED),
+            proc_at(2, Some(100), "login", 0.0, "/usr/bin/login -fp tree"),
+            proc_at(3, Some(2), "zsh", 0.0, "-zsh"),
+            proc_at(
+                4,
+                Some(3),
+                "make",
+                1.0,
+                "/Applications/Xcode.app/Contents/Developer/usr/bin/make dev",
+            ),
+            proc(5, Some(4), "cargo", 779.0),
+        ];
+        let pg = jobs(&[(100, 100), (2, 2), (3, 3), (4, 4), (5, 4)]);
+        assert_eq!(tree_face(&g, &table, &[], &pg), "Zed · make");
+    }
+
+    const ZED: &str = "/Applications/Zed.app/Contents/MacOS/zed";
+    const CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    const CHROME_RENDERER: &str = "/Applications/Google Chrome.app/Contents/Frameworks/\
+         Google Chrome Framework.framework/Versions/151.0.0.0/Helpers/\
+         Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) \
+         --type=renderer";
+
+    /// The app's own helpers never become the tail, even from a process
+    /// group of their own: same bundle as the root is the gate. Chrome
+    /// is the sharp case — its bundle repeats its name, so both the root
+    /// and every helper carry `display_name: None`, exactly like a bare
+    /// executable would; only argv[0] tells them apart.
+    #[test]
+    fn an_apps_own_helpers_are_not_a_tail() {
+        let g = group(100, "Google Chrome", 400.0);
+        let root = proc_at(100, Some(1), "Google Chrome", 5.0, CHROME);
+        let renderer = proc_at(
+            2,
+            Some(100),
+            "Google Chrome Helper (Renderer)",
+            395.0,
+            CHROME_RENDERER,
+        );
+        let table = vec![root.clone(), renderer];
+        let pg = jobs(&[(100, 100), (2, 2)]);
+        assert_eq!(tree_face(&g, &table, &[], &pg), "Google Chrome");
+
+        // The app itself leads the hot group: title only.
+        let table = vec![root, proc_at(3, Some(100), "node", 395.0, "node server.js")];
+        let pg = jobs(&[(100, 100), (3, 100)]);
+        assert_eq!(tree_face(&g, &table, &[], &pg), "Google Chrome");
     }
 
     #[test]
