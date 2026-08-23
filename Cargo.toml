@@ -1,6 +1,6 @@
 [package]
 name = "zstats-app"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 
 # The package cannot itself be called `zstats` — that name is taken by the
