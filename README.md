@@ -30,6 +30,7 @@ Most menu-bar monitors paint pretty numbers, nag you, or both — and they treat
 The headline is **a base threshold combined with per-program ones**: one global line as the floor, and any program can carry its own — on one machine a browser may be allowed 200% CPU while a background daemon should speak up at 30%. A program's own line wins where set, the base line covers the rest, edited right on the panel. Built-in templates cover the common cases with sensible defaults, so **alerts are meaningful out of the box, before you configure anything**.
 
 - CPU, memory, disk and memory-pressure thresholds, evaluated by zstats' rule engine
+- **Two granularities**: rules watch the single **process** and, separately, the whole **application** — its process tree summed. A runaway helper trips the process line; a browser quietly holding 4 GB across 37 helpers trips the application line, though no single member ever crosses one. Each level carries its own base threshold and its own per-name overrides
 - **Slow burns get named too**: a process holding CPU for hours without ever crossing a line (25% for an hour, say) is called out by the sustained-load watcher — delivered as a silent banner, never a nag. How long counts as "sustained", and how far under the alert line the bar sits, are yours to set
 - Native notification banners; snooze an episode for 1 or 3 hours
 - Memory-pressure cards list the top consumers and offer a polite quit (⌘Q / SIGTERM — never SIGKILL)
