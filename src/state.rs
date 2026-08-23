@@ -32,6 +32,7 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use std::array;
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
@@ -812,6 +813,11 @@ pub struct ZStatsAppState {
     /// Same, for the Applications card.
     history_rows_scroll: ScrollHandle,
     app_rows_scroll: ScrollHandle,
+    /// One-shot "scroll the Apps list to the selected row on the next
+    /// paint", armed by [`Self::reveal_app`]. A `Cell` because the
+    /// consumer is the render pass, which holds `&self`; taken once,
+    /// so the reader's own scrolling wins from the frame after.
+    app_reveal: Cell<bool>,
 }
 
 impl Default for ZStatsAppState {
@@ -923,6 +929,7 @@ impl Default for ZStatsAppState {
             proc_rows_scroll: ScrollHandle::new(),
             history_rows_scroll: ScrollHandle::new(),
             app_rows_scroll: ScrollHandle::new(),
+            app_reveal: Cell::new(false),
         }
     }
 }
@@ -2719,6 +2726,30 @@ impl ZStatsAppState {
             self.ensure_member_table(root_pid, expected, cx);
         }
         cx.notify();
+    }
+
+    /// Jump from a row elsewhere (Overview's top card) to the Apps tab
+    /// with this tree selected and its expansion loading — the same
+    /// state a click on the Apps row itself produces, minus the toggle:
+    /// landing on an already-open tree must not fold it.
+    pub fn reveal_app(&mut self, root_pid: u32, cx: &mut Context<Self>) {
+        self.set_tab(Tab::Apps, cx);
+        if self.selected_app != Some(root_pid) {
+            self.selected_app = Some(root_pid);
+            if matches!(self.member_table, MemberTable::Failed) {
+                self.member_table = MemberTable::Off;
+            }
+            let expected = self.group_process_count(root_pid).unwrap_or(1);
+            self.ensure_member_table(root_pid, expected, cx);
+        }
+        self.app_reveal.set(true);
+        cx.notify();
+    }
+
+    /// True exactly once per [`Self::reveal_app`]: the Apps list scrolls
+    /// the selected row into view on that paint and never steers again.
+    pub fn take_app_reveal(&self) -> bool {
+        self.app_reveal.take()
     }
 
     /// The uncapped process table, once Apps/Overview needed a job face

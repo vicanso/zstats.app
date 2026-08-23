@@ -148,7 +148,9 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
             // Burst only: a tree has no sustained flag of its own, and
             // walking members here would make Overview a second Apps tab.
             let hot = processes::is_hot(f64::from(g.cpu_usage_percent), false);
+            let root_pid = g.root_pid;
             h_flex()
+                .id(("top-app-row", root_pid as usize))
                 .items_center()
                 .justify_between()
                 .gap(px(8.))
@@ -156,6 +158,16 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 .py(px(5.))
                 .when(i + 1 < n, |d| {
                     d.border_b(px(1.)).border_color(theme::border_subtle())
+                })
+                // The row answers "who" — the Apps tab answers the next
+                // question, so a click lands there with this tree open
+                // and scrolled into view. Hover fill is the affordance,
+                // same as the Apps rows the click leads to.
+                .hover(|d| d.bg(theme::surface_raised()))
+                .on_click(move |_, _window, cx| {
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.reveal_app(root_pid, cx));
                 })
                 .child({
                     // Face, not [`trend::tree_key`]: a login compile

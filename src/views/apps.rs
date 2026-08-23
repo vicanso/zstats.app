@@ -91,6 +91,19 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let no_match = !filter.is_empty() && shown == 0;
     let bar_full = bar_full_for(sort, rows.iter().copied());
 
+    // A jump from Overview: put the selected row in view on this one
+    // paint. The index is into `rows` as sorted and filtered — exactly
+    // the children the scroll container is about to get. A target the
+    // filter hides scrolls nowhere, which is honest: there is nothing
+    // to show.
+    if state.take_app_reveal()
+        && let Some(ix) = state
+            .selected_app()
+            .and_then(|sel| rows.iter().position(|g| g.root_pid == sel))
+    {
+        state.app_rows_scroll().scroll_to_item(ix);
+    }
+
     let list_el = widgets::list_shell()
         .child(widgets::list_header(
             h_flex()
