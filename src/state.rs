@@ -57,6 +57,12 @@ const SUSTAINED_FALLBACK_ALERT: f64 = 30.0;
 /// How many past alerts the Alerts tab can show.
 const MAX_ALERTS: usize = 20;
 
+/// Days the Alerts tab's read-only record reaches back — a week, the
+/// span "how often did this fire" is usually asked over. The files
+/// keep a month (`alertlog::RETENTION_DAYS`); the tab shows the part
+/// that fits a glance.
+const ALERT_HISTORY_DAYS: u16 = 7;
+
 /// How to order the process list. A view preference, deliberately not
 /// persisted — it is for looking at something right now, not a setting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -634,6 +640,16 @@ pub struct ZStatsAppState {
     last_auto_hide: Option<Instant>,
     latest: Option<Tick>,
     alerts: VecDeque<SeenAlert>,
+    /// Today's episodes the user has acknowledged with ✕. Out of the
+    /// list and off the tab's tint, but written back into today's file
+    /// with `dismissed = true`: the record of the day must say what
+    /// fired, not what was left unread. Retired with the list at
+    /// midnight; bounded like it.
+    dismissed_today: Vec<alertlog::Restored>,
+    /// The past week's files, read at launch, on entering the Alerts
+    /// tab and when the day turns — never per frame. Read-only on
+    /// screen; nothing in it can be acted on (the pids are history).
+    alert_history: Vec<alertlog::DayLog>,
     tab: Tab,
     selected_pid: Option<u32>,
     selected_app: Option<u32>,
@@ -840,6 +856,8 @@ impl Default for ZStatsAppState {
             last_auto_hide: None,
             latest: None,
             alerts: VecDeque::new(),
+            dismissed_today: Vec::new(),
+            alert_history: Vec::new(),
             tab: Tab::default(),
             selected_pid: None,
             selected_app: None,
@@ -1097,6 +1115,7 @@ impl ZStatsAppState {
     /// instead of inheriting the developer's own alerts.
     pub fn restore_alerts(&mut self) {
         self.adopt_alerts(alertlog::load());
+        self.refresh_alert_history();
     }
 
     /// The restore proper, minus the file read: episodes join the list
@@ -1135,9 +1154,25 @@ impl ZStatsAppState {
     /// The removal proper, minus the file write — `true` when the list
     /// actually changed.
     fn drop_alert(&mut self, seq: u64) -> bool {
-        let before = self.alerts.len();
-        self.alerts.retain(|seen| seen.seq != seq);
-        self.alerts.len() != before
+        let Some(index) = self.alerts.iter().position(|seen| seen.seq == seq) else {
+            return false;
+        };
+        let Some(seen) = self.alerts.remove(index) else {
+            return false;
+        };
+        // Out of the list, into the record: the day's file keeps it
+        // with the acknowledgement, so the week still says it fired.
+        self.dismissed_today.push(alertlog::Restored {
+            event: seen.event,
+            first_at: seen.first_at,
+            at: seen.at,
+            reports: seen.reports,
+            dismissed: true,
+        });
+        if self.dismissed_today.len() > MAX_ALERTS {
+            self.dismissed_today.remove(0);
+        }
+        true
     }
 
     /// Retire episodes that are no longer today's. The file already
@@ -1167,10 +1202,18 @@ impl ZStatsAppState {
         let Some(today) = alertlog::local_date(now) else {
             return false;
         };
-        let before = self.alerts.len();
+        let before = self.alerts.len() + self.dismissed_today.len();
         self.alerts
             .retain(|seen| alertlog::local_date(seen.at).as_deref() == Some(today.as_str()));
-        self.alerts.len() != before
+        self.dismissed_today
+            .retain(|e| alertlog::local_date(e.at).as_deref() == Some(today.as_str()));
+        let retired = self.alerts.len() + self.dismissed_today.len() != before;
+        if retired {
+            // Yesterday is now a past day: its file was written as it
+            // happened, so the record only needs re-reading.
+            self.refresh_alert_history();
+        }
+        retired
     }
 
     fn persist_alerts(&self) {
@@ -1182,9 +1225,29 @@ impl ZStatsAppState {
                 first_at: seen.first_at,
                 at: seen.at,
                 reports: seen.reports,
+                dismissed: false,
             })
+            .chain(self.dismissed_today.iter().map(|e| alertlog::Restored {
+                event: e.event.clone(),
+                first_at: e.first_at,
+                at: e.at,
+                reports: e.reports,
+                dismissed: true,
+            }))
             .collect();
         alertlog::save(&episodes);
+    }
+
+    /// The past week's record, newest day first, today excluded.
+    pub fn alert_history(&self) -> &[alertlog::DayLog] {
+        &self.alert_history
+    }
+
+    /// Re-read the past days' files. A handful of small files, read on
+    /// the events that can change what they say — launch, entering the
+    /// tab, the day turning — never per frame.
+    pub fn refresh_alert_history(&mut self) {
+        self.alert_history = alertlog::recent(ALERT_HISTORY_DAYS);
     }
 
     /// The most recent collection, or `None` before the first one lands.
@@ -2068,6 +2131,12 @@ impl ZStatsAppState {
             // a stale "today" is worse than a moment's wait.
             if tab == Tab::History {
                 self.load_history(cx);
+            }
+            // The past week's files are small and change only at
+            // midnight; re-reading them on the way into the tab is
+            // what keeps a day-old photograph from being the record.
+            if tab == Tab::Alerts {
+                self.refresh_alert_history();
             }
             // Apps / Overview titles need the full ppid chain and the
             // process groups for a job face. Kick it here so the first
@@ -3191,6 +3260,7 @@ mod tests {
             first_at: morning,
             at: morning,
             reports: 2,
+            dismissed: false,
         }]);
         assert_eq!(state.alerts().len(), 1);
 
@@ -3222,6 +3292,7 @@ mod tests {
             first_at: SystemTime::now() - Duration::from_secs(7200),
             at: SystemTime::now() - Duration::from_secs(7200),
             reports: 1,
+            dismissed: false,
         }]);
         assert!(!state.alerts()[0].live, "restored is read-only");
 

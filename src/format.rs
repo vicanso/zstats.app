@@ -5,7 +5,7 @@
 //! live apart from the views and are unit-tested. Lives at the crate root
 //! rather than under `views` because the tray title needs [`pct`] too.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const KIB: f64 = 1024.0;
 const MIB: f64 = 1024.0 * 1024.0;
@@ -150,6 +150,22 @@ pub fn memory_signed(delta: i64) -> String {
     }
 }
 
+/// A wall-clock instant as the local time of day, `14:20`. For a line
+/// in a day's record, where the date is the heading and the hour is
+/// the only thing left to say. `--:--` for an instant with no calendar
+/// (before the epoch), which a record never legitimately carries.
+pub fn clock(t: SystemTime) -> String {
+    let Ok(since) = t.duration_since(UNIX_EPOCH) else {
+        return "--:--".into();
+    };
+    let Ok(stamp) = jiff::Timestamp::from_second(since.as_secs().min(i64::MAX as u64) as i64)
+    else {
+        return "--:--".into();
+    };
+    let zoned = stamp.to_zoned(jiff::tz::TimeZone::system());
+    format!("{:02}:{:02}", zoned.hour(), zoned.minute())
+}
+
 /// Disk-style capacity, promoting to TB past a terabyte.
 ///
 /// Below 1 GiB this used to round to `0 GB`, so a 400 MB installer
@@ -282,6 +298,17 @@ pub fn span(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_reads_the_local_hour_and_minute() {
+        let noon = jiff::civil::date(2026, 8, 22)
+            .at(14, 20, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .unwrap();
+        let at = UNIX_EPOCH + Duration::from_secs(noon.timestamp().as_second() as u64);
+        assert_eq!(clock(at), "14:20");
+        assert_eq!(clock(UNIX_EPOCH - Duration::from_secs(1)), "--:--");
+    }
 
     #[test]
     fn memory_signed_carries_the_sign() {

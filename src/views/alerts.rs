@@ -15,6 +15,7 @@
 //! collector reloads `[alerts]` in place.
 
 use super::widgets::{self, card};
+use crate::alertlog::{self, DayLog};
 use crate::assets;
 use crate::confirm;
 use crate::font;
@@ -45,7 +46,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     if live.is_empty() && earlier.is_empty() && holdings.is_empty() {
         // An empty list is indistinguishable from a broken watcher unless
         // it says what it is armed with — so quote the thresholds in force.
-        return vec![empty_card(state)];
+        // The week's record still follows: a quiet today is not a quiet
+        // week, and "how often does this fire" is asked on quiet days.
+        let mut cards = vec![empty_card(state)];
+        cards.extend(past_days_block(state.alert_history()));
+        return cards;
     }
 
     let mut now: Vec<AnyElement> = live.iter().copied().map(|s| alert_card(s, state)).collect();
@@ -63,6 +68,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // Watching belongs here too, not only on the empty list: otherwise
     // one episode leaves half the panel blank and hides what is armed.
     cards.extend(armed_block(state));
+    cards.extend(past_days_block(state.alert_history()));
     cards.push(widgets::note(i18n::tr("alerts.footer_note")));
     cards
 }
@@ -115,6 +121,137 @@ fn earlier_heading() -> AnyElement {
         .text_color(theme::text_dim())
         .child(i18n::tr("alerts.earlier"))
         .into_any_element()
+}
+
+/// Rows a day shows before folding the rest into "+N more": enough to
+/// read a busy day, not enough for one day to push the week off the
+/// panel.
+const PAST_ROWS_PER_DAY: usize = 6;
+
+/// The past week, read-only: a heading, then one shell per day with a
+/// line per episode — time, severity as the dot the cards use, subject,
+/// kind, and "dismissed" where the card was acknowledged. No buttons,
+/// no expansion: the pids are history and nothing here can be acted on.
+/// Empty days are not listed; an empty week says so, and says that it
+/// only knows what this app saw.
+fn past_days_block(days: &[DayLog]) -> Vec<AnyElement> {
+    let mut out = vec![past_heading()];
+    if days.is_empty() {
+        out.push(widgets::note(i18n::tr("alerts.past_none")));
+        return out;
+    }
+    out.extend(days.iter().map(past_day_card));
+    out
+}
+
+fn past_heading() -> AnyElement {
+    h_flex()
+        .items_center()
+        .gap(px(4.))
+        .px(px(13.))
+        .child(
+            div()
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text_dim())
+                .child(i18n::tr("alerts.past_days")),
+        )
+        .child(widgets::info_icon(
+            "alerts-past-info",
+            i18n::tr("alerts.past_tip"),
+        ))
+        .into_any_element()
+}
+
+fn past_day_card(day: &DayLog) -> AnyElement {
+    let count = day.episodes.len();
+    let count_text = if count == 1 {
+        i18n::tr("alerts.past_count_one")
+    } else {
+        t!("alerts.past_count", count = count).to_string()
+    };
+    let shown = count.min(PAST_ROWS_PER_DAY);
+    let hidden = count - shown;
+    widgets::list_shell()
+        .child(widgets::list_header(
+            day.date.clone(),
+            Some(widgets::note(count_text)),
+        ))
+        .children(
+            day.episodes
+                .iter()
+                .take(shown)
+                .enumerate()
+                .map(|(i, e)| past_row(e, i + 1 == shown && hidden == 0)),
+        )
+        .when(hidden > 0, |d| {
+            d.child(div().px(px(13.)).py(px(6.)).child(widgets::note(
+                t!("alerts.past_more", count = hidden).to_string(),
+            )))
+        })
+        .into_any_element()
+}
+
+fn past_row(e: &alertlog::Restored, last: bool) -> AnyElement {
+    let critical = e.event.severity() == Severity::Critical;
+    h_flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(13.))
+        .py(px(5.))
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .child(
+            div()
+                .flex_none()
+                .font_family(font::MONO)
+                .text_size(px(10.))
+                .text_color(theme::text_dim())
+                .child(format::clock(e.at)),
+        )
+        // Severity as the cards paint it: accent past the line, ink
+        // otherwise — the one colour rule every threshold shares.
+        .child(
+            div()
+                .flex_none()
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(theme::fill_for(critical)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(11.))
+                .text_color(theme::text())
+                .child(subject_label(&e.event.subject)),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(9.5))
+                .text_color(theme::tiny_label(theme::text_muted()))
+                .child(i18n::tr(past_kind_key(e.event.kind()))),
+        )
+        .children(
+            e.dismissed
+                .then(|| widgets::outline_pill(i18n::tr("alerts.past_dismissed"))),
+        )
+        .into_any_element()
+}
+
+fn past_kind_key(kind: AlertKind) -> &'static str {
+    match kind {
+        AlertKind::Cpu => "alerts.kind_cpu",
+        AlertKind::Memory => "alerts.kind_mem",
+        AlertKind::AppCpu => "alerts.kind_app_cpu",
+        AlertKind::AppMemory => "alerts.kind_app_mem",
+        AlertKind::Disk => "alerts.kind_disk",
+        AlertKind::Pressure => "alerts.kind_pressure",
+    }
 }
 
 /// One episode card. Keyed by the episode's own id, never by position:
