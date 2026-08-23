@@ -155,9 +155,9 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 .child(widgets::truncating_name(
                     ("top-app-name", g.root_pid as usize),
                     // Face, not [`trend::tree_key`]: a login compile
-                    // shows as rustc. The rise is still looked up on
+                    // shows as cargo. The rise is still looked up on
                     // the launchd child so the hour does not split.
-                    trend::tree_face(g, topology, processes),
+                    trend::tree_face(g, topology, processes, state.member_pgids()),
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),

@@ -219,6 +219,7 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 - **字体**：系统字体做 UI，JetBrains Mono 做指标数字（等宽数位，跳动时不会左右抖）。设计指定的 Archivo 未采用。
 - **Config tab 可写**。开关和间隔走 `apply_add` 后重建 `Monitor`（速率基线会丢，下一次采样的速率是 —）；告警基值走 `reload_settings()`，和 Alerts 卡片同一条路径。
 - **Apps 展开列出整棵树的成员**。`ProcessGroupSnapshot` 只有汇总；成员靠对全表走 parent 指针还原。常驻 tick 只物化 `max-processes`，所以点击展开时若 live 表不够，会另采一次不带 CPU 基线的全表（不重建 Monitor、不拉长 `max-processes`）。已在 top-N 里的 pid 继续画 tick 上的 CPU，其余显示 `—`。
+- **Apps / Overview 的行标题是「脸」，不是树的 key**（`trend::tree_face`）。根是裸可执行文件（无 bundle、`display_name` 为 `None`：login、sshd-session、tmux、守护进程）的树，按**内核的进程组**命名：job-control shell 给每个敲下的命令一个新 pgid，它 fork 的一切都继承，于是 `login → zsh → cargo → rustc×10` 是 `{login}`、`{zsh}`、`{cargo, rustc…}` 三个组，按组合计 CPU、取最大组（须 ≥ 树的 1/3）的组长——`cargo`：你敲的那个、退出会落到的那个，而且整个构建期间稳定，不论此刻一个还是十个 rustc、尾部是不是 `rustc → cc → ld`。曾经的做法是一张 shell 名单 + 找单个最热进程，两处都错：名单永远不全（nushell、sshd-session、sudo、caffeinate），而并行构建里没有一个 rustc 过得了 1/3，树最热的时候脸反而停在 `login`；也考虑过「沿闲置的单子节点往下钻」，但它在构建头尾抖（单个 rustc 时是 `rustc`，链接时是 `ld`）。组长就是 job，没有名单。`sudo make` 的脸是 `sudo`——组长，诚实且稳定。**门禁是 bundle 而不是名字**：根有 bundle 的是应用，哪怕某个渲染进程自成一组烧满整棵树，行仍然是那个应用。pgid 不在 zstats 的快照里，由 `procscan::process_groups`（同一个 `sysctl(KERN_PROC_ALL)`，`e_pgid` 紧挨 `e_ppid`）和成员表在同一次后台采集里一起取、一起落到 `MemberTable::Ready`，所以脸和展开行描述的是同一瞬间；表落地前树保持自己的名字。有一个针对偏移量的自检测试：本进程在表里的 pgid 必须等于 `getpgid(0)`。
 - 设计稿里的假菜单栏和右下角说明文字不实现 —— 那是设计稿自己的展示环境。
 
 ## 日志（`logger.rs`）

@@ -170,6 +170,33 @@ const OFF_COMM: usize = 243;
 const COMM_LEN: usize = 17;
 /// `kp_eproc.e_ppid`
 const OFF_PPID: usize = 560;
+/// `kp_eproc.e_pgid` — the next field of `struct eproc`
+const OFF_PGID: usize = 564;
+
+/// pid → process group id for every process in the table: the kernel's
+/// own job boundaries, read for `trend::tree_face`.
+///
+/// A job-control shell puts each command it launches in a fresh process
+/// group, and everything that command forks inherits it — `cargo` and
+/// its ten `rustc`s share one pgid, the idle `zsh` above them has its
+/// own. That is the fact the face needs ("which job is this tree's
+/// CPU"), and it is process *state*, which is what this module reads;
+/// zstats' snapshots do not carry it. Same single syscall as [`scan`],
+/// no accounting. Empty when the table cannot be read.
+pub fn process_groups() -> HashMap<u32, u32> {
+    let Some(raw) = all_processes() else {
+        return HashMap::new();
+    };
+    raw.as_chunks::<KINFO_PROC_SIZE>()
+        .0
+        .iter()
+        .filter_map(|chunk| {
+            let pid = read_i32(chunk, OFF_PID);
+            let pgid = read_i32(chunk, OFF_PGID);
+            (pid > 0 && pgid > 0).then_some((pid as u32, pgid as u32))
+        })
+        .collect()
+}
 
 fn parse_entry(chunk: &[u8]) -> Option<AbnormalProcess> {
     let state = match u32::from(chunk[OFF_STAT]) {
@@ -215,6 +242,18 @@ fn read_name(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one offset the face depends on, checked against the kernel's
+    /// own answer for this process: a wrong `OFF_PGID` would not error,
+    /// it would quietly file every process under a garbage job.
+    #[test]
+    fn the_pgid_offset_agrees_with_getpgid() {
+        let table = process_groups();
+        let me = std::process::id();
+        let kernel = unsafe { libc::getpgid(0) };
+        assert!(kernel > 0, "getpgid should answer for our own pid");
+        assert_eq!(table.get(&me).copied(), Some(kernel as u32));
+    }
 
     #[test]
     fn scanning_the_live_system_is_consistent() {

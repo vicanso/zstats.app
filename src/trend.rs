@@ -140,30 +140,48 @@ pub fn tree_key(g: &ProcessGroupSnapshot) -> &str {
     g.display_name.as_deref().unwrap_or(&g.name)
 }
 
-/// A descendant must own at least this share of the tree's CPU before
-/// a session-leader row wears its name. Below a third, the session is
-/// still the story (idle `login` + a 2% compile is not "rustc").
+/// A job must own at least this share of the tree's CPU before the row
+/// wears its leader's name. Below a third, the session is still the
+/// story (idle `login` + a 2% compile is not "cargo").
 const FACE_SHARE: f32 = 1.0 / 3.0;
 
-/// What the list should call this tree. Session leaders (`login`,
-/// `zsh`, …) whose CPU is a descendant's show that program — a compile
-/// started from Zed's terminal is `rustc`, not `login`. [`tree_key`]
-/// stays on the launchd child so the hour-window and the alert bars
-/// do not jump mid-compile.
+/// What the list should call this tree.
+///
+/// A tree rooted in a bare executable — no bundle, so no `display_name`:
+/// `login`, `sshd-session`, `tmux`, a daemon — is named after the **job**
+/// its CPU belongs to. A job is the kernel's own unit: a job-control
+/// shell gives every command it launches a fresh process group, and what
+/// that command forks inherits it. So `login → zsh → cargo → rustc × 10`
+/// is three groups — `{login}`, `{zsh}`, `{cargo, rustc…}` — and the
+/// hot one's leader is `cargo`: what was typed, what a quit would land
+/// on, and stable for the whole build whether one `rustc` is running or
+/// ten, or the tail is `rustc → cc → ld`. No list of shell names: the
+/// shell is just a ~0% group, whatever it is called. A wrapper that
+/// leads the job (`sudo make`) is the face — honest, and stable.
+///
+/// A bundle root is an application, and its helpers are its own
+/// business: a renderer in its own process group must not rebrand the
+/// app it belongs to, so the gate is structural, not a name.
+///
+/// [`tree_key`] stays on the launchd child so the hour-window and the
+/// alert bars do not jump mid-compile.
 ///
 /// `topology` is who belongs to the tree (the expansion's full table
 /// when we have one — ppid chains intact — otherwise the tick). `live`
 /// is who has a rate this tick: overlay those percentages when scoring
-/// the hog, same as the member rows. A one-pass listing's CPU is 0 by
+/// the jobs, same as the member rows. A one-pass listing's CPU is 0 by
 /// construction and must not decide the name; empty `live` falls back
-/// to whatever `topology` itself carried.
+/// to whatever `topology` itself carried. `pgids` is pid → process
+/// group from the same photograph (`procscan::process_groups`); empty
+/// before the table lands, and the tree keeps its own name until then.
 pub fn tree_face(
     g: &ProcessGroupSnapshot,
     topology: &[ProcessSnapshot],
     live: &[ProcessSnapshot],
+    pgids: &HashMap<u32, u32>,
 ) -> String {
     let presented = tree_key(g);
-    if !is_session_leader(&g.name) {
+    if g.display_name.is_some() || pgids.is_empty() {
         return presented.to_string();
     }
     let tree_cpu = g.cpu_usage_percent;
@@ -172,24 +190,52 @@ pub fn tree_face(
     }
     let live_cpu: HashMap<u32, f32> = live.iter().map(|p| (p.pid, p.cpu_usage_percent)).collect();
     let cpu_of = |p: &ProcessSnapshot| live_cpu.get(&p.pid).copied().unwrap_or(p.cpu_usage_percent);
-    let Some(hog) = fullscan::tree_members(g.root_pid, topology)
-        .into_iter()
-        .filter(|p| !is_session_leader(&p.name))
-        .max_by(|a, b| cpu_of(a).total_cmp(&cpu_of(b)))
-    else {
+    let members = fullscan::tree_members(g.root_pid, topology);
+    // A member the photograph does not know is a job of its own.
+    let job_of = |p: &ProcessSnapshot| pgids.get(&p.pid).copied().unwrap_or(p.pid);
+    let mut by_job: HashMap<u32, f32> = HashMap::new();
+    for m in &members {
+        *by_job.entry(job_of(m)).or_default() += cpu_of(m);
+    }
+    let Some((&job, &cpu)) = by_job.iter().max_by(|a, b| a.1.total_cmp(b.1)) else {
         return presented.to_string();
     };
-    if cpu_of(hog) / tree_cpu < FACE_SHARE {
+    if cpu / tree_cpu < FACE_SHARE {
         return presented.to_string();
     }
-    hog.display_name.clone().unwrap_or_else(|| hog.name.clone())
-}
-
-pub(crate) fn is_session_leader(name: &str) -> bool {
-    matches!(
-        name,
-        "login" | "zsh" | "bash" | "fish" | "tmux" | "sh" | "-zsh" | "-bash" | "-fish" | "-sh"
-    )
+    // The leader (pid == pgid) while the tree still has it. A job whose
+    // leader exited keeps running under its pgid — name the member
+    // nearest the root, which is the one the rest descend from.
+    let parent_of: HashMap<u32, u32> = members
+        .iter()
+        .filter_map(|p| p.parent_pid.map(|pp| (p.pid, pp)))
+        .collect();
+    let depth = |pid: u32| {
+        let mut pid = pid;
+        let mut steps = 0u32;
+        while pid != g.root_pid && steps < 64 {
+            match parent_of.get(&pid) {
+                Some(&pp) => pid = pp,
+                None => break,
+            }
+            steps += 1;
+        }
+        steps
+    };
+    let face = members
+        .iter()
+        .find(|m| m.pid == job)
+        .or_else(|| {
+            members
+                .iter()
+                .filter(|m| job_of(m) == job)
+                .min_by_key(|m| depth(m.pid))
+        })
+        .copied();
+    match face {
+        Some(p) => p.display_name.clone().unwrap_or_else(|| p.name.clone()),
+        None => presented.to_string(),
+    }
 }
 
 impl AppTrend {
@@ -395,11 +441,18 @@ mod tests {
         }
     }
 
-    /// A compile started from a login shell is the news; the session
-    /// leader is not. [`tree_key`] stays `login` so the trend does not
-    /// jump when rustc exits.
+    /// `login`, `zsh` and the job are three process groups; the job's
+    /// members share the leader's pid.
+    fn jobs(pairs: &[(u32, u32)]) -> HashMap<u32, u32> {
+        pairs.iter().copied().collect()
+    }
+
+    /// The classic session: login and zsh in groups of their own, the
+    /// compile in cargo's. The face is the job's leader — what was
+    /// typed — not the compiler doing the work. [`tree_key`] stays
+    /// `login` so the trend does not jump when the build ends.
     #[test]
-    fn a_login_tree_dominated_by_rustc_wears_rustc() {
+    fn a_login_tree_wears_the_job_not_the_compiler() {
         let g = group(10, "login", 100.0);
         let table = vec![
             proc(10, Some(1), "login", 0.0),
@@ -407,8 +460,57 @@ mod tests {
             proc(12, Some(11), "cargo", 0.2),
             proc(13, Some(12), "rustc", 99.7),
         ];
+        let pg = jobs(&[(10, 10), (11, 11), (12, 12), (13, 12)]);
         assert_eq!(tree_key(&g), "login");
-        assert_eq!(tree_face(&g, &table, &[]), "rustc");
+        assert_eq!(tree_face(&g, &table, &[], &pg), "cargo");
+    }
+
+    /// The case the old "hottest single process" rule got wrong: a
+    /// parallel build where no one compiler passes the share, yet the
+    /// job as a whole is the entire tree. And the tail of the same
+    /// build — one rustc handing to cc handing to ld — reads the same.
+    #[test]
+    fn a_parallel_build_and_its_link_stage_wear_the_same_name() {
+        let g = group(10, "login", 100.0);
+        let parallel = vec![
+            proc(10, Some(1), "login", 0.0),
+            proc(11, Some(10), "zsh", 0.0),
+            proc(12, Some(11), "cargo", 1.0),
+            proc(13, Some(12), "rustc", 33.0),
+            proc(14, Some(12), "rustc", 33.0),
+            proc(15, Some(12), "rustc", 33.0),
+        ];
+        let pg = jobs(&[(10, 10), (11, 11), (12, 12), (13, 12), (14, 12), (15, 12)]);
+        assert_eq!(tree_face(&g, &parallel, &[], &pg), "cargo");
+
+        let linking = vec![
+            proc(10, Some(1), "login", 0.0),
+            proc(11, Some(10), "zsh", 0.0),
+            proc(12, Some(11), "cargo", 0.0),
+            proc(13, Some(12), "rustc", 0.0),
+            proc(16, Some(13), "cc", 0.0),
+            proc(17, Some(16), "ld", 100.0),
+        ];
+        let pg = jobs(&[(10, 10), (11, 11), (12, 12), (13, 12), (16, 12), (17, 12)]);
+        assert_eq!(tree_face(&g, &linking, &[], &pg), "cargo");
+    }
+
+    /// No list of shell names: an SSH session and a wrapper-led job are
+    /// handled by the same group arithmetic. `sudo` leads its job, so
+    /// `sudo` is the face — stable, and what a quit would reach first.
+    #[test]
+    fn any_bare_root_and_any_wrapper_follow_the_groups() {
+        let g = group(20, "sshd-session", 90.0);
+        let table = vec![
+            proc(20, Some(1), "sshd-session", 0.0),
+            proc(21, Some(20), "nu", 0.0),
+            proc(22, Some(21), "sudo", 0.0),
+            proc(23, Some(22), "make", 2.0),
+            proc(24, Some(23), "cc", 44.0),
+            proc(25, Some(23), "cc", 44.0),
+        ];
+        let pg = jobs(&[(20, 20), (21, 21), (22, 22), (23, 22), (24, 22), (25, 22)]);
+        assert_eq!(tree_face(&g, &table, &[], &pg), "sudo");
     }
 
     #[test]
@@ -419,22 +521,31 @@ mod tests {
             proc(11, Some(10), "zsh", 0.1),
             proc(12, Some(11), "rustc", 2.0),
         ];
-        assert_eq!(tree_face(&g, &table, &[]), "login");
+        let pg = jobs(&[(10, 10), (11, 11), (12, 12)]);
+        assert_eq!(tree_face(&g, &table, &[], &pg), "login");
     }
 
+    /// A bundle root is an application. Even when one renderer sits in
+    /// a process group of its own and burns the whole tree, the row is
+    /// still the app — the gate is the bundle, not a name.
     #[test]
     fn a_real_app_is_not_rebranded() {
         let mut g = group(1, "Electron", 40.0);
         g.display_name = Some("CodeBuddy CN".into());
+        let table = vec![
+            proc(1, Some(0), "Electron", 0.0),
+            proc(2, Some(1), "Electron Helper (Renderer)", 40.0),
+        ];
+        let pg = jobs(&[(1, 1), (2, 2)]);
         assert_eq!(tree_key(&g), "CodeBuddy CN");
-        assert_eq!(tree_face(&g, &[], &[]), "CodeBuddy CN");
+        assert_eq!(tree_face(&g, &table, &[], &pg), "CodeBuddy CN");
     }
 
     /// The expansion's full table is one-pass: every CPU is 0. The
     /// member rows already overlay the tick; the face must too, or a
     /// `login` whose cargo is 17% of 17% stays titled `login`.
     #[test]
-    fn a_login_tree_scores_the_hog_from_live_cpu() {
+    fn a_login_tree_scores_the_job_from_live_cpu() {
         let g = group(10, "login", 17.0);
         let topology = vec![
             proc(10, Some(1), "login", 0.0),
@@ -442,23 +553,41 @@ mod tests {
             proc(12, Some(11), "cargo", 0.0),
             proc(13, Some(12), "rustc", 0.0),
         ];
-        let live = vec![proc(12, Some(11), "cargo", 17.0)];
-        assert_eq!(tree_face(&g, &topology, &[]), "login");
-        assert_eq!(tree_face(&g, &topology, &live), "cargo");
+        let pg = jobs(&[(10, 10), (11, 11), (12, 12), (13, 12)]);
+        let live = vec![proc(13, Some(12), "rustc", 17.0)];
+        assert_eq!(tree_face(&g, &topology, &[], &pg), "login");
+        assert_eq!(tree_face(&g, &topology, &live, &pg), "cargo");
     }
 
-    /// The tick's top-N usually drops the idle shell. cargo is sitting
-    /// right there with the tree's 17%, but `tree_members` will not
-    /// guess a broken ppid chain — which is why a collapsed row reads
-    /// `login` until the full table lands.
+    /// A job outlives its leader: `cargo` exits the moment it finishes
+    /// handing out work to a detached helper. The group is still the
+    /// hot one; its topmost surviving member is the face.
     #[test]
-    fn a_tick_missing_the_shell_cannot_name_the_hog() {
+    fn a_job_whose_leader_is_gone_names_its_topmost_member() {
+        let g = group(10, "login", 50.0);
+        let table = vec![
+            proc(10, Some(1), "login", 0.0),
+            proc(11, Some(10), "zsh", 0.0),
+            proc(13, Some(11), "rustc", 10.0),
+            proc(16, Some(13), "cc", 40.0),
+        ];
+        let pg = jobs(&[(10, 10), (11, 11), (13, 12), (16, 12)]);
+        assert_eq!(tree_face(&g, &table, &[], &pg), "rustc");
+    }
+
+    /// The tick's top-N usually drops the idle shell, and the tick
+    /// carries no process groups at all — which is why a collapsed row
+    /// reads `login` until the full table lands, and not a guess.
+    #[test]
+    fn a_tick_without_the_photograph_cannot_name_the_job() {
         let g = group(10, "login", 17.0);
         let tick = vec![
             proc(10, Some(1), "login", 0.0),
             proc(12, Some(11), "cargo", 17.0),
         ];
-        assert_eq!(tree_face(&g, &tick, &tick), "login");
+        assert_eq!(tree_face(&g, &tick, &tick, &HashMap::new()), "login");
+        let pg = jobs(&[(10, 10), (12, 12)]);
+        assert_eq!(tree_face(&g, &tick, &tick, &pg), "login");
     }
 
     #[test]

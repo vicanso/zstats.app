@@ -78,8 +78,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let filter = state.proc_filter_text();
     if !filter.is_empty() {
-        // Bundle, executable, or the face a session-leader tree wears
-        // (a `login` compile shows as `rustc`).
+        // Bundle, executable, or the job face a bare tree wears (a
+        // `login` compile shows as `cargo`).
         rows.retain(|g| {
             g.name.to_lowercase().contains(filter)
                 || trend::tree_key(g).to_lowercase().contains(filter)
@@ -300,17 +300,22 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
-/// Tick rates, plus the full table once Apps has asked for topology
-/// (a session-leader face, or an expansion). The listing is one-pass
-/// (CPU 0); the face scores the hog from the tick, same overlay the
-/// member rows already paint.
+/// Tick rates, plus the full table and its process groups once Apps has
+/// asked for topology (a job face, or an expansion). The listing is
+/// one-pass (CPU 0); the face scores the jobs from the tick, same
+/// overlay the member rows already paint.
 fn face_of(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> String {
     let live = state
         .latest()
         .and_then(|t| t.snapshot.processes.as_deref())
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    trend::tree_face(g, state.member_processes().unwrap_or(live), live)
+    trend::tree_face(
+        g,
+        state.member_processes().unwrap_or(live),
+        live,
+        state.member_pgids(),
+    )
 }
 
 fn app_row(
@@ -345,7 +350,7 @@ fn app_row(
                 .gap(px(8.))
                 .child(widgets::truncating_name(
                     ("app-name", root_pid as usize),
-                    // Bundle name, or a session-leader's hog (`rustc`
+                    // Bundle name, or a bare tree's job (`cargo`
                     // instead of `login`). The matchable name stays in
                     // the expansion, beside the bars that key on it.
                     face,

@@ -37,9 +37,9 @@ use std::mem;
 use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zstats::settings::FileConfig;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
@@ -582,13 +582,13 @@ pub struct FullAppScanData {
 ///
 /// CPU on this table is unusable (one pass, no baseline) — the expansion
 /// paints rates from the tick when the pid is there, and `—` otherwise.
-/// Same photograph feeds session-leader faces (`login` → `cargo`): the
-/// tick drops the idle shell, so a collapsed row cannot walk login →
-/// zsh → cargo until this lands. Hide still drops it; collapse does
-/// not, or folding would rename the row back to `login`. While Apps or
-/// Overview is on screen (or a row is held open) it refreshes on the
-/// process cadence ([`metrics::PANEL_PROCESS_INTERVAL`]), not the 2s
-/// CPU tick.
+/// Same photograph feeds the job faces (`login` → `cargo`): the tick
+/// drops the idle shell and carries no process groups, so a collapsed
+/// row cannot name its job until this lands. Hide still drops it;
+/// collapse does not, or folding would rename the row back to `login`.
+/// While Apps or Overview is on screen (or a row is held open) it
+/// refreshes on the process cadence ([`metrics::PANEL_PROCESS_INTERVAL`]),
+/// not the 2s CPU tick.
 #[derive(Default)]
 pub enum MemberTable {
     #[default]
@@ -596,6 +596,10 @@ pub enum MemberTable {
     Running,
     Ready {
         processes: Arc<Vec<ProcessSnapshot>>,
+        /// pid → process group, taken in the same breath as the table
+        /// (`procscan::process_groups`): the kernel's job boundaries
+        /// that `trend::tree_face` names a bare tree by.
+        pgids: Arc<HashMap<u32, u32>>,
         at: Instant,
         /// A refresh in flight keeps the last photograph on screen.
         refreshing: bool,
@@ -969,9 +973,9 @@ impl ZStatsAppState {
         self.prune_stale_alerts();
         self.maybe_auto_check_update(cx);
         // Views cannot start work. Hide drops the table. A still-open
-        // expansion, or a session-leader face the tick cannot name,
-        // asks from here so the row title is `cargo` before anyone
-        // clicks, and a 15s-old photograph is replaced.
+        // expansion, or a job face the tick cannot name, asks from here
+        // so the row title is `cargo` before anyone clicks, and a
+        // 15s-old photograph is replaced.
         self.ensure_apps_topology(cx);
         cx.notify();
         fresh
@@ -1962,9 +1966,9 @@ impl ZStatsAppState {
             if tab == Tab::History {
                 self.load_history(cx);
             }
-            // Apps / Overview titles need the full ppid chain for a
-            // session-leader face. Kick it here so the first paint after
-            // the switch is not waiting on the next collector tick.
+            // Apps / Overview titles need the full ppid chain and the
+            // process groups for a job face. Kick it here so the first
+            // paint after the switch is not waiting on the next tick.
             if matches!(tab, Tab::Apps | Tab::Overview) {
                 self.ensure_apps_topology(cx);
             }
@@ -2524,7 +2528,7 @@ impl ZStatsAppState {
         if self.selected_app == Some(root_pid) {
             self.selected_app = None;
             // Keep the photograph: collapsing must not rename a
-            // session-leader row back to `login`. Hide still drops it.
+            // job-faced row back to `login`. Hide still drops it.
         } else {
             self.selected_app = Some(root_pid);
             if matches!(self.member_table, MemberTable::Failed) {
@@ -2536,12 +2540,23 @@ impl ZStatsAppState {
         cx.notify();
     }
 
-    /// The uncapped process table, once Apps/Overview needed a
-    /// session-leader face or an expansion asked for members.
+    /// The uncapped process table, once Apps/Overview needed a job face
+    /// or an expansion asked for members.
     pub fn member_processes(&self) -> Option<&[ProcessSnapshot]> {
         match &self.member_table {
             MemberTable::Ready { processes, .. } => Some(processes.as_slice()),
             _ => None,
+        }
+    }
+
+    /// The process groups from the same photograph — empty until it
+    /// lands, which `trend::tree_face` reads as "keep the tree's own
+    /// name".
+    pub fn member_pgids(&self) -> &HashMap<u32, u32> {
+        static NONE: LazyLock<HashMap<u32, u32>> = LazyLock::new(HashMap::new);
+        match &self.member_table {
+            MemberTable::Ready { pgids, .. } => pgids,
+            _ => &NONE,
         }
     }
 
@@ -2566,10 +2581,10 @@ impl ZStatsAppState {
     }
 
     /// Fetch the full table when the live top-N cannot name the tree
-    /// (members *or* a session-leader face), and again when a held
-    /// photograph is older than the process cadence. A 2-process Finder
-    /// is already complete; Chrome's helpers and a `login` compile whose
-    /// `zsh` was ranked out are why the first fetch exists.
+    /// (members *or* a job face), and again when a held photograph is
+    /// older than the process cadence. A 2-process Finder is already
+    /// complete; Chrome's helpers and a `login` compile whose `zsh` was
+    /// ranked out are why the first fetch exists.
     fn ensure_apps_topology(&mut self, cx: &mut Context<Self>) {
         if let Some(pid) = self.selected_app
             && let Some(n) = self.group_process_count(pid)
@@ -2582,31 +2597,23 @@ impl ZStatsAppState {
         if !visible || !matches!(self.tab, Tab::Apps | Tab::Overview) {
             return;
         }
-        if let Some((root, n)) = self.session_leader_needing_topology() {
+        if let Some((root, n)) = self.bare_tree_needing_topology() {
             self.ensure_member_table(root, n, cx);
         }
     }
 
-    /// A session-leader group whose descendants are not all in the tick:
-    /// the idle shell was ranked out, so `tree_face` cannot walk to cargo.
-    fn session_leader_needing_topology(&self) -> Option<(u32, u32)> {
+    /// A bare-rooted tree (no bundle) with company and CPU: its face is
+    /// the job holding that CPU, and the job boundaries come only with
+    /// the photograph — the tick carries no process groups, and usually
+    /// not the idle shell either. Not gated on "members missing from the
+    /// tick" any more: a tree fully present in the tick still has no
+    /// pgids there.
+    fn bare_tree_needing_topology(&self) -> Option<(u32, u32)> {
         let tick = self.latest.as_ref()?;
         let groups = tick.snapshot.process_groups.as_deref()?;
-        let processes = tick
-            .snapshot
-            .processes
-            .as_deref()
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
         groups.iter().find_map(|g| {
-            if !trend::is_session_leader(&g.name)
-                || g.cpu_usage_percent <= 0.0
-                || g.process_count <= 1
-            {
-                return None;
-            }
-            let named = fullscan::tree_members(g.root_pid, processes).len() as u32;
-            (named < g.process_count).then_some((g.root_pid, g.process_count))
+            (g.display_name.is_none() && g.cpu_usage_percent > 0.0 && g.process_count > 1)
+                .then_some((g.root_pid, g.process_count))
         })
     }
 
@@ -2653,25 +2660,39 @@ impl ZStatsAppState {
             }
         }
         cx.spawn(async move |this, cx| {
+            // The process groups come from the same background pass, so
+            // the face and the member rows describe one moment: a job
+            // read a tick later could name a pid the table no longer
+            // has, or miss the one it just gained.
             let listed = cx
                 .background_executor()
-                .spawn(async { fullscan::list_processes() })
+                .spawn(async {
+                    let processes = fullscan::list_processes()?;
+                    Ok::<_, zstats::CollectError>((processes, Arc::new(procscan::process_groups())))
+                })
                 .await;
             let _ = this.update(cx, |state, cx| {
                 if matches!(state.member_table, MemberTable::Off) {
                     return;
                 }
                 state.member_table = match listed {
-                    Ok(ps) => MemberTable::Ready {
-                        processes: ps,
+                    Ok((processes, pgids)) => MemberTable::Ready {
+                        processes,
+                        pgids,
                         at: Instant::now(),
                         refreshing: false,
                     },
                     Err(e) => {
                         tracing::warn!("app member listing failed: {e}");
                         match &state.member_table {
-                            MemberTable::Ready { processes, at, .. } => MemberTable::Ready {
+                            MemberTable::Ready {
+                                processes,
+                                pgids,
+                                at,
+                                ..
+                            } => MemberTable::Ready {
                                 processes: Arc::clone(processes),
+                                pgids: Arc::clone(pgids),
                                 at: *at,
                                 refreshing: false,
                             },
