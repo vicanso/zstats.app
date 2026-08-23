@@ -2,9 +2,9 @@
 
 English | [中文](README-zh.md)
 
-A macOS menu-bar system monitor: live CPU in the tray; process monitoring, threshold alerts and disk-space analysis in the panel, with safe reclamation of regenerable caches.
+A macOS menu-bar system monitor built around per-app rules: live CPU in the tray; process monitoring, threshold alerts each program can carry its own line for, and disk-space analysis with safe reclamation of regenerable caches.
 
-**A menu-bar monitor for macOS.** See what the machine is doing, get told when it matters, take the disk back.
+**A menu-bar monitor that watches your machine your way.** Different apps deserve different rules — set them per app, get told when *your* lines are crossed, take the disk back.
 
 The tray shows live CPU. Click for the panel — it tucks away when you look elsewhere. Collection, alerts and history run in-process on the [zstats](https://crates.io/crates/zstats) engine.
 
@@ -14,7 +14,7 @@ The tray shows live CPU. Click for the panel — it tucks away when you look els
 
 ## Why this one
 
-Most menu-bar monitors either paint pretty numbers or nag you. zstats does both, and then helps you act — disk full: find the 20 GB build cache and trash it the way Finder would (recoverable); memory tight: ask the biggest consumer to quit politely (⌘Q-equivalent).
+Most menu-bar monitors paint pretty numbers, nag you, or both — and they treat every program the same. zstats starts from the opposite premise: **monitoring is personal**. The browser you live in all day is allowed 200% CPU; the daemon you forgot about should speak up at 30% — so every threshold here can be set per app, right on the panel, with sensible built-in templates covering the common cases before you configure anything. It still paints the numbers, still tells you when it matters, and then helps you act — disk full: find the 20 GB build cache and trash it the way Finder would (recoverable); memory tight: ask the biggest consumer to quit politely (⌘Q-equivalent).
 
 ## Watch
 
@@ -30,7 +30,7 @@ Most menu-bar monitors either paint pretty numbers or nag you. zstats does both,
 The headline is **a base threshold combined with per-program ones**: one global line as the floor, and any program can carry its own — on one machine a browser may be allowed 200% CPU while a background daemon should speak up at 30%. A program's own line wins where set, the base line covers the rest, edited right on the panel. Built-in templates cover the common cases with sensible defaults, so **alerts are meaningful out of the box, before you configure anything**.
 
 - CPU, memory, disk and memory-pressure thresholds, evaluated by zstats' rule engine
-- **Slow burns get named too**: a process holding CPU for hours without ever crossing a line (25% for an hour, say) is called out by the sustained-load watcher — delivered as a silent banner, never a nag
+- **Slow burns get named too**: a process holding CPU for hours without ever crossing a line (25% for an hour, say) is called out by the sustained-load watcher — delivered as a silent banner, never a nag. How long counts as "sustained", and how far under the alert line the bar sits, are yours to set
 - Native notification banners; snooze an episode for 1 or 3 hours
 - Memory-pressure cards list the top consumers and offer a polite quit (⌘Q / SIGTERM — never SIGKILL)
 
@@ -61,7 +61,7 @@ Download `zstats.dmg` from [Releases](../../releases) and drag it into Applicati
 make bundle          # or build from source (needs cargo-bundle)
 ```
 
-Language, theme and panel opacity live in a settings window. The UI is fully bilingual; dark and light modes use native vibrancy.
+Language, theme, the tray's face, panel opacity and the sustained-load knobs live in a settings window. The UI is fully bilingual; dark and light modes use native vibrancy.
 
 ## Develop
 

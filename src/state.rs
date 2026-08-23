@@ -2103,6 +2103,14 @@ impl ZStatsAppState {
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
         self.member_table = MemberTable::Off;
+        // The question goes with the photograph. `ensure_apps_topology`
+        // keeps the member table fresh for a selected tree on every
+        // tick, ahead of its visibility gate — an expansion left
+        // selected across a hide kept the resident loop refetching the
+        // full table (footprints and all) every 15s with no panel on
+        // screen, which is how tray-resident CPU more than doubled.
+        // Collapse still keeps the selection; hide is the reset.
+        self.selected_app = None;
         cx.notify();
     }
 
