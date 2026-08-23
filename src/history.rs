@@ -104,6 +104,12 @@ pub struct Spender {
     /// for.
     pub peak_cpu_percent: f32,
     pub peak_memory_bytes: u64,
+    /// Last recorded footprint minus the first — what the day did to
+    /// this process's memory, the day-scale form of the leak question
+    /// (`trend.rs` asks it over an hour). Signed: a process that freed
+    /// reads negative and sinks in the growth order. Recorded minutes
+    /// only, like every figure here, and `0` with a single sample.
+    pub memory_growth_bytes: i64,
     /// Minutes this process was recorded. Fewer than the wall clock: a
     /// process only lands in the file on the minutes it qualifies.
     pub minutes: usize,
@@ -169,6 +175,18 @@ pub fn rank(mut records: Vec<MetricRecord>, band_day: Option<jiff::civil::Date>)
                 .map(|r| r.cpu_avg_percent)
                 .fold(0.0, f32::max);
             let span = span_of(&samples);
+            // Footprint when the record carries it (zstats ≥ 0.5; "RSS
+            // could not explain its own alerts"), RSS for older lines —
+            // same preference the process rows use, so the two tabs
+            // speak one dialect.
+            let footprint =
+                |r: &MetricRecord| r.memory_footprint_bytes.unwrap_or(r.memory_avg_bytes);
+            let memory_growth_bytes = match (samples.first(), samples.last()) {
+                (Some(first), Some(last)) if samples.len() >= 2 => {
+                    footprint(last) as i64 - footprint(first) as i64
+                }
+                _ => 0,
+            };
             Spender {
                 pid,
                 // Any sample's Some will do — the bundle does not change
@@ -177,15 +195,8 @@ pub fn rank(mut records: Vec<MetricRecord>, band_day: Option<jiff::civil::Date>)
                 name,
                 cpu_time_ms,
                 peak_cpu_percent,
-                peak_memory_bytes: samples
-                    .iter()
-                    // Footprint when the record carries it (zstats ≥ 0.5;
-                    // "RSS could not explain its own alerts"), RSS for
-                    // older lines — same preference the process rows use,
-                    // so the two tabs speak one dialect.
-                    .map(|r| r.memory_footprint_bytes.unwrap_or(r.memory_avg_bytes))
-                    .max()
-                    .unwrap_or(0),
+                peak_memory_bytes: samples.iter().map(footprint).max().unwrap_or(0),
+                memory_growth_bytes,
                 minutes: samples.len(),
                 span,
                 shape: classify(cpu_time_ms, peak_cpu_percent, span, samples.len()),
@@ -294,6 +305,34 @@ mod tests {
             memory_share_percent: 1.0,
             cpu_time_ms,
         }
+    }
+
+    /// Growth is the last recorded footprint against the first — the
+    /// day-scale leak question. A process that freed reads negative; a
+    /// single sample has no growth to speak of.
+    #[test]
+    fn growth_is_last_footprint_minus_first() {
+        let at = |pid: u32, name: &str, minute: i64, footprint: u64| {
+            let mut r = record(pid, name, minute, 0, 1.0);
+            r.memory_footprint_bytes = Some(footprint);
+            r
+        };
+        let ranked = rank(
+            vec![
+                at(1, "leaky", 0, 300 << 20),
+                at(1, "leaky", 60, 800 << 20),
+                at(1, "leaky", 480, 1500 << 20),
+                at(2, "freed", 0, 2000 << 20),
+                at(2, "freed", 120, 400 << 20),
+                at(3, "once", 0, 900 << 20),
+            ],
+            None,
+        );
+        let by_name = |n: &str| ranked.iter().find(|s| s.name == n).unwrap();
+        assert_eq!(by_name("leaky").memory_growth_bytes, 1200 << 20);
+        assert_eq!(by_name("leaky").peak_memory_bytes, 1500 << 20);
+        assert_eq!(by_name("freed").memory_growth_bytes, -(1600 << 20));
+        assert_eq!(by_name("once").memory_growth_bytes, 0);
     }
 
     /// The whole point of the view: a steady low percentage outspends a short

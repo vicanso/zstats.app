@@ -5,7 +5,7 @@ use super::widgets::{self, card};
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::{Tab, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{MemoryCreep, Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use crate::trend;
 use gpui::prelude::FluentBuilder;
@@ -59,7 +59,12 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     vec![
         processor(&snapshot.cpu, &snapshot.load),
         top_apps(state),
-        memory(&snapshot.memory, &snapshot.io_totals, snapshot.capabilities),
+        memory(
+            &snapshot.memory,
+            &snapshot.io_totals,
+            snapshot.capabilities,
+            state.memory_climbers(),
+        ),
     ]
 }
 
@@ -390,10 +395,76 @@ fn cluster_label(name: &str, cores: u32) -> String {
     format!("{pretty} · {cores}")
 }
 
+/// A tree's footprint must have climbed this much within the hour — and
+/// still be there — before the memory card names it. A quarter of a
+/// gigabyte is past what a page load or a GC cycle moves, and under
+/// what a leak does in an hour. Display only, like every threshold in
+/// `views/`: the banner has its own, higher bar (`trend::CREEP_NOTIFY_BYTES`).
+const MEM_RISE_FLOOR: u64 = 256 * trend::MIB;
+
+/// How many climbers the strip names. Three fit one line at 320px
+/// beside the lead; a fourth would be a second line for a glance.
+const MEM_RISE_N: usize = 3;
+
+/// One muted line under the memory figures: who has been climbing this
+/// hour and is still up — `Chrome +1.2 GB · Code +420 MB`. The hour's
+/// answer to the question the History tab asks of the day, and the
+/// one the memory rules cannot ask at all (a climb crosses no line
+/// until it is too late). Absent when nothing is climbing, so a quiet
+/// hour costs the card no height. `None`, not an empty strip.
+fn mem_climb_strip(climbers: &[MemoryCreep]) -> Option<AnyElement> {
+    let named: Vec<String> = climbers
+        .iter()
+        .filter(|c| c.climb_bytes >= MEM_RISE_FLOOR)
+        .take(MEM_RISE_N)
+        .map(|c| {
+            t!(
+                "overview.mem_rise_item",
+                name = c.name.clone(),
+                delta = format::memory(c.climb_bytes)
+            )
+            .to_string()
+        })
+        .collect();
+    if named.is_empty() {
+        return None;
+    }
+    Some(
+        h_flex()
+            .id("mem-climbers")
+            .items_baseline()
+            .gap(px(6.))
+            .mt(px(8.))
+            .min_w_0()
+            .text_size(px(10.))
+            .tooltip(widgets::wrap_tooltip(i18n::tr("overview.mem_rise_tip")))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("overview.mem_rise_lead")),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(font::MONO)
+                    .text_color(theme::text_muted())
+                    .child(named.join(" · ")),
+            )
+            .into_any_element(),
+    )
+}
+
 /// `caps` decides how an absent figure reads: this build cannot measure
 /// it, or it can and has not yet. On macOS every capability is true, so
 /// every branch here resolves exactly as it did before 0.5.2.
-fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> AnyElement {
+fn memory(
+    mem: &MemorySnapshot,
+    io: &IoTotalsSnapshot,
+    caps: Capabilities,
+    climbers: Vec<MemoryCreep>,
+) -> AnyElement {
     // The kernel's own verdict, not a number we derive: 1 normal, 2 warning,
     // 4 critical. Absent has two readings and they are not the same
     // sentence: this build cannot measure pressure at all, or it can and
@@ -552,6 +623,7 @@ fn memory(mem: &MemorySnapshot, io: &IoTotalsSnapshot, caps: Capabilities) -> An
         )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
         .child(widgets::kv_packed(rows))
+        .children(mem_climb_strip(&climbers))
         .child(io_strip(io))
         .into_any_element()
 }

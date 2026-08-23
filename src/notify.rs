@@ -279,6 +279,26 @@ pub fn post_sustained(notice: &state::SustainedNotice) {
     });
 }
 
+/// Announce a tree whose memory footprint has climbed a gigabyte within
+/// the hour and is still holding it — the leak shape.
+///
+/// Same class as [`post_sustained`], same reasons: not a `zstats` alert
+/// and never will be, because a climb crosses no line until it is too
+/// late. Silent, and one per climb (`state::take_memory_creep_notices`
+/// re-arms only once the climb is gone).
+pub fn post_memory_creep(creep: &state::MemoryCreep) {
+    dispatch(Banner {
+        title: creep.name.clone(),
+        subtitle: t!(
+            "alerts.creep_subtitle",
+            delta = format::memory(creep.climb_bytes)
+        )
+        .to_string(),
+        body: t!("alerts.creep_body", now = format::memory(creep.now_bytes)).to_string(),
+        silent: true,
+    });
+}
+
 fn signal_click() {
     if let Some(tx) = CLICK.get() {
         let _ = tx.try_send(());

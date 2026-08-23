@@ -138,6 +138,18 @@ pub fn memory(bytes: u64) -> String {
     }
 }
 
+/// [`memory`] with its sign, for a change rather than a level: `+1.2 GB`,
+/// `−120 MB`. The minus is the typographic one, so it cannot be read
+/// as a dash between two things.
+pub fn memory_signed(delta: i64) -> String {
+    let magnitude = memory(delta.unsigned_abs());
+    if delta < 0 {
+        format!("−{magnitude}")
+    } else {
+        format!("+{magnitude}")
+    }
+}
+
 /// Disk-style capacity, promoting to TB past a terabyte.
 ///
 /// Below 1 GiB this used to round to `0 GB`, so a 400 MB installer
@@ -270,6 +282,13 @@ pub fn span(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_signed_carries_the_sign() {
+        assert_eq!(memory_signed(1200 << 20), "+1.2 GB");
+        assert_eq!(memory_signed(-(120 << 20)), "−120 MB");
+        assert_eq!(memory_signed(0), "+0 MB");
+    }
 
     #[test]
     fn gb_short_rounds_like_gb_without_the_unit() {

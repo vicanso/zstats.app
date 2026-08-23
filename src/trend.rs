@@ -49,6 +49,18 @@ use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 /// Minutes of history per tree: the hour the card talks about.
 const SLOTS: usize = 60;
 
+/// The memory ring's unit: a footprint is fed in MB so it fits the same
+/// `u16` slot as a CPU percent (cap ~64 GB per tree — the machine).
+pub const MIB: u64 = 1 << 20;
+
+/// A tree's footprint must have climbed this much within the hour —
+/// and still be there — before the silent banner goes out. Bigger than
+/// the Overview strip's floor on purpose: the strip is a glance, the
+/// banner is an interruption. One gigabyte in an hour is past what a
+/// browser session or an indexer does by itself on an ordinary
+/// morning, and a leak at that rate fills a laptop before lunch.
+pub const CREEP_NOTIFY_BYTES: u64 = 1024 * MIB;
+
 /// Slot value for "no reading survived for this minute".
 const NO_DATA: u16 = u16::MAX;
 
@@ -368,7 +380,51 @@ impl AppTrend {
         }
         Some(recent_sum / recent_n as f32 - base_sum / base_n as f32)
     }
+
+    /// The newest reported minutes against the **earliest** reported
+    /// ones in the window — the full climb, where [`rise`](Self::rise)
+    /// measures against the hour's average. The memory question: a
+    /// footprint that went 300 MB → 1.5 GB over the hour has climbed
+    /// 1.2 GB, and an hour-average baseline would report half of it.
+    ///
+    /// Only a climb that is *still there* counts: when the newest
+    /// minutes sit more than [`CLIMB_HOLD`] below the hour's high, the
+    /// tree grew and freed — a spike that is over, not a leak — and the
+    /// verdict is `None`. `None` too until [`CLIMB_MIN_MINUTES`] of the
+    /// hour have been reported: five minutes of history is a trend for
+    /// CPU, where a rate can turn in a minute, but not for a footprint,
+    /// which is supposed to move slowly.
+    pub fn climb(&self, name: &str) -> Option<f32> {
+        let reported = self.reported.as_ref()?;
+        let ring = self.apps.get(name)?;
+        let now = reported.head;
+        let values: Vec<f32> = (now.saturating_sub(SLOTS as u64 - 1)..=now)
+            .filter(|m| reported.at(*m).is_some())
+            .map(|m| f32::from(ring.at(m).unwrap_or(0)))
+            .collect();
+        if values.len() < CLIMB_MIN_MINUTES {
+            return None;
+        }
+        let n = RECENT_MINUTES as usize;
+        let mean = |slice: &[f32]| slice.iter().sum::<f32>() / slice.len() as f32;
+        let early = mean(&values[..n]);
+        let late = mean(&values[values.len() - n..]);
+        let high = values.iter().copied().fold(0.0, f32::max);
+        if late < high * CLIMB_HOLD {
+            return None;
+        }
+        Some(late - early)
+    }
 }
+
+/// Reported minutes a climb verdict needs — a third of the hour.
+const CLIMB_MIN_MINUTES: usize = 20;
+
+/// The newest minutes must hold at least this share of the hour's high
+/// for the climb to still be a climb. Ten percent of slack absorbs
+/// jitter in a footprint (page-outs, a GC pass) without letting a tree
+/// that halved its memory keep reading as "climbing".
+const CLIMB_HOLD: f32 = 0.9;
 
 #[cfg(test)]
 mod tests {
@@ -761,6 +817,52 @@ mod tests {
         let table = vec![root, proc_at(3, Some(100), "node", 395.0, "node server.js")];
         let pg = jobs(&[(100, 100), (3, 100)]);
         assert_eq!(tree_face(&g, &table, &[], &pg), "Google Chrome");
+    }
+
+    /// The memory question, fed in MB: a steady 300 → 1500 climb reads
+    /// as the whole climb, not as the distance from the hour's average.
+    #[test]
+    fn a_steady_climb_reads_as_the_whole_climb() {
+        let mut trend = AppTrend::default();
+        for m in 0..60u64 {
+            trend.sample(m, [("leaky", 300.0 + m as f32 * 20.0)].into_iter());
+        }
+        let climb = trend.climb("leaky").unwrap();
+        // early five ≈ 340, late five ≈ 1440
+        assert!(
+            (climb - 1100.0).abs() < 1.0,
+            "full climb, not half: {climb}"
+        );
+        // `rise` is the same data against the hour's *average*: on a
+        // linear climb the average sits mid-slope, so it understates.
+        let rise = trend.rise("leaky").unwrap();
+        assert!(
+            rise < climb * 0.6,
+            "rise measures against the average: {rise}"
+        );
+    }
+
+    /// Grew and freed is a spike that is over, not a leak.
+    #[test]
+    fn a_climb_that_came_back_down_is_no_climb() {
+        let mut trend = AppTrend::default();
+        feed(&mut trend, "burst", 0..30, 300.0);
+        feed(&mut trend, "burst", 30..50, 2000.0);
+        feed(&mut trend, "burst", 50..60, 400.0);
+        assert_eq!(trend.climb("burst"), None);
+    }
+
+    /// A footprint moves slowly; a few minutes are not a verdict.
+    #[test]
+    fn a_short_history_has_no_climb_verdict() {
+        let mut trend = AppTrend::default();
+        feed(&mut trend, "new", 0..10, 900.0);
+        assert_eq!(trend.climb("new"), None);
+        feed(&mut trend, "new", 10..25, 900.0);
+        assert!(
+            (trend.climb("new").unwrap()).abs() < f32::EPSILON,
+            "flat is zero"
+        );
     }
 
     #[test]

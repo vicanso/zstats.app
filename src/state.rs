@@ -22,7 +22,7 @@ use crate::metrics;
 use crate::prefs;
 use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
-use crate::trend::{self, AppTrend};
+use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedWatch};
@@ -32,6 +32,7 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use std::array;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::ops::Deref;
@@ -275,13 +276,18 @@ pub enum HistorySort {
     /// Highest recorded one-minute footprint. Honesty caveat carried by
     /// the chip tooltip: only minutes that qualified for the file count.
     PeakMemory,
+    /// Last recorded footprint minus the first — who grew through the
+    /// day. The leak question at day scale; `trend.rs` asks it over an
+    /// hour. Same caveat as the peak: recorded minutes only.
+    MemoryGrowth,
 }
 
 impl HistorySort {
     pub fn next(self) -> Self {
         match self {
             HistorySort::CpuTime => HistorySort::PeakMemory,
-            HistorySort::PeakMemory => HistorySort::CpuTime,
+            HistorySort::PeakMemory => HistorySort::MemoryGrowth,
+            HistorySort::MemoryGrowth => HistorySort::CpuTime,
         }
     }
 
@@ -289,6 +295,7 @@ impl HistorySort {
         match self {
             HistorySort::CpuTime => "history.sort_cpu",
             HistorySort::PeakMemory => "history.sort_mem",
+            HistorySort::MemoryGrowth => "history.sort_growth",
         }
     }
 
@@ -296,6 +303,7 @@ impl HistorySort {
         match self {
             HistorySort::CpuTime => "history.sort_cpu_tip",
             HistorySort::PeakMemory => "history.sort_mem_tip",
+            HistorySort::MemoryGrowth => "history.sort_growth_tip",
         }
     }
 }
@@ -577,6 +585,19 @@ pub struct FullAppScanData {
 }
 
 /// Full process table, for naming every member of an expanded Apps tree.
+/// A tree whose memory footprint has climbed through the hour and is
+/// still at its high — the leak shape (`trend::climb`). Display and a
+/// silent banner, never an `AlertEvent`: a climb crosses no line by
+/// definition, which is exactly why it has to be said somewhere.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryCreep {
+    pub name: String,
+    /// Newest minutes against the earliest reported ones in the hour.
+    pub climb_bytes: u64,
+    /// What the tree holds on the latest sample.
+    pub now_bytes: u64,
+}
+
 /// The resident tick only keeps `max-processes`, so a group's
 /// `process_count` can be 37 while the live table names four of them.
 ///
@@ -698,6 +719,18 @@ pub struct ZStatsAppState {
     /// The hour of per-tree CPU history behind Overview's climbing rows
     /// — same observer class as the three above (see `trend.rs`).
     trend: AppTrend,
+    /// The same hour of rings, fed with each tree's memory footprint
+    /// in MB instead of CPU% — the leak question. A footprint that
+    /// went 300 MB → 1.5 GB over an hour has crossed nothing, and
+    /// zstats' rules ask only "over the line now"; this is the shape
+    /// that is too late by the time it is. Display plus one silent
+    /// banner, never an `AlertEvent`. `u16` MB caps at ~64 GB per
+    /// tree, which is the whole machine.
+    mem_trend: AppTrend,
+    /// Trees whose climb has been announced and not yet come back
+    /// under the floor — the re-arm set, so a creep is one banner, not
+    /// one per tick (`take_memory_creep_notices`).
+    creep_notified: HashSet<String>,
     /// Today's history, ranked. `None` until the tab is first opened — the
     /// read walks a day of JSONL and there is no reason to pay for it before
     /// somebody asks.
@@ -849,6 +882,8 @@ impl Default for ZStatsAppState {
             abnormal: AbnormalWatch::default(),
             net: NetActivity::default(),
             trend: AppTrend::default(),
+            mem_trend: AppTrend::default(),
+            creep_notified: HashSet::new(),
             history: None,
             history_range: HistoryRange::default(),
             history_sort: HistorySort::default(),
@@ -949,6 +984,16 @@ impl ZStatsAppState {
                 groups
                     .iter()
                     .map(|g| (trend::tree_key(g), g.cpu_usage_percent)),
+            );
+            // Same ring, the footprint in MB — the figure the memory rules
+            // measure, RSS where the kernel refused one (same fallback as
+            // every memory figure in the app).
+            self.mem_trend.sample(
+                minute,
+                groups.iter().map(|g| {
+                    let bytes = g.phys_footprint_bytes.unwrap_or(g.memory_bytes);
+                    (trend::tree_key(g), (bytes / MIB) as f32)
+                }),
             );
         }
 
@@ -1247,6 +1292,64 @@ impl ZStatsAppState {
     /// has enough reported history for a verdict.
     pub fn app_rise(&self, name: &str) -> Option<f32> {
         self.trend.rise(name)
+    }
+
+    /// How far this tree's footprint has climbed across the hour and
+    /// is still holding, in bytes. `None` without enough history, or
+    /// when the climb has already come back down (`trend::climb`).
+    pub fn app_memory_climb(&self, name: &str) -> Option<u64> {
+        self.mem_trend
+            .climb(name)
+            .filter(|mb| *mb > 0.0)
+            .map(|mb| mb as u64 * MIB)
+    }
+
+    /// Every tree climbing at all this hour, biggest climb first, with
+    /// what it holds now. The Overview strip applies its own floor;
+    /// this is the raw answer.
+    pub fn memory_climbers(&self) -> Vec<MemoryCreep> {
+        let Some(groups) = self
+            .latest
+            .as_ref()
+            .and_then(|t| t.snapshot.process_groups.as_deref())
+        else {
+            return Vec::new();
+        };
+        let mut climbers: Vec<MemoryCreep> = groups
+            .iter()
+            .filter_map(|g| {
+                let name = trend::tree_key(g);
+                let climb_bytes = self.app_memory_climb(name)?;
+                Some(MemoryCreep {
+                    name: name.to_string(),
+                    climb_bytes,
+                    now_bytes: g.phys_footprint_bytes.unwrap_or(g.memory_bytes),
+                })
+            })
+            .collect();
+        climbers.sort_by_key(|c| Reverse(c.climb_bytes));
+        climbers
+    }
+
+    /// Creeps that have crossed `trend::CREEP_NOTIFY_BYTES` since they
+    /// were last announced — one banner per climb. A tree stays in the
+    /// announced set until its climb drops under the bar (freed, or
+    /// the hour rolled past the climb), then it may be announced again
+    /// the next time it climbs a gigabyte: a real leak that keeps
+    /// going will say so once an hour, not once a tick.
+    pub fn take_memory_creep_notices(&mut self) -> Vec<MemoryCreep> {
+        let climbers = self.memory_climbers();
+        let over: HashSet<String> = climbers
+            .iter()
+            .filter(|c| c.climb_bytes >= trend::CREEP_NOTIFY_BYTES)
+            .map(|c| c.name.clone())
+            .collect();
+        self.creep_notified.retain(|name| over.contains(name));
+        climbers
+            .into_iter()
+            .filter(|c| over.contains(&c.name))
+            .filter(|c| self.creep_notified.insert(c.name.clone()))
+            .collect()
     }
 
     pub fn proc_sort(&self) -> ProcSort {

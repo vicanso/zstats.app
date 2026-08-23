@@ -304,6 +304,15 @@ pub fn start(cx: &mut App) {
                             );
                             notify::post_sustained(&notice);
                         }
+                        for creep in state.take_memory_creep_notices() {
+                            tracing::info!(
+                                name = %creep.name,
+                                climb_bytes = creep.climb_bytes,
+                                now_bytes = creep.now_bytes,
+                                "memory creep notice delivered"
+                            );
+                            notify::post_memory_creep(&creep);
+                        }
                         // After ingest, not before: the tray's auto
                         // mode reads the episode list this tick just
                         // merged into, and a memory alert should turn

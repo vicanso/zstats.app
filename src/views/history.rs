@@ -58,8 +58,12 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // Re-ordered in the view: rank() ships CPU-time order, and the
     // memory order is a lens over the same rows, not a second dataset.
     let mut ordered: Vec<_> = rows.iter().collect();
-    if sort == HistorySort::PeakMemory {
-        ordered.sort_by_key(|s| Reverse(s.peak_memory_bytes));
+    match sort {
+        HistorySort::CpuTime => {}
+        HistorySort::PeakMemory => ordered.sort_by_key(|s| Reverse(s.peak_memory_bytes)),
+        // Signed: a process that freed memory sinks below the ones that
+        // held steady, which is the order the question implies.
+        HistorySort::MemoryGrowth => ordered.sort_by_key(|s| Reverse(s.memory_growth_bytes)),
     }
     // The bar is relative to the period's biggest — an absolute scale
     // would be meaningless (a day has 86 400 core-seconds per core).
@@ -68,6 +72,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .map_or(1, |s| match sort {
             HistorySort::CpuTime => s.cpu_time_ms,
             HistorySort::PeakMemory => s.peak_memory_bytes,
+            HistorySort::MemoryGrowth => s.memory_growth_bytes.max(0) as u64,
         })
         .max(1);
     let shown: Vec<_> = ordered.into_iter().take(TOP_N).collect();
@@ -172,6 +177,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                                     HistorySort::PeakMemory => {
                                                         format::memory(s.peak_memory_bytes)
                                                     }
+                                                    HistorySort::MemoryGrowth => {
+                                                        format::memory_signed(s.memory_growth_bytes)
+                                                    }
                                                 }),
                                         )
                                         .child(
@@ -181,6 +189,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                                 .child(i18n::tr(match sort {
                                                     HistorySort::CpuTime => "alerts.kind_cpu",
                                                     HistorySort::PeakMemory => "history.peak_tag",
+                                                    HistorySort::MemoryGrowth => {
+                                                        "history.growth_tag"
+                                                    }
                                                 })),
                                         ),
                                 ),
@@ -215,13 +226,24 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                             // fact twice on one row.
                                             div().min_w_0().truncate().child(
                                                 match (sort, repeated) {
-                                                    (HistorySort::CpuTime, false) => t!(
+                                                    // Under the growth order the peak is
+                                                    // the figure that puts the climb in
+                                                    // proportion, same as under CPU time.
+                                                    (
+                                                        HistorySort::CpuTime
+                                                        | HistorySort::MemoryGrowth,
+                                                        false,
+                                                    ) => t!(
                                                         "history.pid_mem",
                                                         pid = s.pid,
                                                         mem = format::memory(s.peak_memory_bytes)
                                                     )
                                                     .to_string(),
-                                                    (HistorySort::CpuTime, true) => t!(
+                                                    (
+                                                        HistorySort::CpuTime
+                                                        | HistorySort::MemoryGrowth,
+                                                        true,
+                                                    ) => t!(
                                                         "history.mem_only",
                                                         mem = format::memory(s.peak_memory_bytes)
                                                     )
@@ -280,6 +302,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                 match sort {
                                     HistorySort::CpuTime => s.cpu_time_ms as f32,
                                     HistorySort::PeakMemory => s.peak_memory_bytes as f32,
+                                    HistorySort::MemoryGrowth => {
+                                        s.memory_growth_bytes.max(0) as f32
+                                    }
                                 } / top as f32,
                                 Hsla::from(theme::ink()),
                                 4.,
