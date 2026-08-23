@@ -1,5 +1,6 @@
 //! UI preferences — language, theme, the tray's face, panel opacity, the
-//! outbound proxy, and the analyser's last scope — persisted in `app.toml`.
+//! outbound proxy, the sustained-load watcher's two knobs, and the
+//! analyser's last scope — persisted in `app.toml`.
 //!
 //! Deliberately *not* in the shared `config.toml`: `zstats::settings::save`
 //! serialises only the sections the CLI models (`collector` / `daemon` /
@@ -12,11 +13,13 @@
 //! correct default, and keeps the file empty for anyone who never touches
 //! the setting.
 
+use crate::watch;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
+use std::time::Duration;
 
 /// The user's language choice. `System` defers to `i18n::detect`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -123,6 +126,15 @@ static THEME: AtomicU8 = AtomicU8::new(0);
 /// Read on every tick by the tray, so an atomic like its neighbours
 /// rather than a lock the collector's hand-off would have to take.
 static TRAY: AtomicU8 = AtomicU8::new(0);
+/// The sustained-load watcher's duration, in minutes; `0` means "unset
+/// — the watcher's default". Read on every tick by the store when it
+/// builds the rule, hence an atomic.
+static SUSTAINED_MINUTES: AtomicU16 = AtomicU16::new(0);
+/// The divisor under `alert-cpu` that sets the sustained bar; `0` means
+/// unset. A divisor rather than a percent on purpose: the bar must keep
+/// following `alert-cpu`, or the two lines drift apart the first time
+/// the threshold is edited.
+static SUSTAINED_DIVISOR: AtomicU8 = AtomicU8::new(0);
 /// Hundredths of opacity. `0` means "unset — use the mode default".
 /// One copy, read per frame by the root view's wash — a picker change
 /// lands on the very next repaint. (Hand-edits to `app.toml` still wait
@@ -208,6 +220,75 @@ pub fn theme() -> ThemePref {
 
 pub fn tray() -> TrayPref {
     decode_tray(TRAY.load(Ordering::Relaxed))
+}
+
+/// `alert-cpu ÷ 3` is the bar the watcher shipped with: a third of the
+/// line is low enough to be invisible to the rules and high enough to
+/// be a real share of a core.
+pub const DEFAULT_SUSTAINED_DIVISOR: u8 = 3;
+/// Under ten minutes the watcher is a burst detector, which the rules
+/// already are; over a day the finding lands the next morning.
+const SUSTAINED_MINUTES_MIN: u16 = 10;
+const SUSTAINED_MINUTES_MAX: u16 = 24 * 60;
+/// `÷1` is the alert line itself (pointless, the rules fire there);
+/// past ten the bar is scheduler noise.
+const SUSTAINED_DIVISOR_MAX: u8 = 10;
+
+/// How long a process must hold the bar before the sustained-load
+/// watcher names it. The watcher's default unless `app.toml` says.
+pub fn sustained_after() -> Duration {
+    match SUSTAINED_MINUTES.load(Ordering::Relaxed) {
+        0 => watch::DEFAULT_SUSTAINED_AFTER,
+        minutes => Duration::from_secs(u64::from(minutes) * 60),
+    }
+}
+
+/// What `alert-cpu` is divided by to get the sustained bar.
+pub fn sustained_divisor() -> u8 {
+    match SUSTAINED_DIVISOR.load(Ordering::Relaxed) {
+        0 => DEFAULT_SUSTAINED_DIVISOR,
+        divisor => divisor,
+    }
+}
+
+/// Remember and persist the sustained duration; `None` restores the
+/// default and drops the key. The next tick reads it — no restart, no
+/// collector rebuild, this watcher is the panel's own.
+pub fn set_sustained_after(minutes: Option<u16>) {
+    SUSTAINED_MINUTES.store(encode_sustained_minutes(minutes), Ordering::Relaxed);
+    persist();
+}
+
+/// Remember and persist the sustained divisor; `None` restores the
+/// default and drops the key.
+pub fn set_sustained_divisor(divisor: Option<u8>) {
+    SUSTAINED_DIVISOR.store(encode_sustained_divisor(divisor), Ordering::Relaxed);
+    persist();
+}
+
+/// Out of range reads as unset, the same posture as an opacity below
+/// the floor: the built-in default, never a clamp the user did not ask
+/// for.
+fn encode_sustained_minutes(minutes: Option<u16>) -> u16 {
+    match minutes {
+        Some(m) if (SUSTAINED_MINUTES_MIN..=SUSTAINED_MINUTES_MAX).contains(&m) => m,
+        _ => 0,
+    }
+}
+
+fn encode_sustained_divisor(divisor: Option<u8>) -> u8 {
+    match divisor {
+        Some(d) if (2..=SUSTAINED_DIVISOR_MAX).contains(&d) => d,
+        _ => 0,
+    }
+}
+
+fn decode_sustained_minutes(raw: u16) -> Option<u16> {
+    (raw != 0).then_some(raw)
+}
+
+fn decode_sustained_divisor(raw: u8) -> Option<u8> {
+    (raw != 0).then_some(raw)
 }
 
 /// The panel opacity — what the Interface page shows and what the root
@@ -323,6 +404,14 @@ pub fn load() {
     LANGUAGE.store(encode_language(prefs.language), Ordering::Relaxed);
     THEME.store(encode_theme(prefs.theme), Ordering::Relaxed);
     TRAY.store(encode_tray(prefs.tray), Ordering::Relaxed);
+    SUSTAINED_MINUTES.store(
+        encode_sustained_minutes(prefs.sustained_minutes),
+        Ordering::Relaxed,
+    );
+    SUSTAINED_DIVISOR.store(
+        encode_sustained_divisor(prefs.sustained_divisor),
+        Ordering::Relaxed,
+    );
     OPACITY.store(encode_opacity(prefs.opacity), Ordering::Relaxed);
     crate::proxy::set_configured_proxy(&prefs.proxy);
     *PROXY.write().expect("proxy pref lock poisoned") = prefs.proxy;
@@ -369,6 +458,8 @@ fn persist() {
         language: language(),
         theme: theme(),
         tray: tray(),
+        sustained_minutes: decode_sustained_minutes(SUSTAINED_MINUTES.load(Ordering::Relaxed)),
+        sustained_divisor: decode_sustained_divisor(SUSTAINED_DIVISOR.load(Ordering::Relaxed)),
         opacity: opacity(),
         proxy: proxy(),
         analysis_roots: ANALYSIS_ROOTS
@@ -403,6 +494,10 @@ struct Prefs {
     language: LanguagePref,
     theme: ThemePref,
     tray: TrayPref,
+    /// `sustained_hours` in the file, minutes here: the file reads in
+    /// the unit a person thinks in, the code in the one it computes in.
+    sustained_minutes: Option<u16>,
+    sustained_divisor: Option<u8>,
     opacity: Option<f32>,
     proxy: String,
     analysis_roots: Vec<String>,
@@ -432,11 +527,33 @@ fn read(dir: &Path) -> Prefs {
         language: get("language").map_or_else(Default::default, LanguagePref::from_key),
         theme: get("theme").map_or_else(Default::default, ThemePref::from_key),
         tray: get("tray").map_or_else(Default::default, TrayPref::from_key),
+        sustained_minutes: table
+            .get("sustained_hours")
+            .and_then(parse_hours_as_minutes)
+            .and_then(|m| decode_sustained_minutes(encode_sustained_minutes(Some(m)))),
+        sustained_divisor: table
+            .get("sustained_divisor")
+            .and_then(toml::Value::as_integer)
+            .and_then(|d| u8::try_from(d).ok())
+            .and_then(|d| decode_sustained_divisor(encode_sustained_divisor(Some(d)))),
         opacity: table.get("opacity").and_then(parse_opacity),
         proxy: get("proxy").unwrap_or_default().trim().to_string(),
         analysis_roots: list("analysis_roots"),
         analysis_exclude: list("analysis_exclude"),
     }
+}
+
+/// `sustained_hours = 2` or `= 0.5`: hours in the file, whole minutes
+/// out. `None` when it is not a number; the range check is the
+/// encoder's.
+fn parse_hours_as_minutes(value: &toml::Value) -> Option<u16> {
+    let hours = value
+        .as_float()
+        .or_else(|| value.as_integer().map(|i| i as f64))?;
+    if !hours.is_finite() || hours < 0.0 {
+        return None;
+    }
+    u16::try_from((hours * 60.0).round() as i64).ok()
 }
 
 /// `None` when the key is missing, unparsable, or below [`OPACITY_MIN`].
@@ -463,6 +580,20 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     }
     if let Some(key) = prefs.tray.key() {
         doc.insert("tray".into(), toml::Value::String(key.into()));
+    }
+    if let Some(minutes) = prefs.sustained_minutes {
+        // Hours, to two decimals: `2`, `0.5`, `1.25` — what a person
+        // would type; minutes are this module's business.
+        doc.insert(
+            "sustained_hours".into(),
+            toml::Value::Float((f64::from(minutes) / 60.0 * 100.0).round() / 100.0),
+        );
+    }
+    if let Some(divisor) = prefs.sustained_divisor {
+        doc.insert(
+            "sustained_divisor".into(),
+            toml::Value::Integer(i64::from(divisor)),
+        );
     }
     if let Some(value) = prefs.opacity.filter(|v| *v >= OPACITY_MIN) {
         doc.insert(
@@ -524,6 +655,8 @@ mod tests {
                 language: LanguagePref::Chinese,
                 theme: ThemePref::Dark,
                 tray: TrayPref::Memory,
+                sustained_minutes: None,
+                sustained_divisor: None,
                 opacity: Some(0.8),
                 proxy: "http://127.0.0.1:7890".into(),
                 analysis_roots: vec![
@@ -583,6 +716,52 @@ mod tests {
 
     /// Every tray mode survives the file, including the one that is not
     /// a single face.
+    /// Hours in the file, minutes in the code; out-of-range reads as
+    /// unset, and unset writes no key.
+    #[test]
+    fn sustained_knobs_round_trip_in_hours_and_reject_nonsense() {
+        let dir = scratch("sustained");
+        write(
+            &dir,
+            &Prefs {
+                sustained_minutes: Some(90),
+                sustained_divisor: Some(4),
+                ..Prefs::default()
+            },
+        )
+        .unwrap();
+        let text = fs::read_to_string(file_path(&dir)).unwrap();
+        assert!(text.contains("sustained_hours = 1.5"), "{text}");
+        assert!(text.contains("sustained_divisor = 4"), "{text}");
+        let back = read(&dir);
+        assert_eq!(back.sustained_minutes, Some(90));
+        assert_eq!(back.sustained_divisor, Some(4));
+
+        fs::write(
+            file_path(&dir),
+            "sustained_hours = 0.05\nsustained_divisor = 1\n",
+        )
+        .unwrap();
+        let back = read(&dir);
+        assert_eq!(
+            back.sustained_minutes, None,
+            "three minutes is a burst detector"
+        );
+        assert_eq!(back.sustained_divisor, None, "÷1 is the alert line itself");
+
+        fs::write(file_path(&dir), "sustained_hours = 2\n").unwrap();
+        assert_eq!(
+            read(&dir).sustained_minutes,
+            Some(120),
+            "an integer is hours too"
+        );
+
+        write(&dir, &Prefs::default()).unwrap();
+        let text = fs::read_to_string(file_path(&dir)).unwrap();
+        assert!(!text.contains("sustained"), "unset writes no key");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn every_tray_mode_round_trips() {
         let dir = scratch("tray");

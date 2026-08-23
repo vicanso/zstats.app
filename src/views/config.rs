@@ -103,7 +103,7 @@ pub fn render(
     proxy_valid: bool,
 ) -> Vec<AnyElement> {
     match section {
-        SettingsSection::Interface => vec![interface_card(proxy_input, proxy_valid)],
+        SettingsSection::Interface => vec![interface_card(state, proxy_input, proxy_valid)],
         SettingsSection::Config => render_config(state),
         SettingsSection::Permissions => vec![permissions_card()],
         SettingsSection::About => vec![about_card(state, body_height)],
@@ -718,7 +718,11 @@ fn reset_card() -> AnyElement {
 /// Language and theme. Selection reuses the accent chips of the Alerts
 /// threshold editor — in this app a picked value is accent, like a crossed
 /// threshold, and everything else stays neutral.
-fn interface_card(proxy_input: &Entity<InputState>, proxy_valid: bool) -> AnyElement {
+fn interface_card(
+    state: &ZStatsAppState,
+    proxy_input: &Entity<InputState>,
+    proxy_valid: bool,
+) -> AnyElement {
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("config.interface"),
@@ -764,6 +768,43 @@ fn interface_card(proxy_input: &Entity<InputState>, proxy_valid: bool) -> AnyEle
             prefs::tray(),
             crate::set_tray_pref,
             Some(i18n::tr("config.tray_tip")),
+        ))
+        // The sustained-load watcher's two knobs. Minutes and a divisor
+        // rather than a percent, so the bar keeps following `alert-cpu`
+        // (see `prefs::SUSTAINED_DIVISOR`). The tip quotes the bar in
+        // force so the divisor reads as a number, not a fraction.
+        .child(pref_row(
+            "pref-sustained-after",
+            i18n::tr("config.sustained_after"),
+            vec![
+                ("1h".into(), 60u16),
+                ("2h".into(), 120),
+                ("4h".into(), 240),
+                ("8h".into(), 480),
+            ],
+            (prefs::sustained_after().as_secs() / 60) as u16,
+            crate::set_sustained_after_pref,
+            Some(i18n::tr("config.sustained_after_tip")),
+        ))
+        .child(pref_row(
+            "pref-sustained-divisor",
+            i18n::tr("config.sustained_divisor"),
+            vec![
+                ("÷2".into(), 2u8),
+                ("÷3".into(), 3),
+                ("÷4".into(), 4),
+                ("÷6".into(), 6),
+            ],
+            prefs::sustained_divisor(),
+            crate::set_sustained_divisor_pref,
+            Some(
+                t!(
+                    "config.sustained_divisor_tip",
+                    divisor = prefs::sustained_divisor(),
+                    bar = format!("{:.0}%", state.sustained_bar_percent())
+                )
+                .to_string(),
+            ),
         ))
         .child(autostart_row())
         .child(proxy_row(proxy_input, proxy_valid))

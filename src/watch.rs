@@ -25,19 +25,23 @@ use zstats::snapshot::{NetworkSnapshot, ProcessSnapshot};
 
 // ---- sustained low-grade CPU ------------------------------------------
 
-/// A process must stay above the low-grade bar this long before it is worth
-/// pointing at.
+/// How long a process must stay above the low-grade bar before it is
+/// worth pointing at, unless `app.toml` says otherwise
+/// (`prefs::sustained_after`).
 ///
 /// Long enough to rule out ordinary work — a build, a backup, an import all
 /// finish well inside it — and short enough that the finding still lands in
-/// the session that caused it, rather than the next morning.
-pub const SUSTAINED_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
+/// the session that caused it, rather than the next morning. A default,
+/// not a law: a machine that compiles all day and one that writes prose
+/// do not agree on what "sustained" means, and this watcher is the
+/// panel's own, so the knob can live in the panel's own file.
+pub const DEFAULT_SUSTAINED_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// How long a process may drop below the bar without resetting its clock.
 ///
 /// CPU wobbles: something averaging 11% dips under 10% constantly, and a
 /// strict "consecutive" rule would restart the count every few seconds and
-/// never reach [`SUSTAINED_AFTER`]. Only a real stop counts as a stop.
+/// never reach [`DEFAULT_SUSTAINED_AFTER`]. Only a real stop counts as a stop.
 const SUSTAINED_GRACE: Duration = Duration::from_secs(5 * 60);
 
 /// A process that has just crossed into sustained-load territory.
@@ -46,6 +50,17 @@ pub struct SustainedNotice {
     pub name: String,
     pub cpu_avg: f64,
     pub duration: Duration,
+}
+
+/// What counts as sustained: the bar (percent of one core the integral
+/// must clear) and how long it must be held. Both come from outside —
+/// the bar from `alert-cpu` divided down, the duration from `app.toml`
+/// — so every question this watcher answers is asked with the same
+/// pair, and the badge, the banner and the card can never disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SustainedRule {
+    pub bar: f64,
+    pub after: Duration,
 }
 
 /// A process sitting on a low-but-real share of CPU for a long time.
@@ -139,9 +154,10 @@ impl SustainedWatch {
         &mut self,
         processes: &[ProcessSnapshot],
         stats: &HashMap<u32, ProcessStats>,
-        bar: f64,
+        rule: SustainedRule,
         now: Instant,
     ) {
+        let SustainedRule { bar, after } = rule;
         for p in processes {
             let Some(entry) = self.stretches.get_mut(&p.pid) else {
                 // Open a stretch only for something already looking busy, so
@@ -193,7 +209,7 @@ impl SustainedWatch {
             // over that whole stretch clears the bar.
             let average = entry.average_percent();
             let duration = entry.duration();
-            if duration >= SUSTAINED_AFTER && average >= bar && self.notified.insert(p.pid) {
+            if duration >= after && average >= bar && self.notified.insert(p.pid) {
                 self.pending.push(SustainedNotice {
                     pid: p.pid,
                     name: p.name.clone(),
@@ -221,14 +237,14 @@ impl SustainedWatch {
     /// over the bar — longest first. The Alerts tab's read-only card:
     /// a view of what the watcher is holding, raising nothing and
     /// feeding nothing into the rule engine.
-    pub fn active(&self, bar: f64) -> Vec<SustainedNotice> {
+    pub fn active(&self, rule: SustainedRule) -> Vec<SustainedNotice> {
         let mut out: Vec<SustainedNotice> = self
             .stretches
             .iter()
             .filter_map(|(pid, s)| {
                 let duration = s.duration();
                 let average = s.average_percent();
-                (duration >= SUSTAINED_AFTER && average >= bar).then(|| SustainedNotice {
+                (duration >= rule.after && average >= rule.bar).then(|| SustainedNotice {
                     pid: *pid,
                     name: s.name.clone(),
                     cpu_avg: average,
@@ -247,12 +263,12 @@ impl SustainedWatch {
 
     /// How long this process has been holding a low-but-real CPU share, once
     /// that has gone on long enough to be worth saying.
-    pub fn duration_for(&self, pid: u32, bar: f64) -> Option<Duration> {
+    pub fn duration_for(&self, pid: u32, rule: SustainedRule) -> Option<Duration> {
         let stretch = self.stretches.get(&pid)?;
         let duration = stretch.duration();
         // Same two conditions the notice uses, so the badge and the banner
         // can never disagree about who qualifies.
-        (duration >= SUSTAINED_AFTER && stretch.average_percent() >= bar).then_some(duration)
+        (duration >= rule.after && stretch.average_percent() >= rule.bar).then_some(duration)
     }
 }
 
@@ -359,7 +375,7 @@ mod tests {
     #[test]
     fn active_lists_only_qualifying_stretches() {
         let mut watch = SustainedWatch::default();
-        let long_ago = Instant::now() - SUSTAINED_AFTER - Duration::from_secs(60);
+        let long_ago = Instant::now() - DEFAULT_SUSTAINED_AFTER - Duration::from_secs(60);
         // Long enough and ~10% integral → qualifies at a bar of 8.
         watch.stretches.insert(1, burnt(long_ago, 726_000));
         // Long enough but ~0.01% → under the bar.
@@ -369,10 +385,10 @@ mod tests {
             .stretches
             .insert(3, burnt(Instant::now() - Duration::from_secs(60), 30_000));
 
-        let active = watch.active(8.0);
+        let active = watch.active(rule(8.0));
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].pid, 1);
-        assert!(active[0].duration >= SUSTAINED_AFTER);
+        assert!(active[0].duration >= DEFAULT_SUSTAINED_AFTER);
     }
 
     /// A stretch starting at `since` that has consumed `cpu_time_ms` of
@@ -390,23 +406,31 @@ mod tests {
 
     const BAR: f64 = 10.0;
 
+    /// A rule at `bar` with the default duration.
+    fn rule(bar: f64) -> SustainedRule {
+        SustainedRule {
+            bar,
+            after: DEFAULT_SUSTAINED_AFTER,
+        }
+    }
+
     #[test]
     fn sustained_load_survives_dips_but_not_a_real_stop() {
         let mut watch = SustainedWatch::default();
-        let start = Instant::now() - SUSTAINED_AFTER - Duration::from_secs(60);
+        let start = Instant::now() - DEFAULT_SUSTAINED_AFTER - Duration::from_secs(60);
 
         // Long enough, and the counter says it really did burn ~11% the whole
         // way: the case worth reporting — never trips the alert, grinds away
         // all day.
         watch.stretches.insert(42, burnt(start, 800_000));
-        assert!(watch.duration_for(42, BAR).is_some());
+        assert!(watch.duration_for(42, rule(BAR)).is_some());
 
         // Same stretch, but only 300 core-seconds in it — about 4%. This is
         // the intermittent burst the percentage version used to report as a
         // steady 10%: over the bar every time we looked, under it on average.
         watch.stretches.insert(45, burnt(start, 300_000));
         assert!(
-            watch.duration_for(45, BAR).is_none(),
+            watch.duration_for(45, rule(BAR)).is_none(),
             "a 4% integral must not qualify however often it peaked"
         );
 
@@ -423,7 +447,7 @@ mod tests {
         watch
             .stretches
             .insert(44, Stretch::new(Instant::now(), 0, "test"));
-        assert!(watch.duration_for(44, BAR).is_none());
+        assert!(watch.duration_for(44, rule(BAR)).is_none());
     }
 
     #[test]
@@ -432,7 +456,7 @@ mod tests {
         watch.stretches.insert(
             7,
             burnt(
-                Instant::now() - SUSTAINED_AFTER - Duration::from_secs(1),
+                Instant::now() - DEFAULT_SUSTAINED_AFTER - Duration::from_secs(1),
                 800_000,
             ),
         );
@@ -442,7 +466,7 @@ mod tests {
             pid: 7,
             name: "helper".into(),
             cpu_avg: 12.0,
-            duration: SUSTAINED_AFTER,
+            duration: DEFAULT_SUSTAINED_AFTER,
         });
         assert_eq!(watch.take_notices().len(), 1);
         // Draining is idempotent — staying over the line is not a new event,

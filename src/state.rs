@@ -25,7 +25,7 @@ use crate::spaceinfo::{self, SpaceInfo};
 use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
 pub use crate::watch::SustainedNotice;
-use crate::watch::{AbnormalWatch, NetActivity, SustainedWatch};
+use crate::watch::{AbnormalWatch, NetActivity, SustainedRule, SustainedWatch};
 use gpui::{
     AppContext, Bounds, Context, Entity, Focusable, Global, ListAlignment, ListState, Pixels,
     ScrollHandle, Window, px,
@@ -46,12 +46,10 @@ use zstats::settings::FileConfig;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 use zstats::{AlertEvent, AlertKind, AlertSubject, Tick};
 
-/// Fraction of the CPU alert threshold at which sustained load starts to
-/// matter. Derived rather than fixed so tightening `alert-cpu` tightens this
-/// too.
-const SUSTAINED_FRACTION: f64 = 1.0 / 3.0;
-
 /// Used when config.toml sets no `alert-cpu` — zstats' own default is 30%.
+/// The sustained bar is that line divided by `prefs::sustained_divisor`
+/// (3 unless app.toml says): derived rather than fixed so tightening
+/// `alert-cpu` tightens this too.
 const SUSTAINED_FALLBACK_ALERT: f64 = 30.0;
 
 /// How many past alerts the Alerts tab can show.
@@ -985,7 +983,7 @@ impl ZStatsAppState {
 
         if let Some(processes) = tick.snapshot.processes.as_deref() {
             self.sustained
-                .record(processes, &tick.process_stats, self.sustained_bar(), now);
+                .record(processes, &tick.process_stats, self.sustained_rule(), now);
         }
         if let Some(nets) = tick.snapshot.networks.as_deref() {
             self.net.record(nets, now);
@@ -1317,7 +1315,7 @@ impl ZStatsAppState {
     /// card. Judgment stays out of the rule engine: this reads the
     /// watcher's state and nothing more.
     pub fn sustained_active(&self) -> Vec<SustainedNotice> {
-        self.sustained.active(self.sustained_bar())
+        self.sustained.active(self.sustained_rule())
     }
 
     /// The sustained bar, exposed for the Alerts empty state's
@@ -1331,7 +1329,18 @@ impl ZStatsAppState {
             .as_ref()
             .and_then(|f| f.alerts.cpu)
             .map_or(SUSTAINED_FALLBACK_ALERT, f64::from)
-            * SUSTAINED_FRACTION
+            / f64::from(prefs::sustained_divisor())
+    }
+
+    /// The sustained-load rule in force: the bar from `alert-cpu` and
+    /// the panel's divisor, the duration from the panel's own file.
+    /// Built per question rather than cached, so a picker change is
+    /// in force on the next tick with no restart.
+    pub fn sustained_rule(&self) -> SustainedRule {
+        SustainedRule {
+            bar: self.sustained_bar(),
+            after: prefs::sustained_after(),
+        }
     }
 
     /// Sustained-load notices raised by the last round, taken once.
@@ -1342,7 +1351,7 @@ impl ZStatsAppState {
     /// How long this process has been holding a low-but-real CPU share, once
     /// that has gone on long enough to be worth saying.
     pub fn sustained_load(&self, pid: u32) -> Option<Duration> {
-        self.sustained.duration_for(pid, self.sustained_bar())
+        self.sustained.duration_for(pid, self.sustained_rule())
     }
 
     /// Whether an interface has carried traffic recently enough for a row.

@@ -317,6 +317,23 @@ pub fn set_tray_pref(pref: prefs::TrayPref, cx: &mut App) {
     repaint(cx);
 }
 
+/// The Interface page's sustained-duration picker. Persist and repaint;
+/// the store builds the rule from prefs on every question, so the next
+/// tick already runs with it — no collector rebuild, this watcher is the
+/// panel's own. The default chip stores `None`, so the key leaves the
+/// file rather than pinning today's default into it.
+pub fn set_sustained_after_pref(minutes: u16, cx: &mut App) {
+    let default = (watch::DEFAULT_SUSTAINED_AFTER.as_secs() / 60) as u16;
+    prefs::set_sustained_after((minutes != default).then_some(minutes));
+    repaint(cx);
+}
+
+/// The Interface page's sustained-divisor picker — same shape.
+pub fn set_sustained_divisor_pref(divisor: u8, cx: &mut App) {
+    prefs::set_sustained_divisor((divisor != prefs::DEFAULT_SUSTAINED_DIVISOR).then_some(divisor));
+    repaint(cx);
+}
+
 /// The Config tab's language picker: persist, re-pin the locale, and rebuild
 /// the chrome that snapshotted translated strings when it was built — the
 /// tray menu and the app menu. Everything else re-translates on repaint.

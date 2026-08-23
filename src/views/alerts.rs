@@ -24,7 +24,6 @@ use crate::i18n;
 use crate::state::{SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
 use crate::theme;
-use crate::watch::SUSTAINED_AFTER;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -54,7 +53,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
 
     let mut now: Vec<AnyElement> = live.iter().copied().map(|s| alert_card(s, state)).collect();
-    if let (Some(ago), Some(card)) = (newest_noticed_ago(&holdings), sustained_from(&holdings)) {
+    let after = state.sustained_rule().after;
+    if let (Some(ago), Some(card)) = (
+        newest_noticed_ago(&holdings, after),
+        sustained_from(&holdings),
+    ) {
         let ages: Vec<Duration> = live.iter().map(|s| s.age()).collect();
         let at = sustained_insert_at(&ages, ago);
         now.splice(at..at, std::iter::once(card));
@@ -96,11 +99,11 @@ fn empty_card(state: &ZStatsAppState) -> AnyElement {
 }
 
 /// How long ago the watcher started pointing at this stretch: the hold
-/// itself is two hours old by then, but that is the bar, not the news.
-fn newest_noticed_ago(holdings: &[SustainedNotice]) -> Option<Duration> {
+/// itself is `after` old by then, but that is the bar, not the news.
+fn newest_noticed_ago(holdings: &[SustainedNotice], after: Duration) -> Option<Duration> {
     holdings
         .iter()
-        .map(|n| n.duration.saturating_sub(SUSTAINED_AFTER))
+        .map(|n| n.duration.saturating_sub(after))
         .min()
 }
 
@@ -431,7 +434,7 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
         t!(
             "alerts.watch_sustained",
             cpu = format!("{:.0}%", state.sustained_bar_percent()),
-            hours = SUSTAINED_AFTER.as_secs() / 3600
+            after = format::span(state.sustained_rule().after)
         )
         .to_string(),
     ));
@@ -1318,10 +1321,14 @@ mod tests {
             pid: 1,
             name: "ghostty".into(),
             cpu_avg: 23.7,
-            duration: SUSTAINED_AFTER + Duration::from_secs(120),
+            duration: crate::watch::DEFAULT_SUSTAINED_AFTER + Duration::from_secs(120),
         };
-        assert_eq!(newest_noticed_ago(&[n]), Some(Duration::from_secs(120)));
-        assert_eq!(newest_noticed_ago(&[]), None);
+        let after = crate::watch::DEFAULT_SUSTAINED_AFTER;
+        assert_eq!(
+            newest_noticed_ago(&[n], after),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(newest_noticed_ago(&[], after), None);
     }
 
     #[test]
