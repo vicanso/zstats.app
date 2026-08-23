@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.1.11](https://github.com/vicanso/zstats.app/compare/v0.1.7..v0.1.11) - 2026-08-23
+
+### ⛰️  Features
+
+- An Overview row is a door — click lands on Apps with that tree open - ([925a04c](https://github.com/vicanso/zstats.app/commit/925a04ced948fb8ad608cb64fe862dac91bae074))
+- How long is "sustained" becomes the reader's call — hours and a divisor in app.toml - ([10982b6](https://github.com/vicanso/zstats.app/commit/10982b646f41e182edeb48b0e8f4b84dbb7ebbae))
+- The week's alerts stay readable — one file per day, a dismissed card still counts - ([c046c5c](https://github.com/vicanso/zstats.app/commit/c046c5c62f45384d7166d511d789c3eb661a3e03))
+- Memory that keeps climbing gets named — an hour on Overview, a day on History - ([ad59a7e](https://github.com/vicanso/zstats.app/commit/ad59a7e0e865962fe080ed0e7d75ad97d25d2016))
+- An app's tree names the job that burns it, and the memory face counts what is left - ([c5036a6](https://github.com/vicanso/zstats.app/commit/c5036a67af446218af6282a22a3be08965d990c6))
+- A bare tree wears its job — the kernel's process group, not a shell list or the hottest leaf - ([c7f6581](https://github.com/vicanso/zstats.app/commit/c7f6581a63165eb299116d491373974e3aee6504))
+- A login compile shows as rustc — the session name stays in the expansion - ([7adc080](https://github.com/vicanso/zstats.app/commit/7adc080c6ffea506226835d01073256d54a0eddb))
+- The tray wears a face — CPU at rest, memory when an alert says so, or both side by side - ([4eec774](https://github.com/vicanso/zstats.app/commit/4eec7744a97fe3b0bac83462267931efd5421a2b))
+- Add load average of 1/5/15 - ([6d7d580](https://github.com/vicanso/zstats.app/commit/6d7d580990c7833bf14b413b5945e4073499a706))
+- An Apps expansion takes a new photograph on reopen, and again every 15s - ([c076716](https://github.com/vicanso/zstats.app/commit/c0767161800ed44089902b8fe4e80af339046456))
+- The app keeps a diary — alerts with their verdicts, and stderr stops eating the evidence - ([be0c8f1](https://github.com/vicanso/zstats.app/commit/be0c8f1ee8608c728c5047168f7b0ea7e00d4b26))
+- Climbing still fills five rows, so the window does not go hollow - ([98a5f97](https://github.com/vicanso/zstats.app/commit/98a5f97912fadb65e469a4d6e1e92df6f087ebc1))
+- Battery says charging in the title, so the grid is three and three - ([5ca54a7](https://github.com/vicanso/zstats.app/commit/5ca54a7979cb6e4c4abde964f8e319c9e03b3665))
+
+### 🐛 Bug Fixes
+
+- Hide drops the question with the photograph — no more full-table scans tray-resident - ([f0b96df](https://github.com/vicanso/zstats.app/commit/f0b96dfed2a9a8d97d2f27c2a1cf2282dd01fc3f))
+- The tray picker's fourth chip is "Both" — four chips now fit one row at 320px - ([d6d967a](https://github.com/vicanso/zstats.app/commit/d6d967a0e541fd804f36be0a6fb8a72097c8499e))
+- Labels yield to their figures — and one-line pairs pack instead of pinning - ([21b649f](https://github.com/vicanso/zstats.app/commit/21b649fd645fccd87f8f69614f4e43f1bd5328ea))
+
+### ⚙️ Miscellaneous Tasks
+
+- Zstats 0.5.6 — the process boost bar becomes 30% of the machine - ([afcd10d](https://github.com/vicanso/zstats.app/commit/afcd10d55ace6e11608acd757cd99468fea04b14))
+- Version 0.1.10 - ([41f0521](https://github.com/vicanso/zstats.app/commit/41f0521de6cd8341b60b9b0efb004e474132e03d))
+- Version 0.1.9 - ([34f7e61](https://github.com/vicanso/zstats.app/commit/34f7e614a27526eb62c51d19073bdbeab49bb2da))
+- Version 0.1.8 - ([580175b](https://github.com/vicanso/zstats.app/commit/580175b7db6bf0ef089976456e3112ffe8c5f831))
+- Fmt the line CI caught, and write the fmt-then-lint rule down - ([7d59079](https://github.com/vicanso/zstats.app/commit/7d590798077363bb2601403d62d193b1538ff8a0))
+- Chunks become typed — 1.98's clippy asks, as_chunks answers - ([dc62134](https://github.com/vicanso/zstats.app/commit/dc62134048fdad8f91387904ff2237f79f8513e3))
+- Update rust to 1.98.0 - ([3d2cee7](https://github.com/vicanso/zstats.app/commit/3d2cee74000f864648b4e582db0cd5133b74f682))
+
 ## [0.1.10](https://github.com/vicanso/zstats.app/compare/v0.1.7..v0.1.10) - 2026-08-23
 
 ### ⛰️  Features
