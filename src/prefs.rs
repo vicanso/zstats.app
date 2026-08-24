@@ -41,7 +41,8 @@ pub enum ThemePref {
 
 /// What the menu bar shows. `Auto` is the default and the only mode that
 /// moves: CPU until memory is the thing that needs attention, then
-/// memory until it is not (`tray::face_for` says exactly when). The two
+/// memory until it is not — recovered for five minutes, or the card
+/// dismissed (`tray::face_for` says exactly when). The two
 /// pinned modes are for the reader who always wants the same figure
 /// there; `Both` keeps two status items, CPU to the left of memory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

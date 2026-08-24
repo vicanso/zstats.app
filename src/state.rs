@@ -44,8 +44,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zstats::settings::FileConfig;
+use zstats::snapshot::SystemSnapshot;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
-use zstats::{AlertEvent, AlertKind, AlertSubject, Tick};
+use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Tick};
 
 /// Used when config.toml sets no `alert-cpu` — zstats' own default is 30%.
 /// The sustained bar is that line divided by `prefs::sustained_divisor`
@@ -447,6 +448,15 @@ const EJECT_HIDE_MAX: Duration = Duration::from_secs(60);
 const NOISY_WINDOW: Duration = Duration::from_secs(3600);
 const NOISY_AFTER: usize = 2;
 
+/// How long a memory-class episode must look recovered before Auto
+/// puts the tray back on CPU. Same five minutes zstats waits to end a
+/// pressure episode (`PRESSURE_REARM` = `SLOW_WINDOW`): a one-sample
+/// dip must not flip the icon, and the face turns back when the engine
+/// would have cleared that episode, not five minutes after. Process
+/// and app memory get the same hold so a leak that just went under
+/// its own bar does not flicker the menu bar. The card stays.
+const TRAY_RECOVER: Duration = Duration::from_secs(5 * 60);
+
 /// One episode's quiet hours: banners are skipped until the deadline.
 struct Snooze {
     until: Instant,
@@ -504,6 +514,11 @@ pub struct SeenAlert {
     /// during this run — restored cards are records to read, and the
     /// Processes tab still offers a quit for anything actually running.
     pub live: bool,
+    /// When this memory-class episode last started looking recovered,
+    /// for the tray's Auto face. `None` while it still holds. The card
+    /// stays on the Alerts tab; the menu bar goes back to CPU after
+    /// [`TRAY_RECOVER`]. Display-layer only — the engine is not asked.
+    recovered_since: Option<SystemTime>,
     pub event: AlertEvent,
 }
 
@@ -522,6 +537,70 @@ impl SeenAlert {
     pub fn span(&self) -> Option<Duration> {
         let span = self.at.duration_since(self.first_at).unwrap_or_default();
         (span >= Duration::from_secs(60)).then_some(span)
+    }
+
+    fn recovered_for(&self, now: SystemTime) -> bool {
+        self.recovered_since
+            .is_some_and(|at| now.duration_since(at).unwrap_or_default() >= TRAY_RECOVER)
+    }
+}
+
+fn is_memory_class(kind: AlertKind) -> bool {
+    matches!(
+        kind,
+        AlertKind::Memory | AlertKind::AppMemory | AlertKind::Pressure
+    )
+}
+
+/// Whether this memory-class event still holds in `snapshot`.
+///
+/// `None` if this sample cannot say (no pressure level, process
+/// collection off). `false` if the subject is gone or its figure is
+/// under the bar the event itself recorded — not a new threshold.
+fn memory_event_holds(event: &AlertEvent, snapshot: &SystemSnapshot) -> Option<bool> {
+    match &event.detail {
+        AlertDetail::Pressure { .. } => {
+            // zstats: `level <= 1` is normal. No level → cannot say.
+            Some(snapshot.memory.pressure_level? > 1)
+        }
+        AlertDetail::Memory {
+            threshold_bytes,
+            threshold_percent,
+            ..
+        } => {
+            let held = match &event.subject {
+                AlertSubject::Process { pid, name, .. } => {
+                    let processes = snapshot.processes.as_deref()?;
+                    let Some(p) = processes.iter().find(|p| p.pid == *pid) else {
+                        return Some(false);
+                    };
+                    if p.name != *name {
+                        return Some(false);
+                    }
+                    p.phys_footprint_bytes.unwrap_or(p.memory_bytes)
+                }
+                AlertSubject::App { root_pid, name, .. } => {
+                    let groups = snapshot.process_groups.as_deref()?;
+                    let Some(g) = groups.iter().find(|g| g.root_pid == *root_pid) else {
+                        return Some(false);
+                    };
+                    if g.name != *name {
+                        return Some(false);
+                    }
+                    g.phys_footprint_bytes.unwrap_or(g.memory_bytes)
+                }
+                _ => return Some(false),
+            };
+            if *threshold_bytes > 0 {
+                Some(held >= *threshold_bytes)
+            } else if *threshold_percent > 0.0 && snapshot.memory.total_bytes > 0 {
+                let share = held as f64 / snapshot.memory.total_bytes as f64 * 100.0;
+                Some(share >= *threshold_percent)
+            } else {
+                None
+            }
+        }
+        _ => Some(false),
     }
 }
 
@@ -976,9 +1055,9 @@ impl ZStatsAppState {
     /// without walking the accumulated list.
     pub fn ingest(&mut self, tick: Tick, cx: &mut Context<Self>) -> Vec<AlertEvent> {
         let now = Instant::now();
+        let wall = SystemTime::now();
         let fresh = tick.alerts.clone();
         if !fresh.is_empty() {
-            let wall = SystemTime::now();
             for event in &fresh {
                 self.record_alert(event.clone(), wall);
             }
@@ -1032,6 +1111,7 @@ impl ZStatsAppState {
             self.prune_ejected(&listed, now);
         }
         self.latest = Some(tick);
+        self.note_memory_recovery(wall);
         // Piggyback on the tick rather than the render: views are pure
         // functions and cannot start work, and a fresh probe is only
         // interesting while someone is looking at the Hardware tab.
@@ -1093,6 +1173,7 @@ impl ZStatsAppState {
             seen.reports += 1;
             // A live report just named this pid: the card may act again.
             seen.live = true;
+            seen.recovered_since = None;
             // Keep the newest reading: the follow-up carries current numbers,
             // and a card showing the crossing value 30 minutes on is stale.
             seen.event = event;
@@ -1107,6 +1188,7 @@ impl ZStatsAppState {
             at: now,
             reports: 1,
             live: true,
+            recovered_since: None,
             event,
         });
         while self.alerts.len() > MAX_ALERTS {
@@ -1138,6 +1220,7 @@ impl ZStatsAppState {
                 // Read-only until a live report confirms the subject —
                 // see [`SeenAlert::live`].
                 live: false,
+                recovered_since: None,
                 event: saved.event,
             });
         }
@@ -1265,32 +1348,52 @@ impl ZStatsAppState {
     }
 
     /// The one question the tray's auto mode asks the store: is memory
-    /// what needs attention right now? One input: a memory-class episode
-    /// (process, application, or kernel pressure) reported *this
-    /// session* and not yet dismissed — read exactly as the Alerts tab's
-    /// tint reads the list. Dismissing the card is the acknowledgement,
-    /// and a condition that still holds re-opens it on the next report.
-    /// Restored episodes do not count: they are yesterday-shaped records,
-    /// and the tray is about now.
+    /// what needs attention right now? A memory-class episode (process,
+    /// application, or kernel pressure) reported *this session*, not
+    /// yet dismissed, and not recovered for [`TRAY_RECOVER`]. Restored
+    /// episodes do not count: they are yesterday-shaped records, and
+    /// the tray is about now. Dismissing the card still switches back
+    /// immediately; a condition that still holds re-opens it on the
+    /// next report.
     ///
-    /// Deliberately *not* the raw `pressure_level` on the latest sample.
-    /// zstats' pressure rule exists because that level flaps — its own
-    /// comment records four "new" warnings in 5.5h for one continuous
-    /// condition — so it reports only after warning has held five
-    /// minutes (critical one), and ends the episode only after normal
-    /// has held five more. Reading the level underneath that would put
-    /// the flapping zstats removed straight back on the menu bar, and
-    /// replace a considered verdict with a cruder one. The face turns
-    /// when the banner would, and not before. Nothing here evaluates a
-    /// threshold.
+    /// Recovery is the event's own bar against this tick's numbers —
+    /// `threshold_bytes` on the card, `pressure_level > 1` for the
+    /// kernel verdict — not a second threshold. Turning *on* still
+    /// waits for zstats to report: the raw level flaps, and reading it
+    /// to face memory would put that flap on the menu bar. Turning
+    /// *off* after five minutes of the same "normal" zstats uses to
+    /// end a pressure episode is the clear side of that rule, which
+    /// the list never heard.
     pub fn memory_needs_attention(&self) -> bool {
-        self.alerts.iter().any(|seen| {
-            seen.live
-                && matches!(
-                    seen.event.kind(),
-                    AlertKind::Memory | AlertKind::AppMemory | AlertKind::Pressure
-                )
-        })
+        self.memory_needs_attention_at(SystemTime::now())
+    }
+
+    fn memory_needs_attention_at(&self, now: SystemTime) -> bool {
+        self.alerts
+            .iter()
+            .any(|seen| seen.live && is_memory_class(seen.event.kind()) && !seen.recovered_for(now))
+    }
+
+    /// Start or reset each live memory episode's recovery clock from
+    /// this tick. Unknown samples (no process table, no pressure
+    /// level) leave the clock where it was.
+    fn note_memory_recovery(&mut self, now: SystemTime) {
+        let Some(tick) = self.latest.as_ref() else {
+            return;
+        };
+        let snapshot = &tick.snapshot;
+        for seen in &mut self.alerts {
+            if !seen.live || !is_memory_class(seen.event.kind()) {
+                continue;
+            }
+            match memory_event_holds(&seen.event, snapshot) {
+                Some(true) => seen.recovered_since = None,
+                Some(false) if seen.recovered_since.is_none() => {
+                    seen.recovered_since = Some(now);
+                }
+                Some(false) | None => {}
+            }
+        }
     }
 
     /// What the collector is running with. Seeded at startup, then replaced
@@ -3178,6 +3281,78 @@ mod tests {
         }
     }
 
+    fn pressure_alert() -> AlertEvent {
+        AlertEvent {
+            subject: AlertSubject::System,
+            detail: AlertDetail::Pressure {
+                level: 2,
+                sustained: Duration::from_secs(300),
+                swap_used_bytes: 1 << 30,
+                swap_total_bytes: 2 << 30,
+                compressed_bytes: None,
+                top_consumers: vec![],
+            },
+            repeat_after: None,
+        }
+    }
+
+    fn empty_tick() -> Tick {
+        use zstats::snapshot::{CpuSnapshot, HostInfo, LoadSnapshot, MemorySnapshot};
+        Tick {
+            snapshot: SystemSnapshot {
+                timestamp: jiff::Timestamp::now(),
+                host: HostInfo {
+                    hostname: String::new(),
+                    os_name: String::new(),
+                    os_version: String::new(),
+                    kernel_version: None,
+                    arch: String::new(),
+                    uptime_secs: 0,
+                    labels: HashMap::new(),
+                },
+                cpu: CpuSnapshot {
+                    usage_percent: 0.0,
+                    per_core_usage: vec![],
+                    logical_cores: 1,
+                    physical_cores: None,
+                    frequency_mhz: None,
+                    per_core_frequency_mhz: vec![],
+                    brand: None,
+                    perf_levels: None,
+                },
+                memory: MemorySnapshot {
+                    total_bytes: 16 << 30,
+                    used_bytes: 0,
+                    available_bytes: 16 << 30,
+                    swap_total_bytes: 0,
+                    swap_used_bytes: 0,
+                    used_percent: 0.0,
+                    swap_used_percent: 0.0,
+                    compressed_bytes: None,
+                    pressure_level: Some(1),
+                },
+                disks: None,
+                networks: None,
+                processes: None,
+                process_groups: None,
+                total_processes: None,
+                battery: None,
+                load: LoadSnapshot {
+                    load1: 0.0,
+                    load5: 0.0,
+                    load15: 0.0,
+                },
+                temperatures: None,
+                io_totals: Default::default(),
+                capabilities: Default::default(),
+                extras: HashMap::new(),
+            },
+            alerts: vec![],
+            process_stats: HashMap::new(),
+            records: vec![],
+        }
+    }
+
     /// zstats reports a crossing once and follows up once 30 minutes later.
     /// Both describe the same episode, and a list that appends a card per
     /// event turns one problem into two — then lets a flapping process crowd
@@ -3368,6 +3543,108 @@ mod tests {
             !state.drop_alert(doomed),
             "dismissing twice changes nothing"
         );
+    }
+
+    /// Auto faces memory while a live memory episode still holds, and
+    /// only after five minutes under the event's own bar — not on a
+    /// one-sample dip, and not by evaluating a new threshold.
+    #[test]
+    fn auto_tray_returns_to_cpu_five_minutes_after_memory_recovers() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(mem_alert(7), t0);
+        assert!(
+            state.memory_needs_attention_at(t0),
+            "a live memory episode faces memory"
+        );
+
+        let mut tick = empty_tick();
+        let mut p = snap(7, "p7");
+        p.phys_footprint_bytes = Some(100 << 20);
+        tick.snapshot.processes = Some(Arc::new(vec![p]));
+        state.latest = Some(tick);
+        state.note_memory_recovery(t0);
+        assert!(
+            state.memory_needs_attention_at(t0),
+            "just recovered is still memory"
+        );
+        assert!(
+            state.memory_needs_attention_at(t0 + Duration::from_secs(4 * 60 + 59)),
+            "four minutes under the bar is not five"
+        );
+        assert!(
+            !state.memory_needs_attention_at(t0 + TRAY_RECOVER),
+            "five minutes under the event's bar returns to CPU"
+        );
+    }
+
+    #[test]
+    fn auto_tray_stays_on_memory_while_the_process_is_still_over() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(mem_alert(7), t0);
+        let mut tick = empty_tick();
+        let mut p = snap(7, "p7");
+        p.phys_footprint_bytes = Some(8 << 30);
+        tick.snapshot.processes = Some(Arc::new(vec![p]));
+        state.latest = Some(tick);
+        state.note_memory_recovery(t0);
+        assert!(state.memory_needs_attention_at(t0 + TRAY_RECOVER));
+    }
+
+    #[test]
+    fn auto_tray_faces_memory_again_if_the_condition_returns() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(mem_alert(7), t0);
+        let mut quiet = empty_tick();
+        let mut p = snap(7, "p7");
+        p.phys_footprint_bytes = Some(100 << 20);
+        quiet.snapshot.processes = Some(Arc::new(vec![p.clone()]));
+        state.latest = Some(quiet);
+        state.note_memory_recovery(t0);
+
+        p.phys_footprint_bytes = Some(8 << 30);
+        let mut loud = empty_tick();
+        loud.snapshot.processes = Some(Arc::new(vec![p]));
+        state.latest = Some(loud);
+        state.note_memory_recovery(t0 + Duration::from_secs(60));
+        assert!(
+            state.memory_needs_attention_at(t0 + TRAY_RECOVER + Duration::from_secs(60)),
+            "crossing again resets the five minutes"
+        );
+    }
+
+    #[test]
+    fn auto_tray_pressure_returns_after_five_minutes_of_normal() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(pressure_alert(), t0);
+        let mut tick = empty_tick();
+        tick.snapshot.memory.pressure_level = Some(4);
+        state.latest = Some(tick);
+        state.note_memory_recovery(t0);
+        assert!(state.memory_needs_attention_at(t0));
+
+        let mut normal = empty_tick();
+        normal.snapshot.memory.pressure_level = Some(1);
+        state.latest = Some(normal);
+        state.note_memory_recovery(t0);
+        assert!(state.memory_needs_attention_at(t0 + Duration::from_secs(60)));
+        assert!(!state.memory_needs_attention_at(t0 + TRAY_RECOVER));
+    }
+
+    #[test]
+    fn auto_tray_ignores_restored_memory_episodes() {
+        let mut state = ZStatsAppState::new();
+        state.adopt_alerts(vec![alertlog::Restored {
+            event: mem_alert(7),
+            first_at: SystemTime::now(),
+            at: SystemTime::now(),
+            reports: 1,
+            dismissed: false,
+        }]);
+        assert!(!state.memory_needs_attention_at(SystemTime::now()));
     }
 
     /// "Today's alerts" has to keep meaning today on a machine that

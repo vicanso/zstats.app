@@ -230,7 +230,9 @@ fn build_item(label: &'static str, face: TrayFace, faces: &Faces) -> Option<Item
 /// episode changes nothing: the figure it concerns is already there.
 /// Memory is the face that has to be *earned*, and when both are in
 /// trouble it wins, because memory is the one macOS escalates
-/// (compressor, swap, jetsam) while a busy CPU just stays busy.
+/// (compressor, swap, jetsam) while a busy CPU just stays busy. Auto
+/// switches back after the episode has looked recovered for five
+/// minutes, or immediately when the card is dismissed.
 ///
 /// This is the *primary* item's face. In Both that is memory: the
 /// second item lands to its left (see `TrayHandle::second`) and wears
