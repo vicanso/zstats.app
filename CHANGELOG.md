@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.13](https://github.com/vicanso/zstats.app/compare/v0.1.11..v0.1.13) - 2026-08-24
+
+### ⛰️  Features
+
+- The memory face finds its own way back — five quiet minutes, or the ✕ - ([f8db833](https://github.com/vicanso/zstats.app/commit/f8db833938cc8993c489c11afc9ca9ed37820154))
+
+### 🐛 Bug Fixes
+
+- Banners come back from the dead — UNUserNotificationCenter, with both gates named - ([95cb4ba](https://github.com/vicanso/zstats.app/commit/95cb4ba9616793dd9fb56b6ba7fbabf5c2459198))
+- One left edge for the Alerts tab — loose text joins the card-content line - ([d9722eb](https://github.com/vicanso/zstats.app/commit/d9722eb70d48496fa58eec7822d5da61a3fb937a))
+- Real glass that owes the wallpaper nothing — a stock popover material carries the ground - ([af6cccd](https://github.com/vicanso/zstats.app/commit/af6cccd9a7ba787405b219bfe37dc7a85387d43d))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.1.12 - ([7550a05](https://github.com/vicanso/zstats.app/commit/7550a053a33e8e39ac77fa3e1b2075bbf4b915ea))
+
 ## [0.1.12](https://github.com/vicanso/zstats.app/compare/v0.1.11..v0.1.12) - 2026-08-24
 
 ### ⛰️  Features
