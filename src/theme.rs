@@ -20,8 +20,18 @@ pub fn is_dark() -> bool {
     DARK.load(Ordering::Relaxed)
 }
 
-/// Card / grouped fill. Dark: faint white lift. Light: nearly solid white,
-/// so cards sit on the grey panel the way Settings groups do.
+/// Card / grouped fill. Dark: faint white lift over the glass. Light:
+/// nearly solid white, so cards sit on the grey panel the way Settings
+/// groups do.
+///
+/// The dark lift is safe to stay translucent because the ground under it
+/// is guaranteed: `use_popover_material` (main.rs) puts a stock
+/// popover-material `NSVisualEffectView` under the content, whose
+/// luminosity clamp keeps the backdrop dark over any wallpaper — the
+/// same mechanism that keeps a system menu readable on a white desktop.
+/// A brief detour made these cards nearly solid instead; it fixed white
+/// wallpapers by killing the glass everywhere else, which is the wrong
+/// trade when the OS offers the right one.
 #[inline]
 pub fn surface() -> Rgba {
     if is_dark() {

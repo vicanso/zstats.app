@@ -220,7 +220,7 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 
 ### 与设计稿有意的偏差
 
-- **毛玻璃**：设计稿是实心 `#09090b`，这里保留 vibrancy，观感更通透。
+- **毛玻璃**：设计稿是实心 `#09090b`，这里保留 vibrancy，观感更通透。**白色壁纸曾把整个暗色面板打穿**（55% wash 放 45% 亮度进来，近白正文压在浅灰玻璃上，有实测截图），根因在 gpui：它给 `Blurred` 垫的 `NSVisualEffectView` 子类钉死 `Selection` 材质、并在每次 `updateLayer` 把 layer 背景剥掉（自称 colorless）——剩下**纯 blur**，材质本该有的亮度钳制衬底根本留不住，`setMaterial: Popover` 设上去也会被剥。所以 `use_popover_material`（main.rs，建窗后首帧调用）在 gpui 的 blur 视图**之上**、Metal 内容层**之下**插一个**原生未子类化的** `NSVisualEffectView`（`.popover` 材质、`.behindWindow`、`.active`，autoresize 跟窗，重入时以 `isMemberOfClass` 认出自己直接返回）：popover 材质的亮度钳制正是系统菜单在任何壁纸上都保持暗底的机制——但对纯白只能压到中灰，所以暗色 wash 从 55% 降到 35% 而不是归零：白底下弱化文字仍可读，彩色壁纸的色相则清楚地透进玻璃（实测 20% 在白底会把说明文字洗掉，HUDWindow 材质在新系统上反而更透，都试过）。曾经试过反方向——把卡片涂到 94% 实心——白壁纸是修好了，玻璃也没了，黑底下卡片还和框架撞色；已回退，卡片仍是玻璃上的微提亮（暗 `0xffffff12`、浅 `0xfffffff2`）。那次弯路留下的一件对的东西保住了：卡片描边（`widgets::outline`，零布局 inset shadow，`theme::border()` 选墨色）从浅色专属改为两个主题都画——不欠壁纸任何东西的分隔。
 - **导航**：设计稿是 4×2 缩写文字（Over / Sens / Conf）。320px 塞不下全名，缩写也不像 macOS，所以改成单行图标 + tooltip。
 - **字体**：系统字体做 UI，JetBrains Mono 做指标数字（等宽数位，跳动时不会左右抖）。设计指定的 Archivo 未采用。
 - **Config tab 可写**。开关和间隔走 `apply_add` 后重建 `Monitor`（速率基线会丢，下一次采样的速率是 —）；告警基值走 `reload_settings()`，和 Alerts 卡片同一条路径。

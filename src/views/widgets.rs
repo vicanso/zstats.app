@@ -56,14 +56,19 @@ pub fn with_wrap_tooltip(
         .into_any_element()
 }
 
-/// Light mode's 1px card outline, painted as a zero-blur inset shadow
-/// instead of a border. Not cosmetic hair-splitting: gpui borders occupy
-/// layout space, so a real border made every light card 2px taller than
-/// its dark twin — a window sized snugly under one theme scrolled under
-/// the other. A shadow costs no layout, and `inset` draws it exactly
-/// where the old border sat; the two themes now produce pixel-identical
-/// geometry.
-fn light_outline(d: Div) -> Div {
+/// The 1px card outline, painted as a zero-blur inset shadow instead of
+/// a border. Not cosmetic hair-splitting: gpui borders occupy layout
+/// space, so a real border made every light card 2px taller than its
+/// dark twin — a window sized snugly under one theme scrolled under the
+/// other. A shadow costs no layout, and `inset` draws it exactly where
+/// a border would sit; the two themes produce pixel-identical geometry.
+///
+/// Both themes now, not just light: since the cards went nearly solid,
+/// their separation from the glass frame is a colour difference, and on
+/// a wallpaper that happens to match the card (black, for dark) that
+/// difference vanishes. The hairline is the separation that owes the
+/// wallpaper nothing. `theme::border()` picks the ink per theme.
+fn outline(d: Div) -> Div {
     d.shadow(vec![gpui::BoxShadow {
         color: gpui::Hsla::from(theme::border()),
         offset: gpui::point(px(0.), px(0.)),
@@ -73,12 +78,9 @@ fn light_outline(d: Div) -> Div {
     }])
 }
 
-/// Settings-style grouped container: fill, no hard outline.
+/// Settings-style grouped container: fill, hairline outline.
 pub fn card() -> Div {
-    v_flex()
-        .rounded(px(12.))
-        .bg(theme::surface())
-        .when(!theme::is_dark(), light_outline)
+    outline(v_flex().rounded(px(12.)).bg(theme::surface()))
         .px(px(13.))
         .pt(px(12.))
         .pb(px(13.))
@@ -86,11 +88,7 @@ pub fn card() -> Div {
 
 /// Same grouping, no inner padding — lists paint their own rows to the edges.
 pub fn list_shell() -> Div {
-    v_flex()
-        .rounded(px(12.))
-        .bg(theme::surface())
-        .when(!theme::is_dark(), light_outline)
-        .overflow_hidden()
+    outline(v_flex().rounded(px(12.)).bg(theme::surface())).overflow_hidden()
 }
 
 /// Card title on the left, an optional status pill on the right.

@@ -96,13 +96,15 @@ const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(target_os = "macos
 } else {
     WindowBackgroundAppearance::Opaque
 };
-/// Dark: one wash over the whole window. 0.18 is fine on a dark desktop
-/// but a light wallpaper shows straight through and the panel turns into
-/// grey fog (light type on white glass). 0.55 is still one layer — tabs,
-/// cards and empty space stay the same material, no extra body fill.
-/// Light: a *thick* wash. Light tokens use dark type, and a dark wallpaper
-/// shining through 0.2 opacity turns the panel into grey fog.
-const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.55 } else { 1.0 };
+/// Dark: one thin wash over the whole window — a tint in our token's
+/// hue, not protection. The protection is the popover material
+/// (`use_popover_material`): its luminosity clamp keeps the ground dark
+/// over any wallpaper — but only down to mid-grey against pure white,
+/// so the wash still shares the load: 0.35 keeps the dim captions
+/// legible there while a coloured desktop still shines through
+/// clearly. 0.55 (the raw-blur era's value) stacked on the material
+/// read as fully opaque; 0.20 washed the captions out on white.
+const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.35 } else { 1.0 };
 /// Light mode is deliberately near-opaque: vibrancy there is pale-on-pale,
 /// so the blur reads as barely anything while the desktop's detail still
 /// bleeds through and fights the dark text. Legibility wins; the effect is
@@ -406,7 +408,10 @@ fn with_app_identity(mut options: WindowOptions) -> WindowOptions {
 fn use_popover_material(window: &Window) {
     use objc2::ClassType;
     use objc2::runtime::AnyObject;
-    use objc2_app_kit::{NSVisualEffectMaterial, NSVisualEffectView};
+    use objc2_app_kit::{
+        NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    };
+    use objc2_foundation::NSRect;
     use raw_window_handle::RawWindowHandle;
 
     // Fully qualified: gpui's inherent `Window::window_handle()` (returning
@@ -426,14 +431,60 @@ fn use_popover_material(window: &Window) {
         let content: *mut AnyObject = objc2::msg_send![ns_window, contentView];
         let subviews: *mut AnyObject = objc2::msg_send![content, subviews];
         let count: usize = objc2::msg_send![subviews, count];
+        // Setting the material on gpui's own blur view is not enough — it
+        // is a subclass that pins `Selection` and strips the layer
+        // background on every `updateLayer` ("colorless" by design), so
+        // any material's adaptive backdrop is removed the moment AppKit
+        // repaints. What is left is pure blur: a white wallpaper arrives
+        // at full brightness and the dark theme sits on light glass. So a
+        // *stock* `NSVisualEffectView` goes in above gpui's (below its
+        // Metal content layer): the popover material's luminosity clamp —
+        // the reason every system menu stays dark over any wallpaper — is
+        // exactly the ground the panel needs, and nothing strips it.
+        let mut gpui_blur: *mut AnyObject = std::ptr::null_mut();
         for i in 0..count {
             let view: *mut AnyObject = objc2::msg_send![subviews, objectAtIndex: i];
+            let is_ours: bool =
+                objc2::msg_send![view, isMemberOfClass: NSVisualEffectView::class()];
+            if is_ours {
+                // Already installed (the panel window is built once, but
+                // being re-entrant here costs nothing).
+                return;
+            }
             let is_effect_view: bool =
                 objc2::msg_send![view, isKindOfClass: NSVisualEffectView::class()];
             if is_effect_view {
-                let _: () = objc2::msg_send![view, setMaterial: NSVisualEffectMaterial::Popover];
+                gpui_blur = view;
             }
         }
+        let bounds: NSRect = objc2::msg_send![content, bounds];
+        let effect: *mut AnyObject = objc2::msg_send![NSVisualEffectView::class(), alloc];
+        let effect: *mut AnyObject = objc2::msg_send![effect, initWithFrame: bounds];
+        if effect.is_null() {
+            return;
+        }
+        // Popover: the strongest practical clamp of the stock materials
+        // on current macOS (HUDWindow was tried and reads *lighter*
+        // over a white desktop). The clamp alone leaves pure white at
+        // mid-grey, so the wash above still carries part of the load —
+        // hence its 0.35, between "tint" and "rescue".
+        let _: () = objc2::msg_send![effect, setMaterial: NSVisualEffectMaterial::Popover];
+        let _: () =
+            objc2::msg_send![effect, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
+        // Active always: the popover auto-hides on focus loss anyway, so
+        // there is no "inactive but visible" state worth a paler ground.
+        let _: () = objc2::msg_send![effect, setState: NSVisualEffectState::Active];
+        // NSViewWidthSizable | NSViewHeightSizable — track the window.
+        let _: () = objc2::msg_send![effect, setAutoresizingMask: 18usize];
+        // NSWindowAbove = 1: directly above gpui's blur view, below the
+        // Metal layer that draws every element.
+        let _: () = objc2::msg_send![
+            content,
+            addSubview: effect,
+            positioned: 1isize,
+            relativeTo: gpui_blur
+        ];
+        let _: *mut AnyObject = objc2::msg_send![effect, autorelease];
     }
 }
 
