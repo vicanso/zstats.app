@@ -9889,6 +9889,7 @@ name = "zstats-app"
 version = "0.1.12"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -9902,6 +9903,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-service-management",
+ "objc2-user-notifications",
  "raw-window-handle",
  "resvg 0.46.0",
  "rust-embed",

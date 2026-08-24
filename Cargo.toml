@@ -140,7 +140,9 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
     "NSString",
-    "NSUserNotification",
+    # Real-bundle detection for the notification path: bare `cargo run`
+    # has no .app, and UNUserNotificationCenter throws there.
+    "NSBundle",
     # NSFileManager.trashItemAtURL — the Hardware tab's delete button is
     # Finder's own recoverable move-to-Trash, never a direct unlink.
     "NSError",
@@ -154,6 +156,23 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSValue",
 ] }
 raw-window-handle = "0.6"
+# Banner delivery. NSUserNotification — the deprecated API a bare binary
+# could use — is a silent no-op on macOS 26 (measured: "delivered" logged,
+# nothing shown, no ncprefs entry ever created; see docs/design.md
+# 系统通知), so delivery goes through UNUserNotificationCenter, which
+# requires a real .app bundle and the standard authorization prompt.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "UNUserNotificationCenter",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSound",
+    "block2",
+    "std",
+] }
+# Completion-handler blocks for the UN calls above.
+block2 = "0.6"
 # SMAppService.mainApp backs the Interface page's launch-at-login
 # switch: a login item the user can see and revoke in System Settings →
 # General → Login Items — both directions are the OS's own mechanism.

@@ -238,11 +238,13 @@ zedis 的 logger 原样适配：stdout + `~/.zstats/logs/zstats-app.log.<日期>
 
 告警触发时发原生横幅，macOS 走 `NSUserNotification`。点击横幅会打开 popover 并切到 Alerts 页。系统横幅的外观不能自定义。
 
-**macOS 上投递是自己的一层薄 `NSUserNotificationCenter` 封装：fire-and-forget + 常驻 delegate。** `deliverNotification:` 是异步 XPC 调用，立即返回；点击由启动时装好的 delegate 在主 run loop 上接收（gpui 本来就在泵它），任何一条横幅的点击都等于「打开 Alerts 页」，所以 delegate 无需携带 per-notification 状态。fire-and-forget 是目的而不是省事：此前走 notify-rust 的 `wait_for_action`（一条常驻投递线程 + 深度 16 的队列），它要等到用户*处理掉*横幅才返回——一条躺在通知中心没人理的横幅会把线程停多久取决于用户什么时候去理，后续横幅在队列里排队，第 17 条起静默丢弃。用户的注意力不是可以串行化的资源；投递与注意力解耦后，队列和停摆这一类问题整个不存在了。非 macOS 平台保留原来的 notify-rust 队列路径（XDG 横幅会自动过期，那里的等待有界）。
+**macOS 上投递走 `UNUserNotificationCenter`：fire-and-forget + 常驻 delegate。** `addNotificationRequest:` 异步返回；点击由启动时装好的 delegate 在主 run loop 上接收（gpui 本来就在泵它），任何一条横幅的点击都等于「打开 Alerts 页」，所以 delegate 无需携带 per-notification 状态；`willPresent` 回调放行 Banner|List|Sound，让面板打开（应用最前）时横幅照常出现——菜单栏应用的「最前」正是用户在看告警的时刻。fire-and-forget 是目的而不是省事：更早的 notify-rust `wait_for_action` 版本要等用户*处理掉*横幅才返回，一条躺着没人理的横幅能把投递线程停到天亮，第 17 条起静默丢弃。用户的注意力不是可以串行化的资源。
 
-`NSUserNotification` 自 10.14 起标记废弃，但它是裸 `cargo run` 进程唯一能用的横幅 API——替代品 `UNUserNotificationCenter` 对没有真实 bundle 的进程直接抛异常，而这个应用一半的生命都在调试器下不带 bundle 运行。
+**前任 `NSUserNotification` 在 macOS 26 上死于无声**，这是整次迁移的起因：当年选它是因为裸 `cargo run` 没有 bundle、UN 会直接抛异常，而它到 26.5 变成了彻底的 no-op——`deliverNotification:` 正常返回、什么都不显示、系统连通知设置条目都不建（实测，`osascript` 的横幅作为对照正常弹出）。假装投递的 API 比拒绝投递的更糟，所以它没有作为回退保留：裸 `cargo run` 现在诚实地没有横幅，启动时日志说一次。
 
-**必须在启动时调用 `notify_rust::set_application(BUNDLE_ID)`。** 它在调用时就把 `NSBundle.bundleIdentifier` swizzle 成我们的 id（进程级，自己的投递路径同样受益），macOS 据此归属横幅。字面量必须和 `Cargo.toml` 里 `[package.metadata.bundle] identifier` 保持一致，有单测守这个跨文件约束。裸 `cargo run` 时这个 id 解析到*已安装*的 zstats.app——这就是调试构建能发横幅的原因，也是没装 .app 时横幅静默不出现的原因。同一个 id 若有多份 .app 注册（比如 Downloads 里留着旧包），归属会摇摆，横幅可能静默丢失：`lsregister -u` 掉多余的那份即可。
+**授权与签名身份，两道都要过。** UN 走标准授权：首次请求弹系统自己的「允许通知？」对话框，之后按用户的记录静默放行；拒绝只记日志、绝不重问——用户已经答过系统的问题了。**签名身份是本地构建的暗坑**：arm64 链接器自动打的 ad-hoc 签名带随机 Identifier（`zstats-<hex>`），UN 对它直接拒绝授权（实测 `granted=false`）；`make bundle` 因此收尾 `codesign -s - --force --deep` 重签——codesign 会从 Info.plist 取正规 bundle id 作 Identifier，重签后授权即通过（同样实测）。发布管线的真实签名会覆盖这次 ad-hoc。旧的 `notify_rust::set_application` swizzle 和 `BUNDLE_ID` 常量随 `NSUserNotification` 一起退役——UN 按进程的真实 bundle 归属，无需自报身份；留下的跨文件测试改为守「Cargo.toml 还声明着 identifier」本身。
+
+同一个 id 若有多份 .app 注册（比如 Downloads 里留着旧包），归属会摇摆，横幅可能静默丢失：`lsregister -u` 掉多余的那份即可。实测这台机器上曾同时注册六份（正主之外：`make bundle` 的构建产物——Spotlight 会自动收录它索引到的任何 `.app`——和四条已卸载 DMG 的残留），所以 **`make bundle` 现在收尾自动注销自己的产物**，每次构建都做（Spotlight 之后可能悄悄加回来）；DMG 挂载残留系统会自行回收，等不及可手动 `-u`。`make dev` 是裸二进制，本来就不产生注册。
 
 ## 开发
 

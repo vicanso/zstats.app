@@ -4,16 +4,25 @@
 //! chrome. What we can do is deliver them, and treat a click as "open
 //! the panel on Alerts". Threshold edits stay in the Alerts tab.
 //!
-//! macOS delivery is our own thin `NSUserNotificationCenter` layer:
-//! `deliverNotification:` is an async XPC post that returns immediately,
+//! macOS delivery is our own thin `UNUserNotificationCenter` layer:
+//! `addNotificationRequest:` is an async post that returns immediately,
 //! and a resident delegate receives clicks on the main run loop, which
 //! gpui is already pumping. Fire-and-forget is the point, not a shortcut.
-//! The previous transport (notify-rust's `wait_for_action` on one delivery
+//! An earlier transport (notify-rust's `wait_for_action` on one delivery
 //! thread) returned only when the user *dealt with* a banner — one left
 //! sitting in Notification Center parked the thread for as long as it sat
 //! there, every later banner queued behind it, and the 17th was silently
 //! dropped. Attention is not a resource to serialise on: with delivery
 //! decoupled from it there is no queue to fill and nothing to stall.
+//!
+//! UN requires a real `.app` bundle: outside one (`cargo run`) it
+//! throws, so banners are honestly absent there, said once in the log.
+//! The predecessor, deprecated `NSUserNotification`, was kept for years
+//! *because* it worked unbundled — until macOS 26, where it became a
+//! silent no-op: `deliverNotification:` returned, nothing showed, and
+//! the system never even created the app's notification-settings entry
+//! (measured, with an osascript banner as the working control). An API
+//! that pretends to deliver is worse than one that refuses.
 //!
 //! Non-macOS keeps the notify-rust transport (one delivery thread, bounded
 //! queue) unchanged — XDG banners auto-expire, so the wait there is
@@ -58,24 +67,35 @@ fn dispatch(banner: Banner) {
     enqueue(banner);
 }
 
-/// Fire-and-forget delivery over `NSUserNotificationCenter`.
+/// Fire-and-forget delivery over `UNUserNotificationCenter`.
 ///
-/// The API has been deprecated since 10.14, but it is the only banner API a
-/// bare `cargo run` binary can use at all — the replacement
-/// `UNUserNotificationCenter` throws unless the process runs from a real
-/// bundle, and half this app's life is spent unbundled under a debugger.
-/// Hence the module-wide `allow`.
+/// Bundled processes only — see the module doc for why the unbundled
+/// fallback (`NSUserNotification`) no longer exists.
 #[cfg(target_os = "macos")]
-#[allow(deprecated)]
 mod native {
+    use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{NSObject, ProtocolObject};
     use objc2::{AnyThread, define_class, msg_send};
-    use objc2_foundation::{
-        NSObjectProtocol, NSString, NSUserNotification, NSUserNotificationCenter,
-        NSUserNotificationCenterDelegate, NSUserNotificationDefaultSoundName,
+    use objc2_foundation::{NSBundle, NSError, NSObjectProtocol, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use std::mem;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Whether this process runs from a real `.app`. UN throws an
+    /// Objective-C exception for a bare binary, so the answer gates every
+    /// call into it. The main bundle of a bare `cargo run` is the
+    /// executable's directory; only a real bundle's path ends in `.app`.
+    fn bundled() -> bool {
+        NSBundle::mainBundle()
+            .bundlePath()
+            .to_string()
+            .ends_with(".app")
+    }
 
     define_class!(
         /// Receives activations for every banner this process posted. One
@@ -86,64 +106,113 @@ mod native {
         struct NotifyDelegate;
 
         unsafe impl NSObjectProtocol for NotifyDelegate {}
-        unsafe impl NSUserNotificationCenterDelegate for NotifyDelegate {}
+        unsafe impl UNUserNotificationCenterDelegate for NotifyDelegate {}
 
         impl NotifyDelegate {
-            #[unsafe(method(userNotificationCenter:didActivateNotification:))]
-            fn did_activate(
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            fn did_receive(
                 &self,
-                _center: &NSUserNotificationCenter,
-                _note: &NSUserNotification,
+                _center: &UNUserNotificationCenter,
+                _response: &UNNotificationResponse,
+                completion: &block2::Block<dyn Fn()>,
             ) {
                 super::signal_click();
+                completion.call(());
             }
 
-            // Present even while this app is active. The default suppresses
-            // banners from the frontmost app — reasonable for a document
-            // app, but for a menu-bar accessory "frontmost" means the panel
-            // is open, which is exactly when an alert banner is being asked
-            // for context, not redundant.
-            #[unsafe(method(userNotificationCenter:shouldPresentNotification:))]
-            fn should_present(
+            // Present even while this app is active. UN's default
+            // suppresses banners from the frontmost app — reasonable for
+            // a document app, but for a menu-bar accessory "frontmost"
+            // means the panel is open, which is exactly when an alert
+            // banner is being asked for context, not redundant.
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present(
                 &self,
-                _center: &NSUserNotificationCenter,
-                _note: &NSUserNotification,
-            ) -> bool {
-                true
+                _center: &UNUserNotificationCenter,
+                _note: &UNNotification,
+                completion: &block2::Block<dyn Fn(UNNotificationPresentationOptions)>,
+            ) {
+                completion.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List
+                    | UNNotificationPresentationOptions::Sound,));
             }
         }
     );
 
-    /// Install the resident delegate. Call once from `start`, before the
-    /// first banner; a banner posted earlier still shows, its click is just
-    /// nobody's to hear.
+    /// Install the resident delegate and ask for authorization. Call once
+    /// from `start`, before the first banner. The request puts up the
+    /// system's own "allow notifications?" prompt the first time this app
+    /// ever asks; every run after that it resolves silently from the
+    /// user's recorded answer.
     pub(super) fn install() {
+        if !bundled() {
+            tracing::info!(
+                "banners unavailable outside a bundle (cargo run): \
+                 UNUserNotificationCenter needs a real .app"
+            );
+            return;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
         let delegate: Retained<NotifyDelegate> = {
             let this = NotifyDelegate::alloc().set_ivars(());
             unsafe { msg_send![super(this), init] }
         };
-        let center = NSUserNotificationCenter::defaultUserNotificationCenter();
-        // SAFETY: `setDelegate:` stores an unretained pointer, so the
-        // referent must outlive it — the `forget` below makes ours immortal.
-        unsafe { center.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
+        // `setDelegate:` stores an unretained pointer, so the referent
+        // must outlive it — the `forget` below makes ours immortal.
+        center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         mem::forget(delegate);
+
+        // The denial is logged, not surfaced: the user answered the
+        // system's own dialog, and nagging past that answer is exactly
+        // what an alerting app must not do. The Alerts tab still records
+        // every episode either way.
+        let done = RcBlock::new(|granted: objc2::runtime::Bool, error: *mut NSError| {
+            if !granted.as_bool() {
+                // The description, not the pointer: "not allowed" for an
+                // unsigned bundle and "declined" by the user are different
+                // problems, and this line is the only witness.
+                let reason = unsafe { error.as_ref() }
+                    .map(|e| e.localizedDescription().to_string())
+                    .unwrap_or_else(|| "declined by the user".into());
+                tracing::warn!("notification authorization declined: {reason}");
+            }
+        });
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &done,
+        );
     }
 
     /// Post one banner and return. Whether and when it shows is the
     /// notification centre's business; a banner the user never touches
     /// costs nothing here.
     pub(super) fn deliver(banner: &super::Banner) {
-        let note = NSUserNotification::new();
-        note.setTitle(Some(&NSString::from_str(&banner.title)));
-        note.setSubtitle(Some(&NSString::from_str(&banner.subtitle)));
-        note.setInformativeText(Some(&NSString::from_str(&banner.body)));
-        if !banner.silent {
-            // The exported constant, not a string that names it — a
-            // `soundName` that matches no installed sound plays nothing.
-            // SAFETY: reading Foundation's exported constant.
-            note.setSoundName(Some(unsafe { NSUserNotificationDefaultSoundName }));
+        if !bundled() {
+            return; // said once, at install
         }
-        NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&note);
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(&banner.title));
+        content.setSubtitle(&NSString::from_str(&banner.subtitle));
+        content.setBody(&NSString::from_str(&banner.body));
+        if !banner.silent {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
+        // Unique per banner: UN treats a repeated identifier as an update
+        // to the existing notification, and every alert here is its own.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = format!("zstats-banner-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&id),
+            &content,
+            None,
+        );
+        let done = RcBlock::new(|error: *mut NSError| {
+            if !error.is_null() {
+                tracing::warn!("banner rejected by notification center: {error:?}");
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, Some(&done));
     }
 }
 
@@ -195,32 +264,20 @@ fn deliver(banner: &Banner) {
     }
 }
 
-/// Must match `[package.metadata.bundle] identifier` in Cargo.toml — it is
-/// what macOS attributes the notification to.
-const BUNDLE_ID: &str = "com.github.vicanso.zstats";
-
 /// Listen for banner clicks. Call once from `main`, on the UI thread,
 /// before the first tick.
+///
+/// No identity claim any more: `UNUserNotificationCenter` attributes
+/// banners to the process's real bundle, so the old
+/// `notify_rust::set_application` swizzle (and the `BUNDLE_ID` constant
+/// it had to keep in step with Cargo.toml) retired with the
+/// `NSUserNotification` path.
 pub fn start(cx: &mut gpui::App) {
     let (tx, rx) = smol::channel::unbounded();
     let _ = CLICK.set(tx);
 
     #[cfg(target_os = "macos")]
-    {
-        // Claim our own bundle id before the first delivery. This is what
-        // stamps our identity on the banner: `set_application` swizzles
-        // `NSBundle.bundleIdentifier` process-wide at call time, so it
-        // covers our own delivery path too. The literal has to stay in step
-        // with `[package.metadata.bundle] identifier` in Cargo.toml (a test
-        // guards that). Outside a bundle (`cargo run`) the id still resolves
-        // to the *installed* .app, which is why banners work under a
-        // debugger at all — and why they quietly don't when no zstats.app
-        // is installed.
-        if let Err(e) = notify_rust::set_application(BUNDLE_ID) {
-            tracing::warn!("could not claim notification identity: {e}");
-        }
-        native::install();
-    }
+    native::install();
 
     // One delivery thread for the life of the process. It only ever blocks —
     // on the queue, or on a banner the server has not resolved — so it costs
@@ -418,17 +475,18 @@ fn window_mins(window: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
+    /// The notification identity now IS the bundle — UN attributes by the
+    /// real .app, no claimed id to keep in step with Cargo.toml. What is
+    /// left to guard is that the manifest still declares one at all: an
+    /// identifier-less bundle would fail authorization at runtime with
+    /// nothing pointing at the cause.
     #[test]
-    fn bundle_id_matches_the_manifest() {
-        // These two have to agree: macOS attributes the banner to whatever
-        // identifier we claim, and a mismatch fails silently at runtime —
-        // notifications simply show up under the wrong application.
+    fn the_manifest_still_declares_a_bundle_identifier() {
         let manifest = include_str!("../Cargo.toml");
         assert!(
-            manifest.contains(&format!("identifier = \"{BUNDLE_ID}\"")),
-            "BUNDLE_ID ({BUNDLE_ID}) is not the identifier in Cargo.toml"
+            manifest.contains("identifier = \"com.github.vicanso.zstats\""),
+            "Cargo.toml lost its [package.metadata.bundle] identifier"
         );
     }
 }

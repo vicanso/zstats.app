@@ -52,7 +52,23 @@ bundle:
 	PLIST="$$APP/Contents/Info.plist"; \
 	/usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$$PLIST" >/dev/null 2>&1 || true; \
 	/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$$PLIST"; \
-	echo "LSUIElement=true -> $$PLIST"
+	echo "LSUIElement=true -> $$PLIST"; \
+	codesign -s - --force --deep "$$APP"; \
+	echo "ad-hoc signed as bundle identifier -> $$APP"; \
+	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$$APP" >/dev/null 2>&1 || true; \
+	echo "unregistered from LaunchServices -> $$APP"
+# The codesign matters even for a local build: the linker's automatic ad-hoc
+# signature carries a random identifier (zstats-<hex>), and
+# UNUserNotificationCenter refuses authorization to it — banners silently
+# absent. Re-signing reads the identifier from Info.plist, which is the
+# identity notifications are granted to (measured both ways; docs/design.md
+# 系统通知). The release pipeline's real signature replaces this one.
+# The unregister matters: the build output carries the same bundle id as the
+# installed /Applications/zstats.app, Spotlight registers any .app it indexes,
+# and two live registrations of one id make notification attribution sway —
+# banners silently lost (measured; see docs/design.md 系统通知). Unregistering
+# here keeps the installed copy the only claimant; Spotlight may quietly
+# re-add this one later, which is why it runs on every bundle rather than once.
 
 # Where the release binary's size goes, by crate.
 bloat:
