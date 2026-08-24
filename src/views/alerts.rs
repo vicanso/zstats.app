@@ -70,10 +70,21 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
     // Watching belongs here too, not only on the empty list: otherwise
     // one episode leaves half the panel blank and hides what is armed.
-    cards.extend(armed_block(state));
+    cards.extend(armed_block(state).map(on_content_line));
     cards.extend(past_days_block(state.alert_history()));
-    cards.push(widgets::note(i18n::tr("alerts.footer_note")));
+    cards.push(on_content_line(widgets::note(i18n::tr(
+        "alerts.footer_note",
+    ))));
     cards
+}
+
+/// Bare text between cards sits on the card-content line — body gutter
+/// plus a card's own 13 — the same line every heading and every card
+/// interior uses. Without this the tab had two left edges: card content
+/// and headings at one, loose text 13px to their left, and "Past 7
+/// days" read as indented against the Watching rows above it.
+fn on_content_line(el: AnyElement) -> AnyElement {
+    div().px(px(13.)).child(el).into_any_element()
 }
 
 fn empty_card(state: &ZStatsAppState) -> AnyElement {
@@ -140,7 +151,7 @@ const PAST_ROWS_PER_DAY: usize = 6;
 fn past_days_block(days: &[DayLog]) -> Vec<AnyElement> {
     let mut out = vec![past_heading()];
     if days.is_empty() {
-        out.push(widgets::note(i18n::tr("alerts.past_none")));
+        out.push(on_content_line(widgets::note(i18n::tr("alerts.past_none"))));
         return out;
     }
     out.extend(days.iter().map(past_day_card));
