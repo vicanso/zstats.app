@@ -244,7 +244,9 @@ zedis 的 logger 原样适配：stdout + `~/.zstats/logs/zstats-app.log.<日期>
 
 **授权与签名身份，两道都要过。** UN 走标准授权：首次请求弹系统自己的「允许通知？」对话框，之后按用户的记录静默放行；拒绝只记日志、绝不重问——用户已经答过系统的问题了。**签名身份是本地构建的暗坑**：arm64 链接器自动打的 ad-hoc 签名带随机 Identifier（`zstats-<hex>`），UN 对它直接拒绝授权（实测 `granted=false`）；`make bundle` 因此收尾 `codesign -s - --force --deep` 重签——codesign 会从 Info.plist 取正规 bundle id 作 Identifier，重签后授权即通过（同样实测）。发布管线的真实签名会覆盖这次 ad-hoc。旧的 `notify_rust::set_application` swizzle 和 `BUNDLE_ID` 常量随 `NSUserNotification` 一起退役——UN 按进程的真实 bundle 归属，无需自报身份；留下的跨文件测试改为守「Cargo.toml 还声明着 identifier」本身。
 
-同一个 id 若有多份 .app 注册（比如 Downloads 里留着旧包），归属会摇摆，横幅可能静默丢失：`lsregister -u` 掉多余的那份即可。实测这台机器上曾同时注册六份（正主之外：`make bundle` 的构建产物——Spotlight 会自动收录它索引到的任何 `.app`——和四条已卸载 DMG 的残留），所以 **`make bundle` 现在收尾自动注销自己的产物**，每次构建都做（Spotlight 之后可能悄悄加回来）；DMG 挂载残留系统会自行回收，等不及可手动 `-u`。`make dev` 是裸二进制，本来就不产生注册。
+同一个 id 若有多份 .app 注册（比如 Downloads 里留着旧包），归属会摇摆，横幅可能静默丢失：`lsregister -u` 掉多余的那份即可。实测这台机器上曾同时注册六份（正主之外：`make bundle` 的构建产物——Spotlight 会自动收录它索引到的任何 `.app`——和四条已卸载 DMG 的残留），所以 **`make bundle` 现在收尾自动注销自己的产物**，每次构建都做（Spotlight 之后可能悄悄加回来）。`make dev` 是裸二进制，本来就不产生注册。
+
+**应用内更新流程自己就会制造第二个认领者**：updater 下载 DMG 后交给 `open` 挂载，用户拖完 /Applications，卷宗却没人弹出——镜像里那份 zstats.app 一直挂在 `/Volumes/zstats Installer`，注册鲜活，横幅从此静默丢失（v0.1.13 发布版实测：系统设置里授权齐全、日志 `banner="delivered"`、屏幕上什么都没有；弹出镜像横幅立刻回来）。**所以新版本启动时替上一次更新收尾**：`updater::sweep_installer_mounts`（后台执行器上跑一次）把名字以「zstats Installer」开头、bundle id 是我们、版本不比运行中*新*的卷宗 `hdiutil detach` 掉，再 `lsregister -u` 掉卸载后仍残留的注册记录（实测卸载不清记录）。三道闸都承重：id 不符的卷宗不是我们的、正在从镜像里运行就不能抽走地面、版本更新意味着「下载了还没拖」的进行中安装，拖装窗口得留着。detach 忙则记 warn 放过，下次启动重试。
 
 ## 开发
 

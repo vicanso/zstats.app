@@ -9,6 +9,11 @@
 //! it, and Gatekeeper independently validates the notarized signature
 //! at install time either way.
 //!
+//! The flow's one piece of debris is cleaned at the next launch:
+//! [`sweep_installer_mounts`] detaches the installer image the finished
+//! update left mounted, because its bundle contends for the notification
+//! identity and the banners silently stop.
+//!
 //! `releases/latest` excludes drafts and prereleases by definition, so
 //! the rolling `nightly` build never counts as an update.
 
@@ -22,6 +27,7 @@ use std::io;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -163,6 +169,105 @@ fn file_sha256(path: &Path) -> Option<String> {
                 out
             }),
     )
+}
+
+// ---- installer-image sweep (once, at launch) ---------------------------
+
+/// The identity notifications are granted to — must match
+/// `[package.metadata.bundle] identifier` in Cargo.toml (a test guards
+/// the pair, same as notify.rs guards the delivery side).
+const BUNDLE_ID: &str = "com.github.vicanso.zstats";
+
+/// The volume name the release workflow gives the DMG. Finder mounts
+/// repeats as "zstats Installer 1", "… 2" — hence a prefix match.
+const INSTALLER_VOLUME_PREFIX: &str = "zstats Installer";
+
+/// LaunchServices' registration tool; no public API does this.
+const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+/// Detach the installer image a finished update left mounted.
+///
+/// `download_and_open` hands the DMG to the OS and the user drags the
+/// bundle out — but nothing ever ejects the volume, Spotlight registers
+/// the mounted copy with LaunchServices, and two live registrations of
+/// one bundle id make notification attribution sway: deliveries still
+/// log as accepted while no banner renders (measured on v0.1.13 —
+/// System Settings showed zstats fully authorized, `banner="delivered"`
+/// in the log, nothing on screen; ejecting the image brought the
+/// banners straight back — docs/design.md 系统通知). So the freshly
+/// installed version cleans up after the update that produced it.
+///
+/// Three gates keep it honest: the volume's bundle must carry *our*
+/// identifier (a stranger's volume that happens to be named "zstats
+/// Installer" is not ours to eject); the running executable must not
+/// live on that volume (never pull the ground out from a copy launched
+/// off the image); and the bundle must not be *newer* than the running
+/// build — newer means downloaded-but-not-yet-copied, an install in
+/// progress whose drag window must stay. A busy detach is left alone
+/// with a warning; the next launch retries. Blocking child processes
+/// (hdiutil takes a second or two) — background executor only.
+pub fn sweep_installer_mounts() {
+    let running = env::current_exe().ok();
+    let Ok(volumes) = fs::read_dir("/Volumes") else {
+        return;
+    };
+    for entry in volumes.flatten() {
+        let name = entry.file_name();
+        if !name
+            .to_str()
+            .is_some_and(|name| name.starts_with(INSTALLER_VOLUME_PREFIX))
+        {
+            continue;
+        }
+        let volume = entry.path();
+        let app = volume.join("zstats.app");
+        if bundle_plist_value(&app, "CFBundleIdentifier").as_deref() != Some(BUNDLE_ID) {
+            continue;
+        }
+        if running.as_ref().is_some_and(|exe| exe.starts_with(&volume)) {
+            continue;
+        }
+        let version = bundle_plist_value(&app, "CFBundleShortVersionString").unwrap_or_default();
+        if is_newer(&version, about::version()) {
+            continue;
+        }
+        let detached = Command::new("hdiutil")
+            .arg("detach")
+            .arg(volume.as_os_str())
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !detached {
+            tracing::warn!(volume = %volume.display(), "installer image would not detach");
+            continue;
+        }
+        // LaunchServices keeps the record after the unmount (measured),
+        // so the stale claimant is dropped explicitly.
+        let _ = Command::new(LSREGISTER)
+            .arg("-u")
+            .arg(app.as_os_str())
+            .output();
+        tracing::info!(volume = %volume.display(), %version, "stale installer image detached");
+    }
+}
+
+/// One string key out of a bundle's Info.plist, via `defaults read`
+/// (which handles both the XML cargo-bundle writes and a binary
+/// conversion something else may have made). `None` for a missing
+/// bundle, key, or a failed spawn — every caller treats those alike.
+fn bundle_plist_value(app: &Path, key: &str) -> Option<String> {
+    let out = Command::new("defaults")
+        .arg("read")
+        // Sans extension — `defaults` appends ".plist" itself.
+        .arg(app.join("Contents/Info").as_os_str())
+        .arg(key)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(out.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 pub enum UpdateCheck {
@@ -451,6 +556,16 @@ fn is_newer(remote_tag: &str, current: &str) -> bool {
 mod tests {
     use super::*;
     use std::process;
+
+    /// The sweep ejects volumes on the strength of this identifier —
+    /// if the bundle id ever moves, the const must move with it or the
+    /// sweep goes blind (it would never *mis*-eject: a mismatch only
+    /// makes it skip).
+    #[test]
+    fn the_sweep_identifier_matches_the_manifest() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains(&format!("identifier = \"{BUNDLE_ID}\"")));
+    }
 
     #[test]
     fn version_compare_is_numeric_per_segment() {

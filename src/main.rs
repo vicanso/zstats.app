@@ -1217,6 +1217,14 @@ fn main() {
         notify::start(cx);
         metrics::start(cx);
 
+        // The previous update's installer image, if the user never
+        // ejected it: a second registration of our bundle id costs the
+        // banners (updater.rs explains). Child processes that block for
+        // seconds — off the main thread.
+        cx.background_executor()
+            .spawn(async { updater::sweep_installer_mounts() })
+            .detach();
+
         // Release builds start with no window at all — the app lives in the
         // tray until the icon is clicked, and deliberately does not
         // `cx.activate`, because launching shouldn't steal focus from
