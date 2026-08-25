@@ -86,6 +86,32 @@ pub const BAND_BUCKET_MINUTES: usize = 24 * 60 / BAND_BUCKETS;
 /// would let one quiet minute talk a real burst back down.
 pub type Band = [Option<f32>; BAND_BUCKETS];
 
+/// The lit stretches of a band's lived prefix, merged into `[start,
+/// end)` bucket ranges — the data behind the band's hover readout,
+/// which spells the cells out in clock time. Any shade counts: a lit
+/// cell means "a minute here qualified for the record", and the readout
+/// explains the picture, so a stretch the eye can see must never be
+/// missing from its own tooltip. Loudness stays the cell's job.
+pub fn stretches(cells: &Band, lived: usize) -> Vec<(usize, usize)> {
+    let lived = lived.min(BAND_BUCKETS);
+    let mut runs = Vec::new();
+    let mut start = None;
+    for i in 0..lived {
+        match (cells[i].is_some(), start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                runs.push((s, i));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        runs.push((s, lived));
+    }
+    runs
+}
+
 /// One process's share of the chosen window.
 pub struct Spender {
     pub pid: u32,
@@ -521,5 +547,35 @@ mod tests {
         // the view keeps the share meter.
         let ranked = rank(vec![record(1, "p", 0, 0, 8.0)], None);
         assert!(ranked[0].band.is_none());
+    }
+
+    #[test]
+    fn stretches_merge_neighbours_and_split_on_gaps() {
+        let mut band: Band = [None; BAND_BUCKETS];
+        // 09:00–11:30 (three lit cells in a row), then 14:00–14:30.
+        for cell in 18..23 {
+            band[cell] = Some(50.0);
+        }
+        band[28] = Some(5.0);
+        assert_eq!(stretches(&band, BAND_BUCKETS), vec![(18, 23), (28, 29)]);
+    }
+
+    #[test]
+    fn a_stretch_reaching_the_lived_edge_ends_there() {
+        let mut band: Band = [None; BAND_BUCKETS];
+        band[31] = Some(80.0);
+        band[32] = Some(80.0);
+        // At 16:10 the current half hour is cell 32; the run must close
+        // at the lived edge (the view says "now"), not at the cell
+        // array's end, and cells recorded past it — a clock jump —
+        // must not resurrect it.
+        band[40] = Some(99.0);
+        assert_eq!(stretches(&band, 33), vec![(31, 33)]);
+        // The faintest shade still counts: the readout explains the
+        // picture, and the picture lights any recorded cell.
+        let mut faint: Band = [None; BAND_BUCKETS];
+        faint[0] = Some(0.1);
+        assert_eq!(stretches(&faint, BAND_BUCKETS), vec![(0, 1)]);
+        assert!(stretches(&[None; BAND_BUCKETS], BAND_BUCKETS).is_empty());
     }
 }

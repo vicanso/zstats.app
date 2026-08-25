@@ -172,9 +172,15 @@ pub fn truncating_name(
 ) -> AnyElement {
     let name = name.into();
     let long = name.chars().count() >= NAME_TIP_FROM;
+    // Content-sized, not `flex_1`: every caller sits this at the left
+    // of a `justify_between` row, where growing changes nothing — but a
+    // sibling *inside* the left group (History's inline pid) must hug
+    // the name, not be pushed to the group's far edge by a greedy name.
+    // `min_w_0` + default shrink keep the truncation when space runs
+    // out, and the long-name tooltip now triggers on the text itself
+    // rather than on the empty stretch beside it.
     div()
         .id(id)
-        .flex_1()
         .min_w_0()
         .text_size(px(size))
         .font_weight(weight)

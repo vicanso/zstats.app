@@ -15,13 +15,12 @@ use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore}
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, div, px,
+    AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::{Icon, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
-use std::collections::HashMap;
 use std::time::Duration;
 
 /// How many rows to name. Beyond this the tail is all daemons doing their job.
@@ -79,14 +78,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let last = shown.len().saturating_sub(1);
     let has_note = rows.len() > TOP_N;
 
-    // Two `yes` rows with different pids read as a duplicate at a squint;
-    // a repeated name gets its pid inline so identity is visible without
-    // reading the caption line.
-    let mut name_counts: HashMap<&str, usize> = HashMap::new();
-    for s in &shown {
-        *name_counts.entry(shown_name(s)).or_default() += 1;
-    }
-
     let list = widgets::list_shell()
         .child(widgets::list_header(
             // The note this carries used to be a card of its own under
@@ -119,7 +110,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .overflow_y_scroll()
                 .max_h(px(rows_height(state, has_note)))
                 .children(shown.into_iter().enumerate().map(|(i, s)| {
-                    let repeated = name_counts[shown_name(s)] > 1;
                     v_flex()
                         .px(px(13.))
                         .py(px(9.))
@@ -144,16 +134,24 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                             gpui::FontWeight::MEDIUM,
                                             Hsla::from(theme::text()),
                                         ))
-                                        .when(repeated, |d| {
-                                            d.child(
-                                                div()
-                                                    .flex_none()
-                                                    .font_family(font::MONO)
-                                                    .text_size(px(9.5))
-                                                    .text_color(theme::text_faint())
-                                                    .child(s.pid.to_string()),
-                                            )
-                                        }),
+                                        // The pid rides beside the name on
+                                        // every row (it used to appear only
+                                        // when two rows shared a name): it
+                                        // is identity, and identity reads
+                                        // best at the title — which also
+                                        // frees the caption to be pure
+                                        // figures. The name truncates, the
+                                        // pid does not: a cut name is still
+                                        // recognisable, a cut pid is a
+                                        // different number.
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .font_family(font::MONO)
+                                                .text_size(px(9.5))
+                                                .text_color(theme::text_faint())
+                                                .child(s.pid.to_string()),
+                                        ),
                                 )
                                 // The headline figure is core-time, which shares a
                                 // unit *shape* with the wall-clock minutes below —
@@ -219,48 +217,27 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                             )
                                         }))
                                         .child(
-                                            // The pid is said once per row. A repeated
-                                            // name already carries it inline above,
-                                            // where the eye needs it to tell two rows
-                                            // apart; repeating it here was the same
-                                            // fact twice on one row.
-                                            div().min_w_0().truncate().child(
-                                                match (sort, repeated) {
-                                                    // Under the growth order the peak is
-                                                    // the figure that puts the climb in
-                                                    // proportion, same as under CPU time.
-                                                    (
-                                                        HistorySort::CpuTime
-                                                        | HistorySort::MemoryGrowth,
-                                                        false,
-                                                    ) => t!(
-                                                        "history.pid_mem",
-                                                        pid = s.pid,
-                                                        mem = format::memory(s.peak_memory_bytes)
-                                                    )
-                                                    .to_string(),
-                                                    (
-                                                        HistorySort::CpuTime
-                                                        | HistorySort::MemoryGrowth,
-                                                        true,
-                                                    ) => t!(
-                                                        "history.mem_only",
-                                                        mem = format::memory(s.peak_memory_bytes)
-                                                    )
-                                                    .to_string(),
-                                                    (HistorySort::PeakMemory, false) => t!(
-                                                        "history.pid_cpu",
-                                                        pid = s.pid,
-                                                        cpu = format::core_time(s.cpu_time_ms)
-                                                    )
-                                                    .to_string(),
-                                                    (HistorySort::PeakMemory, true) => t!(
-                                                        "history.cpu_only",
-                                                        cpu = format::core_time(s.cpu_time_ms)
-                                                    )
-                                                    .to_string(),
-                                                },
-                                            ),
+                                            // Pure figure: the pid lives
+                                            // beside the name now, so the
+                                            // caption carries only the
+                                            // metric the sort is not
+                                            // already headlining.
+                                            div().min_w_0().truncate().child(match sort {
+                                                // Under the growth order the peak is
+                                                // the figure that puts the climb in
+                                                // proportion, same as under CPU time.
+                                                HistorySort::CpuTime
+                                                | HistorySort::MemoryGrowth => t!(
+                                                    "history.mem_only",
+                                                    mem = format::memory(s.peak_memory_bytes)
+                                                )
+                                                .to_string(),
+                                                HistorySort::PeakMemory => t!(
+                                                    "history.cpu_only",
+                                                    cpu = format::core_time(s.cpu_time_ms)
+                                                )
+                                                .to_string(),
+                                            }),
                                         ),
                                 )
                                 // Peak beside total on purpose: a small peak next to a
@@ -295,7 +272,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             // is time, not a magnitude comparison, so
                             // reordering the rows does not change what
                             // a row's band means.
-                            Some(cells) => band(cells),
+                            Some(cells) => band(("hist-band", s.pid as usize), cells),
                             // Wider windows: no single day to draw, the
                             // share meter stays.
                             None => widgets::meter(
@@ -343,14 +320,14 @@ fn shown_name(s: &crate::history::Spender) -> &str {
 /// through means "no line in the file for this half hour", which is not
 /// zero (records are conditional — see `history::Band`) and therefore
 /// must not be painted as a value.
-fn band(cells: &history::Band) -> AnyElement {
+fn band(id: impl Into<ElementId>, cells: &history::Band) -> AnyElement {
     // Only the lived part of the day: at nine in the morning a fixed
     // 24-hour axis would read as fifteen hours of mysterious quiet, and
     // squeeze the real morning into a quarter of the width.
     let now = jiff::Zoned::now();
     let lived_minutes = now.hour().max(0) as usize * 60 + now.minute().max(0) as usize;
     let lived = (lived_minutes / history::BAND_BUCKET_MINUTES + 1).min(history::BAND_BUCKETS);
-    h_flex()
+    let strip = h_flex()
         .h(px(8.))
         .rounded(px(2.))
         .overflow_hidden()
@@ -368,8 +345,78 @@ fn band(cells: &history::Band) -> AnyElement {
             div().flex_1().h_full().when_some(cells[i], |d, peak| {
                 d.bg(Hsla::from(theme::ink()).opacity(band_alpha(peak)))
             })
-        }))
+        }));
+    // Hovering spells the lit cells out in clock time — a ~6px cell can
+    // place "around three" but never answer 14:30, and axis labels for
+    // a 320px strip could not either. Any shade counts (the tooltip
+    // explains the picture; see `history::stretches`); a band with
+    // nothing lit has nothing to spell out, and stays a plain strip.
+    let runs = history::stretches(cells, lived);
+    if runs.is_empty() {
+        return strip.into_any_element();
+    }
+    // The same clock `lived` was cut at, so the readout and the strip
+    // agree on where "so far" ends within this one frame.
+    let now_clock = format!("{:02}:{:02}", now.hour(), now.minute());
+    strip
+        .id(id)
+        .tooltip(widgets::wrap_tooltip(band_tip(&runs, lived, &now_clock)))
         .into_any_element()
+}
+
+/// How many stretches the readout names before folding the rest into a
+/// count: enough for a real day's rhythm, short of a tooltip taller
+/// than the panel for a process that flickered all day.
+const TIP_STRETCHES: usize = 8;
+
+/// Which stretches the readout names when a day has more than
+/// [`TIP_STRETCHES`]: the longest, shown in day order. A bursty day is
+/// a pile of single cells around a few real stretches, and taking the
+/// first N by clock spent the whole budget on the morning's noise while
+/// hiding the afternoon's two-hour block — the one the reader hovered
+/// to find. Ties keep the earlier stretch, and what "+N" folds away is
+/// then never longer than anything shown.
+fn tip_stretches(runs: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    if runs.len() <= TIP_STRETCHES {
+        return runs.to_vec();
+    }
+    let mut by_length = runs.to_vec();
+    by_length.sort_by_key(|&(start, end)| (Reverse(end - start), start));
+    let mut chosen = by_length[..TIP_STRETCHES].to_vec();
+    chosen.sort_by_key(|&(start, _)| start);
+    chosen
+}
+
+/// The stretches as "09:00–11:30 · 14:00–14:30 · 16:30–17:12":
+/// half-hour precision, because that is the resolution the band
+/// actually has — a tooltip more precise than its picture would claim
+/// minutes the cells cannot show. The one minute-precise figure is the
+/// live edge: a run still going ends at the wall clock itself, because
+/// its cell's nominal end is in the future and a placeholder word would
+/// be the one entry the reader cannot put on a clock.
+fn band_tip(runs: &[(usize, usize)], lived: usize, now_clock: &str) -> String {
+    let shown = tip_stretches(runs);
+    let mut parts: Vec<String> = shown
+        .iter()
+        .map(|&(start, end)| {
+            let end = if end == lived {
+                now_clock.to_string()
+            } else {
+                bucket_clock(end)
+            };
+            format!("{}–{}", bucket_clock(start), end)
+        })
+        .collect();
+    if runs.len() > shown.len() {
+        parts.push(t!("history.band_more", count = runs.len() - shown.len()).to_string());
+    }
+    parts.join(" · ")
+}
+
+/// A bucket boundary as wall clock — bucket 19 is "09:30".
+fn bucket_clock(bucket: usize) -> String {
+    let minutes = bucket * history::BAND_BUCKET_MINUTES;
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// Four intensity steps for a cell's loudest minute. Quantized rather
@@ -516,4 +563,38 @@ fn refresh_control() -> AnyElement {
                 .update(cx, |state, cx| state.load_history(cx));
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bucket_boundaries_read_as_wall_clock() {
+        assert_eq!(bucket_clock(0), "00:00");
+        assert_eq!(bucket_clock(19), "09:30");
+        assert_eq!(bucket_clock(history::BAND_BUCKETS), "24:00");
+    }
+
+    /// A bursty day: a pile of single cells around two real stretches.
+    /// The budget goes to the longest, in day order — first-N-by-clock
+    /// would have spent it all on the morning's noise and hidden the
+    /// afternoon block entirely.
+    #[test]
+    fn the_longest_stretches_survive_the_cap_in_day_order() {
+        // Nine singles (00:00 onward, every other cell)…
+        let mut runs: Vec<(usize, usize)> = (0..9).map(|i| (i * 2, i * 2 + 1)).collect();
+        // …then a four-cell block in the afternoon.
+        runs.push((28, 32));
+        let shown = tip_stretches(&runs);
+        assert_eq!(shown.len(), TIP_STRETCHES);
+        assert!(shown.contains(&(28, 32)), "the block must not be dropped");
+        // Day order kept: the block is last because it is latest.
+        assert_eq!(shown.last(), Some(&(28, 32)));
+        // Ties (the singles) keep the earlier ones.
+        assert_eq!(shown[0], (0, 1));
+        // At or under the cap, nothing is reordered or dropped.
+        let few = vec![(4, 5), (10, 12)];
+        assert_eq!(tip_stretches(&few), few);
+    }
 }
