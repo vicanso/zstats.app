@@ -23,6 +23,7 @@ compile_error!(
 );
 
 mod about;
+mod active;
 mod alertlog;
 mod alerttpl;
 mod assets;
@@ -1222,6 +1223,9 @@ fn main() {
         #[cfg(not(target_os = "linux"))]
         tray::init_tray(cx);
         notify::start(cx);
+        // Before the collector, so the first slow-burn banner of the
+        // session can already say whether its subject is in use.
+        active::start();
         metrics::start(cx);
 
         // The previous update's installer image, if the user never

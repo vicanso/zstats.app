@@ -29,6 +29,7 @@
 //! bounded by the server, not the user. See "Platform reality" in
 //! CLAUDE.md for how much trust to put in that path.
 
+use crate::active;
 use crate::format;
 use crate::i18n;
 use crate::state;
@@ -329,11 +330,30 @@ pub fn post_sustained(notice: &state::SustainedNotice) {
             duration = format::uptime(notice.duration.as_secs())
         )
         .to_string(),
-        body: t!("alerts.sustained_body", pid = notice.pid).to_string(),
+        body: format!(
+            "{}{}",
+            t!("alerts.sustained_body", pid = notice.pid),
+            unused_clause(notice.pid)
+        ),
         // Silent: a slow-burn finding, not something that needs attention
         // this second.
         silent: true,
     });
+}
+
+/// " Unused for 3h." — appended to a slow-burn banner when the subject
+/// is an application nobody has switched to in a while (`active.rs`).
+///
+/// This is the sentence that separates a finding from a false alarm:
+/// the same load in the editor you are typing in is work. Empty
+/// whenever the answer is not known *and proven* — an app active
+/// recently, a bare process AppKit never reports, or a session too
+/// young to have seen the switch. A banner may say less; it may not
+/// claim a stretch of time the reader cannot check.
+fn unused_clause(pid: u32) -> String {
+    active::unused_for_a_while(pid).map_or_else(String::new, |idle| {
+        format!(" {}", t!("alerts.unused_for", span = format::span(idle)))
+    })
 }
 
 /// Announce a tree whose memory footprint has climbed a gigabyte within
@@ -351,7 +371,11 @@ pub fn post_memory_creep(creep: &state::MemoryCreep) {
             delta = format::memory(creep.climb_bytes)
         )
         .to_string(),
-        body: t!("alerts.creep_body", now = format::memory(creep.now_bytes)).to_string(),
+        body: format!(
+            "{}{}",
+            t!("alerts.creep_body", now = format::memory(creep.now_bytes)),
+            unused_clause(creep.root_pid)
+        ),
         silent: true,
     });
 }

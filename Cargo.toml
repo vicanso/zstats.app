@@ -195,6 +195,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSScreen",
     "NSVisualEffectView",
     "NSWindow",
+    # active.rs: which app is frontmost, and the workspace notification
+    # that says when that changes — public API, no entitlement.
+    "NSWorkspace",
     "objc2-core-foundation",
 ] }
 

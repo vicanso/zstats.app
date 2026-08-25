@@ -677,6 +677,11 @@ pub struct FullAppScanData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryCreep {
     pub name: String,
+    /// The tree's root — the pid AppKit knows the application by, so
+    /// the banner can ask `active.rs` whether anyone is using it. Not
+    /// an identity: trees are keyed by name (`trend::tree_key`),
+    /// because a root pid changes across a restart.
+    pub root_pid: u32,
     /// Newest minutes against the earliest reported ones in the hour.
     pub climb_bytes: u64,
     /// What the tree holds on the latest sample.
@@ -1509,6 +1514,7 @@ impl ZStatsAppState {
                 let climb_bytes = self.app_memory_climb(name)?;
                 Some(MemoryCreep {
                     name: name.to_string(),
+                    root_pid: g.root_pid,
                     climb_bytes,
                     now_bytes: g.phys_footprint_bytes.unwrap_or(g.memory_bytes),
                 })
