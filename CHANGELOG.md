@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.16](https://github.com/vicanso/zstats.app/compare/v0.1.14..v0.1.16) - 2026-08-25
+
+### ⛰️  Features
+
+- A slow-burn banner says when nobody has been using the app - ([9d1aaba](https://github.com/vicanso/zstats.app/commit/9d1aaba6e9e2a6f7b30065917d779c9d05b8115f))
+- A notifications master switch — banners off, the record untouched - ([d34bf39](https://github.com/vicanso/zstats.app/commit/d34bf393ba310c3d1487703d704b1b2f10d46fd4))
+
+### 🐛 Bug Fixes
+
+- The creep banner re-arms on the clock, never on a dip - ([131403b](https://github.com/vicanso/zstats.app/commit/131403bed371e65c0e5aba7feda70a24c504bb6f))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.1.15 - ([3b85fe0](https://github.com/vicanso/zstats.app/commit/3b85fe07fcbde253c2f1c612352266255d70fe38))
+- Version 0.1.14 - ([d0104d5](https://github.com/vicanso/zstats.app/commit/d0104d527ad6fbe423c6e8c2b85e39e8f0c33a11))
+
 ## [0.1.14](https://github.com/vicanso/zstats.app/compare/v0.1.11..v0.1.14) - 2026-08-24
 
 ### ⛰️  Features
