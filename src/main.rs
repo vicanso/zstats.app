@@ -297,6 +297,13 @@ pub fn set_autostart_pref(on: bool, cx: &mut App) {
     repaint(cx);
 }
 
+/// The Interface page's notifications switch: banners on or off,
+/// recording untouched (`prefs::notifications` explains the split).
+pub fn set_notifications_pref(on: bool, cx: &mut App) {
+    prefs::set_notifications(on);
+    repaint(cx);
+}
+
 /// The Config tab's theme picker: persist, re-pin AppKit, restyle, repaint.
 pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
     prefs::set_theme(pref);

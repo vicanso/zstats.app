@@ -1,6 +1,7 @@
 //! UI preferences — language, theme, the tray's face, panel opacity, the
-//! outbound proxy, the sustained-load watcher's two knobs, and the
-//! analyser's last scope — persisted in `app.toml`.
+//! outbound proxy, the sustained-load watcher's two knobs, the
+//! notifications switch, and the analyser's last scope — persisted in
+//! `app.toml`.
 //!
 //! Deliberately *not* in the shared `config.toml`: `zstats::settings::save`
 //! serialises only the sections the CLI models (`collector` / `daemon` /
@@ -18,7 +19,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use std::time::Duration;
 
 /// The user's language choice. `System` defers to `i18n::detect`.
@@ -136,6 +137,10 @@ static SUSTAINED_MINUTES: AtomicU16 = AtomicU16::new(0);
 /// following `alert-cpu`, or the two lines drift apart the first time
 /// the threshold is edited.
 static SUSTAINED_DIVISOR: AtomicU8 = AtomicU8::new(0);
+/// `true` = the user turned banners off. Inverted so the untouched
+/// default (`false`) is banners on, matching "an absent key follows
+/// the system" — the file carries `notifications = false` only.
+static MUTED: AtomicBool = AtomicBool::new(false);
 /// Hundredths of opacity. `0` means "unset — use the mode default".
 /// One copy, read per frame by the root view's wash — a picker change
 /// lands on the very next repaint. (Hand-edits to `app.toml` still wait
@@ -292,6 +297,21 @@ fn decode_sustained_divisor(raw: u8) -> Option<u8> {
     (raw != 0).then_some(raw)
 }
 
+/// Whether notification-centre banners go out at all. Off mutes the
+/// *delivery* only: every alert is still evaluated by zstats, recorded
+/// into the Alerts list and the daily file, and logged with its
+/// verdict — nothing stops but the interruption (`metrics.rs` is the
+/// one reader).
+pub fn notifications() -> bool {
+    !MUTED.load(Ordering::Relaxed)
+}
+
+/// Remember and persist the notifications switch.
+pub fn set_notifications(on: bool) {
+    MUTED.store(!on, Ordering::Relaxed);
+    persist();
+}
+
 /// The panel opacity — what the Interface page shows and what the root
 /// view paints, one and the same. `None` → the mode default.
 pub fn opacity() -> Option<f32> {
@@ -413,6 +433,7 @@ pub fn load() {
         encode_sustained_divisor(prefs.sustained_divisor),
         Ordering::Relaxed,
     );
+    MUTED.store(prefs.muted, Ordering::Relaxed);
     OPACITY.store(encode_opacity(prefs.opacity), Ordering::Relaxed);
     crate::proxy::set_configured_proxy(&prefs.proxy);
     *PROXY.write().expect("proxy pref lock poisoned") = prefs.proxy;
@@ -461,6 +482,7 @@ fn persist() {
         tray: tray(),
         sustained_minutes: decode_sustained_minutes(SUSTAINED_MINUTES.load(Ordering::Relaxed)),
         sustained_divisor: decode_sustained_divisor(SUSTAINED_DIVISOR.load(Ordering::Relaxed)),
+        muted: MUTED.load(Ordering::Relaxed),
         opacity: opacity(),
         proxy: proxy(),
         analysis_roots: ANALYSIS_ROOTS
@@ -499,6 +521,9 @@ struct Prefs {
     /// the unit a person thinks in, the code in the one it computes in.
     sustained_minutes: Option<u16>,
     sustained_divisor: Option<u8>,
+    /// `notifications = false` in the file; inverted here so the
+    /// derived default (`false`) is banners on.
+    muted: bool,
     opacity: Option<f32>,
     proxy: String,
     analysis_roots: Vec<String>,
@@ -537,6 +562,10 @@ fn read(dir: &Path) -> Prefs {
             .and_then(toml::Value::as_integer)
             .and_then(|d| u8::try_from(d).ok())
             .and_then(|d| decode_sustained_divisor(encode_sustained_divisor(Some(d)))),
+        muted: table
+            .get("notifications")
+            .and_then(toml::Value::as_bool)
+            .is_some_and(|on| !on),
         opacity: table.get("opacity").and_then(parse_opacity),
         proxy: get("proxy").unwrap_or_default().trim().to_string(),
         analysis_roots: list("analysis_roots"),
@@ -595,6 +624,9 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
             "sustained_divisor".into(),
             toml::Value::Integer(i64::from(divisor)),
         );
+    }
+    if prefs.muted {
+        doc.insert("notifications".into(), toml::Value::Boolean(false));
     }
     if let Some(value) = prefs.opacity.filter(|v| *v >= OPACITY_MIN) {
         doc.insert(
@@ -658,6 +690,7 @@ mod tests {
                 tray: TrayPref::Memory,
                 sustained_minutes: None,
                 sustained_divisor: None,
+                muted: true,
                 opacity: Some(0.8),
                 proxy: "http://127.0.0.1:7890".into(),
                 analysis_roots: vec![
@@ -684,6 +717,10 @@ mod tests {
             ]
         );
         assert_eq!(back.analysis_exclude, vec!["~/github".to_string()]);
+        // The switch is stored as the off value only.
+        assert!(back.muted);
+        let text = fs::read_to_string(file_path(&dir)).unwrap();
+        assert!(text.contains("notifications = false"), "{text}");
 
         // Both back to System: the keys disappear rather than being written
         // as a third value. Same for an unset opacity.
@@ -696,6 +733,10 @@ mod tests {
             "unset opacity should omit the key"
         );
         assert!(!text.contains("proxy"), "empty proxy should omit the key");
+        assert!(
+            !text.contains("notifications"),
+            "banners on should omit the key"
+        );
         assert!(
             !text.contains("analysis_roots"),
             "the default scope should omit the key"

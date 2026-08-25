@@ -6,6 +6,7 @@
 //! with the popover would reset every rate to "unknown" on each reopen.
 
 use crate::notify;
+use crate::prefs;
 use crate::procscan;
 use crate::state::ZStatsGlobalStore;
 #[cfg(not(target_os = "linux"))]
@@ -264,12 +265,19 @@ pub fn start(cx: &mut App) {
                     .clone()
                     .update(cx, |state, cx| {
                         let now = Instant::now();
+                        // The user's master switch, ahead of the
+                        // per-episode gates: while banners are off
+                        // nothing interrupts, so neither the snooze
+                        // clock nor the auto-quiet window should
+                        // record a delivery that never happened.
+                        let muted = !prefs::notifications();
                         for event in state.ingest(tick, cx) {
                             // Quiet subjects still land in the Alerts list
-                            // above — only the banner stays quiet. Two
-                            // gates: the snooze the user asked for, and
-                            // the auto-quiet for a subject that has
-                            // already interrupted twice this hour.
+                            // above — only the banner stays quiet. Three
+                            // gates: the global switch, the snooze the
+                            // user asked for, and the auto-quiet for a
+                            // subject that has already interrupted twice
+                            // this hour.
                             //
                             // Each verdict is logged: a banner that
                             // silently stayed away is indistinguishable
@@ -277,12 +285,14 @@ pub fn start(cx: &mut App) {
                             // reason the card wears a pill), and the log
                             // is where that question gets answered a day
                             // later.
-                            let snoozed = state.banner_snoozed(&event);
-                            let damped = !snoozed && state.banner_damped(&event, now);
+                            let snoozed = !muted && state.banner_snoozed(&event);
+                            let damped = !muted && !snoozed && state.banner_damped(&event, now);
                             tracing::info!(
                                 kind = ?event.kind(),
                                 subject = ?event.subject,
-                                banner = if snoozed {
+                                banner = if muted {
+                                    "muted"
+                                } else if snoozed {
                                     "snoozed"
                                 } else if damped {
                                     "auto-quieted"
@@ -291,7 +301,7 @@ pub fn start(cx: &mut App) {
                                 },
                                 "alert reported"
                             );
-                            if snoozed || damped {
+                            if muted || snoozed || damped {
                                 continue;
                             }
                             notify::post(&event);
@@ -300,18 +310,24 @@ pub fn start(cx: &mut App) {
                             tracing::info!(
                                 pid = notice.pid,
                                 name = %notice.name,
-                                "sustained-load notice delivered"
+                                banner = if muted { "muted" } else { "delivered" },
+                                "sustained-load notice"
                             );
-                            notify::post_sustained(&notice);
+                            if !muted {
+                                notify::post_sustained(&notice);
+                            }
                         }
                         for creep in state.take_memory_creep_notices() {
                             tracing::info!(
                                 name = %creep.name,
                                 climb_bytes = creep.climb_bytes,
                                 now_bytes = creep.now_bytes,
-                                "memory creep notice delivered"
+                                banner = if muted { "muted" } else { "delivered" },
+                                "memory creep notice"
                             );
-                            notify::post_memory_creep(&creep);
+                            if !muted {
+                                notify::post_memory_creep(&creep);
+                            }
                         }
                         // After ingest, not before: the tray's auto
                         // mode reads the episode list this tick just

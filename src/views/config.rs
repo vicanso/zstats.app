@@ -806,9 +806,55 @@ fn interface_card(
                 .to_string(),
             ),
         ))
+        .child(notifications_row())
         .child(autostart_row())
         .child(proxy_row(proxy_input, proxy_valid))
         .child(opacity_row())
+        .into_any_element()
+}
+
+/// The notifications master switch — banners only. Everything else
+/// keeps running: rules evaluate, the Alerts list and the daily record
+/// fill, the log carries each banner's verdict ("muted"), and the
+/// Alerts tab's Watching block says so — a banner that quietly never
+/// arrives must never read as a rule that stopped firing.
+fn notifications_row() -> AnyElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .px(px(13.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("config.notifications")),
+                )
+                .child(
+                    div()
+                        .id("pref-notifications-info")
+                        .flex_none()
+                        .p(px(1.))
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.notifications_tip")))
+                        .child(
+                            Icon::new(IconName::Info)
+                                .with_size(Size::Size(px(12.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        ),
+                ),
+        )
+        .child(
+            Switch::new("pref-notifications")
+                .small()
+                .checked(prefs::notifications())
+                .on_click(|checked, _window, cx| crate::set_notifications_pref(*checked, cx)),
+        )
         .into_any_element()
 }
 

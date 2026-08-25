@@ -22,6 +22,7 @@ use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::prefs;
 use crate::state::{MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
 use crate::theme;
@@ -84,8 +85,14 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // one episode leaves half the panel blank and hides what is armed.
     cards.extend(armed_block(state).map(on_content_line));
     cards.extend(past_days_block(state.alert_history()));
+    // The cadence promise is only true while banners are on; off, the
+    // honest sentence is the one that says where the record still goes.
     cards.push(on_content_line(widgets::note(i18n::tr(
-        "alerts.footer_note",
+        if prefs::notifications() {
+            "alerts.footer_note"
+        } else {
+            "alerts.footer_note_muted"
+        },
     ))));
     cards
 }
@@ -560,6 +567,15 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
         i18n::tr("alerts.empty_cooldown"),
         super::config::humanize(eff.cooldown),
     ));
+    // The master switch, said where the watching is listed: a banner
+    // that quietly never arrives reads as a rule that stopped firing —
+    // the same reason every filtered banner logs its verdict.
+    if !prefs::notifications() {
+        rows.push((
+            i18n::tr("alerts.armed_notifications"),
+            i18n::tr("alerts.armed_muted"),
+        ));
+    }
     Some(rows)
 }
 
