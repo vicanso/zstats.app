@@ -96,8 +96,8 @@ pub fn stretches(cells: &Band, lived: usize) -> Vec<(usize, usize)> {
     let lived = lived.min(BAND_BUCKETS);
     let mut runs = Vec::new();
     let mut start = None;
-    for i in 0..lived {
-        match (cells[i].is_some(), start) {
+    for (i, cell) in cells.iter().take(lived).enumerate() {
+        match (cell.is_some(), start) {
             (true, None) => start = Some(i),
             (false, Some(s)) => {
                 runs.push((s, i));
@@ -553,8 +553,8 @@ mod tests {
     fn stretches_merge_neighbours_and_split_on_gaps() {
         let mut band: Band = [None; BAND_BUCKETS];
         // 09:00–11:30 (three lit cells in a row), then 14:00–14:30.
-        for cell in 18..23 {
-            band[cell] = Some(50.0);
+        for slot in &mut band[18..23] {
+            *slot = Some(50.0);
         }
         band[28] = Some(5.0);
         assert_eq!(stretches(&band, BAND_BUCKETS), vec![(18, 23), (28, 29)]);

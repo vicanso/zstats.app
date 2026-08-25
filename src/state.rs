@@ -822,12 +822,13 @@ pub struct ZStatsAppState {
     /// banner, never an `AlertEvent`. `u16` MB caps at ~64 GB per
     /// tree, which is the whole machine.
     mem_trend: AppTrend,
-    /// Trees whose climb has been announced and not yet come back
-    /// under the floor — the re-arm set, so a creep is one banner, not
-    /// one per tick (`take_memory_creep_notices`). The value is when
-    /// the climb was first named: the Alerts tab's read-only card
-    /// sorts into the live list by it (`creeps_active`), same as the
-    /// sustained card sorts by its notice age.
+    /// Trees whose climb has been announced within the last
+    /// [`trend::CREEP_REARM`] — the re-arm set, pruned by that clock
+    /// and never by the figure, so a creep is one banner an hour, not
+    /// one per crossing of the bar (`take_memory_creep_notices`). The
+    /// value is when the climb was first named: the Alerts tab's
+    /// read-only card sorts into the live list by it (`creeps_active`),
+    /// same as the sustained card sorts by its notice age.
     creep_notified: HashMap<String, Instant>,
     /// Today's history, ranked. `None` until the tab is first opened — the
     /// read walks a day of JSONL and there is no reason to pay for it before
@@ -1518,22 +1519,22 @@ impl ZStatsAppState {
     }
 
     /// Creeps that have crossed `trend::CREEP_NOTIFY_BYTES` since they
-    /// were last announced — one banner per climb. A tree stays in the
-    /// announced set until its climb drops under the bar (freed, or
-    /// the hour rolled past the climb), then it may be announced again
-    /// the next time it climbs a gigabyte: a real leak that keeps
-    /// going will say so once an hour, not once a tick.
+    /// were last announced — one banner per climb, where "per climb"
+    /// is kept by the clock, not by the figure: an announcement stands
+    /// for [`trend::CREEP_REARM`] however the number moves underneath
+    /// it. Re-arming the moment the climb fell under the bar was the
+    /// first shape, and a GC sawtooth turned it into three Chrome
+    /// banners in 29 minutes — every re-crossing of 1 GB read as a
+    /// fresh leak (the constant's doc has the full story). Once the
+    /// hour expires, a tree still climbing a gigabyte is measured
+    /// against a baseline newer than the last banner: news again,
+    /// once an hour, which was the intent all along.
     pub fn take_memory_creep_notices(&mut self) -> Vec<MemoryCreep> {
-        let climbers = self.memory_climbers();
-        let over: HashSet<String> = climbers
-            .iter()
-            .filter(|c| c.climb_bytes >= trend::CREEP_NOTIFY_BYTES)
-            .map(|c| c.name.clone())
-            .collect();
-        self.creep_notified.retain(|name, _| over.contains(name));
-        climbers
+        self.creep_notified
+            .retain(|_, named_at| named_at.elapsed() < trend::CREEP_REARM);
+        self.memory_climbers()
             .into_iter()
-            .filter(|c| over.contains(&c.name))
+            .filter(|c| c.climb_bytes >= trend::CREEP_NOTIFY_BYTES)
             .filter(|c| match self.creep_notified.entry(c.name.clone()) {
                 Entry::Occupied(_) => false,
                 Entry::Vacant(slot) => {
@@ -1544,13 +1545,16 @@ impl ZStatsAppState {
             .collect()
     }
 
-    /// The climbs whose banner is out — announced, still at or over
-    /// the notify bar — with how long ago each was first named. The
+    /// The climbs whose banner is out — announced within the hour and
+    /// still climbing — with how long ago each was first named. The
     /// Alerts tab's read-only card reads this: the card is the landing
-    /// spot for the creep banner, so it shows exactly what has an
-    /// announcement standing and nothing softer (the sub-gigabyte
-    /// climbers stay on Overview's strip). Biggest climb first, from
-    /// `memory_climbers`' own order.
+    /// spot for the creep banner, so its rows mirror the standing
+    /// announcements with live figures (a dip below the bar does not
+    /// drop a row — the reader clicking a 20-minute-old banner must
+    /// still land on its subject; only a climb that ended, or the
+    /// hour turning over, retires one). Unannounced climbers stay on
+    /// Overview's strip. Biggest climb first, from `memory_climbers`'
+    /// own order.
     pub fn creeps_active(&self) -> Vec<(MemoryCreep, Duration)> {
         self.memory_climbers()
             .into_iter()
@@ -3672,6 +3676,37 @@ mod tests {
             dismissed: false,
         }]);
         assert!(!state.memory_needs_attention_at(SystemTime::now()));
+    }
+
+    /// The creep re-arm is the clock, not the figure. With nothing
+    /// over the bar this tick, the first shape read "climb gone" and
+    /// re-armed — a GC sawtooth crossing 1 GB every few minutes became
+    /// three Chrome banners in 29 minutes. A standing announcement now
+    /// survives any dip; only [`trend::CREEP_REARM`] expiring prunes it.
+    #[test]
+    fn a_dip_under_the_bar_does_not_rearm_the_creep_banner() {
+        let mut state = ZStatsAppState::new();
+        state
+            .creep_notified
+            .insert("Google Chrome".into(), Instant::now());
+        // No tick at all — as far as this pass can see, nothing is
+        // over the bar, which is exactly what a low tooth looks like.
+        assert!(state.take_memory_creep_notices().is_empty());
+        assert!(
+            state.creep_notified.contains_key("Google Chrome"),
+            "the hour re-arms, a dip must not"
+        );
+        // The clock half: an announcement older than the ring goes.
+        // Guarded because `Instant` cannot reach past boot — on a
+        // machine (or CI runner) up less than the hour, only the
+        // dip half above is checkable.
+        if let Some(stale) = Instant::now().checked_sub(trend::CREEP_REARM + Duration::from_secs(1))
+        {
+            state.creep_notified.insert("old".into(), stale);
+            let _ = state.take_memory_creep_notices();
+            assert!(!state.creep_notified.contains_key("old"));
+            assert!(state.creep_notified.contains_key("Google Chrome"));
+        }
     }
 
     /// "Today's alerts" has to keep meaning today on a machine that

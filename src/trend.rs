@@ -44,6 +44,7 @@
 
 use crate::fullscan;
 use std::collections::HashMap;
+use std::time::Duration;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
 /// Minutes of history per tree: the hour the card talks about.
@@ -60,6 +61,19 @@ pub const MIB: u64 = 1 << 20;
 /// browser session or an indexer does by itself on an ordinary
 /// morning, and a leak at that rate fills a laptop before lunch.
 pub const CREEP_NOTIFY_BYTES: u64 = 1024 * MIB;
+
+/// How long one creep announcement stands before the same tree may
+/// banner again — one full ring, dips notwithstanding. "Re-arm when
+/// the climb falls back under the bar" was tried first and read a GC
+/// sawtooth as a stream of fresh leaks: Chrome's footprint oscillating
+/// around its high walked the climb across 1 GB every few minutes —
+/// measured, three banners in 29 minutes — because a single tick can
+/// never distinguish "the climb ended" from "the collector caught the
+/// low tooth". By the time this clock expires, the hour the banner
+/// described has slid out of the ring entirely, so whatever a
+/// re-announcement measures is against a baseline newer than the last
+/// banner — which is what makes it news again.
+pub const CREEP_REARM: Duration = Duration::from_secs(60 * 60);
 
 /// Slot value for "no reading survived for this minute".
 const NO_DATA: u16 = u16::MAX;
