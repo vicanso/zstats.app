@@ -5,9 +5,10 @@
 //! `state::SeenAlert`) along with when this process saw it.
 //!
 //! Recency beats type. Live episodes (reported this session) sit first,
-//! newest report first. The sustained-load card joins that group by when
-//! it started being noticed — it is not an alert, but it is happening
-//! now, and burying it under restored cards made the tab look stale.
+//! newest report first. The watcher cards — sustained load, and the
+//! memory climbs with a banner out — join that group by when they
+//! started being noticed: neither is an alert, but both are happening
+//! now, and burying them under restored cards made the tab look stale.
 //! Episodes restored from earlier today follow, under their own heading.
 //!
 //! Clicking a card expands a per-subject threshold editor. Writes go
@@ -21,9 +22,10 @@ use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::state::{SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
 use crate::theme;
+use crate::trend;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -41,8 +43,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let live: Vec<&SeenAlert> = state.alerts().iter().filter(|s| s.live).collect();
     let earlier: Vec<&SeenAlert> = state.alerts().iter().filter(|s| !s.live).collect();
     let holdings = state.sustained_active();
+    let creeps = state.creeps_active();
 
-    if live.is_empty() && earlier.is_empty() && holdings.is_empty() {
+    if live.is_empty() && earlier.is_empty() && holdings.is_empty() && creeps.is_empty() {
         // An empty list is indistinguishable from a broken watcher unless
         // it says what it is armed with — so quote the thresholds in force.
         // The week's record still follows: a quiet today is not a quiet
@@ -54,12 +57,21 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
     let mut now: Vec<AnyElement> = live.iter().copied().map(|s| alert_card(s, state)).collect();
     let after = state.sustained_rule().after;
+    let mut watchers: Vec<(Duration, AnyElement)> = Vec::new();
     if let (Some(ago), Some(card)) = (
         newest_noticed_ago(&holdings, after),
         sustained_from(&holdings),
     ) {
-        let ages: Vec<Duration> = live.iter().map(|s| s.age()).collect();
-        let at = sustained_insert_at(&ages, ago);
+        watchers.push((ago, card));
+    }
+    if let Some(card) = creep_from(&creeps) {
+        let ago = creeps.iter().map(|(_, ago)| *ago).min().unwrap_or_default();
+        watchers.push((ago, card));
+    }
+    watchers.sort_by_key(|(ago, _)| *ago);
+    let ages: Vec<Duration> = live.iter().map(|s| s.age()).collect();
+    let agos: Vec<Duration> = watchers.iter().map(|(ago, _)| *ago).collect();
+    for (at, (_, card)) in watch_cards_at(&ages, &agos).into_iter().zip(watchers) {
         now.splice(at..at, std::iter::once(card));
     }
 
@@ -118,13 +130,26 @@ fn newest_noticed_ago(holdings: &[SustainedNotice], after: Duration) -> Option<D
         .min()
 }
 
-/// Index in the live list (newest first) the sustained card belongs at.
-/// A hold noticed more recently than a live report sits above it.
-fn sustained_insert_at(live_ages: &[Duration], noticed_ago: Duration) -> usize {
+/// Index in the live list (newest first) a watcher card belongs at.
+/// A watch noticed more recently than a live report sits above it.
+fn watch_insert_at(live_ages: &[Duration], noticed_ago: Duration) -> usize {
     live_ages
         .iter()
         .position(|age| noticed_ago < *age)
         .unwrap_or(live_ages.len())
+}
+
+/// Final indices for the watcher cards among the live episodes, one per
+/// noticed-ago, which the caller passes sorted ascending (newest
+/// first). Each card lands `k` past its own slot because the `k` cards
+/// before it are already in the list — and `watch_insert_at` is
+/// monotonic in `ago`, so those cards always sit at or before it.
+fn watch_cards_at(live_ages: &[Duration], noticed_agos: &[Duration]) -> Vec<usize> {
+    noticed_agos
+        .iter()
+        .enumerate()
+        .map(|(k, ago)| watch_insert_at(live_ages, *ago) + k)
+        .collect()
 }
 
 fn earlier_heading() -> AnyElement {
@@ -394,6 +419,77 @@ fn sustained_from(active: &[SustainedNotice]) -> Option<AnyElement> {
     )
 }
 
+/// The memory-climb watcher's holdings, as a read-only card — the
+/// landing spot for the creep banner, exactly as [`sustained_from`] is
+/// for the sustained one: the banner's click opens this tab, and until
+/// this card existed it opened onto a page that never mentioned the
+/// climber. Display only: the judgment lives in trend.rs, the rows
+/// carry no actions, and nothing here is an alert — a climb crosses no
+/// line until it is too late, which is the whole reason the watcher
+/// exists. Only climbs with a banner out appear (the sub-gigabyte ones
+/// stay on Overview's strip): this card answers "what was that
+/// notification", not "what moved at all".
+fn creep_from(creeps: &[(MemoryCreep, Duration)]) -> Option<AnyElement> {
+    if creeps.is_empty() {
+        return None;
+    }
+    let last = creeps.len() - 1;
+    Some(
+        card()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .child(i18n::tr("alerts.creep_title")),
+            )
+            .child(
+                div()
+                    .mt(px(3.))
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("alerts.creep_note")),
+            )
+            .children(creeps.iter().enumerate().map(|(i, (creep, _))| {
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .py(px(7.))
+                    .when(i != last, |d| {
+                        d.border_b(px(1.)).border_color(theme::border_subtle())
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme::text())
+                            .truncate()
+                            .child(creep.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(font::MONO)
+                            .text_size(px(10.))
+                            .text_color(theme::text_muted())
+                            .child(
+                                t!(
+                                    "alerts.creep_row",
+                                    delta = format::memory(creep.climb_bytes),
+                                    now = format::memory(creep.now_bytes)
+                                )
+                                .to_string(),
+                            ),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    )
+}
+
 /// The rules the engine is armed with right now, resolved through
 /// zstats' own [`ActiveThresholds`] (same source as the Config tab, so
 /// the two can never disagree). One pair per rule — a single joined
@@ -446,6 +542,17 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
             "alerts.watch_sustained",
             cpu = format!("{:.0}%", state.sustained_bar_percent()),
             after = format::span(state.sustained_rule().after)
+        )
+        .to_string(),
+    ));
+    // The other watcher: a list that names one and not the other would
+    // make the creep card (and its banner) look like they came from
+    // nowhere.
+    rows.push((
+        i18n::tr("alerts.kind_creep"),
+        t!(
+            "alerts.watch_creep",
+            delta = format::memory(trend::CREEP_NOTIFY_BYTES)
         )
         .to_string(),
     ));
@@ -1306,24 +1413,42 @@ mod tests {
     #[test]
     fn a_just_noticed_hold_sits_above_stale_live_alerts() {
         let live = [Duration::from_secs(4 * 3600), Duration::from_secs(9 * 3600)];
-        assert_eq!(sustained_insert_at(&live, Duration::from_secs(2 * 60)), 0);
+        assert_eq!(watch_insert_at(&live, Duration::from_secs(2 * 60)), 0);
     }
 
     #[test]
     fn a_fresh_live_alert_keeps_the_top() {
         let live = [Duration::from_secs(30), Duration::from_secs(4 * 3600)];
-        assert_eq!(sustained_insert_at(&live, Duration::from_secs(2 * 60)), 1);
+        assert_eq!(watch_insert_at(&live, Duration::from_secs(2 * 60)), 1);
     }
 
     #[test]
     fn with_no_live_alerts_sustained_is_first() {
-        assert_eq!(sustained_insert_at(&[], Duration::from_secs(60)), 0);
+        assert_eq!(watch_insert_at(&[], Duration::from_secs(60)), 0);
     }
 
     #[test]
     fn an_old_hold_falls_through_to_the_bottom_of_live() {
         let live = [Duration::from_secs(60)];
-        assert_eq!(sustained_insert_at(&live, Duration::from_secs(3 * 3600)), 1);
+        assert_eq!(watch_insert_at(&live, Duration::from_secs(3 * 3600)), 1);
+    }
+
+    /// Two watcher cards land among the live episodes without shoving
+    /// each other: the second card's slot is computed as if the first
+    /// were already in the list.
+    #[test]
+    fn two_watch_cards_offset_each_other() {
+        let live = [Duration::from_secs(60), Duration::from_secs(10 * 60)];
+        // Noticed 30s and 5m ago: one above the fresh alert, one
+        // between the alerts — the 5m card shifts by the 30s one.
+        let agos = [Duration::from_secs(30), Duration::from_secs(5 * 60)];
+        assert_eq!(watch_cards_at(&live, &agos), vec![0, 2]);
+        // Both newer than every live report: they take the top two
+        // slots in their own order.
+        let both_fresh = [Duration::from_secs(10), Duration::from_secs(30)];
+        assert_eq!(watch_cards_at(&live, &both_fresh), vec![0, 1]);
+        // No live episodes at all: the cards simply stack.
+        assert_eq!(watch_cards_at(&[], &agos), vec![0, 1]);
     }
 
     #[test]

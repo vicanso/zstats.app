@@ -34,6 +34,7 @@ use gpui_component::input::{InputEvent, InputState};
 use std::array;
 use std::cell::Cell;
 use std::cmp::Reverse;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::ops::Deref;
@@ -823,8 +824,11 @@ pub struct ZStatsAppState {
     mem_trend: AppTrend,
     /// Trees whose climb has been announced and not yet come back
     /// under the floor — the re-arm set, so a creep is one banner, not
-    /// one per tick (`take_memory_creep_notices`).
-    creep_notified: HashSet<String>,
+    /// one per tick (`take_memory_creep_notices`). The value is when
+    /// the climb was first named: the Alerts tab's read-only card
+    /// sorts into the live list by it (`creeps_active`), same as the
+    /// sustained card sorts by its notice age.
+    creep_notified: HashMap<String, Instant>,
     /// Today's history, ranked. `None` until the tab is first opened — the
     /// read walks a day of JSONL and there is no reason to pay for it before
     /// somebody asks.
@@ -984,7 +988,7 @@ impl Default for ZStatsAppState {
             net: NetActivity::default(),
             trend: AppTrend::default(),
             mem_trend: AppTrend::default(),
-            creep_notified: HashSet::new(),
+            creep_notified: HashMap::new(),
             history: None,
             history_range: HistoryRange::default(),
             history_sort: HistorySort::default(),
@@ -1526,11 +1530,34 @@ impl ZStatsAppState {
             .filter(|c| c.climb_bytes >= trend::CREEP_NOTIFY_BYTES)
             .map(|c| c.name.clone())
             .collect();
-        self.creep_notified.retain(|name| over.contains(name));
+        self.creep_notified.retain(|name, _| over.contains(name));
         climbers
             .into_iter()
             .filter(|c| over.contains(&c.name))
-            .filter(|c| self.creep_notified.insert(c.name.clone()))
+            .filter(|c| match self.creep_notified.entry(c.name.clone()) {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(slot) => {
+                    slot.insert(Instant::now());
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// The climbs whose banner is out — announced, still at or over
+    /// the notify bar — with how long ago each was first named. The
+    /// Alerts tab's read-only card reads this: the card is the landing
+    /// spot for the creep banner, so it shows exactly what has an
+    /// announcement standing and nothing softer (the sub-gigabyte
+    /// climbers stay on Overview's strip). Biggest climb first, from
+    /// `memory_climbers`' own order.
+    pub fn creeps_active(&self) -> Vec<(MemoryCreep, Duration)> {
+        self.memory_climbers()
+            .into_iter()
+            .filter_map(|c| {
+                let named_at = self.creep_notified.get(&c.name)?;
+                Some((c, named_at.elapsed()))
+            })
             .collect()
     }
 
