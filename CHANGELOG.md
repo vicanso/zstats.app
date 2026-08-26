@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.17](https://github.com/vicanso/zstats.app/compare/v0.1.14..v0.1.17) - 2026-08-26
+
+### ⛰️  Features
+
+- The tray's memory-recovery clock says when it starts and when it resets - ([11d7a90](https://github.com/vicanso/zstats.app/commit/11d7a9017fad124b50c17901c4473c55c92c028b))
+- A MobileAsset row quotes what macOS declares about it - ([d6daeaa](https://github.com/vicanso/zstats.app/commit/d6daeaae5db5f24563df7a202a8ce5caf8726311))
+- A whole-disk analysis scope, rooted at the data volume - ([54df1ca](https://github.com/vicanso/zstats.app/commit/54df1ca717f53213bb7bb0e48133c2f4cb97323d))
+- The menu bar waits for critical pressure, not the warning tier - ([a041786](https://github.com/vicanso/zstats.app/commit/a0417864e0fe30b637b9bababc57bc7a8623bfbe))
+- Hovering a History band reads its stretches out, one line each - ([798c8f0](https://github.com/vicanso/zstats.app/commit/798c8f044309f500be3a717ffdec4fcc299df007))
+- A slow-burn banner says when nobody has been using the app - ([9d1aaba](https://github.com/vicanso/zstats.app/commit/9d1aaba6e9e2a6f7b30065917d779c9d05b8115f))
+- A notifications master switch — banners off, the record untouched - ([d34bf39](https://github.com/vicanso/zstats.app/commit/d34bf393ba310c3d1487703d704b1b2f10d46fd4))
+
+### 🐛 Bug Fixes
+
+- The creep banner re-arms on the clock, never on a dip - ([131403b](https://github.com/vicanso/zstats.app/commit/131403bed371e65c0e5aba7feda70a24c504bb6f))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.1.16 - ([d266f31](https://github.com/vicanso/zstats.app/commit/d266f31979b2158d6973907444c199273091a48a))
+- Version 0.1.15 - ([3b85fe0](https://github.com/vicanso/zstats.app/commit/3b85fe07fcbde253c2f1c612352266255d70fe38))
+- Version 0.1.14 - ([d0104d5](https://github.com/vicanso/zstats.app/commit/d0104d527ad6fbe423c6e8c2b85e39e8f0c33a11))
+
 ## [0.1.16](https://github.com/vicanso/zstats.app/compare/v0.1.14..v0.1.16) - 2026-08-25
 
 ### ⛰️  Features
