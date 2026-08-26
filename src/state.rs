@@ -1420,6 +1420,17 @@ impl ZStatsAppState {
     /// Start or reset each live memory episode's recovery clock from
     /// this tick. Unknown samples (no process table, no pressure
     /// level) leave the clock where it was.
+    ///
+    /// Both transitions are logged, and at INFO rather than DEBUG on
+    /// purpose: the question they answer — "the episode looks over,
+    /// why is the menu bar still on memory?" — is asked about the
+    /// *installed* build, where DEBUG is not being captured. It was
+    /// asked once with no record to answer it from, and the honest
+    /// reply was a guess about the level flapping. A reset line with
+    /// how long the clock had run says which of the two it was.
+    /// Transitions only: the arm re-holds every tick the condition
+    /// holds, and those would be a line every few seconds saying
+    /// nothing changed.
     fn note_memory_recovery(&mut self, now: SystemTime) {
         let Some(tick) = self.latest.as_ref() else {
             return;
@@ -1430,9 +1441,28 @@ impl ZStatsAppState {
                 continue;
             }
             match memory_event_holds(&seen.event, snapshot) {
-                Some(true) => seen.recovered_since = None,
+                Some(true) => {
+                    // Only a clock that was actually running is a reset;
+                    // the arm holds on every tick the condition holds,
+                    // and logging those would be a line every few
+                    // seconds saying nothing changed.
+                    if let Some(started) = seen.recovered_since.take() {
+                        tracing::info!(
+                            kind = ?seen.event.kind(),
+                            subject = ?seen.event.subject,
+                            ran_for = ?now.duration_since(started).unwrap_or_default(),
+                            "memory recovery clock reset"
+                        );
+                    }
+                }
                 Some(false) if seen.recovered_since.is_none() => {
                     seen.recovered_since = Some(now);
+                    tracing::info!(
+                        kind = ?seen.event.kind(),
+                        subject = ?seen.event.subject,
+                        after = ?TRAY_RECOVER,
+                        "memory recovery clock started"
+                    );
                 }
                 Some(false) | None => {}
             }
@@ -3741,6 +3771,44 @@ mod tests {
         state.latest = Some(critical);
         state.note_memory_recovery(t0);
         assert!(state.memory_needs_attention_at(t0));
+    }
+
+    /// The clock's two transitions are what the log reports, so the
+    /// state they read from has to move exactly once per transition:
+    /// the arm re-holds on every tick the condition holds, and a line
+    /// per tick would drown the one that matters.
+    #[test]
+    fn the_recovery_clock_moves_only_on_a_transition() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(pressure_alert(4), t0);
+        let normal = || {
+            let mut tick = empty_tick();
+            tick.snapshot.memory.pressure_level = Some(1);
+            tick
+        };
+        state.latest = Some(normal());
+        state.note_memory_recovery(t0);
+        let started = state.alerts()[0].recovered_since.expect("clock started");
+        // A second quiet tick must not restart it — that would push the
+        // deadline out forever and log a line each time.
+        state.latest = Some(normal());
+        state.note_memory_recovery(t0 + Duration::from_secs(5));
+        assert_eq!(state.alerts()[0].recovered_since, Some(started));
+
+        // Back over the line: cleared, so the next quiet tick is a
+        // genuine restart.
+        let mut over = empty_tick();
+        over.snapshot.memory.pressure_level = Some(4);
+        state.latest = Some(over);
+        state.note_memory_recovery(t0 + Duration::from_secs(60));
+        assert!(state.alerts()[0].recovered_since.is_none());
+        state.latest = Some(normal());
+        state.note_memory_recovery(t0 + Duration::from_secs(65));
+        assert_eq!(
+            state.alerts()[0].recovered_since,
+            Some(t0 + Duration::from_secs(65))
+        );
     }
 
     /// A process over its memory bar is Warning in zstats — only

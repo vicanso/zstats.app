@@ -256,7 +256,7 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 
 zedis 的 logger 原样适配：stdout + `~/.zstats/logs/zstats-app.log.<日期>` 每日滚动（**文件名日期是 UTC**——tracing-appender 写死 now_utc，UTC+8 下本地 0~8 点的行落在前一天名字的文件里、早上 8 点换文件；行内时间戳是本地的，按内容时间查而不是按文件名）、90 天清理（**仅启动时执行**，按 mtime 判旧；常驻数月不重启就不清，KB/天的量级无所谓）、`RUST_LOG` 控级（默认 INFO）、non-blocking writer 的 guard 由 `main` 持有到进程结束。目录与 CLI 共享，所以**文件名携带写入者**——和 cleanhints 文件名携带平台是同一条理由。
 
-它落盘的核心是**告警类轨迹**：每条上报的 `AlertEvent` 连同横幅裁决（delivered / snoozed / auto-quieted——一条悄悄没出现的横幅和一条不再触发的规则从外面看一样，卡片上的 pill 答当下，日志答隔天的追问）、每次 quit/SIGTERM 请求、每次移入废纸篓（都在唯一投递点打一行，两个确认门的调用方共享）。此前 app 有约 30 处裸 `eprintln!` 且没装 subscriber——LaunchServices 下 stderr 无人可见，而且 **zstats 库自己发的 tracing 事件（调度器、告警引擎）一直在被丢弃**；现在全部收编，失败路径一律 `tracing::warn!/error!`。
+它落盘的核心是**告警类轨迹**：托盘内存恢复计时的两次转换（起步 / 清零，后者带「已跑多久」——刻意打 INFO 而不是 DEBUG：它要回答的「episode 看着已经过去了，菜单栏怎么还是内存」是对着**安装版**问的，而安装版不开 DEBUG；这个问题被问过一次，当时没有任何记录可查，只能靠推断压力值抖动来回答。只记转换，条件持续成立的每个 tick 不记，否则真正有信息的那行会被淹掉）、每条上报的 `AlertEvent` 连同横幅裁决（delivered / snoozed / auto-quieted——一条悄悄没出现的横幅和一条不再触发的规则从外面看一样，卡片上的 pill 答当下，日志答隔天的追问）、每次 quit/SIGTERM 请求、每次移入废纸篓（都在唯一投递点打一行，两个确认门的调用方共享）。此前 app 有约 30 处裸 `eprintln!` 且没装 subscriber——LaunchServices 下 stderr 无人可见，而且 **zstats 库自己发的 tracing 事件（调度器、告警引擎）一直在被丢弃**；现在全部收编，失败路径一律 `tracing::warn!/error!`。
 
 ## 系统通知
 
