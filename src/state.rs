@@ -1685,6 +1685,16 @@ impl ZStatsAppState {
         self.launch_disk_analysis(scope, true, cx);
     }
 
+    /// Analyze the whole writable volume — the scope that can see what
+    /// no home-shaped one can (`diskscan::whole_disk_root` explains why
+    /// its root is not `/`). Minutes, not seconds, and the slowest
+    /// preset by far; the walk survives every surface like the others.
+    pub fn start_disk_analysis_whole_disk(&mut self, cx: &mut Context<Self>) {
+        let scope = diskscan::ScanScope::whole_disk();
+        self.disk_analysis_root = Some(scope.clone());
+        self.launch_disk_analysis(scope, true, cx);
+    }
+
     /// Analyze the cache-set preset — the explicit cache roots merged
     /// into one ranked view (docs/disk-analysis.md's scope table). Same
     /// session semantics as a picked folder: re-analyze means this scope

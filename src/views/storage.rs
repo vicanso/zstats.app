@@ -494,6 +494,16 @@ fn analysis_preset_chips() -> Vec<AnyElement> {
             i18n::tr("disk.ana_preset_caches_tip"),
             |state, cx| state.start_disk_analysis_caches(cx),
         ),
+        // Last, and deliberately so: it is the slowest by a wide margin
+        // and the only one that needs Full Disk Access to be complete.
+        // It is also the only scope that can see the asset caches and
+        // system-wide libraries a home walk structurally cannot.
+        chip(
+            "ana-preset-disk",
+            i18n::tr("disk.ana_preset_disk"),
+            i18n::tr("disk.ana_preset_disk_tip"),
+            |state, cx| state.start_disk_analysis_whole_disk(cx),
+        ),
     ]
 }
 /// When permission gaps hid part of the tree, say so and offer the one
@@ -1466,7 +1476,18 @@ fn display_bar(bytes: u64) -> u64 {
 /// `/Users/you/…` collapses to `~/…` — the shared prefix every row would
 /// otherwise spend its tooltip width repeating. Pure so it can be tested
 /// without touching the real environment.
+///
+/// The whole-disk scope walks `/System/Volumes/Data`, so its paths
+/// arrive wearing that prefix; it is dropped first. Not cosmetic —
+/// `/System/Volumes/Data/Users/you/Downloads` and `~/Downloads` are the
+/// same inode reached through a firmlink, and showing the mount-point
+/// spelling would make a familiar folder look like somewhere strange
+/// while also defeating the `~` collapse below.
 fn tilde_path(path: &str, home: &str) -> String {
+    let path = path
+        .strip_prefix(diskscan::DATA_VOLUME_DISPLAY_PREFIX)
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(path);
     match path.strip_prefix(home) {
         // Component boundary required: /Users/xy must not collapse under
         // a /Users/x home.
@@ -1658,6 +1679,33 @@ mod tests {
         assert_eq!(tilde_path("/tmp/a", ""), "/tmp/a");
         // Prefix only counts on a component boundary.
         assert_eq!(tilde_path("/Users/xy/f", "/Users/x"), "/Users/xy/f");
+    }
+
+    /// The whole-disk scope walks the data volume, so its paths arrive
+    /// wearing that mount point. They are the same directories reached
+    /// through a firmlink, and the reader knows them by their ordinary
+    /// names — the prefix comes off before the `~` collapse, not after,
+    /// or a home path under it would never collapse at all.
+    #[test]
+    fn tilde_path_drops_the_data_volume_mount_point() {
+        assert_eq!(
+            tilde_path("/System/Volumes/Data/Users/x/Movies/a.mkv", "/Users/x"),
+            "~/Movies/a.mkv"
+        );
+        assert_eq!(
+            tilde_path("/System/Volumes/Data/System/Library/AssetsV2", "/Users/x"),
+            "/System/Library/AssetsV2"
+        );
+        // The mount point itself is not a path under it.
+        assert_eq!(
+            tilde_path("/System/Volumes/Data", "/Users/x"),
+            "/System/Volumes/Data"
+        );
+        // A same-named directory elsewhere keeps its full path.
+        assert_eq!(
+            tilde_path("/System/Volumes/DataSet/x", "/Users/x"),
+            "/System/Volumes/DataSet/x"
+        );
     }
 
     #[test]

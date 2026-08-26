@@ -228,6 +228,15 @@ impl ScanScope {
         }
     }
 
+    /// Everything on the writable volume — see [`whole_disk_root`] for
+    /// why that is not `/`. Single-root like every picked folder; the
+    /// prunes it needs are derived from the root itself
+    /// (`volume_prunes`) rather than carried here, so a hand-picked
+    /// `/System/Volumes/Data` behaves identically to the preset.
+    pub fn whole_disk() -> Self {
+        Self::single(whole_disk_root())
+    }
+
     /// The explicit cache roots, merged into one ranked view under the
     /// home base: the three macOS/XDG locations, then the tool caches
     /// that live directly in `~` and a full home walk would bury among
@@ -285,6 +294,68 @@ pub fn default_root() -> Option<PathBuf> {
     env::var("HOME").ok().map(PathBuf::from)
 }
 
+/// The writable volume, which on an Apple-silicon-era Mac is where
+/// every reclaimable byte lives — the root of the whole-disk scope.
+///
+/// **Not `/`,** and the difference is not cosmetic. Since macOS 10.15
+/// the boot disk is two volumes: a sealed, read-only system volume
+/// mounted at `/`, and a data volume whose directories are stitched
+/// into it by *firmlinks*. A firmlink is not a symlink — `/Users` and
+/// `/System/Volumes/Data/Users` are literally the same inode on the
+/// same device (measured: ino 16925 both ways), so `follow_links(false)`
+/// does nothing about it and a walk from `/` counts the entire data
+/// volume **twice**, once through each name. Nothing about a size
+/// report survives being wrong by a factor of two.
+///
+/// Walking `/` and pruning `/System/Volumes/Data` fixes the double
+/// count and creates a worse problem: the data volume's top level
+/// holds directories that no firmlink points at — `.Spotlight-V100`,
+/// `.DocumentRevisions-V100`, `MobileSoftwareUpdate`, `.fseventsd` —
+/// which are unreachable from `/` and are exactly the "where did my
+/// disk go" answers people come here for.
+///
+/// So the scope roots at the data volume: one volume, every byte once,
+/// including the `System/Library/AssetsV2` downloads (asset caches
+/// that reach gigabytes) that no home-shaped preset could ever see.
+/// What it does not cover is the sealed volume itself — fixed size,
+/// cryptographically sealed, not one byte of it reclaimable. Falls
+/// back to `/` where there is no data volume (pre-Catalina, or a
+/// non-APFS boot disk), where the split does not exist either.
+pub fn whole_disk_root() -> PathBuf {
+    let data = PathBuf::from(DATA_VOLUME);
+    if data.is_dir() {
+        data
+    } else {
+        PathBuf::from("/")
+    }
+}
+
+/// Mount point of the boot disk's writable volume.
+const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+/// The same prefix, for the view that strips it off a path before
+/// showing it — one definition, so the walker and the label can never
+/// disagree about what the whole-disk root is called.
+pub const DATA_VOLUME_DISPLAY_PREFIX: &str = DATA_VOLUME;
+
+/// Directories under a whole-disk root that must not be walked.
+///
+/// `Volumes` holds *other* disks — an external drive, a mounted DMG, a
+/// network share — and folding a 2 TB backup drive into "this disk" is
+/// the same class of lie as the double count. `home` is an autofs
+/// trigger: walking it mounts things on demand. Both are pruned by
+/// exact path, so a user who deliberately picks `/Volumes/Backup` as
+/// their scope still gets it walked — the prune is about what a
+/// *whole-disk* walk wanders into, not about those paths being off
+/// limits.
+fn volume_prunes(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| root.as_path() == Path::new(DATA_VOLUME) || root.as_path() == Path::new("/"))
+        .flat_map(|root| [root.join("Volumes"), root.join("home")])
+        .collect()
+}
+
 fn run(
     scope: &ScanScope,
     cancel: &Arc<AtomicBool>,
@@ -301,7 +372,7 @@ fn run(
     // The user's own list, pruned exactly like the TCC one — the
     // difference is only whose decision it was.
     let excluded: Vec<PathBuf> = prefs::analysis_exclude();
-    let deny: Vec<PathBuf> = env::var("HOME")
+    let mut deny: Vec<PathBuf> = env::var("HOME")
         .ok()
         .map(|h| {
             TCC_DENY
@@ -310,6 +381,7 @@ fn run(
                 .collect()
         })
         .unwrap_or_default();
+    deny.extend(volume_prunes(&walked));
 
     // Raw collection: one bytes counter per owning directory, the fold
     // map, and the candidates for the file table. No tree. Shared across
@@ -1282,6 +1354,39 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    /// A whole-disk walk must not wander onto other disks, and must not
+    /// trip the autofs mount at `home`. Pruned by exact path, so a
+    /// deliberately picked `/Volumes/Backup` is still walked — the rule
+    /// is about what a whole-disk root wanders into.
+    #[test]
+    fn a_whole_disk_root_prunes_other_mounts_and_the_autofs_trigger() {
+        let prunes = volume_prunes(&[p(DATA_VOLUME)]);
+        assert!(prunes.contains(&p("/System/Volumes/Data/Volumes")));
+        assert!(prunes.contains(&p("/System/Volumes/Data/home")));
+        // The pre-Catalina fallback root gets the same treatment.
+        assert_eq!(volume_prunes(&[p("/")]).len(), 2);
+        // Every other scope is untouched: a picked folder named
+        // Volumes is the user's business, and a home walk has no
+        // mount points to cross.
+        assert!(volume_prunes(&[p("/Users/x")]).is_empty());
+        assert!(volume_prunes(&[p("/Volumes/Backup")]).is_empty());
+    }
+
+    /// The root is the data volume where there is one — walking `/`
+    /// would double-count every firmlinked directory (`/Users` and
+    /// `/System/Volumes/Data/Users` are one inode) and would still miss
+    /// the data volume's own top level.
+    #[test]
+    fn the_whole_disk_root_is_the_data_volume_where_it_exists() {
+        let root = whole_disk_root();
+        if Path::new(DATA_VOLUME).is_dir() {
+            assert_eq!(root, p(DATA_VOLUME));
+        } else {
+            assert_eq!(root, p("/"));
+        }
+        assert_eq!(ScanScope::whole_disk().roots, vec![root]);
     }
 
     #[test]
