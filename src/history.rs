@@ -84,31 +84,69 @@ pub const BAND_BUCKET_MINUTES: usize = 24 * 60 / BAND_BUCKETS;
 /// Cells hold the **max** of their minutes, same reasoning as the trend
 /// buffer: "when did it burn" asks what a stretch reached, and a mean
 /// would let one quiet minute talk a real burst back down.
-pub type Band = [Option<f32>; BAND_BUCKETS];
+pub type Band = [Option<BandCell>; BAND_BUCKETS];
 
-/// The lit stretches of a band's lived prefix, merged into `[start,
-/// end)` bucket ranges — the data behind the band's hover readout,
-/// which spells the cells out in clock time. Any shade counts: a lit
-/// cell means "a minute here qualified for the record", and the readout
-/// explains the picture, so a stretch the eye can see must never be
-/// missing from its own tooltip. Loudness stays the cell's job.
-pub fn stretches(cells: &Band, lived: usize) -> Vec<(usize, usize)> {
+/// What one half-hour cell holds. The peak paints it; the count is what
+/// keeps the picture honest when it is read back in clock time.
+///
+/// At half-hour resolution a machine that woke for one minute every
+/// thirty looks exactly like one that ran the whole time — measured, on
+/// a laptop asleep overnight: 25 maintenance wakes lit every cell from
+/// midnight to morning, 48 recorded minutes out of 440. The count is
+/// how the hover readout tells those two apart, and it is stored beside
+/// the peak rather than in a parallel array precisely so the two can
+/// never disagree about which cell they describe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandCell {
+    /// Highest 1-minute average recorded in this half hour.
+    pub peak: f32,
+    /// How many of its thirty minutes left a line in the file.
+    pub minutes: u16,
+}
+
+/// One run of lit cells: `[start, end)` in buckets, and how many
+/// minutes inside it actually left a line in the file.
+///
+/// The two numbers answer different questions and both are needed. The
+/// range says *when*; `minutes` says how much of that stretch was
+/// really there — a run of fourteen cells holding fourteen minutes is a
+/// machine waking briefly, and the same run holding four hundred is one
+/// that never stopped. Without the count the two are indistinguishable
+/// at this resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stretch {
+    pub start: usize,
+    pub end: usize,
+    pub minutes: u32,
+}
+
+/// The lit stretches of a band's lived prefix. Any shade counts: a lit
+/// cell means "a minute here qualified for the record", and the hover
+/// readout explains the picture, so a stretch the eye can see must
+/// never be missing from its own tooltip. Loudness stays the cell's
+/// job.
+pub fn stretches(cells: &Band, lived: usize) -> Vec<Stretch> {
     let lived = lived.min(BAND_BUCKETS);
-    let mut runs = Vec::new();
-    let mut start = None;
+    let mut runs: Vec<Stretch> = Vec::new();
+    let mut open: Option<Stretch> = None;
     for (i, cell) in cells.iter().take(lived).enumerate() {
-        match (cell.is_some(), start) {
-            (true, None) => start = Some(i),
-            (false, Some(s)) => {
-                runs.push((s, i));
-                start = None;
+        match (cell, &mut open) {
+            (Some(cell), Some(run)) => {
+                run.end = i + 1;
+                run.minutes += u32::from(cell.minutes);
             }
-            _ => {}
+            (Some(cell), slot @ None) => {
+                *slot = Some(Stretch {
+                    start: i,
+                    end: i + 1,
+                    minutes: u32::from(cell.minutes),
+                });
+            }
+            (None, slot @ Some(_)) => runs.extend(slot.take()),
+            (None, None) => {}
         }
     }
-    if let Some(s) = start {
-        runs.push((s, lived));
-    }
+    runs.extend(open);
     runs
 }
 
@@ -266,7 +304,16 @@ fn assemble_band(minutes: impl Iterator<Item = (u16, f32)>) -> Band {
             // no cell rather than a panic or a wrapped slot.
             continue;
         };
-        *cell = Some(cell.map_or(cpu, |held: f32| held.max(cpu)));
+        *cell = Some(match *cell {
+            Some(held) => BandCell {
+                peak: held.peak.max(cpu),
+                minutes: held.minutes.saturating_add(1),
+            },
+            None => BandCell {
+                peak: cpu,
+                minutes: 1,
+            },
+        });
     }
     band
 }
@@ -522,8 +569,12 @@ mod tests {
     fn a_cell_keeps_the_loudest_minute_and_an_empty_cell_stays_a_gap() {
         // Two minutes inside 14:00–14:30 (840 and 855), one at 09:05.
         let band = assemble_band([(840, 12.0), (855, 38.0), (545, 5.0)].into_iter());
-        assert_eq!(band[840 / BAND_BUCKET_MINUTES], Some(38.0), "max, not last");
-        assert_eq!(band[545 / BAND_BUCKET_MINUTES], Some(5.0));
+        let busy = band[840 / BAND_BUCKET_MINUTES].expect("lit");
+        assert_eq!(busy.peak, 38.0, "max, not last");
+        assert_eq!(busy.minutes, 2, "both minutes counted, not just the peak");
+        let quiet = band[545 / BAND_BUCKET_MINUTES].expect("lit");
+        assert_eq!(quiet.peak, 5.0);
+        assert_eq!(quiet.minutes, 1);
         // Everything unrecorded is a gap — "no line in the file", which
         // must never be paintable as zero.
         let filled = band.iter().flatten().count();
@@ -533,8 +584,12 @@ mod tests {
     #[test]
     fn the_day_edges_land_in_the_first_and_last_cell() {
         let band = assemble_band([(0, 1.0), (1439, 2.0), (1440, 99.0)].into_iter());
-        assert_eq!(band[0], Some(1.0));
-        assert_eq!(band[BAND_BUCKETS - 1], Some(2.0), "23:59 is the last cell");
+        assert_eq!(band[0].expect("lit").peak, 1.0);
+        assert_eq!(
+            band[BAND_BUCKETS - 1].expect("lit").peak,
+            2.0,
+            "23:59 is the last cell"
+        );
         // Minute 1440 does not exist in a day; a corrupt line gets no
         // cell rather than a wrapped slot or a panic.
         assert_eq!(band.iter().flatten().count(), 2);
@@ -549,33 +604,85 @@ mod tests {
         assert!(ranked[0].band.is_none());
     }
 
+    fn cell(peak: f32, minutes: u16) -> Option<BandCell> {
+        Some(BandCell { peak, minutes })
+    }
+
     #[test]
     fn stretches_merge_neighbours_and_split_on_gaps() {
         let mut band: Band = [None; BAND_BUCKETS];
-        // 09:00–11:30 (three lit cells in a row), then 14:00–14:30.
+        // 09:00–11:30 (five lit cells in a row), then 14:00–14:30.
         for slot in &mut band[18..23] {
-            *slot = Some(50.0);
+            *slot = cell(50.0, 30);
         }
-        band[28] = Some(5.0);
-        assert_eq!(stretches(&band, BAND_BUCKETS), vec![(18, 23), (28, 29)]);
+        band[28] = cell(5.0, 4);
+        assert_eq!(
+            stretches(&band, BAND_BUCKETS),
+            vec![
+                Stretch {
+                    start: 18,
+                    end: 23,
+                    minutes: 150
+                },
+                Stretch {
+                    start: 28,
+                    end: 29,
+                    minutes: 4
+                },
+            ]
+        );
+    }
+
+    /// The count is what separates a machine that ran from one that
+    /// woke: same lit cells, different minutes. Measured overnight —
+    /// 25 maintenance wakes lit every cell from midnight to morning on
+    /// 48 recorded minutes.
+    #[test]
+    fn a_stretch_counts_only_the_minutes_that_were_recorded() {
+        let mut solid: Band = [None; BAND_BUCKETS];
+        let mut waking: Band = [None; BAND_BUCKETS];
+        for i in 0..14 {
+            solid[i] = cell(20.0, 30);
+            waking[i] = cell(2.0, 1);
+        }
+        let solid = stretches(&solid, 14);
+        let waking = stretches(&waking, 14);
+        assert_eq!(solid[0].start, waking[0].start, "the same picture…");
+        assert_eq!(solid[0].end, waking[0].end);
+        assert_eq!(solid[0].minutes, 420, "…and a very different story");
+        assert_eq!(waking[0].minutes, 14);
     }
 
     #[test]
     fn a_stretch_reaching_the_lived_edge_ends_there() {
         let mut band: Band = [None; BAND_BUCKETS];
-        band[31] = Some(80.0);
-        band[32] = Some(80.0);
+        band[31] = cell(80.0, 30);
+        band[32] = cell(80.0, 10);
         // At 16:10 the current half hour is cell 32; the run must close
-        // at the lived edge (the view says "now"), not at the cell
-        // array's end, and cells recorded past it — a clock jump —
+        // at the lived edge (the view says the wall clock), not at the
+        // cell array's end, and cells recorded past it — a clock jump —
         // must not resurrect it.
-        band[40] = Some(99.0);
-        assert_eq!(stretches(&band, 33), vec![(31, 33)]);
+        band[40] = cell(99.0, 30);
+        assert_eq!(
+            stretches(&band, 33),
+            vec![Stretch {
+                start: 31,
+                end: 33,
+                minutes: 40
+            }]
+        );
         // The faintest shade still counts: the readout explains the
         // picture, and the picture lights any recorded cell.
         let mut faint: Band = [None; BAND_BUCKETS];
-        faint[0] = Some(0.1);
-        assert_eq!(stretches(&faint, BAND_BUCKETS), vec![(0, 1)]);
+        faint[0] = cell(0.1, 1);
+        assert_eq!(
+            stretches(&faint, BAND_BUCKETS),
+            vec![Stretch {
+                start: 0,
+                end: 1,
+                minutes: 1
+            }]
+        );
         assert!(stretches(&[None; BAND_BUCKETS], BAND_BUCKETS).is_empty());
     }
 }

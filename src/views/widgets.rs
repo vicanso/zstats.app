@@ -35,6 +35,36 @@ pub fn wrap_tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut 
     }
 }
 
+/// [`wrap_tooltip`] with one line per entry, for a readout that is a
+/// list rather than a sentence — the band's stretches, where three
+/// ranges joined by separators read as one run of digits.
+///
+/// Separate children, not `\n` in one string: gpui lays a div's text
+/// out as a single run and would render the newline as a space.
+pub fn wrap_tooltip_lines(
+    lines: Vec<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + use<> {
+    move |window, cx| {
+        let lines = lines.clone();
+        Tooltip::element(move |_, _| {
+            v_flex()
+                .max_w(px(220.))
+                .gap(px(2.))
+                .text_size(px(11.))
+                .line_height(relative(1.35))
+                .children(
+                    lines
+                        .iter()
+                        .map(|line| div().whitespace_normal().child(line.clone())),
+                )
+        })
+        .max_w(px(232.))
+        .text_size(px(11.))
+        .py(px(4.))
+        .build(window, cx)
+    }
+}
+
 /// Give a control a *wrapping* tooltip when it cannot build one itself.
 ///
 /// gpui-component's `Button::tooltip` takes a plain string and renders

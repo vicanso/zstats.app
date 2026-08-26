@@ -15,7 +15,7 @@ use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore}
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement,
+    AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_component::{Icon, Sizable, Size, h_flex, v_flex};
@@ -342,9 +342,12 @@ fn band(id: impl Into<ElementId>, cells: &history::Band) -> AnyElement {
         // ambiguous to begin with.
         .bg(theme::trough())
         .children((0..lived).map(|i| {
-            div().flex_1().h_full().when_some(cells[i], |d, peak| {
-                d.bg(Hsla::from(theme::ink()).opacity(band_alpha(peak)))
-            })
+            div()
+                .flex_1()
+                .h_full()
+                .when_some(cells[i], |d, cell: history::BandCell| {
+                    d.bg(Hsla::from(theme::ink()).opacity(band_alpha(cell.peak)))
+                })
         }));
     // Hovering spells the lit cells out in clock time — a ~6px cell can
     // place "around three" but never answer 14:30, and axis labels for
@@ -360,7 +363,9 @@ fn band(id: impl Into<ElementId>, cells: &history::Band) -> AnyElement {
     let now_clock = format!("{:02}:{:02}", now.hour(), now.minute());
     strip
         .id(id)
-        .tooltip(widgets::wrap_tooltip(band_tip(&runs, lived, &now_clock)))
+        .tooltip(widgets::wrap_tooltip_lines(band_tip(
+            &runs, lived, &now_clock,
+        )))
         .into_any_element()
 }
 
@@ -376,41 +381,62 @@ const TIP_STRETCHES: usize = 8;
 /// hiding the afternoon's two-hour block — the one the reader hovered
 /// to find. Ties keep the earlier stretch, and what "+N" folds away is
 /// then never longer than anything shown.
-fn tip_stretches(runs: &[(usize, usize)]) -> Vec<(usize, usize)> {
+fn tip_stretches(runs: &[history::Stretch]) -> Vec<history::Stretch> {
     if runs.len() <= TIP_STRETCHES {
         return runs.to_vec();
     }
     let mut by_length = runs.to_vec();
-    by_length.sort_by_key(|&(start, end)| (Reverse(end - start), start));
+    by_length.sort_by_key(|run| (Reverse(run.end - run.start), run.start));
     let mut chosen = by_length[..TIP_STRETCHES].to_vec();
-    chosen.sort_by_key(|&(start, _)| start);
+    chosen.sort_by_key(|run| run.start);
     chosen
 }
 
-/// The stretches as "09:00–11:30 · 14:00–14:30 · 16:30–17:12":
-/// half-hour precision, because that is the resolution the band
-/// actually has — a tooltip more precise than its picture would claim
-/// minutes the cells cannot show. The one minute-precise figure is the
-/// live edge: a run still going ends at the wall clock itself, because
-/// its cell's nominal end is in the future and a placeholder word would
-/// be the one entry the reader cannot put on a clock.
-fn band_tip(runs: &[(usize, usize)], lived: usize, now_clock: &str) -> String {
+/// One line per stretch: "09:00–11:30 · 42 min". Half-hour precision
+/// on the clock, because that is the resolution the band actually has
+/// — a tooltip more precise than its picture would claim minutes the
+/// cells cannot show. The one minute-precise clock figure is the live
+/// edge: a run still going ends at the wall clock itself, because its
+/// cell's nominal end is in the future and a placeholder word would be
+/// the one entry the reader cannot put on a clock.
+///
+/// The minute count is the half that makes the range mean anything. At
+/// this resolution a laptop waking once every thirty minutes lights
+/// the same cells as one that never stopped (measured overnight: 25
+/// maintenance wakes, every cell from midnight to morning lit, 48
+/// recorded minutes out of 440) — "00:30–07:00 · 22 min" says which of
+/// the two happened and the range alone never could.
+///
+/// One line per stretch rather than a separator-joined sentence: three
+/// ranges in a row read as one run of digits.
+fn band_tip(runs: &[history::Stretch], lived: usize, now_clock: &str) -> Vec<SharedString> {
     let shown = tip_stretches(runs);
-    let mut parts: Vec<String> = shown
+    let mut lines: Vec<SharedString> = shown
         .iter()
-        .map(|&(start, end)| {
-            let end = if end == lived {
+        .map(|run| {
+            let end = if run.end == lived {
                 now_clock.to_string()
             } else {
-                bucket_clock(end)
+                bucket_clock(run.end)
             };
-            format!("{}–{}", bucket_clock(start), end)
+            t!(
+                "history.band_line",
+                start = bucket_clock(run.start),
+                end = end,
+                minutes = run.minutes
+            )
+            .to_string()
+            .into()
         })
         .collect();
     if runs.len() > shown.len() {
-        parts.push(t!("history.band_more", count = runs.len() - shown.len()).to_string());
+        lines.push(
+            t!("history.band_more", count = runs.len() - shown.len())
+                .to_string()
+                .into(),
+        );
     }
-    parts.join(" · ")
+    lines
 }
 
 /// A bucket boundary as wall clock — bucket 19 is "09:30".
@@ -582,19 +608,52 @@ mod tests {
     /// afternoon block entirely.
     #[test]
     fn the_longest_stretches_survive_the_cap_in_day_order() {
+        let run = |start: usize, end: usize| history::Stretch {
+            start,
+            end,
+            minutes: (end - start) as u32,
+        };
         // Nine singles (00:00 onward, every other cell)…
-        let mut runs: Vec<(usize, usize)> = (0..9).map(|i| (i * 2, i * 2 + 1)).collect();
+        let mut runs: Vec<history::Stretch> = (0..9).map(|i| run(i * 2, i * 2 + 1)).collect();
         // …then a four-cell block in the afternoon.
-        runs.push((28, 32));
+        runs.push(run(28, 32));
         let shown = tip_stretches(&runs);
         assert_eq!(shown.len(), TIP_STRETCHES);
-        assert!(shown.contains(&(28, 32)), "the block must not be dropped");
+        assert!(
+            shown.contains(&run(28, 32)),
+            "the block must not be dropped"
+        );
         // Day order kept: the block is last because it is latest.
-        assert_eq!(shown.last(), Some(&(28, 32)));
+        assert_eq!(shown.last(), Some(&run(28, 32)));
         // Ties (the singles) keep the earlier ones.
-        assert_eq!(shown[0], (0, 1));
+        assert_eq!(shown[0], run(0, 1));
         // At or under the cap, nothing is reordered or dropped.
-        let few = vec![(4, 5), (10, 12)];
+        let few = vec![run(4, 5), run(10, 12)];
         assert_eq!(tip_stretches(&few), few);
+    }
+
+    /// The readout is a list, one line per stretch — and the live edge
+    /// takes the wall clock rather than its cell's nominal end.
+    #[test]
+    fn the_readout_is_one_line_per_stretch() {
+        let runs = [
+            history::Stretch {
+                start: 0,
+                end: 1,
+                minutes: 28,
+            },
+            history::Stretch {
+                start: 1,
+                end: 15,
+                minutes: 22,
+            },
+        ];
+        let lines = band_tip(&runs, 15, "07:22");
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("00:00") && lines[0].contains("00:30"));
+        assert!(lines[0].contains("28"));
+        // Ends at the clock, not at 07:30 — that half hour is not over.
+        assert!(lines[1].contains("07:22"), "{}", lines[1]);
+        assert!(lines[1].contains("22"));
     }
 }
