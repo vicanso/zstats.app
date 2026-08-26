@@ -408,13 +408,29 @@ impl AppTrend {
     /// hour have been reported: five minutes of history is a trend for
     /// CPU, where a rate can turn in a minute, but not for a footprint,
     /// which is supposed to move slowly.
+    ///
+    /// **A minute this tree is missing from is skipped, not read as
+    /// zero** — the one place this ring's two questions part company,
+    /// and the difference is entirely about what the collector's table
+    /// is sorted by. [`rise`](Self::rise) may count an absent tree as
+    /// 0% because the table *is* a CPU ranking: falling out of it is
+    /// itself evidence of low CPU. Memory has no such luck — the sort
+    /// key is still CPU, so absence says nothing whatever about a
+    /// footprint, and zero-filling it turns "this tree left the top
+    /// fifty for a while" into a fabricated climb the size of its
+    /// whole footprint. Measured: a terminal holding ~1.1 GB, in and
+    /// out of the table as commands ran, was announced as "up 1.1 GB
+    /// this hour · holding 1.1 GB now" — the two figures identical,
+    /// which is the signature of a baseline read as nothing. With 700
+    /// trees on the machine and `max-processes` 50, drifting out is
+    /// the norm, not an edge case.
     pub fn climb(&self, name: &str) -> Option<f32> {
         let reported = self.reported.as_ref()?;
         let ring = self.apps.get(name)?;
         let now = reported.head;
         let values: Vec<f32> = (now.saturating_sub(SLOTS as u64 - 1)..=now)
             .filter(|m| reported.at(*m).is_some())
-            .map(|m| f32::from(ring.at(m).unwrap_or(0)))
+            .filter_map(|m| ring.at(m).map(f32::from))
             .collect();
         if values.len() < CLIMB_MIN_MINUTES {
             return None;
@@ -864,6 +880,33 @@ mod tests {
         feed(&mut trend, "burst", 30..50, 2000.0);
         feed(&mut trend, "burst", 50..60, 400.0);
         assert_eq!(trend.climb("burst"), None);
+    }
+
+    /// The bug this rule shipped with, and the reason `climb` skips
+    /// where `rise` zero-fills: the collector's table is a CPU ranking
+    /// capped at `max-processes`, so a tree drifting out of it says
+    /// nothing about its footprint. Zero-filling those minutes made a
+    /// terminal that merely went quiet look like it had grown its
+    /// entire 1.1 GB inside the hour.
+    #[test]
+    fn minutes_the_tree_is_missing_from_do_not_read_as_an_empty_footprint() {
+        let mut trend = AppTrend::default();
+        // Present at ~900 MB, out of the top-50 for a stretch, back at
+        // ~1000 MB: a 100 MB climb, not a 1000 MB one.
+        feed(&mut trend, "ghostty", 0..15, 900.0);
+        idle(&mut trend, 15..40);
+        feed(&mut trend, "ghostty", 40..60, 1000.0);
+        let climb = trend.climb("ghostty").expect("enough observed minutes");
+        assert!(
+            (climb - 100.0).abs() < 1.0,
+            "the gap must not become a baseline of nothing: {climb}"
+        );
+        // And the CPU question keeps the opposite reading, deliberately:
+        // there, falling out of a CPU-sorted table *is* evidence.
+        let mut cpu = AppTrend::default();
+        idle(&mut cpu, 0..55);
+        feed(&mut cpu, "softwareupdated", 55..60, 180.0);
+        assert_eq!(cpu.rise("softwareupdated"), Some(180.0));
     }
 
     /// A footprint moves slowly; a few minutes are not a verdict.
