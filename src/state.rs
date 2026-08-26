@@ -47,7 +47,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zstats::settings::FileConfig;
 use zstats::snapshot::SystemSnapshot;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
-use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Tick};
+use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity, Tick};
 
 /// Used when config.toml sets no `alert-cpu` — zstats' own default is 30%.
 /// The sustained bar is that line divided by `prefs::sustained_divisor`
@@ -551,6 +551,39 @@ fn is_memory_class(kind: AlertKind) -> bool {
         kind,
         AlertKind::Memory | AlertKind::AppMemory | AlertKind::Pressure
     )
+}
+
+/// Whether this episode is worth the menu bar changing face.
+///
+/// Every memory-class episode qualifies except **kernel pressure at
+/// the warning tier**, and the exception is about what warning *means*
+/// on this platform: a memory-heavy Mac sits at warning as its steady
+/// state — zstats says so in the pressure rule's own comment, and
+/// makes that tier wait five times as long before reporting for
+/// exactly this reason. A face that spends half the day on memory has
+/// stopped being a signal, so the tray waits for the kernel's
+/// `critical` while the card and the banner still carry the warning.
+///
+/// The severity is `AlertEvent::severity()`, zstats' own field — the
+/// panel is choosing *which verdict deserves the menu bar*, not
+/// deciding when memory is a problem, and it reads no raw
+/// `pressure_level` to do it. Process and application memory episodes
+/// are Warning by construction in zstats (only pressure ≥ 4 and a
+/// runaway CPU are Critical), so gating the whole class on severity
+/// would have deleted the face's original job: naming the process or
+/// tree that is eating the machine.
+///
+/// An episode that escalated from warning to critical turns the face
+/// the moment the worsening is reported (`record_alert` keeps the
+/// newest event), and keeps it through a fall back to warning — that
+/// tail is still one unrecovered critical episode, and it ends the way
+/// every other one does, on `TRAY_RECOVER` of the kernel calling the
+/// machine normal again.
+fn turns_the_face(event: &AlertEvent) -> bool {
+    match event.kind() {
+        AlertKind::Pressure => event.severity() == Severity::Critical,
+        kind => is_memory_class(kind),
+    }
 }
 
 /// Whether this memory-class event still holds in `snapshot`.
@@ -1381,7 +1414,7 @@ impl ZStatsAppState {
     fn memory_needs_attention_at(&self, now: SystemTime) -> bool {
         self.alerts
             .iter()
-            .any(|seen| seen.live && is_memory_class(seen.event.kind()) && !seen.recovered_for(now))
+            .any(|seen| seen.live && turns_the_face(&seen.event) && !seen.recovered_for(now))
     }
 
     /// Start or reset each live memory episode's recovery clock from
@@ -3318,11 +3351,11 @@ mod tests {
         }
     }
 
-    fn pressure_alert() -> AlertEvent {
+    fn pressure_alert(level: u32) -> AlertEvent {
         AlertEvent {
             subject: AlertSubject::System,
             detail: AlertDetail::Pressure {
-                level: 2,
+                level,
                 sustained: Duration::from_secs(300),
                 swap_used_bytes: 1 << 30,
                 swap_total_bytes: 2 << 30,
@@ -3656,7 +3689,7 @@ mod tests {
     fn auto_tray_pressure_returns_after_five_minutes_of_normal() {
         let mut state = ZStatsAppState::new();
         let t0 = SystemTime::now();
-        state.record_alert(pressure_alert(), t0);
+        state.record_alert(pressure_alert(4), t0);
         let mut tick = empty_tick();
         tick.snapshot.memory.pressure_level = Some(4);
         state.latest = Some(tick);
@@ -3669,6 +3702,48 @@ mod tests {
         state.note_memory_recovery(t0);
         assert!(state.memory_needs_attention_at(t0 + Duration::from_secs(60)));
         assert!(!state.memory_needs_attention_at(t0 + TRAY_RECOVER));
+    }
+
+    /// A memory-heavy Mac sits at the kernel's warning tier as its
+    /// steady state, so that tier does not get the menu bar — the card
+    /// and the banner still carry it. Critical does, and an episode
+    /// that escalates turns the face on the report that says so.
+    #[test]
+    fn auto_tray_waits_for_critical_pressure_but_not_for_warning() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(pressure_alert(2), t0);
+        let mut warned = empty_tick();
+        warned.snapshot.memory.pressure_level = Some(2);
+        state.latest = Some(warned);
+        state.note_memory_recovery(t0);
+        assert!(
+            !state.memory_needs_attention_at(t0),
+            "warning is this platform's normal, not news for the menu bar"
+        );
+        // The episode is still on the tab: only the face is withheld.
+        assert_eq!(state.alerts().len(), 1);
+
+        // Worsening is reported as a fresh event on the same episode.
+        state.record_alert(pressure_alert(4), t0);
+        let mut critical = empty_tick();
+        critical.snapshot.memory.pressure_level = Some(4);
+        state.latest = Some(critical);
+        state.note_memory_recovery(t0);
+        assert!(state.memory_needs_attention_at(t0));
+    }
+
+    /// A process over its memory bar is Warning in zstats — only
+    /// pressure ≥ 4 and a runaway CPU are Critical — so gating the
+    /// whole class on severity would have deleted the face's original
+    /// job.
+    #[test]
+    fn auto_tray_still_turns_for_a_process_memory_episode() {
+        let mut state = ZStatsAppState::new();
+        let t0 = SystemTime::now();
+        state.record_alert(mem_alert(7), t0);
+        assert_eq!(state.alerts()[0].event.severity(), Severity::Warning);
+        assert!(state.memory_needs_attention_at(t0));
     }
 
     #[test]
