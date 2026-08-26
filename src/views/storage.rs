@@ -700,6 +700,7 @@ fn analysis_tables(
                     prev_bytes: diff.and_then(|d| d.bytes_for(&h.path)),
                     delta_tip: delta_tip.clone(),
                     kind: None,
+                    asset: None,
                     group_max: max,
                     root: &root,
                     deletable: false,
@@ -885,6 +886,7 @@ fn dir_row_tree(
         prev_bytes: ctx.diff.and_then(|d| d.bytes_for(&hit.path)),
         delta_tip: ctx.delta_tip.clone(),
         kind: Some(hit.kind),
+        asset: hit.asset.as_ref(),
         group_max,
         root: parent,
         deletable: ctx.deletable,
@@ -987,6 +989,26 @@ fn expand_note(key: &SharedString, depth: usize, text: String) -> AnyElement {
 /// A heuristic fold earns no pill; its explanatory value did not pay
 /// for the attention it took, so the how-it-was-classified note rides
 /// the row's name tooltip instead. Plain directories say nothing.
+/// The same pill for a MobileAsset row, carrying what the system
+/// declares (`asset_clause`). It earns its attention where a heuristic
+/// fold did not: without it a row reads as an unexplained
+/// `com_apple_MobileAsset_UAF_Siri_Understanding` and nobody would
+/// know a tooltip is there — and unlike "cache", this pill exists to
+/// say the row is *not* yours to delete.
+fn asset_pill(key: &SharedString, note: &diskscan::AssetNote) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("{key}-asset")))
+        .flex_none()
+        .rounded_full()
+        .px(px(5.))
+        .text_size(px(9.))
+        .bg(theme::inset())
+        .text_color(theme::tiny_label(theme::text_muted()))
+        .tooltip(widgets::wrap_tooltip(asset_clause(note)))
+        .child(i18n::tr("disk.asset_pill"))
+        .into_any_element()
+}
+
 fn kind_pill(key: &SharedString, kind: HitKind) -> Option<AnyElement> {
     if kind != HitKind::Tag {
         return None;
@@ -1051,6 +1073,10 @@ struct AnalysisRow<'a> {
     /// run). Only read when a delta actually renders.
     delta_tip: Option<String>,
     kind: Option<HitKind>,
+    /// What macOS declares about a MobileAsset row (`assetinfo`).
+    /// `None` for every other path, and for the file table — files
+    /// carry no declaration of their own.
+    asset: Option<&'a diskscan::AssetNote>,
     /// The group's largest row, the meter's 100%.
     group_max: u64,
     /// The row's label is this path made relative — the scan root at
@@ -1082,6 +1108,29 @@ fn delta_label(bytes: u64, prev_bytes: Option<u64>) -> Option<String> {
     (diff >= DIFF_FLOOR).then(|| format!("{sign}{}", format::memory(diff)))
 }
 
+/// The system's own words about a MobileAsset row, as one sentence.
+///
+/// Every clause is a field that was actually present in the asset's
+/// `Info.plist`; absent fields say nothing, because the alternative is
+/// the app guessing about system files. The closing line is the part
+/// the reader most needs and the only part not read off disk: this
+/// content belongs to `mobileassetd`, and the way to reclaim it is the
+/// system's own storage management, not a delete button here.
+fn asset_clause(note: &diskscan::AssetNote) -> String {
+    let mut out = t!("disk.asset_kind", kind = &note.kind).to_string();
+    if let Some(locale) = &note.locale {
+        out.push_str(&format!(" · {}", t!("disk.asset_locale", lang = locale)));
+    }
+    if note.required_by_os == Some(true) {
+        out.push_str(&format!(" · {}", i18n::tr("disk.asset_required")));
+    }
+    if note.never_collected == Some(true) {
+        out.push_str(&format!(" · {}", i18n::tr("disk.asset_never_collected")));
+    }
+    out.push_str(&format!(" — {}", i18n::tr("disk.asset_reclaim")));
+    out
+}
+
 fn analysis_row(row: AnalysisRow) -> AnyElement {
     let AnalysisRow {
         key,
@@ -1090,6 +1139,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         prev_bytes,
         delta_tip,
         kind,
+        asset,
         group_max,
         root,
         deletable,
@@ -1118,6 +1168,13 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
             Some(cmd) => t!("disk.hint_cmd", owner = &hint.owner, cmd = cmd).to_string(),
             None => t!("disk.hint_owner", owner = &hint.owner).to_string(),
         });
+    }
+    // The same posture one step further: what the *system* declares
+    // about a MobileAsset row, quoted rather than interpreted. No
+    // delete button follows from it — `mobileassetd` owns this content.
+    if let Some(note) = asset {
+        full.push_str(" — ");
+        full.push_str(&asset_clause(note));
     }
     let reveal_path = path.to_path_buf();
     let trash_path = path.to_path_buf();
@@ -1173,6 +1230,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                         .child(label),
                 )
                 .children(kind.and_then(|kind| kind_pill(&key, kind)))
+                .children(asset.map(|note| asset_pill(&key, note)))
                 .children(delta_label(bytes, prev_bytes).map(|delta| {
                     // Quiet on purpose: the sign carries the meaning, and
                     // accent is reserved for over-threshold (views/mod.rs).
@@ -1637,6 +1695,7 @@ mod tests {
             path: PathBuf::from(format!("/r/{bytes}")),
             bytes,
             kind: HitKind::Plain,
+            asset: None,
         };
         let big = |n: u64| hit(n * EXPAND_FLOOR);
         let rows: Vec<DirHit> = (1..=EXPAND_ROWS as u64 + 3).rev().map(big).collect();
@@ -1666,6 +1725,41 @@ mod tests {
         assert_eq!(display_bar(5 * MIB + 1), 5 * MIB);
         // Below a megabyte the caption drops its claim instead of lying.
         assert_eq!(display_bar(500 * 1024), 0);
+    }
+
+    /// Every clause is a field the plist actually carried; the closing
+    /// line is always there, because "do not delete this by hand" is
+    /// the part a reader most needs and the one thing not read off
+    /// disk.
+    #[test]
+    fn the_asset_clause_quotes_only_what_was_declared() {
+        let bare = diskscan::AssetNote {
+            kind: "Font8".into(),
+            required_by_os: None,
+            never_collected: None,
+            locale: None,
+        };
+        let text = asset_clause(&bare);
+        assert!(text.contains("Font8"));
+        assert!(!text.contains("language"), "{text}");
+        let full = diskscan::AssetNote {
+            kind: "VoiceServices".into(),
+            required_by_os: Some(true),
+            never_collected: Some(true),
+            locale: Some("zh_Hans".into()),
+        };
+        let text = asset_clause(&full);
+        assert!(text.contains("zh_Hans"), "{text}");
+        // A declared `false` is not a claim either way — only `true`
+        // earns a clause.
+        let denied = diskscan::AssetNote {
+            kind: "X".into(),
+            required_by_os: Some(false),
+            never_collected: Some(false),
+            locale: None,
+        };
+        let text = asset_clause(&denied);
+        assert!(!text.contains("required"), "{text}");
     }
 
     #[test]

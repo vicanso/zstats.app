@@ -15,6 +15,8 @@
 //! through shared state. Cancellation is a flag the walk polls; a
 //! cancelled run says nothing at all (the UI has already moved on).
 
+use crate::assetinfo;
+pub use crate::assetinfo::AssetNote;
 use crate::cleanhints;
 use crate::prefs;
 use jwalk::{Parallelism, WalkDirGeneric};
@@ -129,6 +131,11 @@ pub struct DirHit {
     /// Renders as the row's trust-tier pill: Tag wears "cache",
     /// Heuristic a fainter "guess", Plain nothing.
     pub kind: HitKind,
+    /// What macOS declares about this row, for the MobileAsset
+    /// directories the whole-disk scope exposes — `None` everywhere
+    /// else. Resolved once per finished table (`assetinfo::note_for`
+    /// shells out), never per frame.
+    pub asset: Option<AssetNote>,
 }
 
 #[derive(Clone)]
@@ -635,6 +642,9 @@ fn suggest(
             bytes: totals.get(path).copied().unwrap_or(0),
             path: path.clone(),
             kind: HitKind::Tag,
+            // A tagged cache is never a MobileAsset row: AssetsV2
+            // carries no CACHEDIR.TAG.
+            asset: None,
         })
         .collect();
     for (path, bytes) in totals {
@@ -643,6 +653,7 @@ fn suggest(
                 path: path.clone(),
                 bytes: *bytes,
                 kind: HitKind::Plain,
+                asset: None,
             });
         }
     }
@@ -794,6 +805,9 @@ fn tables(
             bytes: totals.get(path).copied().unwrap_or(0),
             path: path.clone(),
             kind: HitKind::Tag,
+            // A tagged cache is never a MobileAsset row: AssetsV2
+            // carries no CACHEDIR.TAG.
+            asset: None,
         })
         .collect();
     regenerable.sort_by_key(|d| Reverse(d.bytes));
@@ -814,12 +828,20 @@ fn tables(
                 bytes: totals.get(&rep).copied().unwrap_or(0),
                 kind: fold.get(&rep).copied().unwrap_or(HitKind::Plain),
                 path: rep,
+                // Filled in below, once the table is truncated.
+                asset: None,
             }
         })
         .filter(|d| d.bytes > 0)
         .collect();
     dirs.sort_by_key(|d| Reverse(d.bytes));
     dirs.truncate(TABLE_KEEP);
+    // After the truncate, so the plist reads are bounded by what the
+    // table will actually show (TABLE_KEEP rows) rather than by how
+    // many directories the walk crossed.
+    for dir in &mut dirs {
+        dir.asset = assetinfo::note_for(&dir.path);
+    }
 
     (regenerable, dirs)
 }
@@ -993,6 +1015,22 @@ fn serialise(result: &ScanResult) -> String {
                 .into(),
             ),
         );
+        // Carried through the cache rather than re-resolved on load: a
+        // restored table is shown immediately, and re-reading up to
+        // eight plists per row through `plutil` is not something to do
+        // while a window is opening.
+        if let Some(a) = &h.asset {
+            t.insert("asset_kind".into(), Value::String(a.kind.clone()));
+            if let Some(v) = a.required_by_os {
+                t.insert("asset_required".into(), Value::Boolean(v));
+            }
+            if let Some(v) = a.never_collected {
+                t.insert("asset_never_collected".into(), Value::Boolean(v));
+            }
+            if let Some(v) = &a.locale {
+                t.insert("asset_locale".into(), Value::String(v.clone()));
+            }
+        }
         Value::Table(t)
     };
     let mut doc = Table::new();
@@ -1139,6 +1177,21 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
                                 Some("heuristic") => HitKind::Heuristic,
                                 _ => HitKind::Plain,
                             },
+                            asset: row.get("asset_kind").and_then(toml::Value::as_str).map(
+                                |kind| AssetNote {
+                                    kind: kind.to_string(),
+                                    required_by_os: row
+                                        .get("asset_required")
+                                        .and_then(toml::Value::as_bool),
+                                    never_collected: row
+                                        .get("asset_never_collected")
+                                        .and_then(toml::Value::as_bool),
+                                    locale: row
+                                        .get("asset_locale")
+                                        .and_then(toml::Value::as_str)
+                                        .map(str::to_string),
+                                },
+                            ),
                         })
                     })
                     .collect()
@@ -1658,11 +1711,21 @@ mod tests {
                 path: p("/r/cache"),
                 bytes: 10,
                 kind: HitKind::Tag,
+                asset: None,
             }],
             dirs: vec![DirHit {
                 path: p("/r/big"),
                 bytes: 20,
                 kind: HitKind::Plain,
+                // A restored table has to keep what the system said, or
+                // reopening the window would silently drop the one
+                // thing that makes a MobileAsset row readable.
+                asset: Some(AssetNote {
+                    kind: "Font8".into(),
+                    required_by_os: Some(false),
+                    never_collected: Some(true),
+                    locale: Some("zh_Hans".into()),
+                }),
             }],
             files: vec![FileHit {
                 path: p("/r/.blob"),
@@ -1672,6 +1735,7 @@ mod tests {
                 path: p("/r/cache"),
                 bytes: 10,
                 kind: HitKind::Tag,
+                asset: None,
             }],
             index: None,
         };
@@ -1685,6 +1749,8 @@ mod tests {
         assert_eq!(loaded.regenerable.len(), 1);
         assert_eq!(loaded.regenerable[0].kind, HitKind::Tag);
         assert_eq!(loaded.dirs[0].path, p("/r/big"));
+        assert_eq!(loaded.dirs[0].asset, result.dirs[0].asset);
+        assert!(loaded.regenerable[0].asset.is_none());
         assert_eq!(loaded.files[0].bytes, 30);
         assert_eq!(loaded.suggestions.len(), 1);
         assert!(loaded.index.is_none(), "the drill index is never persisted");
@@ -1720,11 +1786,13 @@ mod tests {
                 path: p("/r/cache"),
                 bytes: 10,
                 kind: HitKind::Tag,
+                asset: None,
             }],
             dirs: vec![DirHit {
                 path: p("/r/big"),
                 bytes,
                 kind: HitKind::Plain,
+                asset: None,
             }],
             files: vec![FileHit {
                 path: p("/r/.blob"),

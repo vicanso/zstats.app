@@ -26,6 +26,7 @@ mod about;
 mod active;
 mod alertlog;
 mod alerttpl;
+mod assetinfo;
 mod assets;
 mod autostart;
 mod bigfiles;
