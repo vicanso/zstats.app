@@ -84,25 +84,17 @@ pub(crate) fn panel_interval(file: Duration, fallback: Duration) -> Duration {
 /// Matches zstats' own builtin default, so the app and the CLI agree.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Cadence while the panel is closed and the machine is quiet. The expensive
-/// part of a sample is the full process-table walk plus the process-group
-/// tree aggregation, and with the panel closed nobody is reading it.
+/// Cadence while the panel is closed. The expensive part of a sample is
+/// the full process-table walk plus the process-group tree aggregation
+/// (already on its own 15s wall clock), and with the panel closed nobody
+/// is reading that. CPU% and memory still feed the tray, so this cannot
+/// be the process cadence — at 15s the title reads as frozen.
 ///
-/// Not longer than this because the tray title rides on the same tick and is
-/// the only thing still visible with the panel closed — at 15s it reads as
-/// frozen. Measured idle cost: 2s = 1.6%, 5s = 1.0%, 15s = 0.3%; 5s is where
-/// the curve bends without the number going stale.
+/// Not gated on load: a compile used to pin the 2s interval the whole
+/// time the panel was hidden, for ~0.6% of one core (2s = 1.6%, 5s =
+/// 1.0%) on a machine that is already busy. The tray is the only reader
+/// then, and 5s is the line where it does not look stuck.
 const IDLE_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Overall CPU at or above which the machine counts as busy, holding the fast
-/// cadence even with the panel closed.
-///
-/// This can only react to *sustained* load. CPU percent is the average
-/// between two refreshes, so at [`IDLE_INTERVAL`] a 3-second spike is
-/// flattened across the whole 5 seconds and may never reach the bar — the
-/// mechanism suppresses its own trigger. Compilations and encodes are caught;
-/// brief spikes are not.
-const BUSY_CPU_PERCENT: f32 = 30.0;
 
 /// How often to sweep for abnormal processes.
 ///
@@ -220,25 +212,16 @@ pub fn start(cx: &mut App) {
             {
                 tracing::error!("reload_settings failed: {e}");
             }
-            // Derived fresh every round rather than carried across: a failed
-            // sample says nothing about load, and a stale `true` would hold
-            // the fast cadence indefinitely on a collector that has stopped
-            // returning anything to be busy about.
-            let busy = match monitor.tick() {
+            match monitor.tick() {
                 Ok(tick) => {
-                    let busy = tick.snapshot.cpu.usage_percent >= BUSY_CPU_PERCENT;
                     if tx.send_blocking(tick).is_err() {
                         return; // receiver dropped — the app is going away
                     }
-                    busy
                 }
                 // One failed sample shouldn't end sampling.
-                Err(e) => {
-                    tracing::warn!("collect failed: {e}");
-                    false
-                }
-            };
-            let wait = if busy || visible.load(Ordering::Relaxed) {
+                Err(e) => tracing::warn!("collect failed: {e}"),
+            }
+            let wait = if visible.load(Ordering::Relaxed) {
                 interval
             } else {
                 IDLE_INTERVAL
