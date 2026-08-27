@@ -407,13 +407,6 @@ fn cluster_label(name: &str, cores: u32) -> String {
     format!("{pretty} · {cores}")
 }
 
-/// A tree's footprint must have climbed this much within the hour — and
-/// still be there — before the memory card names it. A quarter of a
-/// gigabyte is past what a page load or a GC cycle moves, and under
-/// what a leak does in an hour. Display only, like every threshold in
-/// `views/`: the banner has its own, higher bar (`trend::CREEP_NOTIFY_BYTES`).
-const MEM_RISE_FLOOR: u64 = 256 * trend::MIB;
-
 /// How many climbers the strip names. Three fit one line at 320px
 /// beside the lead; a fourth would be a second line for a glance.
 const MEM_RISE_N: usize = 3;
@@ -424,10 +417,11 @@ const MEM_RISE_N: usize = 3;
 /// one the memory rules cannot ask at all (a climb crosses no line
 /// until it is too late). Absent when nothing is climbing, so a quiet
 /// hour costs the card no height. `None`, not an empty strip.
-fn mem_climb_strip(climbers: &[MemoryCreep]) -> Option<AnyElement> {
+fn mem_climb_strip(climbers: &[MemoryCreep], total_bytes: u64) -> Option<AnyElement> {
+    let floor = trend::mem_rise_floor(total_bytes);
     let named: Vec<String> = climbers
         .iter()
-        .filter(|c| c.climb_bytes >= MEM_RISE_FLOOR)
+        .filter(|c| c.climb_bytes >= floor)
         .take(MEM_RISE_N)
         .map(|c| {
             t!(
@@ -635,7 +629,7 @@ fn memory(
         )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
         .child(widgets::kv_packed(rows))
-        .children(mem_climb_strip(&climbers))
+        .children(mem_climb_strip(&climbers, mem.total_bytes))
         .child(io_strip(io))
         .into_any_element()
 }

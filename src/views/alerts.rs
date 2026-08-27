@@ -569,7 +569,7 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
         i18n::tr("alerts.kind_creep"),
         t!(
             "alerts.watch_creep",
-            delta = format::memory(trend::CREEP_NOTIFY_BYTES)
+            delta = format::memory(trend::creep_notify_bytes(total.unwrap_or(0)))
         )
         .to_string(),
     ));

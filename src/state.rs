@@ -1587,23 +1587,28 @@ impl ZStatsAppState {
         climbers
     }
 
-    /// Creeps that have crossed `trend::CREEP_NOTIFY_BYTES` since they
+    /// Creeps that have crossed [`trend::creep_notify_bytes`] since they
     /// were last announced — one banner per climb, where "per climb"
     /// is kept by the clock, not by the figure: an announcement stands
     /// for [`trend::CREEP_REARM`] however the number moves underneath
     /// it. Re-arming the moment the climb fell under the bar was the
     /// first shape, and a GC sawtooth turned it into three Chrome
-    /// banners in 29 minutes — every re-crossing of 1 GB read as a
+    /// banners in 29 minutes — every re-crossing of the bar read as a
     /// fresh leak (the constant's doc has the full story). Once the
-    /// hour expires, a tree still climbing a gigabyte is measured
+    /// hour expires, a tree still climbing past the bar is measured
     /// against a baseline newer than the last banner: news again,
     /// once an hour, which was the intent all along.
     pub fn take_memory_creep_notices(&mut self) -> Vec<MemoryCreep> {
         self.creep_notified
             .retain(|_, named_at| named_at.elapsed() < trend::CREEP_REARM);
+        let bar = trend::creep_notify_bytes(
+            self.latest()
+                .map(|t| t.snapshot.memory.total_bytes)
+                .unwrap_or(0),
+        );
         self.memory_climbers()
             .into_iter()
-            .filter(|c| c.climb_bytes >= trend::CREEP_NOTIFY_BYTES)
+            .filter(|c| c.climb_bytes >= bar)
             .filter(|c| match self.creep_notified.entry(c.name.clone()) {
                 Entry::Occupied(_) => false,
                 Entry::Vacant(slot) => {

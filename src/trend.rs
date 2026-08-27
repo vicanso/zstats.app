@@ -54,13 +54,39 @@ const SLOTS: usize = 60;
 /// `u16` slot as a CPU percent (cap ~64 GB per tree — the machine).
 pub const MIB: u64 = 1 << 20;
 
-/// A tree's footprint must have climbed this much within the hour —
-/// and still be there — before the silent banner goes out. Bigger than
-/// the Overview strip's floor on purpose: the strip is a glance, the
-/// banner is an interruption. One gigabyte in an hour is past what a
-/// browser session or an indexer does by itself on an ordinary
-/// morning, and a leak at that rate fills a laptop before lunch.
-pub const CREEP_NOTIFY_BYTES: u64 = 1024 * MIB;
+/// Overview strip: 5% of RAM. Not below a quarter-gig (a page load or
+/// a GC cycle), not above 1 GB — a glance must stay under the banner.
+const RISE_SHARE: f32 = 0.05;
+const RISE_FLOOR: u64 = 256 * MIB;
+const RISE_CEILING: u64 = 1024 * MIB;
+
+/// Silent banner: 10% of RAM. Not below 1 GB (that rate still fills a
+/// small laptop before lunch), not above 2 GB (10% of a 64 GB desk is
+/// 6 GB, which is a different conversation).
+const CREEP_SHARE: f32 = 0.10;
+const CREEP_FLOOR: u64 = 1024 * MIB;
+const CREEP_CEILING: u64 = 2 * 1024 * MIB;
+
+/// How far a tree must have climbed this hour before Overview names it.
+/// `total_bytes` is zstats' `memory.total_bytes`; 0 (no sample yet)
+/// falls back to the floor, never to zero.
+pub fn mem_rise_floor(total_bytes: u64) -> u64 {
+    clamp_share(total_bytes, RISE_SHARE, RISE_FLOOR, RISE_CEILING)
+}
+
+/// How far a tree must have climbed this hour before the silent banner
+/// goes out. Same `total_bytes` as [`mem_rise_floor`].
+pub fn creep_notify_bytes(total_bytes: u64) -> u64 {
+    clamp_share(total_bytes, CREEP_SHARE, CREEP_FLOOR, CREEP_CEILING)
+}
+
+fn clamp_share(total: u64, share: f32, lo: u64, hi: u64) -> u64 {
+    if total == 0 {
+        return lo;
+    }
+    let raw = (total as f64 * f64::from(share)).round() as u64;
+    raw.clamp(lo, hi)
+}
 
 /// How long one creep announcement stands before the same tree may
 /// banner again — one full ring, dips notwithstanding. "Re-arm when
@@ -927,5 +953,27 @@ mod tests {
         let mut trend = AppTrend::default();
         trend.sample(0, [("mega", 1.0e9)].into_iter());
         assert_eq!(trend.apps.get("mega").unwrap().at(0), Some(MAX_PCT));
+    }
+
+    /// 8 GB: 5% is 400 MB (above the strip floor), 10% is 800 MB so
+    /// the banner still sits on 1 GB. 24 GB: both shares hit the
+    /// ceilings. No sample yet is the floor, never zero.
+    #[test]
+    fn climb_bars_follow_ram_then_clamp() {
+        let eight = 8 * 1024 * MIB;
+        let rise_8 = mem_rise_floor(eight);
+        assert!(rise_8 > RISE_FLOOR && rise_8 < RISE_CEILING);
+        assert_eq!(creep_notify_bytes(eight), CREEP_FLOOR);
+
+        let twenty_four = 24 * 1024 * MIB;
+        assert_eq!(mem_rise_floor(twenty_four), RISE_CEILING);
+        assert_eq!(creep_notify_bytes(twenty_four), CREEP_CEILING);
+
+        let tiny = 4 * 1024 * MIB;
+        assert_eq!(mem_rise_floor(tiny), RISE_FLOOR);
+        assert_eq!(creep_notify_bytes(tiny), CREEP_FLOOR);
+
+        assert_eq!(mem_rise_floor(0), RISE_FLOOR);
+        assert_eq!(creep_notify_bytes(0), CREEP_FLOOR);
     }
 }

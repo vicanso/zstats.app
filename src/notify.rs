@@ -356,8 +356,9 @@ fn unused_clause(pid: u32) -> String {
     })
 }
 
-/// Announce a tree whose memory footprint has climbed a gigabyte within
-/// the hour and is still holding it — the leak shape.
+/// Announce a tree whose memory footprint has climbed past
+/// [`trend::creep_notify_bytes`] within the hour and is still holding
+/// it — the leak shape.
 ///
 /// Same class as [`post_sustained`], same reasons: not a `zstats` alert
 /// and never will be, because a climb crosses no line until it is too
