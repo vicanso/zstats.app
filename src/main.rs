@@ -522,6 +522,9 @@ struct SettingsWindow {
 
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The switch reads a cached status; this is the moment it can
+        // have moved without us (System Settings → Login Items).
+        autostart::refresh();
         let store = cx.global::<ZStatsGlobalStore>().clone();
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         let proxy_input = cx.new(|cx| {
@@ -1226,6 +1229,11 @@ fn main() {
         notify::start(cx);
         // Before the collector, so the first slow-burn banner of the
         // session can already say whether its subject is in use.
+        // One sample at launch, before anything can open the settings
+        // window: it both warms the cache and puts the login-time
+        // status in the log — the state that only exists on a machine
+        // that really did just boot (`autostart`).
+        autostart::refresh();
         active::start();
         metrics::start(cx);
 
