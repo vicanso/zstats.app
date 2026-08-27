@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.18](https://github.com/vicanso/zstats.app/compare/v0.1.17..v0.1.18) - 2026-08-27
+
+### ⛰️  Features
+
+- Climb floors follow RAM — 5% names a tree, 10% banners, both clamped - ([0b6cf65](https://github.com/vicanso/zstats.app/commit/0b6cf657fa53a93b246ea79735a3edd87d68fc83))
+- A quiet row can raise its own bar — and Config can take the line back - ([ba9b1ee](https://github.com/vicanso/zstats.app/commit/ba9b1eeb3c8837a93280234d2a5b8231729e52ae))
+
+### ⚙️ Miscellaneous Tasks
+
+- A hidden panel stays at 5s — load no longer pins the open cadence - ([eee054d](https://github.com/vicanso/zstats.app/commit/eee054d51ef328efb43f8e5c65461b64b357d834))
+
 ## [0.1.17](https://github.com/vicanso/zstats.app/compare/v0.1.14..v0.1.17) - 2026-08-26
 
 ### ⛰️  Features
