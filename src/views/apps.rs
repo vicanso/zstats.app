@@ -500,11 +500,6 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                                 g.phys_footprint_bytes
                                     .map_or(format::PLACEHOLDER.into(), format::memory),
                             ),
-                            false,
-                        ))
-                        .child(expand_row(
-                            i18n::tr("processes.bar_cpu"),
-                            expand_value(cpu_bar),
                             true,
                         )),
                 )
@@ -520,15 +515,23 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                         .child(expand_row(
                             i18n::tr("processes.mem_rss"),
                             expand_value(format::memory(g.memory_bytes)),
-                            false,
-                        ))
-                        .child(expand_row(
-                            i18n::tr("processes.bar_mem"),
-                            expand_value(mem_bar),
                             true,
                         )),
                 ),
         )
+        // Full width: in the two-up grid "CPU alert" + "off · override"
+        // truncated the label to "CPU…". These are the lines the chips
+        // below edit, so both words have to stay readable.
+        .child(expand_row(
+            i18n::tr("processes.bar_cpu"),
+            expand_value(cpu_bar),
+            false,
+        ))
+        .child(expand_row(
+            i18n::tr("processes.bar_mem"),
+            expand_value(mem_bar),
+            true,
+        ))
         // Title is not the matchable name: bundle vs Electron, or
         // cargo vs the login session that spawned it. The bars above
         // key on `g.name`; this line is that name.
@@ -592,6 +595,17 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                 t!("apps.members_missing", n = missing).to_string(),
             )))
         })
+        // The app-level rules, editable where they are shown. Keyed on
+        // `g.name` like the bars above — the title can be a bundle or a
+        // job tail, and a threshold matches the executable name.
+        .children(super::processes::threshold_editor(
+            "app-th",
+            g.root_pid as usize,
+            &g.name,
+            "alert-app-cpu",
+            "alert-app-mem",
+            state,
+        ))
         .when(terminate::can_quit_app(g.root_pid), |d| {
             d.child(
                 h_flex()

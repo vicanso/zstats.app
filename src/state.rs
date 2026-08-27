@@ -2115,6 +2115,34 @@ impl ZStatsAppState {
         self.apply_setting(key, &payload, cx)
     }
 
+    /// Drop one per-subject `[alerts]` override, so that subject falls
+    /// back to the base rule (or the template's line for it). Same
+    /// `<key> <name>` shape as the CLI's `-remove`, and the same
+    /// reload afterwards as writing one.
+    ///
+    /// The counterpart to [`apply_alert_override`](Self::apply_alert_override),
+    /// and until it existed an override could be written from the panel
+    /// but never taken back: the only way out was hand-editing
+    /// config.toml, which is exactly the file this app exists to keep
+    /// people out of.
+    pub fn remove_alert_override(
+        &mut self,
+        key: &str,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let file = remove_setting(&zstats::settings::default_dir(), key, name)?;
+        self.settings = Some(file);
+        // Overrides live in `[alerts]`, the one section that reloads in
+        // place — no collector rebuild, so no rate baselines are lost.
+        metrics::request_reload();
+        if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
+            pace.wake();
+        }
+        cx.notify();
+        Ok(())
+    }
+
     /// Replace `config.toml` with zstats builtins. Language and theme live
     /// in `app.toml` and are left alone. Collector fields are baked in at
     /// construction, so this rebuilds the `Monitor`.
@@ -3252,6 +3280,17 @@ pub(crate) fn persist_setting(dir: &Path, key: &str, value: &str) -> Result<File
     Ok(file)
 }
 
+/// Drop one `<key> <name>` override from `<dir>/config.toml` and return
+/// the saved file. Mirrors [`persist_setting`] through the CLI's own
+/// `apply_remove`, so the panel and `zstats -remove` can never disagree
+/// about what removal means.
+pub(crate) fn remove_setting(dir: &Path, key: &str, name: &str) -> Result<FileConfig, String> {
+    let mut file = zstats::settings::load(dir).map_err(|e| e.to_string())?;
+    zstats::settings::apply_remove(&mut file, key, Some(name))?;
+    zstats::settings::save(dir, &file).map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
 /// Write a default `config.toml`. Absent keys are zstats builtins; any
 /// per-subject override in the previous file is gone.
 pub(crate) fn reset_config(dir: &Path) -> Result<FileConfig, String> {
@@ -3988,6 +4027,43 @@ mod tests {
         assert!(reloaded.collector.as_ref().unwrap().collect_process_disk_io);
         assert_eq!(reloaded.alerts.cpu, Some(50.0));
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Removal is the half that did not exist: an override could be
+    /// written from the panel and never taken back. It has to drop one
+    /// line and only that line — the other subjects under the same
+    /// rule, and the base value, are somebody else's setting.
+    #[test]
+    fn remove_setting_drops_one_override_and_leaves_the_rest() {
+        let dir = scratch("remove");
+        let _ = fs::remove_dir_all(&dir);
+        persist_setting(&dir, "alert-cpu", "40").unwrap();
+        persist_setting(&dir, "alert-cpu", "Google Chrome=45").unwrap();
+        persist_setting(&dir, "alert-cpu", "node=70").unwrap();
+        persist_setting(&dir, "alert-mem", "Xcode=25").unwrap();
+
+        let file = remove_setting(&dir, "alert-cpu", "node").unwrap();
+        assert!(!file.alerts.cpu_overrides.contains_key("node"));
+        // A name with a space is the common case (an application), and
+        // the one most likely to be mangled on the way through.
+        assert_eq!(
+            file.alerts.cpu_overrides.get("Google Chrome").copied(),
+            Some(45.0)
+        );
+        assert_eq!(file.alerts.mem_overrides.get("Xcode").copied(), Some(25.0));
+        assert_eq!(file.alerts.cpu, Some(40.0), "the base rule is untouched");
+
+        // Written through, not just returned.
+        let reloaded = zstats::settings::load(&dir).unwrap();
+        assert!(!reloaded.alerts.cpu_overrides.contains_key("node"));
+        assert_eq!(reloaded.alerts.cpu_overrides.len(), 1);
+
+        // Removing what is not there is an error rather than a silent
+        // success: the row that asked has just gone stale.
+        assert!(remove_setting(&dir, "alert-cpu", "node").is_err());
+        // And a key with no per-name overrides at all says so.
+        assert!(remove_setting(&dir, "alert-pressure", "node").is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

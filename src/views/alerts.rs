@@ -178,23 +178,33 @@ const PAST_ROWS_PER_DAY: usize = 6;
 /// line per episode — time, severity as the dot the cards use, subject,
 /// kind, and "dismissed" where the card was acknowledged. No buttons,
 /// no expansion: the pids are history and nothing here can be acted on.
-/// Empty days are not listed; an empty week says so, and says that it
-/// only knows what this app saw.
+/// Empty days are not listed; an empty week is one card so the heading
+/// does not sit in the card-gap as a lone chip, which made it look
+/// indented against Watching.
 fn past_days_block(days: &[DayLog]) -> Vec<AnyElement> {
-    let mut out = vec![past_heading()];
     if days.is_empty() {
-        out.push(on_content_line(widgets::note(i18n::tr("alerts.past_none"))));
-        return out;
+        return vec![past_empty_card()];
     }
+    let mut out = vec![on_content_line(past_heading())];
     out.extend(days.iter().map(past_day_card));
     out
+}
+
+fn past_empty_card() -> AnyElement {
+    card()
+        .child(past_heading())
+        .child(
+            div()
+                .mt(px(6.))
+                .child(widgets::note(i18n::tr("alerts.past_none"))),
+        )
+        .into_any_element()
 }
 
 fn past_heading() -> AnyElement {
     h_flex()
         .items_center()
         .gap(px(4.))
-        .px(px(13.))
         .child(
             div()
                 .text_size(px(10.))
@@ -1091,9 +1101,9 @@ fn consumer_quit(
 /// The `[alerts]` key + override name this event writes when the user
 /// picks a new threshold. `name` is empty for the global pressure rule.
 #[derive(Clone)]
-struct OverrideTarget {
-    key: &'static str,
-    name: String,
+pub(super) struct OverrideTarget {
+    pub(super) key: &'static str,
+    pub(super) name: String,
 }
 
 fn override_target(event: &AlertEvent) -> Option<OverrideTarget> {
@@ -1266,7 +1276,7 @@ fn threshold_editor(
 
 /// Preset chips. Labels are already localised / unit-suffixed; values are
 /// what `apply_add` accepts (`0` disables a per-name rule).
-fn presets(key: &str) -> Vec<(String, &'static str)> {
+pub(super) fn presets(key: &str) -> Vec<(String, &'static str)> {
     match key {
         "alert-cpu" => vec![
             ("50%".into(), "50"),
@@ -1309,7 +1319,10 @@ fn presets(key: &str) -> Vec<(String, &'static str)> {
     }
 }
 
-fn configured_value(settings: Option<&FileConfig>, target: &OverrideTarget) -> Option<String> {
+pub(super) fn configured_value(
+    settings: Option<&FileConfig>,
+    target: &OverrideTarget,
+) -> Option<String> {
     let a = &settings?.alerts;
     match target.key {
         "alert-cpu" => a

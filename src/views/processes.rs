@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::process;
 use zstats::Tick;
 use zstats::alerts::ActiveThresholds;
+use zstats::settings::FileConfig;
 use zstats::snapshot::{Capabilities, ProcessSnapshot};
 
 /// Floor for the per-row CPU bar. The original scale was 800% (eight
@@ -755,6 +756,138 @@ fn alert_bar_rows(name: &str, state: &ZStatsAppState) -> Vec<(String, String)> {
     ]
 }
 
+/// The per-subject threshold editor the Processes and Apps expansions
+/// share: one chip row per rule, writing exactly what the Alerts tab's
+/// card writes.
+///
+/// Until this existed a threshold could only be tuned while an alert
+/// was *on screen* — the editor lived on the alert card, so the moment
+/// to say "this one is allowed to run hot" was the moment it had just
+/// interrupted you, and never before. The expansion is where a reader
+/// already asks "why is this row at 300% and quiet"; the two bars above
+/// answer it, and these chips are the answer being editable in place.
+///
+/// Under the bars rather than beside the Quit button, and that is not
+/// where it was asked for: there are *two* thresholds per subject, and
+/// one button in a shared action row cannot say which it edits. A chip
+/// row sitting under the value it changes can.
+///
+/// Writes go through `state::apply_alert_override` — the same
+/// `apply_add` the CLI uses — so nothing here is a second way to set a
+/// rule, only a second place to reach the one way.
+pub(super) fn threshold_editor(
+    id: &'static str,
+    seq: usize,
+    name: &str,
+    cpu_key: &'static str,
+    mem_key: &'static str,
+    state: &ZStatsAppState,
+) -> Option<AnyElement> {
+    // No settings read yet: the frame or two before the first load, and
+    // the honest thing is to show the bars without controls rather than
+    // chips that cannot know what is selected.
+    let settings = state.settings()?;
+    let mut col = v_flex()
+        .mt(px(8.))
+        .pt(px(8.))
+        .gap(px(4.))
+        .border_t(px(1.))
+        .border_color(theme::border_subtle());
+    for (i, (key, label)) in [
+        (cpu_key, i18n::tr("processes.bar_cpu_short")),
+        (mem_key, i18n::tr("processes.bar_mem_short")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        col = col.child(threshold_row(id, seq * 2 + i, key, label, name, settings));
+    }
+    Some(col.into_any_element())
+}
+
+/// One rule's chips, labelled so a row of bare percentages cannot be
+/// read against the wrong bar.
+fn threshold_row(
+    id: &'static str,
+    seq: usize,
+    key: &'static str,
+    label: String,
+    name: &str,
+    settings: &FileConfig,
+) -> AnyElement {
+    let target = super::alerts::OverrideTarget {
+        key,
+        name: name.to_string(),
+    };
+    // What the file resolves to for this name — the chip that matches
+    // is the one lit, so "which of these am I on" needs no reading.
+    let current = super::alerts::configured_value(Some(settings), &target);
+    h_flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex_none()
+                .w(px(54.))
+                .truncate()
+                .text_size(px(9.5))
+                .text_color(theme::tiny_label(theme::text_dim()))
+                .child(label),
+        )
+        .child(
+            h_flex().flex_1().min_w_0().gap(px(3.)).children(
+                super::alerts::presets(key).into_iter().enumerate().map(
+                    |(i, (chip_label, value))| {
+                        let on = current.as_deref() == Some(value);
+                        let name = name.to_string();
+                        div()
+                            .id((id, seq * 8 + i))
+                            .flex_none()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(if on {
+                                Hsla::from(theme::accent_wash(45))
+                            } else {
+                                Hsla::from(theme::border())
+                            })
+                            .bg(if on {
+                                Hsla::from(theme::accent_wash(10))
+                            } else {
+                                Hsla::from(theme::inset())
+                            })
+                            .px(px(6.))
+                            .text_size(px(9.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(if on {
+                                theme::accent_light()
+                            } else {
+                                theme::text()
+                            })
+                            .hover(|d| d.bg(theme::surface_raised()))
+                            .on_click(move |_, _window, cx| {
+                                // The row is inside a clickable row that
+                                // toggles the expansion; without this a
+                                // chip click would also collapse it.
+                                cx.stop_propagation();
+                                let name = name.clone();
+                                cx.global::<ZStatsGlobalStore>()
+                                    .clone()
+                                    .update(cx, |state, cx| {
+                                        if let Err(e) =
+                                            state.apply_alert_override(key, &name, value, cx)
+                                        {
+                                            tracing::error!("alert override failed: {e}");
+                                        }
+                                    });
+                            })
+                            .child(chip_label)
+                    },
+                ),
+            ),
+        )
+        .into_any_element()
+}
+
 fn expand_block(
     p: &ProcessSnapshot,
     parent_name: Option<&str>,
@@ -804,10 +937,7 @@ fn expand_block(
                 .unwrap_or_else(|| format::PLACEHOLDER.into()),
         ));
     }
-    // Last, after the measurements: these two are policy, not readings —
-    // what has to happen before this process makes the Alerts tab.
-    detail.extend(alert_bar_rows(&p.name, state));
-
+    let bars = alert_bar_rows(&p.name, state);
     let cmd = p.cmd.clone();
     let headline = cmd_headline(&cmd).to_string();
     let name = p.name.clone();
@@ -833,6 +963,26 @@ fn expand_block(
                 }),
         )
         .child(widgets::kv_columns(detail))
+        // Full width, not a two-up cell: "CPU alert" + "off · override"
+        // in a half-column truncated the label. These are policy, not
+        // readings — what has to happen before this process makes the
+        // Alerts tab — and the chips below edit them.
+        .children({
+            let n = bars.len();
+            bars.into_iter()
+                .enumerate()
+                .map(move |(i, (k, v))| widgets::kv_row(k, v, i + 1 == n, false))
+        })
+        // Directly under the bars it edits, above the action row: the
+        // two lines above say what the rule is, these say change it.
+        .children(threshold_editor(
+            "proc-th",
+            pid as usize,
+            &p.name,
+            "alert-cpu",
+            "alert-mem",
+            state,
+        ))
         .when(crate::terminate::can_term(pid), |col| {
             col.child(h_flex().justify_end().child(kill_button(pid, name)))
         })
@@ -1217,6 +1367,25 @@ fn current_user_id() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two pages edit two different pairs of rules, and mixing them
+    /// up would write a process bar onto an app tree — 200% is
+    /// unremarkable for a tree and absurd for one process. The editor
+    /// takes the keys from its caller precisely so this stays a fact
+    /// about the call sites rather than a guess inside the widget.
+    #[test]
+    fn each_page_edits_its_own_pair_of_rules() {
+        for key in ["alert-cpu", "alert-mem", "alert-app-cpu", "alert-app-mem"] {
+            let presets = super::super::alerts::presets(key);
+            assert!(!presets.is_empty(), "{key} has no chips to offer");
+            // Every rule can be turned off for one subject, and that is
+            // what `0` means to `apply_add` — not "unset".
+            assert!(
+                presets.iter().any(|(_, v)| *v == "0"),
+                "{key} must offer an off chip"
+            );
+        }
+    }
 
     #[test]
     fn bundle_name_reads_the_app_wrapper() {

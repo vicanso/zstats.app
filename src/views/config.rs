@@ -41,6 +41,7 @@ use gpui_component::switch::Switch;
 use gpui_component::text::TextView;
 use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -189,6 +190,9 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
             let collector = file.collector.clone().unwrap_or_default();
             cards.push(collection_card(&collector));
             cards.push(thresholds_card(file));
+            // Right under the counts it explains: the thresholds card
+            // says twelve programs are tuned, this one says which.
+            cards.extend(overrides_card(state));
             // Directly under the thresholds it sits between: the table
             // is the layer below a hand-written override and above the
             // base rule.
@@ -1696,6 +1700,177 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
         .into_any_element()
 }
 
+/// Every per-subject override, in one place, each with a way out.
+///
+/// The thresholds card counts them ("alert-cpu · 12 overrides") and the
+/// Alerts tab writes them one subject at a time, which between them
+/// left the set unreadable: after a few months nobody remembers which
+/// twelve programs they tuned, what to, or how to undo one. The only
+/// answer was to open config.toml — the file this app exists to keep
+/// people out of. Personalised monitoring that cannot be reviewed
+/// stops being personalisation and becomes a liability.
+///
+/// Grouped by rule rather than by subject: the rule is what the value
+/// means (200% of one core is unremarkable for an app tree and absurd
+/// for a process), and a subject usually appears under one rule only.
+/// Sorted by name inside each group, which is `BTreeMap`'s own order —
+/// stable across renders, so a row does not move under the pointer
+/// between the read and the click.
+/// Every override in the file, flattened to (rule key, subject, value)
+/// and ordered by rule then name. Pure so the flattening — five maps,
+/// two numeric widths, one row shape — can be tested without a config
+/// file or a frame.
+fn override_rows(a: &zstats::settings::AlertsConfig) -> Vec<(&'static str, String, f64)> {
+    // Percent for every one of them — zstats parses `name=30` into
+    // these maps as 30, and `0` is that subject's "never alert". Two
+    // widths upstream (f32 for the CPU-ish rules, f64 for the memory
+    // ones); both widen to f64 here rather than the row carrying which.
+    let wide = |m: &BTreeMap<String, f32>| -> Vec<(String, f64)> {
+        m.iter().map(|(n, v)| (n.clone(), f64::from(*v))).collect()
+    };
+    let exact = |m: &BTreeMap<String, f64>| -> Vec<(String, f64)> {
+        m.iter().map(|(n, v)| (n.clone(), *v)).collect()
+    };
+    [
+        ("alert-cpu", wide(&a.cpu_overrides)),
+        ("alert-mem", exact(&a.mem_overrides)),
+        ("alert-app-cpu", wide(&a.app_cpu_overrides)),
+        ("alert-app-mem", exact(&a.app_mem_overrides)),
+        ("alert-disk", wide(&a.disk_overrides)),
+    ]
+    .into_iter()
+    .flat_map(|(key, entries)| entries.into_iter().map(move |(name, v)| (key, name, v)))
+    .collect()
+}
+
+fn overrides_card(state: &ZStatsAppState) -> Option<AnyElement> {
+    let file = state.settings()?;
+    let rows = override_rows(&file.alerts);
+    // Nothing set is not an empty state worth a card: the thresholds
+    // above already say every rule is on its base value.
+    if rows.is_empty() {
+        return None;
+    }
+    let total = rows.len();
+    Some(
+        widgets::list_shell()
+            .child(widgets::list_header(
+                i18n::tr("config.overrides"),
+                Some(widgets::note(
+                    t!("config.override", count = total).to_string(),
+                )),
+            ))
+            .children(
+                rows.into_iter()
+                    .enumerate()
+                    .map(|(i, (key, name, value))| override_row(i, total, key, name, value)),
+            )
+            .child(
+                div()
+                    .px(px(13.))
+                    .pt(px(9.))
+                    .pb(px(11.))
+                    .child(widgets::note(i18n::tr("config.overrides_note"))),
+            )
+            .into_any_element(),
+    )
+}
+
+/// One override: who it is for, which rule, what it was set to, and the
+/// control that drops it.
+///
+/// "Reset" rather than a trash icon: nothing is deleted in the sense
+/// the Trash button on a file row means — the subject goes back to the
+/// rule everyone else is on, and re-setting it is two clicks away in
+/// the Alerts tab. And no confirmation sheet: the two gated actions in
+/// this app move real things (a file to the Trash, a signal to a
+/// process), while this one edits a line in a config file that the row
+/// itself is showing you.
+fn override_row(i: usize, total: usize, key: &'static str, name: String, value: f64) -> AnyElement {
+    let removal_name = name.clone();
+    let subject: SharedString = name.into();
+    h_flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .px(px(13.))
+        .py(px(7.))
+        .when(i + 1 != total, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(subject),
+                )
+                // The rule's own key, in the spelling `zstats -add` and
+                // config.toml use — same reasoning as the thresholds
+                // card above, and what makes this row copyable into a
+                // terminal.
+                .child(
+                    div()
+                        .font_family(font::MONO)
+                        .text_size(px(9.))
+                        .text_color(theme::text_dim())
+                        .child(key),
+                ),
+        )
+        .child(
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .font_family(font::MONO)
+                        .text_size(px(10.))
+                        .text_color(theme::text())
+                        // `0` is not "no value" — it is this subject
+                        // opting out of the rule, and reads as such.
+                        .child(if value == 0.0 {
+                            i18n::tr("alerts.off")
+                        } else {
+                            format!("{value:.0}%")
+                        }),
+                )
+                .child(
+                    div()
+                        .id(("override-reset", i))
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::inset())
+                        .px(px(7.))
+                        .py(px(1.))
+                        .text_size(px(10.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.override_reset_tip")))
+                        .on_click(move |_, _window, cx| {
+                            let name = removal_name.clone();
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| {
+                                    if let Err(e) = state.remove_alert_override(key, &name, cx) {
+                                        tracing::warn!("remove {key} override for {name}: {e}");
+                                    }
+                                });
+                        })
+                        .child(i18n::tr("config.override_reset")),
+                ),
+        )
+        .into_any_element()
+}
+
 fn threshold_chips(key: &'static str, current: &str) -> AnyElement {
     let off = i18n::tr("alerts.off");
     let chips = match key {
@@ -1879,6 +2054,42 @@ mod tests {
         assert_eq!(download_fraction(3_300_000, 6_600_000), Some(0.5));
         assert_eq!(download_fraction(6_600_000, 6_600_000), Some(1.0));
         assert_eq!(download_fraction(1_000, 0), None, "no length, no bar");
+    }
+
+    /// Five maps, two numeric widths, one row shape — and the order is
+    /// what the reader scans: rule first (200% means one thing for an
+    /// app tree and something absurd for a process), name inside it.
+    #[test]
+    fn override_rows_flatten_every_map_in_a_readable_order() {
+        let mut a = zstats::settings::AlertsConfig::default();
+        a.cpu_overrides.insert("node".into(), 70.0);
+        a.cpu_overrides.insert("Google Chrome".into(), 45.0);
+        a.mem_overrides.insert("Xcode".into(), 25.0);
+        a.app_cpu_overrides.insert("zed".into(), 600.0);
+        a.app_mem_overrides.insert("Slack".into(), 12.0);
+        a.disk_overrides.insert("/".into(), 95.0);
+        // A base value is not an override and must not appear.
+        a.cpu = Some(40.0);
+
+        let rows = override_rows(&a);
+        assert_eq!(
+            rows.iter()
+                .map(|(k, n, v)| (*k, n.as_str(), *v))
+                .collect::<Vec<_>>(),
+            vec![
+                // BTreeMap order inside each rule: "Google Chrome"
+                // before "node", and stable across renders so a row
+                // cannot move under the pointer between read and click.
+                ("alert-cpu", "Google Chrome", 45.0),
+                ("alert-cpu", "node", 70.0),
+                ("alert-mem", "Xcode", 25.0),
+                ("alert-app-cpu", "zed", 600.0),
+                ("alert-app-mem", "Slack", 12.0),
+                ("alert-disk", "/", 95.0),
+            ]
+        );
+        // Nothing set is no card at all, not an empty one.
+        assert!(override_rows(&zstats::settings::AlertsConfig::default()).is_empty());
     }
 
     #[test]
