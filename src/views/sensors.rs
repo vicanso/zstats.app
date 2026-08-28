@@ -287,15 +287,52 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
 /// A battery is either emptying or filling, so the old fixed pair of
 /// "Time left" and "To full" guaranteed that one of them was a dash —
 /// and on a full, idle machine both were. One adaptive cell says the
-/// same thing when there is something to say, and a full battery gets
-/// the card back a whole row. State lives in the title so the grid is
-/// six cells (three and three), not seven (four and three).
+/// same thing when there is something to say. State lives in the title
+/// so the grid is always three rows: charging fills six cells, full and
+/// idle leaves the last right-hand cell empty rather than collapsing
+/// the card (five cells in two-up is three-and-two, and the hairlines
+/// no longer meet).
 fn battery_time(b: &zstats::snapshot::BatterySnapshot) -> Option<(String, String)> {
     match (b.time_to_empty_secs, b.time_to_full_secs) {
         (Some(secs), _) => Some((i18n::tr("sensors.empty_in"), format::uptime(secs))),
         (_, Some(secs)) => Some((i18n::tr("sensors.to_full"), format::uptime(secs))),
         (None, None) => None,
     }
+}
+
+fn battery_grid(b: &zstats::snapshot::BatterySnapshot) -> AnyElement {
+    let charge = (i18n::tr("sensors.charge"), format::pct(b.charge_percent));
+    let draw = (
+        i18n::tr("sensors.draw"),
+        b.power_watts
+            .map_or(format::PLACEHOLDER.to_string(), |w| format!("{w:.1} W")),
+    );
+    let health = (
+        i18n::tr("sensors.health"),
+        b.health_percent
+            .map_or(format::PLACEHOLDER.into(), format::pct),
+    );
+    let cycles = (
+        i18n::tr("sensors.cycles"),
+        b.cycle_count
+            .map_or(format::PLACEHOLDER.to_string(), |c| c.to_string()),
+    );
+    let temp = (
+        i18n::tr("sensors.cell_temp"),
+        b.temperature_celsius
+            .map_or(format::PLACEHOLDER.to_string(), |c| format!("{c:.1} °C")),
+    );
+    // Six slots so two-up is always three-and-three. The time cell is
+    // the one that comes and goes; an empty pair keeps the row height
+    // when there is nothing to say.
+    widgets::kv_columns(vec![
+        charge,
+        draw,
+        health,
+        cycles,
+        temp,
+        battery_time(b).unwrap_or_else(|| (String::new(), "\u{00a0}".into())),
+    ])
 }
 
 fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElement> {
@@ -306,34 +343,7 @@ fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElem
                 i18n::tr("sensors.battery"),
                 Some(widgets::note(b.state.clone())),
             ))
-            .child(widgets::kv_columns(
-                vec![
-                    (i18n::tr("sensors.charge"), format::pct(b.charge_percent)),
-                    (
-                        i18n::tr("sensors.draw"),
-                        b.power_watts
-                            .map_or(format::PLACEHOLDER.to_string(), |w| format!("{w:.1} W")),
-                    ),
-                    (
-                        i18n::tr("sensors.health"),
-                        b.health_percent
-                            .map_or(format::PLACEHOLDER.into(), format::pct),
-                    ),
-                    (
-                        i18n::tr("sensors.cycles"),
-                        b.cycle_count
-                            .map_or(format::PLACEHOLDER.to_string(), |c| c.to_string()),
-                    ),
-                    (
-                        i18n::tr("sensors.cell_temp"),
-                        b.temperature_celsius
-                            .map_or(format::PLACEHOLDER.to_string(), |c| format!("{c:.1} °C")),
-                    ),
-                ]
-                .into_iter()
-                .chain(battery_time(b))
-                .collect(),
-            ))
+            .child(battery_grid(b))
             .pb_2()
             .into_any_element(),
     };
