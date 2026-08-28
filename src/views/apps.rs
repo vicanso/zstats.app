@@ -438,9 +438,15 @@ fn app_row(
 /// Both whole-app alert bars for this tree's name — zstats' `app_cpu` /
 /// `app_mem` rules resolved through the live template table, in the
 /// same words as the process expansion (`processes::pct_bar_text`).
-fn app_bars(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> (String, String) {
+fn app_bars(
+    g: &ProcessGroupSnapshot,
+    state: &ZStatsAppState,
+) -> (processes::BarDisplay, processes::BarDisplay) {
     let Some(file) = state.settings() else {
-        return (format::PLACEHOLDER.into(), format::PLACEHOLDER.into());
+        return (
+            processes::BarDisplay::plain(format::PLACEHOLDER),
+            processes::BarDisplay::plain(format::PLACEHOLDER),
+        );
     };
     let loaded = alerttpl::info();
     let eff = ActiveThresholds::from_config_with_template(&file.alerts, &loaded.template);
@@ -519,29 +525,45 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
                         )),
                 ),
         )
-        // Full width: in the two-up grid "CPU alert" + "off · override"
-        // truncated the label to "CPU…". These are the lines the chips
-        // below edit, so both words have to stay readable.
-        .child(expand_row(
+        // Full width: in the two-up grid "CPU alert" truncated the
+        // label to "CPU…". These are the lines the chips below edit,
+        // so both words have to stay readable.
+        .child(processes::bar_row(
+            "app-bar-cpu",
+            g.root_pid as usize,
             i18n::tr("processes.bar_cpu"),
-            expand_value(cpu_bar),
+            cpu_bar,
             false,
         ))
-        .child(expand_row(
+        .child(processes::bar_row(
+            "app-bar-mem",
+            g.root_pid as usize,
             i18n::tr("processes.bar_mem"),
-            expand_value(mem_bar),
+            mem_bar,
             true,
         ))
         // Title is not the matchable name: bundle vs Electron, or
         // cargo vs the login session that spawned it. The bars above
-        // key on `g.name`; this line is that name.
+        // key on `g.name`; this line is that name, the sentence in ⓘ.
         .when(face_of(g, state).text() != g.name, |d| {
             d.child(
-                div()
+                h_flex()
+                    .items_center()
+                    .gap(px(4.))
                     .mt(px(6.))
-                    .text_size(px(10.))
-                    .text_color(theme::text_dim())
-                    .child(t!("apps.exec_name", name = g.name.clone()).to_string()),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(font::MONO)
+                            .text_size(px(10.))
+                            .text_color(theme::text())
+                            .child(g.name.clone()),
+                    )
+                    .child(widgets::info_icon(
+                        ("apps-exec-name", g.root_pid as usize),
+                        i18n::tr("apps.exec_name"),
+                    )),
             )
         })
         .when_some(io, |d, text| {

@@ -85,15 +85,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // one episode leaves half the panel blank and hides what is armed.
     cards.extend(armed_block(state).map(on_content_line));
     cards.extend(past_days_block(state.alert_history()));
-    // The cadence promise is only true while banners are on; off, the
-    // honest sentence is the one that says where the record still goes.
-    cards.push(on_content_line(widgets::note(i18n::tr(
-        if prefs::notifications() {
-            "alerts.footer_note"
-        } else {
-            "alerts.footer_note_muted"
-        },
-    ))));
     cards
 }
 
@@ -111,11 +102,20 @@ fn empty_card(state: &ZStatsAppState) -> AnyElement {
         .pt(px(16.))
         .pb(px(16.))
         .child(
-            div()
-                .text_size(px(13.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(i18n::tr("alerts.empty_title")),
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::text())
+                        .child(i18n::tr("alerts.empty_title")),
+                )
+                .child(widgets::info_icon(
+                    "alerts-empty-info",
+                    i18n::tr("alerts.empty_tip"),
+                )),
         )
         .child(
             div()
@@ -596,11 +596,24 @@ fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
         v_flex()
             .w_full()
             .child(
-                div()
-                    .text_size(px(10.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme::text_dim())
-                    .child(i18n::tr("alerts.empty_watching")),
+                h_flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme::text_dim())
+                            .child(i18n::tr("alerts.empty_watching")),
+                    )
+                    .child(widgets::info_icon(
+                        "alerts-watching-info",
+                        i18n::tr(if prefs::notifications() {
+                            "alerts.footer_note"
+                        } else {
+                            "alerts.footer_note_muted"
+                        }),
+                    )),
             )
             .children(rows.into_iter().enumerate().map(|(i, (k, v))| {
                 h_flex()

@@ -685,20 +685,45 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
-/// The words for a percent-style alert bar (CPU here, app CPU on the
-/// Apps expansion), resolved from what zstats' own `Thresholds` said
-/// about this name. Pure text so both pages and the tests share one
-/// vocabulary. "override" means a per-name entry matched — the user's
-/// own or the template table's; zstats does not say which layer won,
-/// and re-matching here to find out would be a second implementation
-/// of its precedence.
-pub(super) fn pct_bar_text(matched: Option<Option<f32>>, base: Option<f32>) -> String {
+/// The figure an alert-bar row paints, and whether a per-name entry
+/// decided it. Surface is the number (or "off"); `overridden` is the
+/// ⓘ beside the label — putting "override" in the figure itself is
+/// what used to truncate "CPU alert" to "CPU…" at 320px.
+pub(super) struct BarDisplay {
+    text: String,
+    overridden: bool,
+}
+
+impl BarDisplay {
+    pub(super) fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            overridden: false,
+        }
+    }
+
+    fn of(text: impl Into<String>, overridden: bool) -> Self {
+        Self {
+            text: text.into(),
+            overridden,
+        }
+    }
+}
+
+/// A percent-style alert bar (CPU here, app CPU on the Apps
+/// expansion), resolved from what zstats' own `Thresholds` said about
+/// this name. Both pages and the tests share this vocabulary.
+/// `overridden` means a per-name entry matched — the user's own or the
+/// template table's; zstats does not say which layer won, and
+/// re-matching here to find out would be a second implementation of
+/// its precedence.
+pub(super) fn pct_bar_text(matched: Option<Option<f32>>, base: Option<f32>) -> BarDisplay {
     match matched {
-        Some(Some(v)) => t!("processes.bar_override", value = format!("{v:.0}%")).to_string(),
-        Some(None) => i18n::tr("processes.bar_off_override"),
+        Some(Some(v)) => BarDisplay::of(format!("{v:.0}%"), true),
+        Some(None) => BarDisplay::of(i18n::tr("processes.bar_rule_off"), true),
         None => match base {
-            Some(v) => format!("{v:.0}%"),
-            None => i18n::tr("processes.bar_rule_off"),
+            Some(v) => BarDisplay::plain(format!("{v:.0}%")),
+            None => BarDisplay::plain(i18n::tr("processes.bar_rule_off")),
         },
     }
 }
@@ -711,21 +736,65 @@ pub(super) fn mem_bar_text(
     matched: Option<Option<f64>>,
     bytes: Option<u64>,
     base_share: Option<f64>,
-) -> String {
+) -> BarDisplay {
     match matched {
         Some(Some(_)) => match bytes {
-            Some(b) => t!("processes.bar_override", value = format::memory(b)).to_string(),
-            None => i18n::tr("processes.bar_rule_off"),
+            Some(b) => BarDisplay::of(format::memory(b), true),
+            None => BarDisplay::plain(i18n::tr("processes.bar_rule_off")),
         },
-        Some(None) => i18n::tr("processes.bar_off_override"),
+        Some(None) => BarDisplay::of(i18n::tr("processes.bar_rule_off"), true),
         None => match bytes {
-            Some(b) => format::memory(b),
+            Some(b) => BarDisplay::plain(format::memory(b)),
             None => match base_share {
-                Some(f) => format!("{:.0}%", f * 100.0),
-                None => i18n::tr("processes.bar_rule_off"),
+                Some(f) => BarDisplay::plain(format!("{:.0}%", f * 100.0)),
+                None => BarDisplay::plain(i18n::tr("processes.bar_rule_off")),
             },
         },
     }
+}
+
+/// Full-width alert-bar row shared by the Processes and Apps
+/// expansions. ⓘ sits on the label so the figure stays right-aligned
+/// whether this name has an override or not.
+pub(super) fn bar_row(
+    id: &'static str,
+    seq: usize,
+    label: String,
+    bar: BarDisplay,
+    last: bool,
+) -> AnyElement {
+    h_flex()
+        .justify_between()
+        .gap(px(8.))
+        .py(px(5.))
+        .items_center()
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .text_size(px(11.))
+        .text_color(theme::text_muted())
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(px(4.))
+                .child(div().min_w_0().truncate().child(label))
+                .when(bar.overridden, |d| {
+                    d.child(widgets::info_icon(
+                        (id, seq),
+                        i18n::tr("processes.bar_override_tip"),
+                    ))
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .font_family(font::MONO)
+                .text_color(theme::text())
+                .child(bar.text),
+        )
+        .into_any_element()
 }
 
 /// The two alert bars zstats holds for exactly this name — the answer
@@ -733,7 +802,7 @@ pub(super) fn mem_bar_text(
 /// `ActiveThresholds` against the live template table ([`alerttpl`]),
 /// the same resolution the engine armed itself with; nothing here
 /// evaluates a condition, it only reads the line back out.
-fn alert_bar_rows(name: &str, state: &ZStatsAppState) -> Vec<(String, String)> {
+fn alert_bar_rows(name: &str, state: &ZStatsAppState) -> Vec<(String, BarDisplay)> {
     let Some(file) = state.settings() else {
         return Vec::new();
     };
@@ -963,15 +1032,15 @@ fn expand_block(
                 }),
         )
         .child(widgets::kv_columns(detail))
-        // Full width, not a two-up cell: "CPU alert" + "off · override"
-        // in a half-column truncated the label. These are policy, not
-        // readings — what has to happen before this process makes the
-        // Alerts tab — and the chips below edit them.
+        // Full width, not a two-up cell: "CPU alert" in a half-column
+        // truncated the label. These are policy, not readings — what
+        // has to happen before this process makes the Alerts tab —
+        // and the chips below edit them.
         .children({
             let n = bars.len();
-            bars.into_iter()
-                .enumerate()
-                .map(move |(i, (k, v))| widgets::kv_row(k, v, i + 1 == n, false))
+            bars.into_iter().enumerate().map(move |(i, (k, bar))| {
+                bar_row("proc-bar", pid as usize * 2 + i, k, bar, i + 1 == n)
+            })
         })
         // Directly under the bars it edits, above the action row: the
         // two lines above say what the rule is, these say change it.
@@ -1532,41 +1601,47 @@ mod tests {
     }
 
     /// The expansion's alert-bar rows answer "why is this at 300% and
-    /// quiet" — so the wording must distinguish a matched per-name entry
-    /// (user's or the template's) from the base rule, and a disabled
-    /// rule from one that simply sits high.
+    /// quiet" — so a matched per-name entry (user's or the template's)
+    /// must be distinguishable from the base rule, and a disabled rule
+    /// from one that simply sits high. The figure is just the number;
+    /// `overridden` is what lights the ⓘ.
     #[test]
     fn a_bar_says_whether_a_per_name_entry_decided_it() {
-        // Base rule, no match: just the number.
-        assert_eq!(pct_bar_text(None, Some(80.0)), "80%");
-        // A matched entry carries the override marker — this is the
-        // kernel_task case, the row the question is usually about.
-        assert_eq!(
-            pct_bar_text(Some(Some(300.0)), Some(80.0)),
-            "300% · override"
-        );
-        // Matched and disabled: off, and it says why.
-        assert_eq!(pct_bar_text(Some(None), Some(80.0)), "off · override");
-        // Rule off entirely.
-        assert_eq!(pct_bar_text(None, None), "off");
+        let base = pct_bar_text(None, Some(80.0));
+        assert_eq!(base.text, "80%");
+        assert!(!base.overridden);
+        // kernel_task: a matched entry, the row the question is about.
+        let over = pct_bar_text(Some(Some(300.0)), Some(80.0));
+        assert_eq!(over.text, "300%");
+        assert!(over.overridden);
+        let off = pct_bar_text(Some(None), Some(80.0));
+        assert_eq!(off.text, "off");
+        assert!(off.overridden);
+        let rule_off = pct_bar_text(None, None);
+        assert_eq!(rule_off.text, "off");
+        assert!(!rule_off.overridden);
     }
 
     #[test]
     fn the_memory_bar_prefers_zstats_resolved_bytes() {
         // zstats resolves share-vs-ceiling itself; the row shows its
         // answer, never a locally derived one.
-        assert_eq!(
-            mem_bar_text(None, Some(4 * 1024 * 1024 * 1024), Some(0.25)),
-            "4.0 GB"
-        );
-        assert_eq!(
-            mem_bar_text(Some(Some(0.7)), Some(45 * 1024 * 1024 * 1024), Some(0.25)),
-            "45.0 GB · override"
-        );
-        assert_eq!(mem_bar_text(Some(None), None, Some(0.25)), "off · override");
+        let base = mem_bar_text(None, Some(4 * 1024 * 1024 * 1024), Some(0.25));
+        assert_eq!(base.text, "4.0 GB");
+        assert!(!base.overridden);
+        let over = mem_bar_text(Some(Some(0.7)), Some(45 * 1024 * 1024 * 1024), Some(0.25));
+        assert_eq!(over.text, "45.0 GB");
+        assert!(over.overridden);
+        let off = mem_bar_text(Some(None), None, Some(0.25));
+        assert_eq!(off.text, "off");
+        assert!(off.overridden);
         // Before the first tick there is no total to resolve against —
         // the share is all that can be said honestly.
-        assert_eq!(mem_bar_text(None, None, Some(0.25)), "25%");
-        assert_eq!(mem_bar_text(None, None, None), "off");
+        let share = mem_bar_text(None, None, Some(0.25));
+        assert_eq!(share.text, "25%");
+        assert!(!share.overridden);
+        let rule_off = mem_bar_text(None, None, None);
+        assert_eq!(rule_off.text, "off");
+        assert!(!rule_off.overridden);
     }
 }

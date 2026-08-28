@@ -16,7 +16,7 @@
 //! Config (`config.toml`), Permissions (Full Disk Access status + deep
 //! link), and About (version, commit, arch from `crate::about`).
 
-use super::widgets::{self, card};
+use super::widgets;
 use crate::about;
 use crate::alerttpl;
 use crate::assets;
@@ -41,7 +41,7 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::switch::Switch;
 use gpui_component::text::TextView;
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use gpui_component::{Icon, IconName, Sizable, h_flex, v_flex};
 use rust_i18n::t;
 use std::collections::BTreeMap;
 use std::env;
@@ -134,35 +134,33 @@ fn permissions_card() -> AnyElement {
         .into_any_element();
     widgets::list_shell()
         .child(widgets::list_header(
-            i18n::tr("config.perm_fda"),
+            titled(
+                "perm-fda-info",
+                i18n::tr("config.perm_fda"),
+                i18n::tr("config.perm_fda_note"),
+            ),
             Some(status),
         ))
-        .child(
-            div()
-                .px(px(13.))
-                .pb(px(11.))
-                .child(widgets::note(i18n::tr("config.perm_fda_note")))
-                .when(!granted, |d| {
-                    d.child(
-                        h_flex().mt(px(8.)).child(
-                            div()
-                                .id("perm-fda-open")
-                                .flex_none()
-                                .rounded_full()
-                                .border_1()
-                                .border_color(theme::border())
-                                .bg(theme::inset())
-                                .px(px(10.))
-                                .py(px(3.))
-                                .text_size(px(11.))
-                                .text_color(theme::text())
-                                .hover(|d| d.bg(theme::surface_raised()))
-                                .on_click(|_, _window, _cx| super::disk::open_full_disk_access())
-                                .child(i18n::tr("config.perm_open")),
-                        ),
-                    )
-                }),
-        )
+        .when(!granted, |d| {
+            d.child(
+                h_flex().px(px(13.)).pb(px(11.)).child(
+                    div()
+                        .id("perm-fda-open")
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::inset())
+                        .px(px(10.))
+                        .py(px(3.))
+                        .text_size(px(11.))
+                        .text_color(theme::text())
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .on_click(|_, _window, _cx| super::disk::open_full_disk_access())
+                        .child(i18n::tr("config.perm_open")),
+                ),
+            )
+        })
         .into_any_element()
 }
 
@@ -661,63 +659,69 @@ fn apply(key: &'static str, value: impl Into<String>, cx: &mut App) {
 }
 
 fn reset_card() -> AnyElement {
-    card()
-        .child(
-            h_flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(i18n::tr("config.reset")),
-                )
-                .child(
-                    div()
-                        .id("cfg-reset")
-                        .h(px(20.))
-                        .px(px(8.))
-                        .rounded(px(5.))
-                        .border_1()
-                        .border_color(theme::accent_wash(45))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .hover(|d| d.bg(theme::accent_wash(10)))
-                        .on_click(move |_, window, cx| {
-                            confirm::ask(
-                                window,
-                                cx,
-                                i18n::tr("config.reset_title"),
-                                i18n::tr("config.reset_body"),
-                                i18n::tr("config.reset_ok"),
-                                |cx| {
-                                    cx.global::<ZStatsGlobalStore>().clone().update(
-                                        cx,
-                                        |state, cx| {
-                                            if let Err(e) = state.reset_settings(cx) {
-                                                tracing::error!("reset settings: {e}");
-                                            }
-                                        },
-                                    );
-                                },
-                            );
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme::accent_light())
-                                .child(i18n::tr("config.reset_ok")),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .mt(px(6.))
-                .child(widgets::note(i18n::tr("config.reset_note"))),
-        )
+    widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                "cfg-reset-info",
+                i18n::tr("config.reset"),
+                i18n::tr("config.reset_note"),
+            ),
+            Some(
+                div()
+                    .id("cfg-reset")
+                    .h(px(20.))
+                    .px(px(8.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(theme::accent_wash(45))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(|d| d.bg(theme::accent_wash(10)))
+                    .on_click(move |_, window, cx| {
+                        confirm::ask(
+                            window,
+                            cx,
+                            i18n::tr("config.reset_title"),
+                            i18n::tr("config.reset_body"),
+                            i18n::tr("config.reset_ok"),
+                            |cx| {
+                                cx.global::<ZStatsGlobalStore>()
+                                    .clone()
+                                    .update(cx, |state, cx| {
+                                        if let Err(e) = state.reset_settings(cx) {
+                                            tracing::error!("reset settings: {e}");
+                                        }
+                                    });
+                            },
+                        );
+                    })
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme::accent_light())
+                            .child(i18n::tr("config.reset_ok")),
+                    )
+                    .into_any_element(),
+            ),
+        ))
+        .into_any_element()
+}
+
+/// Card title plus the ⓘ that used to be a standing note underneath.
+/// Surface is the name; the sentence is the hover.
+fn titled(
+    id: &'static str,
+    title: impl Into<SharedString>,
+    tip: impl Into<SharedString> + 'static,
+) -> AnyElement {
+    h_flex()
+        .min_w_0()
+        .items_center()
+        .gap(px(4.))
+        .child(div().min_w_0().truncate().child(title.into()))
+        .child(widgets::info_icon(id, tip))
         .into_any_element()
 }
 
@@ -873,18 +877,10 @@ fn notifications_row() -> AnyElement {
                         .text_color(theme::ink())
                         .child(i18n::tr("config.notifications")),
                 )
-                .child(
-                    div()
-                        .id("pref-notifications-info")
-                        .flex_none()
-                        .p(px(1.))
-                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.notifications_tip")))
-                        .child(
-                            Icon::new(IconName::Info)
-                                .with_size(Size::Size(px(12.)))
-                                .text_color(Hsla::from(theme::text_dim())),
-                        ),
-                ),
+                .child(widgets::info_icon(
+                    "pref-notifications-info",
+                    i18n::tr("config.notifications_tip"),
+                )),
         )
         .child(
             Switch::new("pref-notifications")
@@ -916,18 +912,10 @@ fn proxy_row(input: &Entity<InputState>, valid: bool) -> AnyElement {
                         .text_color(theme::ink())
                         .child(i18n::tr("config.proxy")),
                 )
-                .child(
-                    div()
-                        .id("pref-proxy-info")
-                        .flex_none()
-                        .p(px(1.))
-                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.proxy_tip")))
-                        .child(
-                            Icon::new(IconName::Info)
-                                .with_size(Size::Size(px(12.)))
-                                .text_color(Hsla::from(theme::text_dim())),
-                        ),
-                ),
+                .child(widgets::info_icon(
+                    "pref-proxy-info",
+                    i18n::tr("config.proxy_tip"),
+                )),
         )
         .child(div().mt(px(6.)).child(Input::new(input).xsmall()))
         .when(!valid, |d| {
@@ -965,18 +953,10 @@ fn autostart_row() -> AnyElement {
                         .text_color(theme::ink())
                         .child(i18n::tr("config.autostart")),
                 )
-                .child(
-                    div()
-                        .id("pref-autostart-info")
-                        .flex_none()
-                        .p(px(1.))
-                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.autostart_tip")))
-                        .child(
-                            Icon::new(IconName::Info)
-                                .with_size(Size::Size(px(12.)))
-                                .text_color(Hsla::from(theme::text_dim())),
-                        ),
-                ),
+                .child(widgets::info_icon(
+                    "pref-autostart-info",
+                    i18n::tr("config.autostart_tip"),
+                )),
         )
         .child(
             Switch::new("pref-autostart")
@@ -1013,18 +993,10 @@ fn opacity_row() -> AnyElement {
                         .text_color(theme::ink())
                         .child(i18n::tr("config.opacity")),
                 )
-                .child(
-                    div()
-                        .id("pref-opacity-info")
-                        .flex_none()
-                        .p(px(1.))
-                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.opacity_tip")))
-                        .child(
-                            Icon::new(IconName::Info)
-                                .with_size(Size::Size(px(12.)))
-                                .text_color(Hsla::from(theme::text_dim())),
-                        ),
-                ),
+                .child(widgets::info_icon(
+                    "pref-opacity-info",
+                    i18n::tr("config.opacity_tip"),
+                )),
         )
         .child(
             h_flex()
@@ -1097,18 +1069,11 @@ fn pref_row<T: Copy + PartialEq + 'static>(
                         .text_color(theme::ink())
                         .child(label),
                 )
-                .children(tip.map(|tip| {
-                    div()
-                        .id(SharedString::from(format!("{id}-info")))
-                        .flex_none()
-                        .p(px(1.))
-                        .tooltip(widgets::wrap_tooltip(tip))
-                        .child(
-                            Icon::new(IconName::Info)
-                                .with_size(Size::Size(px(12.)))
-                                .text_color(Hsla::from(theme::text_dim())),
-                        )
-                })),
+                .children(
+                    tip.map(|tip| {
+                        widgets::info_icon(SharedString::from(format!("{id}-info")), tip)
+                    }),
+                ),
         )
         .child(
             h_flex()
@@ -1169,24 +1134,25 @@ fn template_card(state: &ZStatsAppState) -> AnyElement {
     };
     widgets::list_shell()
         .child(widgets::list_header(
-            i18n::tr("config.template"),
+            titled(
+                "cfg-template-info",
+                i18n::tr("config.template"),
+                // Names the platform file it pulls, because the local
+                // name cannot: zstats fixes the override at
+                // `template.toml` with no platform in it, and ~/.zstats
+                // may be synced between machines whose process names
+                // have nothing in common.
+                t!("config.template_note", file = alerttpl::FILE).to_string(),
+            ),
             Some(widgets::note(line)),
         ))
         .child(
             h_flex()
                 .items_center()
-                .justify_between()
+                .justify_end()
                 .gap(px(8.))
                 .px(px(13.))
                 .py(px(8.))
-                .child(div().flex_1().min_w_0().child(widgets::note(
-                    // Names the platform file it pulls, because the
-                    // local name cannot: zstats fixes the override at
-                    // `template.toml` with no platform in it, and
-                    // ~/.zstats may be synced between machines whose
-                    // process names have nothing in common.
-                    t!("config.template_note", file = alerttpl::FILE).to_string(),
-                )))
                 .child(template_update_chip(state))
                 .children(loaded.source.has_override().then(template_builtin_chip)),
         )
@@ -1346,19 +1312,20 @@ fn hints_card(state: &ZStatsAppState) -> AnyElement {
     };
     widgets::list_shell()
         .child(widgets::list_header(
-            i18n::tr("config.hints"),
+            titled(
+                "cfg-hints-info",
+                i18n::tr("config.hints"),
+                t!("config.hints_note", file = cleanhints::FILE).to_string(),
+            ),
             Some(widgets::note(source.to_string())),
         ))
         .child(
             h_flex()
                 .items_center()
-                .justify_between()
+                .justify_end()
                 .gap(px(8.))
                 .px(px(13.))
                 .py(px(8.))
-                .child(div().flex_1().min_w_0().child(widgets::note(
-                    t!("config.hints_note", file = cleanhints::FILE).to_string(),
-                )))
                 .child(hints_update_chip(state))
                 .child(
                     div()
@@ -1455,7 +1422,11 @@ fn collection_card(c: &CollectorConfig) -> AnyElement {
 
     widgets::list_shell()
         .child(widgets::list_header(
-            i18n::tr("config.collection"),
+            titled(
+                "cfg-collection-info",
+                i18n::tr("config.collection"),
+                i18n::tr("config.collection_note"),
+            ),
             Some(file_note("file-note-collection", "config.toml")),
         ))
         .child(interval_row(
@@ -1470,7 +1441,7 @@ fn collection_card(c: &CollectorConfig) -> AnyElement {
         // No row for process disk IO: it rides the process-table pass and
         // has no cadence of its own — a second control writing the same
         // key would just fight this one. The fact lives in the process
-        // row's tooltip instead.
+        // row's ⓘ instead.
         .child(interval_row(
             1,
             "cfg-disk",
@@ -1496,12 +1467,19 @@ fn collection_card(c: &CollectorConfig) -> AnyElement {
                 .px(px(13.))
                 .py(px(8.))
                 .child(
-                    div()
-                        .id("cfg-max-processes-label")
-                        .text_size(px(11.))
-                        .text_color(theme::ink())
-                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.max_processes_tip")))
-                        .child(i18n::tr("config.max_processes")),
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme::ink())
+                                .child(i18n::tr("config.max_processes")),
+                        )
+                        .child(widgets::info_icon(
+                            "cfg-max-processes-info",
+                            i18n::tr("config.max_processes_tip"),
+                        )),
                 )
                 .child(setting_chips(
                     "max-processes",
@@ -1514,13 +1492,6 @@ fn collection_card(c: &CollectorConfig) -> AnyElement {
                         ("200".into(), "200"),
                     ],
                 )),
-        )
-        .child(
-            div()
-                .px(px(13.))
-                .pt(px(8.))
-                .pb(px(10.))
-                .child(widgets::note(i18n::tr("config.collection_note"))),
         )
         .into_any_element()
 }
@@ -1545,12 +1516,16 @@ fn interval_row(
                 .items_center()
                 .justify_between()
                 .child(
-                    div()
-                        .id(("cfg-interval-label", i))
-                        .text_size(px(11.))
-                        .text_color(theme::ink())
-                        .tooltip(widgets::wrap_tooltip(tip))
-                        .child(label),
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme::ink())
+                                .child(label),
+                        )
+                        .child(widgets::info_icon(("cfg-interval-info", i), tip)),
                 )
                 .child(
                     div()
@@ -1652,7 +1627,11 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
 
     widgets::list_shell()
         .child(widgets::list_header(
-            i18n::tr("config.thresholds"),
+            titled(
+                "cfg-thresholds-info",
+                i18n::tr("config.thresholds"),
+                i18n::tr("config.thresholds_note"),
+            ),
             Some(file_note("file-note-thresholds", "config.toml")),
         ))
         .children({
@@ -1723,13 +1702,6 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                         .child(div().mt(px(6.)).child(threshold_chips(k, &v)))
                 })
         })
-        .child(
-            div()
-                .px(px(13.))
-                .pt(px(9.))
-                .pb(px(11.))
-                .child(widgets::note(i18n::tr("config.thresholds_note"))),
-        )
         .into_any_element()
 }
 
@@ -1788,7 +1760,11 @@ fn overrides_card(state: &ZStatsAppState) -> Option<AnyElement> {
     Some(
         widgets::list_shell()
             .child(widgets::list_header(
-                i18n::tr("config.overrides"),
+                titled(
+                    "cfg-overrides-info",
+                    i18n::tr("config.overrides"),
+                    i18n::tr("config.overrides_note"),
+                ),
                 Some(widgets::note(
                     t!("config.override", count = total).to_string(),
                 )),
@@ -1797,13 +1773,6 @@ fn overrides_card(state: &ZStatsAppState) -> Option<AnyElement> {
                 rows.into_iter()
                     .enumerate()
                     .map(|(i, (key, name, value))| override_row(i, total, key, name, value)),
-            )
-            .child(
-                div()
-                    .px(px(13.))
-                    .pt(px(9.))
-                    .pb(px(11.))
-                    .child(widgets::note(i18n::tr("config.overrides_note"))),
             )
             .into_any_element(),
     )
