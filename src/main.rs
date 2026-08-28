@@ -60,6 +60,7 @@ mod tray;
 mod trend;
 mod updater;
 mod views;
+mod volflag;
 mod watch;
 #[cfg(target_os = "macos")]
 mod window_ext;

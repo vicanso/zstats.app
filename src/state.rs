@@ -24,6 +24,7 @@ use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
 use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
+use crate::volflag;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedRule, SustainedWatch};
 use gpui::{
@@ -476,6 +477,29 @@ impl Episode {
             AlertSubject::System => Episode::System(kind),
         }
     }
+}
+
+/// A disk alert the user cannot act on is not news: a read-only extra
+/// volume (an installer DMG under `/Volumes`) is full by construction.
+/// Other kinds, and the boot disk, pass. `statfs` failing is fail-open
+/// — see [`volflag`].
+fn keep_alert(event: &AlertEvent) -> bool {
+    let AlertSubject::Volume { mount_point } = &event.subject else {
+        return true;
+    };
+    if event.kind() != AlertKind::Disk {
+        return true;
+    }
+    if !volflag::skips_disk_alert(mount_point) {
+        return true;
+    }
+    tracing::info!(
+        kind = ?event.kind(),
+        subject = ?event.subject,
+        banner = "skipped",
+        "disk alert skipped: volume is read-only"
+    );
+    false
 }
 
 /// One alerting episode, with the freshest numbers it has reported.
@@ -1099,7 +1123,12 @@ impl ZStatsAppState {
     pub fn ingest(&mut self, tick: Tick, cx: &mut Context<Self>) -> Vec<AlertEvent> {
         let now = Instant::now();
         let wall = SystemTime::now();
-        let fresh = tick.alerts.clone();
+        let fresh: Vec<AlertEvent> = tick
+            .alerts
+            .iter()
+            .filter(|event| keep_alert(event))
+            .cloned()
+            .collect();
         if !fresh.is_empty() {
             for event in &fresh {
                 self.record_alert(event.clone(), wall);
@@ -3398,6 +3427,34 @@ mod tests {
             Instant::now() - Duration::from_secs(1);
         assert!(!state.banner_snoozed(&event));
         assert!(state.snoozed.is_empty(), "expired snooze should be pruned");
+    }
+
+    #[test]
+    fn a_writable_disk_still_alerts_and_statfs_failure_is_fail_open() {
+        assert!(super::keep_alert(&cpu_alert(1)));
+        assert!(
+            super::keep_alert(&disk_alert("/")),
+            "the boot volume must still alert"
+        );
+        assert!(
+            super::keep_alert(&disk_alert("/Volumes/no-such-volume")),
+            "a mount we cannot inspect is not silently exempted"
+        );
+    }
+
+    fn disk_alert(mount: &str) -> AlertEvent {
+        AlertEvent {
+            subject: AlertSubject::Volume {
+                mount_point: mount.into(),
+            },
+            detail: AlertDetail::Disk {
+                used_percent: 99.0,
+                threshold_percent: 90.0,
+                available_bytes: 0,
+                total_bytes: 1 << 30,
+            },
+            repeat_after: None,
+        }
     }
 
     fn cpu_alert(pid: u32) -> AlertEvent {
