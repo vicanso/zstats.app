@@ -10,7 +10,9 @@ The tray shows live CPU. Click for the panel — it tucks away when you look els
 
 > macOS only · Apple Silicon and Intel · Universal, signed and notarized
 
-<img src="docs/screenshot.png" width="359" alt="zstats panel" />
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/42259bb0-acb7-4675-9c3c-6ad791cca455" autoplay loop muted playsinline width="100%"></video>
+</p>
 
 ## Why this one
 

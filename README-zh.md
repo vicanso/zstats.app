@@ -10,7 +10,9 @@ macOS 菜单栏系统监控，围绕「按应用定规则」构建：托盘实�
 
 > 仅 macOS · Apple Silicon 与 Intel · Universal，已签名公证
 
-<img src="docs/screenshot.png" width="359" alt="zstats 面板" />
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/42259bb0-acb7-4675-9c3c-6ad791cca455" autoplay loop muted playsinline width="100%"></video>
+</p>
 
 ## 为什么是这个
 
