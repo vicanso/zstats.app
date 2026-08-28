@@ -21,11 +21,13 @@ use crate::about;
 use crate::alerttpl;
 use crate::assets;
 use crate::autostart;
+use crate::bigfiles;
 use crate::cleanhints;
 use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::opener;
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
 use crate::state::{HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
@@ -719,6 +721,37 @@ fn reset_card() -> AnyElement {
         .into_any_element()
 }
 
+/// A card header's file-name note, clickable: the name reveals the file
+/// in Finder. These names answer "where does this setting actually
+/// live", and the natural follow-up — opening that place — used to
+/// mean typing the path yourself. Hover lift is the affordance (the
+/// arrow stays, per the rule in views/mod.rs); the tooltip says where
+/// it goes. A file that does not exist yet (config.toml on a machine
+/// still on builtin defaults) reveals nothing, so the folder opens
+/// instead — the answer to "where" is still given.
+fn file_note(id: &'static str, name: &'static str) -> AnyElement {
+    div()
+        .id(id)
+        .rounded(px(4.))
+        .px(px(4.))
+        .mx(px(-4.))
+        .text_size(px(10.))
+        .text_color(theme::text_dim())
+        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+        .tooltip(widgets::wrap_tooltip(i18n::tr("config.file_reveal_tip")))
+        .on_click(move |_, _window, cx| {
+            cx.stop_propagation();
+            let path = zstats::settings::default_dir().join(name);
+            if path.is_file() {
+                bigfiles::reveal(&path);
+            } else if let Err(e) = opener::open([path.parent().unwrap_or(&path).as_os_str()]) {
+                tracing::warn!("open config dir: {e}");
+            }
+        })
+        .child(name)
+        .into_any_element()
+}
+
 /// Language and theme. Selection reuses the accent chips of the Alerts
 /// threshold editor — in this app a picked value is accent, like a crossed
 /// threshold, and everything else stays neutral.
@@ -732,7 +765,7 @@ fn interface_card(
             i18n::tr("config.interface"),
             // Mirrors "config.toml" on the collection card: says where
             // these two settings actually live.
-            Some(widgets::note("app.toml")),
+            Some(file_note("file-note-app", "app.toml")),
         ))
         .child(pref_row(
             "pref-language",
@@ -1423,7 +1456,7 @@ fn collection_card(c: &CollectorConfig) -> AnyElement {
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("config.collection"),
-            Some(widgets::note(i18n::tr("config.file"))),
+            Some(file_note("file-note-collection", "config.toml")),
         ))
         .child(interval_row(
             0,
@@ -1620,7 +1653,7 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("config.thresholds"),
-            Some(widgets::note(i18n::tr("config.file"))),
+            Some(file_note("file-note-thresholds", "config.toml")),
         ))
         .children({
             let total = rows.len();
