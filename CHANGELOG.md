@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/vicanso/zstats.app/compare/v0.1.18..v0.2.0) - 2026-08-28
+
+### ⛰️  Features
+
+- Names and numbers stay on the surface — sentences move into info - ([fbccad4](https://github.com/vicanso/zstats.app/commit/fbccad4cdc6e766106fb890d7d0bfdc1d5b30da6))
+- The config file names in card headers reveal their file - ([1138bf2](https://github.com/vicanso/zstats.app/commit/1138bf2b4721e561d8f9dbdfe89c57cc0495b290))
+
+### 🐛 Bug Fixes
+
+- A read-only volume under /Volumes is not a disk-full alert - ([276b8db](https://github.com/vicanso/zstats.app/commit/276b8db4afbb92b8ea06a7e73b521269f42b47c9))
+- A full battery keeps three rows — the empty cell holds the hairlines - ([80e91cb](https://github.com/vicanso/zstats.app/commit/80e91cbddee46f6651b9fadbafd3ea6f27f3281d))
+
+### 📚 Documentation
+
+- Update readme - ([540e929](https://github.com/vicanso/zstats.app/commit/540e9292a98925cc82b2c5fdf9adcb18cf461e00))
+
 ## [0.1.18](https://github.com/vicanso/zstats.app/compare/v0.1.17..v0.1.18) - 2026-08-27
 
 ### ⛰️  Features
