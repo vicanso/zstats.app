@@ -175,10 +175,19 @@ impl ZStatsApp {
                 });
             // Order it off screen rather than destroy it — rebuilding the
             // window on every toggle is what leaked ~1 MB a cycle.
+            // AppKit after the App cell is released: this callback *is*
+            // gpui's activation `handle.update`, and `cx.defer` still
+            // runs inside that borrow — `orderOut` can fire
+            // `windowDidMove` synchronously.
             #[cfg(target_os = "macos")]
             {
-                window_ext::hide(window);
+                let ns = window_ext::retain(window);
                 cx.global::<metrics::CollectorPace>().hidden();
+                after_app_borrow(cx, move || {
+                    if let Some(ns) = ns {
+                        window_ext::hide_retained(&ns);
+                    }
+                });
             }
             #[cfg(not(target_os = "macos"))]
             window.remove_window();
@@ -1018,7 +1027,7 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
         },
     );
     match opened {
-        Ok(_) => cx.global::<metrics::CollectorPace>().shown(),
+        Ok(_) => mark_panel_shown(cx),
         Err(e) => tracing::error!("failed to open main window: {e}"),
     }
 }
@@ -1074,13 +1083,19 @@ pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
 pub fn hide_main_window(cx: &mut App) {
     #[cfg(target_os = "macos")]
     if let Some(handle) = cx.windows().first().copied() {
-        let _ = handle.update(cx, |_, window, cx| {
-            window_ext::hide(window);
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.reset_transient_views(window, cx));
-        });
+        let ns = handle
+            .update(cx, |_, window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.reset_transient_views(window, cx));
+                window_ext::retain(window)
+            })
+            .ok()
+            .flatten();
         cx.global::<metrics::CollectorPace>().hidden();
+        if let Some(ns) = ns {
+            after_app_borrow(cx, move || window_ext::hide_retained(&ns));
+        }
     }
     let _ = cx;
 }
@@ -1098,8 +1113,40 @@ fn reveal_main_window(cx: &mut App, handle: gpui::AnyWindowHandle, anchor: Optio
         },
     };
     cx.activate(true);
-    let _ = handle.update(cx, |_, window, _| window_ext::show_at(window, origin));
+    let ns = handle
+        .update(cx, |_, window, _| window_ext::retain(window))
+        .ok()
+        .flatten();
+    mark_panel_shown(cx);
+    // `setFrameOrigin` fires `windowDidMove` *synchronously*. gpui's
+    // handler `try_borrow_mut`s the App. This function itself runs
+    // inside the tray's `cx.update`, so returning from `handle.update`
+    // is not enough — hop the AppKit call onto the main queue.
+    if let Some(ns) = ns {
+        after_app_borrow(cx, move || window_ext::show_retained_at(&ns, origin));
+    }
+}
+
+/// Run `f` after gpui's App `RefCell` is released.
+///
+/// Tray clicks (and banner clicks) arrive inside `cx.update`. That is
+/// the borrow `ERROR gpui::window: RefCell already borrowed` names.
+/// `cx.defer` still runs during `flush_effects` of that same update;
+/// `dispatch_async` on the main queue is the hop that actually drops
+/// it. `windowDidBecomeKey` already does this internally; `windowDidMove`
+/// does not.
+#[cfg(target_os = "macos")]
+fn after_app_borrow(cx: &App, f: impl FnOnce() + 'static) {
+    cx.foreground_executor().spawn(async move { f() }).detach();
+}
+
+/// Panel on screen: fast collector cadence, and if Alerts is the
+/// visible tab the tray spec has been seen.
+fn mark_panel_shown(cx: &mut App) {
     cx.global::<metrics::CollectorPace>().shown();
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, cx| state.see_alerts_if_showing(cx));
 }
 
 /// Banner click, or anything else that wants the Alerts tab in front:

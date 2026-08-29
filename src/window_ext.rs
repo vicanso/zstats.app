@@ -12,6 +12,8 @@
 //! `NSWindow` and drives it directly, and the window is built exactly once.
 
 use gpui::{Bounds, Pixels, Point, Size, Window, px};
+use objc2::Message;
+use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSScreen, NSWindow, NSWindowCollectionBehavior};
 use objc2_foundation::NSPoint;
@@ -58,11 +60,23 @@ pub fn join_all_spaces(window: &Window) {
     }
 }
 
+/// Retain the `NSWindow` so AppKit visibility calls can run *after*
+/// gpui has released both of its cells.
+///
+/// `setFrameOrigin` / `orderOut` fire `windowDidMove` (and key-status
+/// notifications) synchronously. gpui handles those with
+/// `handle.update`, which `try_borrow_mut`s the App. Two borrows have
+/// to be gone first: the window take inside `handle.update`, *and* the
+/// outer `cx.update` the tray click is sitting in. Returning from
+/// `handle.update` alone is not enough — see `after_app_borrow` in
+/// `main.rs`.
+pub fn retain(window: &Window) -> Option<Retained<NSWindow>> {
+    ns_window(window).map(|ns| ns.retain())
+}
+
 /// Take the panel off screen without destroying it.
-pub fn hide(window: &Window) {
-    if let Some(ns) = ns_window(window) {
-        ns.orderOut(None);
-    }
+pub fn hide_retained(ns: &NSWindow) {
+    ns.orderOut(None);
 }
 
 /// Whether the panel is currently on screen.
@@ -70,17 +84,14 @@ pub fn is_visible(window: &Window) -> bool {
     ns_window(window).is_some_and(|ns| ns.isVisible())
 }
 
-/// Move the panel to `origin` and bring it forward, focused.
+/// Move a retained panel to `origin` and bring it forward, focused.
 ///
 /// `origin` is in gpui's coordinate space — logical pixels, top-left of the
 /// primary display, y growing downwards. AppKit places windows from the
 /// bottom-left with y growing up, so the y axis is flipped against the height
 /// of the screen that owns the menu bar (`screens()[0]`, the same one the tray
 /// geometry is resolved against).
-pub fn show_at(window: &Window, origin: Point<Pixels>) {
-    let Some(ns) = ns_window(window) else {
-        return;
-    };
+pub fn show_retained_at(ns: &NSWindow, origin: Point<Pixels>) {
     if let Some(screen_height) = menu_bar_screen_height() {
         let height = ns.frame().size.height;
         let flipped = screen_height - f64::from(origin.y) - height;

@@ -22,6 +22,8 @@ use crate::metrics;
 use crate::prefs;
 use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
+#[cfg(not(target_os = "linux"))]
+use crate::tray;
 use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
 use crate::volflag;
@@ -791,6 +793,12 @@ pub struct ZStatsAppState {
     /// tab and when the day turns — never per frame. Read-only on
     /// screen; nothing in it can be acted on (the pids are history).
     alert_history: Vec<alertlog::DayLog>,
+    /// Tray corner spec: a live `AlertEvent` has landed since the user
+    /// last looked at the Alerts tab. Display of "you have not opened
+    /// that list", not a second threshold — the engine already decided
+    /// the condition. Restored (`live = false`) cards do not count;
+    /// session-only, like the snooze beside it.
+    tray_alert_unseen: bool,
     tab: Tab,
     selected_pid: Option<u32>,
     selected_app: Option<u32>,
@@ -1008,6 +1016,7 @@ impl Default for ZStatsAppState {
             alerts: VecDeque::new(),
             dismissed_today: Vec::new(),
             alert_history: Vec::new(),
+            tray_alert_unseen: false,
             tab: Tab::default(),
             selected_pid: None,
             selected_app: None,
@@ -1133,6 +1142,13 @@ impl ZStatsAppState {
             for event in &fresh {
                 self.record_alert(event.clone(), wall);
             }
+            // Looking at the list as it arrives is the same as switching
+            // to it: the spec is "you have not opened that tab", not a
+            // count of undismissed cards. Hidden, or on another tab,
+            // `record_alert` has already lit it.
+            if self.alerts_are_showing(cx) {
+                self.see_alerts();
+            }
             // The file mirrors the list, so it is rewritten where the
             // list changes — which is only ever here. Tests drive
             // `record_alert` directly and touch no disk.
@@ -1234,6 +1250,11 @@ impl ZStatsAppState {
     /// Fold one alert into the list, merging into its episode if that episode
     /// is already there and moving it back to the front.
     fn record_alert(&mut self, event: AlertEvent, now: SystemTime) {
+        // A live report is news the tray spec can show. Ingest clears
+        // it again if the Alerts tab is already on screen; a follow-up
+        // of an episode they already saw re-lights once they look away,
+        // the same way it would a banner.
+        self.tray_alert_unseen = true;
         let episode = Episode::of(&event);
         if let Some(i) = self
             .alerts
@@ -2197,6 +2218,36 @@ impl ZStatsAppState {
         self.tab
     }
 
+    /// The tray corner spec is on: a live report has landed since the
+    /// Alerts tab was last on screen.
+    pub fn tray_alert_unseen(&self) -> bool {
+        self.tray_alert_unseen
+    }
+
+    /// The Alerts tab is (or is about to be) what the user is looking
+    /// at: the spec has done its job. Does not touch the episode list.
+    pub fn see_alerts(&mut self) {
+        self.tray_alert_unseen = false;
+    }
+
+    /// Reveal path: opening the panel onto Alerts is the same as
+    /// switching to it. Other tabs leave the spec — that is the
+    /// reminder to go look.
+    pub fn see_alerts_if_showing(&mut self, cx: &mut Context<Self>) {
+        if self.tab == Tab::Alerts {
+            self.see_alerts();
+            #[cfg(not(target_os = "linux"))]
+            tray::sync(cx, self);
+        }
+    }
+
+    fn alerts_are_showing(&self, cx: &Context<Self>) -> bool {
+        self.tab == Tab::Alerts
+            && cx
+                .try_global::<metrics::CollectorPace>()
+                .is_some_and(|p| p.is_visible())
+    }
+
     pub fn settings_window(&self) -> Option<gpui::AnyWindowHandle> {
         self.settings_window
     }
@@ -2436,6 +2487,9 @@ impl ZStatsAppState {
             // what keeps a day-old photograph from being the record.
             if tab == Tab::Alerts {
                 self.refresh_alert_history();
+                self.see_alerts();
+                #[cfg(not(target_os = "linux"))]
+                tray::sync(cx, self);
             }
             // Apps / Overview titles need the full ppid chain and the
             // process groups for a job face. Kick it here so the first
@@ -3712,6 +3766,40 @@ mod tests {
         state.record_alert(mem_alert(7), SystemTime::now());
         assert_eq!(state.alerts().len(), 2);
         assert_ne!(state.alerts()[0].seq, state.alerts()[1].seq);
+    }
+
+    /// The tray spec is "a live report you have not opened Alerts
+    /// for", not a count of cards. Restored episodes are yesterday's
+    /// news; a follow-up of one already seen re-lights once they look
+    /// away.
+    #[test]
+    fn a_live_report_lights_the_tray_spec_until_alerts_are_shown() {
+        let mut state = ZStatsAppState::new();
+        assert!(!state.tray_alert_unseen());
+
+        state.adopt_alerts(vec![alertlog::Restored {
+            event: cpu_alert(7),
+            first_at: SystemTime::now(),
+            at: SystemTime::now(),
+            reports: 1,
+            dismissed: false,
+        }]);
+        assert!(
+            !state.tray_alert_unseen(),
+            "a restored card is not a new alert"
+        );
+
+        state.record_alert(cpu_alert(8), SystemTime::now());
+        assert!(state.tray_alert_unseen(), "a live report lights the spec");
+
+        state.see_alerts();
+        assert!(!state.tray_alert_unseen());
+
+        state.record_alert(cpu_alert(8), SystemTime::now());
+        assert!(
+            state.tray_alert_unseen(),
+            "a follow-up while away re-lights"
+        );
     }
 
     /// The acting controls on a card are gated on the pid having been

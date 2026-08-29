@@ -42,22 +42,36 @@ struct Item {
     face: Cell<Option<TrayFace>>,
     /// Last title actually pushed to AppKit, same reason.
     title: RefCell<String>,
+    /// Last applied unread-alert corner spec. Independent of `face` so
+    /// a live report restamps the same die with a dot, without a face
+    /// change.
+    hot: Cell<bool>,
 }
 
 /// The two faces, rasterised once at build so a swap hands AppKit a
 /// cached bitmap instead of parsing an SVG on the collector's hand-off.
 /// `None` where the SVG failed to render — that face is then never
 /// applied, and an item keeps whatever it had.
+///
+/// `*_hot` is the same die with a template spec in the corner — same
+/// ink as the glyph (white on a dark menu bar), not a painted colour.
+/// Both faces carry one: Auto/Both can be wearing the memory stick
+/// when an alert lands, and a spec that only exists on CPU would
+/// vanish the moment memory needed attention.
 struct Faces {
     cpu: Option<Icon>,
+    cpu_hot: Option<Icon>,
     memory: Option<Icon>,
+    memory_hot: Option<Icon>,
 }
 
 impl Faces {
-    fn icon(&self, face: TrayFace) -> Option<&Icon> {
-        match face {
-            TrayFace::Cpu => self.cpu.as_ref(),
-            TrayFace::Memory => self.memory.as_ref(),
+    fn icon(&self, face: TrayFace, hot: bool) -> Option<&Icon> {
+        match (face, hot) {
+            (TrayFace::Cpu, true) => self.cpu_hot.as_ref().or(self.cpu.as_ref()),
+            (TrayFace::Cpu, false) => self.cpu.as_ref(),
+            (TrayFace::Memory, true) => self.memory_hot.as_ref().or(self.memory.as_ref()),
+            (TrayFace::Memory, false) => self.memory.as_ref(),
         }
     }
 }
@@ -91,24 +105,26 @@ impl TrayHandle {
 
 impl Item {
     /// Put a face and, once there is a sample, its figure on the item.
-    fn wear(&self, face: TrayFace, figure: Option<Figure>, faces: &Faces) {
-        self.set_face(face, faces);
+    fn wear(&self, face: TrayFace, figure: Option<Figure>, hot: bool, faces: &Faces) {
+        self.set_face(face, hot, faces);
         if let Some(figure) = figure {
             self.set_title(figure);
         }
     }
 
-    fn set_face(&self, face: TrayFace, faces: &Faces) {
-        if self.face.get() == Some(face) {
+    fn set_face(&self, face: TrayFace, hot: bool, faces: &Faces) {
+        if self.face.get() == Some(face) && self.hot.get() == hot {
             return;
         }
-        let Some(icon) = faces.icon(face) else {
+        let Some(icon) = faces.icon(face, hot) else {
             return;
         };
         // Not `set_icon`: on macOS the crate hard-codes template *off* in
         // that path, and our bitmaps are flattened to black with only alpha
         // meaning anything — swapped in untemplated, the glyph is a black
         // block on a dark menu bar. This is the call that carries the flag.
+        // The unread-alert spec is extra alpha on the same template, so
+        // it takes the menu bar's ink (white on dark) with the die.
         #[cfg(target_os = "macos")]
         let applied = self
             .icon
@@ -119,14 +135,18 @@ impl Item {
             tracing::warn!(
                 item = self.label,
                 ?face,
+                hot,
                 "could not swap the tray icon: {e}"
             );
             return;
         }
-        // A face change is a state change the user sees — the diary
-        // should say when and to what, like every alert verdict does.
-        tracing::info!(item = self.label, ?face, "tray face changed");
+        if self.face.get() != Some(face) {
+            // A face change is a state change the user sees — the diary
+            // should say when and to what, like every alert verdict does.
+            tracing::info!(item = self.label, ?face, "tray face changed");
+        }
         self.face.set(Some(face));
+        self.hot.set(hot);
     }
 
     fn set_title(&self, figure: Figure) {
@@ -198,7 +218,7 @@ fn build_item(label: &'static str, face: TrayFace, faces: &Faces) -> Option<Item
         // The `TrayIconEvent::Click` is emitted either way — this only stops
         // the menu from popping up over it.
         .with_menu_on_left_click(false);
-    let icon = faces.icon(face).cloned();
+    let icon = faces.icon(face, false).cloned();
     if let Some(icon) = icon.clone() {
         builder = builder.with_icon(icon);
         #[cfg(target_os = "macos")]
@@ -212,6 +232,7 @@ fn build_item(label: &'static str, face: TrayFace, faces: &Faces) -> Option<Item
             label,
             face: Cell::new(icon.map(|_| face)),
             title: RefCell::new(String::new()),
+            hot: Cell::new(false),
         }),
         Err(e) => {
             // Not fatal: the window still works, the app just has no tray.
@@ -249,9 +270,12 @@ pub fn face_for(pref: TrayPref, memory_needs_attention: bool) -> TrayFace {
 /// Bring the menu bar in line with the store: how many items the
 /// preference wants, the face from the preference and the store's memory
 /// signal, the figure from the latest sample — `cpu.usage_percent` or
-/// `memory.available_bytes`, both zstats' own fields. Called after every
-/// ingest and when the picker changes; before the first sample there is
-/// a face but no figure. A no-op if the tray failed to build.
+/// `memory.available_bytes`, both zstats' own fields — and the
+/// unread-alert spec (`tray_alert_unseen`). Called after every ingest,
+/// when the picker changes, and when Alerts is shown so the spec goes
+/// out immediately rather than on the next tick. Before the first
+/// sample there is a face but no figure. A no-op if the tray failed to
+/// build.
 pub fn sync(cx: &App, state: &ZStatsAppState) {
     let Some(handle) = cx.try_global::<TrayHandle>() else {
         return;
@@ -268,9 +292,13 @@ pub fn sync(cx: &App, state: &ZStatsAppState) {
         })
     };
     let face = face_for(pref, state.memory_needs_attention());
-    handle.primary.wear(face, figure(face), &handle.faces);
+    // One spec, on the item that always exists. Both's second item is
+    // the same news twice — two adjacent dots would look like two
+    // alerts.
+    let hot = state.tray_alert_unseen();
+    handle.primary.wear(face, figure(face), hot, &handle.faces);
     if let Some(second) = handle.second.borrow().as_ref() {
-        second.wear(TrayFace::Cpu, figure(TrayFace::Cpu), &handle.faces);
+        second.wear(TrayFace::Cpu, figure(TrayFace::Cpu), false, &handle.faces);
     }
 }
 
@@ -297,6 +325,40 @@ enum TrayAction {
 /// sharp on Retina.
 fn tray_icon(glyph: CustomIconName) -> Option<Icon> {
     Icon::from_rgba(rasterise_icon(glyph, ICON_SIZE)?, ICON_SIZE, ICON_SIZE).ok()
+}
+
+/// Same die, plus a filled spec in the top-left. Still black+alpha: the
+/// status item stays a template, so the spec takes the menu bar's ink
+/// with the glyph (white on dark, black on light). Painted colour would
+/// have to drop template mode and become a black block.
+fn tray_icon_hot(glyph: CustomIconName) -> Option<Icon> {
+    let mut rgba = rasterise_icon(glyph, ICON_SIZE)?;
+    stamp_hot_dot(&mut rgba, ICON_SIZE);
+    Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE).ok()
+}
+
+/// 4 pt at 2×, top-left — away from the percent title on the right.
+const DOT_DIAMETER: u32 = 8;
+const DOT_INSET: u32 = 1;
+
+fn stamp_hot_dot(rgba: &mut [u8], size: u32) {
+    let radius = DOT_DIAMETER as f32 / 2.0;
+    let cx = DOT_INSET as f32 + radius;
+    let cy = DOT_INSET as f32 + radius;
+    let r2 = radius * radius;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            if dx * dx + dy * dy <= r2 {
+                let i = ((y * size + x) * 4) as usize;
+                rgba[i] = 0;
+                rgba[i + 1] = 0;
+                rgba[i + 2] = 0;
+                rgba[i + 3] = 255;
+            }
+        }
+    }
 }
 
 /// Rendered at 2x the 18pt macOS uses, so no upscaling happens.
@@ -388,7 +450,9 @@ pub fn init_tray(cx: &mut App) {
     // Rasterised up front so a later swap is cheap.
     let faces = Faces {
         cpu: tray_icon(CustomIconName::Cpu),
+        cpu_hot: tray_icon_hot(CustomIconName::Cpu),
         memory: tray_icon(CustomIconName::MemoryStick),
+        memory_hot: tray_icon_hot(CustomIconName::MemoryStick),
     };
     // The store is empty here, so the face is the preference's resting
     // one (`memory_needs_attention` = false): a pinned mode launches
@@ -500,6 +564,24 @@ mod tests {
             assert!(
                 (0.02..0.50).contains(&coverage),
                 "{glyph:?}: unexpected glyph coverage {coverage:.3} — SVG likely failed to render"
+            );
+        }
+    }
+
+    #[test]
+    fn a_template_spec_is_extra_alpha_in_the_top_left() {
+        for glyph in [CustomIconName::Cpu, CustomIconName::MemoryStick] {
+            let mut rgba = rasterise_icon(glyph, ICON_SIZE).expect("glyph");
+            let cx = (DOT_INSET + DOT_DIAMETER / 2) as usize;
+            let i = (cx * ICON_SIZE as usize + cx) * 4;
+            let before = rgba[i + 3];
+            stamp_hot_dot(&mut rgba, ICON_SIZE);
+            assert_eq!(rgba[i + 3], 255, "{glyph:?}: the spec must be opaque");
+            assert!(rgba[i + 3] >= before);
+            assert_eq!(
+                &rgba[i..i + 3],
+                &[0, 0, 0],
+                "{glyph:?}: template ink, not a painted colour"
             );
         }
     }
