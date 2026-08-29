@@ -428,6 +428,10 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
             /// no bar rather than a made-up one.
             progress: Option<f32>,
         },
+        /// The in-place install landed: quit and reopen the bundle.
+        Restart,
+        /// The fallback landed a drag window instead: quitting is the
+        /// most this app can contribute to the manual install.
         Quit,
     }
 
@@ -499,7 +503,15 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
                 },
                 nonempty_notes(notes),
             ),
-            Some(UpdateStatus::Installed) => (
+            Some(UpdateStatus::Installing { notes }) => (
+                Some(i18n::tr("config.update_installing")),
+                Action::Busy { progress: None },
+                nonempty_notes(notes),
+            ),
+            Some(UpdateStatus::Installed { manual: false }) => {
+                (Some(i18n::tr("config.update_ready")), Action::Restart, None)
+            }
+            Some(UpdateStatus::Installed { manual: true }) => (
                 Some(i18n::tr("config.update_installed")),
                 Action::Quit,
                 None,
@@ -533,6 +545,15 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
         Action::Busy { progress } => {
             update_progress_btn(caption.clone().unwrap_or_default(), progress)
         }
+        Action::Restart => update_btn("about-update-restart", true)
+            .child(i18n::tr("config.update_restart"))
+            .w_full()
+            .hover(|d| d.bg(theme::surface_raised()))
+            .on_click(|_, _window, cx| {
+                updater::relaunch();
+                cx.quit();
+            })
+            .into_any_element(),
         Action::Quit => update_btn("about-update-quit", true)
             .child(i18n::tr("config.update_quit"))
             .w_full()
@@ -541,11 +562,11 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
             .into_any_element(),
     };
 
-    // During download the caption is the button label itself — don't
-    // repeat it above.
+    // During download and install the caption is the button label
+    // itself — don't repeat it above.
     let show_caption = !matches!(
         state.update_status(),
-        Some(UpdateStatus::Downloading { .. })
+        Some(UpdateStatus::Downloading { .. }) | Some(UpdateStatus::Installing { .. })
     );
 
     v_flex()

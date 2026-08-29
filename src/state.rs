@@ -397,9 +397,21 @@ pub enum UpdateStatus {
         total: u64,
         notes: String,
     },
-    /// Downloaded, verified, and the DMG handed to the OS — the drag
-    /// window is (or was) on screen; installing stays the user's act.
-    Installed,
+    /// Downloaded and verified; the image is being mounted and the
+    /// bundle copied into place — a couple of seconds of hdiutil and
+    /// ditto, distinct from Downloading so the bar never sits at 100%
+    /// pretending bytes are still moving.
+    Installing {
+        notes: String,
+    },
+    /// The update landed. `manual` is the fallback path: nothing to
+    /// replace in place (bare binary, unwritable target), so the image
+    /// was opened for the classic drag and the caption still asks for
+    /// it. `false` means the bundle was swapped under the running app
+    /// and one restart finishes the update.
+    Installed {
+        manual: bool,
+    },
     DownloadFailed {
         version: String,
         error: String,
@@ -2677,13 +2689,13 @@ impl ZStatsAppState {
 
         cx.spawn(async move |this, cx| {
             let tag = version.clone();
-            let outcome = cx
+            let downloaded = cx
                 .background_executor()
                 .spawn(async move {
                     // Throttled to whole-MB steps: every 64 KB chunk
                     // would repaint the settings window for nothing.
                     let mut last_mb = u64::MAX;
-                    updater::download_and_open(&tag, move |received, total| {
+                    updater::download(&tag, move |received, total| {
                         let mb = received / (1024 * 1024);
                         if mb != last_mb || received == total {
                             last_mb = mb;
@@ -2692,13 +2704,37 @@ impl ZStatsAppState {
                     })
                 })
                 .await;
+            let path = match downloaded {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = this.update(cx, |state, cx| {
+                        let notes = state.update_notes_in_flight();
+                        state.update_status = Some(UpdateStatus::DownloadFailed {
+                            version,
+                            error,
+                            notes,
+                        });
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
             let _ = this.update(cx, |state, cx| {
-                let notes = match &state.update_status {
-                    Some(UpdateStatus::Downloading { notes, .. }) => notes.clone(),
-                    _ => String::new(),
-                };
-                state.update_status = Some(match outcome {
-                    Ok(_path) => UpdateStatus::Installed,
+                let notes = state.update_notes_in_flight();
+                state.update_status = Some(UpdateStatus::Installing { notes });
+                cx.notify();
+            });
+            let delivered = cx
+                .background_executor()
+                .spawn(async move { updater::install(&path) })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                let notes = state.update_notes_in_flight();
+                state.update_status = Some(match delivered {
+                    Ok(updater::Delivery::Replaced) => UpdateStatus::Installed { manual: false },
+                    Ok(updater::Delivery::OpenedForDrag) => {
+                        UpdateStatus::Installed { manual: true }
+                    }
                     Err(error) => UpdateStatus::DownloadFailed {
                         version,
                         error,
@@ -2709,6 +2745,16 @@ impl ZStatsAppState {
             });
         })
         .detach();
+    }
+
+    /// The release notes riding the in-flight update status, so a
+    /// failure can keep showing them beside the retry button.
+    fn update_notes_in_flight(&self) -> String {
+        match &self.update_status {
+            Some(UpdateStatus::Downloading { notes, .. })
+            | Some(UpdateStatus::Installing { notes }) => notes.clone(),
+            _ => String::new(),
+        }
     }
 
     pub fn hints_sync(&self) -> Option<&HintsSync> {

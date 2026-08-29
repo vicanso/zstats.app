@@ -1,18 +1,31 @@
-//! Check GitHub Releases for a newer version, and assist the install.
+//! Check GitHub Releases for a newer version, download, verify — and
+//! finish the install.
 //!
-//! Same shape as zedis: one user-triggered check, and — on request — a
-//! download of the universal DMG, verified against the release's
-//! SHA256SUMS, then handed to the OS (`open` mounts it, Finder is
-//! brought forward for the drag-to-Applications window). The line that
-//! is NOT crossed: no self-replacing. Copying over /Applications stays
-//! a user act — replacing a running bundle underneath itself can fault
-//! it, and Gatekeeper independently validates the notarized signature
-//! at install time either way.
+//! Same shape as zedis up to the download: one user-triggered check,
+//! then the DMG for this architecture, verified against the release's
+//! SHA256SUMS. The install used to stop at `open`-ing the image for
+//! the manual drag; that asked the user to finish the update by hand
+//! and left the mounted volume behind every single time (the
+//! notification-killing debris [`sweep_installer_mounts`] exists for).
+//! [`install`] now completes it in place when it can: mount silently,
+//! copy the bundle over the running one, detach. Two boundaries keep
+//! the old fault worry answered. The running bundle is *renamed
+//! aside* into the temp directory, never deleted while the process
+//! running from it is alive — every file it might still fault in
+//! stays reachable, and the OS prunes temp on its own schedule. And
+//! anything that blocks the in-place path — bare `cargo run` with no
+//! bundle, an unwritable /Applications, a foreign bundle on the
+//! image — degrades to the old drag flow instead of failing; that
+//! flow is exactly what shipped before, and it works from anywhere.
+//! The checksum is the integrity story: ureq writes no quarantine
+//! xattr, so Gatekeeper never re-inspects the copy — what the
+//! SHA256SUMS line vouched for is what runs.
 //!
-//! The flow's one piece of debris is cleaned at the next launch:
-//! [`sweep_installer_mounts`] detaches the installer image the finished
-//! update left mounted, because its bundle contends for the notification
-//! identity and the banners silently stop.
+//! The flow detaches its own image now; [`sweep_installer_mounts`] at
+//! the next launch remains the backstop for a detach that reported
+//! busy, an install abandoned half-way, and the volumes older builds
+//! left mounted — a lingering installer volume contends for the
+//! notification identity and the banners silently stop.
 //!
 //! `releases/latest` excludes drafts and prereleases by definition, so
 //! the rolling `nightly` build never counts as an update.
@@ -27,7 +40,8 @@ use std::io;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{self, Command};
+use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -58,13 +72,11 @@ fn release_download_url(tag: &str, name: &str) -> String {
     format!("https://github.com/vicanso/zstats.app/releases/download/{tag}/{name}")
 }
 
-/// Download `tag`'s DMG, verify, and hand it to the OS. Returns the
-/// downloaded path. Blocking (up to minutes) — background executor
-/// only. `on_progress(received, total)`; `total` is 0 while unknown.
-pub fn download_and_open(
-    tag: &str,
-    mut on_progress: impl FnMut(u64, u64),
-) -> Result<PathBuf, String> {
+/// Download `tag`'s DMG and verify it. Returns the downloaded path,
+/// ready for [`install`]. Blocking (up to minutes) — background
+/// executor only. `on_progress(received, total)`; `total` is 0 while
+/// unknown.
+pub fn download(tag: &str, mut on_progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(DOWNLOAD_TIMEOUT))
         .proxy(proxy::app_proxy())
@@ -121,10 +133,6 @@ pub fn download_and_open(
         }
     }
 
-    // Mount the image and bring Finder forward — LaunchServices opens
-    // the drag window *behind* whatever is focused otherwise.
-    opener::open([path.as_os_str()]).map_err(|e| e.to_string())?;
-    let _ = opener::open(["-a", "Finder"]);
     Ok(path)
 }
 
@@ -171,12 +179,194 @@ fn file_sha256(path: &Path) -> Option<String> {
     )
 }
 
+// ---- in-place install --------------------------------------------------
+
+/// What [`install`] did with the verified image.
+pub enum Delivery {
+    /// The fresh bundle was copied over the running one; a relaunch
+    /// completes the update.
+    Replaced,
+    /// The image was handed to the OS for the classic drag — no bundle
+    /// to replace, or the in-place copy could not proceed.
+    OpenedForDrag,
+}
+
+/// Install the verified image — in place when possible: mount without
+/// a Finder window, copy the bundle over the running one, detach. The
+/// drag, the "quit to install" and the stray mounted volume all
+/// disappear. Anything that blocks the in-place path degrades to the
+/// old manual flow (mount visibly, bring Finder forward) with a log
+/// line saying why, rather than failing — an `Err` here means even
+/// `open` refused. Blocking (hdiutil and ditto take seconds) —
+/// background executor only.
+pub fn install(dmg: &Path) -> Result<Delivery, String> {
+    match running_bundle() {
+        Some(target) => match install_over(&target, dmg) {
+            Ok(()) => return Ok(Delivery::Replaced),
+            Err(e) => {
+                tracing::warn!(error = %e, "in-place install fell back to the drag window");
+            }
+        },
+        None => tracing::info!("no running bundle (bare binary); opening the image to install"),
+    }
+    // Mount the image and bring Finder forward — LaunchServices opens
+    // the drag window *behind* whatever is focused otherwise.
+    opener::open([dmg.as_os_str()]).map_err(|e| e.to_string())?;
+    let _ = opener::open(["-a", "Finder"]);
+    Ok(Delivery::OpenedForDrag)
+}
+
+/// The bundle this process runs from — `…/zstats.app` for the
+/// installed app, `None` under bare `cargo run`. `current_exe` reports
+/// the path recorded at exec time, so after an in-place install it
+/// names the *new* copy at the same location — exactly what a relaunch
+/// wants, and why [`replace_bundle`] may move the file it points at.
+fn running_bundle() -> Option<PathBuf> {
+    bundle_root_of(&env::current_exe().ok()?)
+}
+
+/// `…/Foo.app/Contents/MacOS/foo` → `…/Foo.app`.
+fn bundle_root_of(exe: &Path) -> Option<PathBuf> {
+    let root = exe.parent()?.parent()?.parent()?;
+    (root.extension().is_some_and(|ext| ext == "app")).then(|| root.to_path_buf())
+}
+
+/// Mount, replace `target`, detach. The volume is detached on every
+/// exit — a failed copy must not leave the image mounted on top of the
+/// failure it just reported.
+fn install_over(target: &Path, dmg: &Path) -> Result<(), String> {
+    let volume = attach(dmg)?;
+    let result = replace_bundle(target, &volume);
+    detach(&volume);
+    result
+}
+
+/// Swap `target` for the bundle on the mounted volume. The old bundle
+/// is renamed aside into the temp directory, never deleted: the
+/// running process keeps every file it might still fault in, and the
+/// OS prunes temp on its own schedule. The rename doubles as the
+/// permission gate — an unwritable /Applications, or running straight
+/// off a read-only image, fails it before anything has moved (a
+/// cross-volume ceiling too: /Applications and $TMPDIR both live on
+/// the data volume, so the rename only crosses filesystems in setups
+/// unusual enough to deserve the manual flow). A failed copy renames
+/// the old bundle straight back.
+fn replace_bundle(target: &Path, volume: &Path) -> Result<(), String> {
+    let fresh = volume.join(BUNDLE_NAME);
+    if bundle_plist_value(&fresh, "CFBundleIdentifier").as_deref() != Some(BUNDLE_ID) {
+        return Err("the mounted image does not carry our bundle".into());
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let aside = env::temp_dir().join(format!("zstats-previous-{}-{stamp}.app", process::id()));
+    fs::rename(target, &aside).map_err(|e| format!("could not move the old bundle aside: {e}"))?;
+    let copied = Command::new("/usr/bin/ditto")
+        .arg(fresh.as_os_str())
+        .arg(target.as_os_str())
+        .output();
+    let failure = match &copied {
+        Ok(out) if out.status.success() => {
+            tracing::info!(target = %target.display(), "update installed in place");
+            return Ok(());
+        }
+        Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        Err(e) => e.to_string(),
+    };
+    if let Err(e) = fs::rename(&aside, target) {
+        tracing::error!(aside = %aside.display(), error = %e, "could not restore the old bundle");
+    }
+    Err(format!("ditto failed: {failure}"))
+}
+
+/// Mount the image without a Finder window and return its mount point,
+/// parsed from hdiutil's own plist output.
+fn attach(dmg: &Path) -> Result<PathBuf, String> {
+    let out = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-plist"])
+        .arg(dmg.as_os_str())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "hdiutil attach: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    mount_point_from_plist(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| "no mount point in hdiutil's output".into())
+}
+
+/// The `mount-point` string out of `hdiutil attach -plist` — the one
+/// value needed, scanned in the same no-serde spirit as
+/// [`json_str_field`]. The volume name is ours and ASCII ("zstats
+/// Installer"), so XML entity escapes cannot occur in the value.
+fn mount_point_from_plist(xml: &str) -> Option<PathBuf> {
+    let after = xml.split("<key>mount-point</key>").nth(1)?;
+    let start = after.find("<string>")? + "<string>".len();
+    let end = start + after[start..].find("</string>")?;
+    Some(PathBuf::from(&after[start..end]))
+}
+
+/// Detach the installer volume, with one retry after a beat — hdiutil
+/// answers "resource busy" while Spotlight is still indexing the fresh
+/// mount. A volume that stays stuck is left with a warning: the launch
+/// sweep detaches it next start (by then the installed version equals
+/// the running one, so the "not newer" gate passes).
+fn detach(volume: &Path) {
+    for attempt in 0..2 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_secs(1));
+        }
+        let detached = Command::new("hdiutil")
+            .arg("detach")
+            .arg(volume.as_os_str())
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if detached {
+            return;
+        }
+    }
+    tracing::warn!(volume = %volume.display(), "installer image left mounted; the launch sweep will retry");
+}
+
+/// Quit-and-restart, for the button on the "installed" row. The
+/// restart is handed to a detached `sh` that waits for this pid to
+/// exit and then `open`s the bundle — the path rides in `$0`, so no
+/// quoting happens inside the script. The caller quits right after;
+/// the shell outlives us as launchd's orphan, so it is never a zombie
+/// of ours.
+pub fn relaunch() {
+    let Some(bundle) = running_bundle() else {
+        return;
+    };
+    let script = format!(
+        "while /bin/kill -0 {pid} 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$0\"",
+        pid = process::id()
+    );
+    match Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .arg(bundle.as_os_str())
+        .spawn()
+    {
+        Ok(_) => {
+            tracing::info!(bundle = %bundle.display(), "restart requested to finish the update")
+        }
+        Err(e) => tracing::warn!(error = %e, "could not spawn the relauncher"),
+    }
+}
+
 // ---- installer-image sweep (once, at launch) ---------------------------
 
 /// The identity notifications are granted to — must match
 /// `[package.metadata.bundle] identifier` in Cargo.toml (a test guards
 /// the pair, same as notify.rs guards the delivery side).
 const BUNDLE_ID: &str = "com.github.vicanso.zstats";
+
+/// The bundle's name, on the image and on disk.
+const BUNDLE_NAME: &str = "zstats.app";
 
 /// The volume name the release workflow gives the DMG. Finder mounts
 /// repeats as "zstats Installer 1", "… 2" — hence a prefix match.
@@ -185,17 +375,19 @@ const INSTALLER_VOLUME_PREFIX: &str = "zstats Installer";
 /// LaunchServices' registration tool; no public API does this.
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
-/// Detach the installer image a finished update left mounted.
+/// Detach the installer image an update left mounted.
 ///
-/// `download_and_open` hands the DMG to the OS and the user drags the
-/// bundle out — but nothing ever ejects the volume, Spotlight registers
-/// the mounted copy with LaunchServices, and two live registrations of
-/// one bundle id make notification attribution sway: deliveries still
-/// log as accepted while no banner renders (measured on v0.1.13 —
-/// System Settings showed zstats fully authorized, `banner="delivered"`
-/// in the log, nothing on screen; ejecting the image brought the
-/// banners straight back — docs/design.md 系统通知). So the freshly
-/// installed version cleans up after the update that produced it.
+/// The manual-drag era left one behind every time: nothing ejected the
+/// volume, Spotlight registered the mounted copy with LaunchServices,
+/// and two live registrations of one bundle id make notification
+/// attribution sway — deliveries still log as accepted while no banner
+/// renders (measured on v0.1.13 — System Settings showed zstats fully
+/// authorized, `banner="delivered"` in the log, nothing on screen;
+/// ejecting the image brought the banners straight back — see
+/// docs/design.md 系统通知). [`install`] now detaches its own image,
+/// so this is the backstop: a detach that stayed busy, an install the
+/// fallback path handed to a drag window, volumes older builds left
+/// mounted.
 ///
 /// Three gates keep it honest: the volume's bundle must carry *our*
 /// identifier (a stranger's volume that happens to be named "zstats
@@ -220,7 +412,7 @@ pub fn sweep_installer_mounts() {
             continue;
         }
         let volume = entry.path();
-        let app = volume.join("zstats.app");
+        let app = volume.join(BUNDLE_NAME);
         if bundle_plist_value(&app, "CFBundleIdentifier").as_deref() != Some(BUNDLE_ID) {
             continue;
         }
@@ -565,6 +757,162 @@ mod tests {
     fn the_sweep_identifier_matches_the_manifest() {
         let manifest = include_str!("../Cargo.toml");
         assert!(manifest.contains(&format!("identifier = \"{BUNDLE_ID}\"")));
+    }
+
+    #[test]
+    fn mount_point_comes_out_of_hdiutil_plist_output() {
+        // Trimmed real output: the disk entity has no mount-point key,
+        // the filesystem entity carries it.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>system-entities</key><array>
+  <dict>
+    <key>content-hint</key><string>GUID_partition_scheme</string>
+    <key>dev-entry</key><string>/dev/disk5</string>
+  </dict>
+  <dict>
+    <key>content-hint</key><string>Apple_HFS</string>
+    <key>dev-entry</key><string>/dev/disk5s1</string>
+    <key>mount-point</key>
+    <string>/Volumes/zstats Installer</string>
+  </dict>
+</array></dict></plist>"#;
+        assert_eq!(
+            mount_point_from_plist(xml),
+            Some(PathBuf::from("/Volumes/zstats Installer"))
+        );
+        assert_eq!(mount_point_from_plist("<plist></plist>"), None);
+    }
+
+    #[test]
+    fn bundle_root_is_the_app_directory_or_nothing() {
+        assert_eq!(
+            bundle_root_of(Path::new("/Applications/zstats.app/Contents/MacOS/zstats")),
+            Some(PathBuf::from("/Applications/zstats.app"))
+        );
+        // Bare `cargo run` has no bundle to replace.
+        assert_eq!(
+            bundle_root_of(Path::new("/Users/x/proj/target/debug/zstats")),
+            None
+        );
+    }
+
+    /// Build a DMG whose payload is `zstats.app` carrying `id` as its
+    /// bundle identifier, under `dir`. Real hdiutil, ~a second.
+    fn fixture_dmg(dir: &Path, id: &str, marker: &[u8], volname: &str) -> PathBuf {
+        let contents = dir.join("payload").join(BUNDLE_NAME).join("Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::write(contents.join("MacOS/zstats"), marker).unwrap();
+        fs::write(
+            contents.join("Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>{id}</string>
+</dict></plist>
+"#
+            ),
+        )
+        .unwrap();
+        let dmg = dir.join("update.dmg");
+        let created = Command::new("hdiutil")
+            .args(["create", "-srcfolder"])
+            .arg(dir.join("payload").as_os_str())
+            .args(["-volname", volname, "-format", "UDZO", "-quiet"])
+            .arg(dmg.as_os_str())
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "hdiutil create failed");
+        dmg
+    }
+
+    /// An old bundle standing where the install will land.
+    fn fixture_target(dir: &Path) -> PathBuf {
+        let target = dir.join("Applications").join(BUNDLE_NAME);
+        fs::create_dir_all(target.join("Contents/MacOS")).unwrap();
+        fs::write(target.join("Contents/MacOS/zstats"), b"old build").unwrap();
+        target
+    }
+
+    /// The asides this test run parked in temp — found by prefix, so
+    /// the test can both assert the old bundle survived and clean up.
+    fn asides() -> Vec<PathBuf> {
+        let prefix = format!("zstats-previous-{}-", process::id());
+        fs::read_dir(env::temp_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .collect()
+    }
+
+    /// The whole in-place path against a real image: mount, verify the
+    /// bundle id, rename the old bundle aside (kept, not deleted),
+    /// copy the new one in, detach the volume.
+    #[test]
+    fn in_place_install_swaps_the_bundle_and_detaches() {
+        let dir = env::temp_dir().join(format!("zstats-inplace-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let volname = "zstats-inplace-test";
+        let dmg = fixture_dmg(&dir, BUNDLE_ID, b"new build", volname);
+        let target = fixture_target(&dir);
+
+        install_over(&target, &dmg).expect("in-place install");
+
+        assert_eq!(
+            fs::read(target.join("Contents/MacOS/zstats")).unwrap(),
+            b"new build"
+        );
+        assert!(
+            !Path::new("/Volumes").join(volname).exists(),
+            "the volume must be detached"
+        );
+        // The old bundle was parked, not destroyed — the running
+        // process may still fault pages in from it.
+        let parked = asides();
+        assert!(
+            parked
+                .iter()
+                .any(|p| fs::read(p.join("Contents/MacOS/zstats"))
+                    .is_ok_and(|bytes| bytes == b"old build")),
+            "the old bundle must survive in temp"
+        );
+        for p in parked {
+            let _ = fs::remove_dir_all(p);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The identity gate fires before anything moves — and the volume
+    /// still gets detached on the failure exit.
+    #[test]
+    fn a_foreign_bundle_is_refused_before_anything_moves() {
+        let dir = env::temp_dir().join(format!("zstats-foreign-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let volname = "zstats-foreign-test";
+        let dmg = fixture_dmg(&dir, "com.example.stranger", b"impostor", volname);
+        let target = fixture_target(&dir);
+
+        let refused = install_over(&target, &dmg);
+
+        assert!(refused.is_err(), "a foreign identifier must be refused");
+        assert_eq!(
+            fs::read(target.join("Contents/MacOS/zstats")).unwrap(),
+            b"old build",
+            "the standing install must be untouched"
+        );
+        assert!(
+            !Path::new("/Volumes").join(volname).exists(),
+            "the volume must be detached even on refusal"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

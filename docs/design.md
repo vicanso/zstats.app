@@ -253,6 +253,12 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 
 **这份数据的 CPU% 口径和其他视图不同**，卡片上用一行说明写死了这件事：它是扫描那 300 毫秒窗口内的值，不是 60 秒滚动均值。同一个进程在两个列表里合理地读出不同的数字，一个没有解释的第二数字比没有更糟。
 
+### 应用内更新自己装完最后一步（`updater::install`）
+
+早先的流程停在把校验过的 DMG 交给 `open`：拖进「应用程序」、退出旧版、启动新版全是用户的手工步骤，而且卷宗每次都留在 /Volumes（启动清扫为此而生，见「系统通知」）。现在 `install` 尽可能原地完成：`hdiutil attach -nobrowse` 静默挂载（mount point 从它自己的 `-plist` 输出里扫出来，同 `json_str_field` 的无 serde 姿态），核对镜像里 bundle 的 `CFBundleIdentifier` 是我们，把正在运行的 bundle **改名挪进 temp**——绝不删除：运行中的进程可能还要从里面 fault 页面进来，temp 由系统自己的节奏清理；这次 rename 同时就是权限闸，/Applications 写不动或正跑在只读镜像上时，在动任何东西之前就干净地失败——然后 `ditto` 拷入新包、detach（忙则等一秒重试一次，仍失败交给下次启动的清扫：那时镜像里的版本等于运行版本，「不更新」闸放行）。复制失败把旧包原地改回去。走不通的一切——裸 `cargo run` 没有 bundle、rename 被拒、镜像里不是我们的包——都回退到老的拖装流程并记日志说明为什么；那条路就是之前发布的行为，哪里都能用。
+
+状态机上「安装中」与「下载中」是两个状态：hdiutil + ditto 要几秒，进度条不该停在 100% 假装字节还在流动。完成态的按钮从「退出以安装」变成「重启 zstats」：`updater::relaunch` 把重启交给一个游离的 `sh`——等本 pid 退出后 `open` bundle，路径经 `$0` 传入，脚本里没有引号拼接——app 随即退出，shell 作为 launchd 的孤儿活到 `open` 完成，永远不会成为我们的僵尸。Gatekeeper 不会再审视这份拷贝：ureq 下载不写 quarantine xattr，完整性由 SHA256SUMS 校验承担——手拖时代这也已是事实，改的只是谁来搬。回退路径落回的手拖完成态仍显示旧文案与「退出以安装」。
+
 ### 与设计稿有意的偏差
 
 - **毛玻璃**：设计稿是实心 `#09090b`，这里保留 vibrancy，观感更通透。**白色壁纸曾把整个暗色面板打穿**（55% wash 放 45% 亮度进来，近白正文压在浅灰玻璃上，有实测截图），根因在 gpui：它给 `Blurred` 垫的 `NSVisualEffectView` 子类钉死 `Selection` 材质、并在每次 `updateLayer` 把 layer 背景剥掉（自称 colorless）——剩下**纯 blur**，材质本该有的亮度钳制衬底根本留不住，`setMaterial: Popover` 设上去也会被剥。所以 `use_popover_material`（main.rs，建窗后首帧调用）在 gpui 的 blur 视图**之上**、Metal 内容层**之下**插一个**原生未子类化的** `NSVisualEffectView`（`.popover` 材质、`.behindWindow`、`.active`，autoresize 跟窗，重入时以 `isMemberOfClass` 认出自己直接返回）：popover 材质的亮度钳制正是系统菜单在任何壁纸上都保持暗底的机制——但对纯白只能压到中灰，所以暗色 wash 从 55% 降到 35% 而不是归零：白底下弱化文字仍可读，彩色壁纸的色相则清楚地透进玻璃（实测 20% 在白底会把说明文字洗掉，HUDWindow 材质在新系统上反而更透，都试过）。曾经试过反方向——把卡片涂到 94% 实心——白壁纸是修好了，玻璃也没了，黑底下卡片还和框架撞色；已回退，卡片仍是玻璃上的微提亮（暗 `0xffffff12`、浅 `0xfffffff2`）。那次弯路留下的一件对的东西保住了：卡片描边（`widgets::outline`，零布局 inset shadow，`theme::border()` 选墨色）从浅色专属改为两个主题都画——不欠壁纸任何东西的分隔。
@@ -281,7 +287,7 @@ zedis 的 logger 原样适配：stdout + `~/.zstats/logs/zstats-app.log.<日期>
 
 同一个 id 若有多份 .app 注册（比如 Downloads 里留着旧包），归属会摇摆，横幅可能静默丢失：`lsregister -u` 掉多余的那份即可。实测这台机器上曾同时注册六份（正主之外：`make bundle` 的构建产物——Spotlight 会自动收录它索引到的任何 `.app`——和四条已卸载 DMG 的残留），所以 **`make bundle` 现在收尾自动注销自己的产物**，每次构建都做（Spotlight 之后可能悄悄加回来）。`make dev` 是裸二进制，本来就不产生注册。
 
-**应用内更新流程自己就会制造第二个认领者**：updater 下载 DMG 后交给 `open` 挂载，用户拖完 /Applications，卷宗却没人弹出——镜像里那份 zstats.app 一直挂在 `/Volumes/zstats Installer`，注册鲜活，横幅从此静默丢失（v0.1.13 发布版实测：系统设置里授权齐全、日志 `banner="delivered"`、屏幕上什么都没有；弹出镜像横幅立刻回来）。**所以新版本启动时替上一次更新收尾**：`updater::sweep_installer_mounts`（后台执行器上跑一次）把名字以「zstats Installer」开头、bundle id 是我们、版本不比运行中*新*的卷宗 `hdiutil detach` 掉，再 `lsregister -u` 掉卸载后仍残留的注册记录（实测卸载不清记录）。三道闸都承重：id 不符的卷宗不是我们的、正在从镜像里运行就不能抽走地面、版本更新意味着「下载了还没拖」的进行中安装，拖装窗口得留着。detach 忙则记 warn 放过，下次启动重试。
+**应用内更新流程自己就会制造第二个认领者**：手拖时代 updater 把 DMG 交给 `open` 挂载，用户拖完 /Applications，卷宗却没人弹出——镜像里那份 zstats.app 一直挂在 `/Volumes/zstats Installer`，注册鲜活，横幅从此静默丢失（v0.1.13 发布版实测：系统设置里授权齐全、日志 `banner="delivered"`、屏幕上什么都没有；弹出镜像横幅立刻回来）。如今 `updater::install` 原地装完会自己 detach（见「界面」一节），这个成因只剩回退的拖装路径；**启动清扫仍在，作为兜底**：`updater::sweep_installer_mounts`（后台执行器上跑一次）把名字以「zstats Installer」开头、bundle id 是我们、版本不比运行中*新*的卷宗 `hdiutil detach` 掉，再 `lsregister -u` 掉卸载后仍残留的注册记录（实测卸载不清记录）——接住 detach 一直报忙的镜像、走了回退路径的安装、旧版本留下的存量卷宗。三道闸都承重：id 不符的卷宗不是我们的、正在从镜像里运行就不能抽走地面、版本更新意味着「下载了还没装完」的进行中安装，拖装窗口得留着。detach 忙则记 warn 放过，下次启动重试。
 
 ## 开发
 
