@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.1](https://github.com/vicanso/zstats.app/compare/v0.2.0..v0.2.1) - 2026-08-30
+
+### ⛰️  Features
+
+- The update installs itself — the drag, the quit and the mounted image all retire - ([9496ec3](https://github.com/vicanso/zstats.app/commit/9496ec33b3c9232b8e292840da46c162e09f93fe))
+- An unseen alert specs the tray, and a click no longer double-borrows - ([361d6a3](https://github.com/vicanso/zstats.app/commit/361d6a3439a61a40b29314f166b7f924c3448fbc))
+
+### ⚡ Performance
+
+- The install stops re-verifying what the checksum already vouched for - ([8dfb9e6](https://github.com/vicanso/zstats.app/commit/8dfb9e696f4b1bad316fb0dec8ce308e37a4b5a1))
+
 ## [0.2.0](https://github.com/vicanso/zstats.app/compare/v0.1.18..v0.2.0) - 2026-08-28
 
 ### ⛰️  Features
