@@ -281,10 +281,15 @@ fn replace_bundle(target: &Path, volume: &Path) -> Result<(), String> {
 }
 
 /// Mount the image without a Finder window and return its mount point,
-/// parsed from hdiutil's own plist output.
+/// parsed from hdiutil's own plist output. `-noverify` because the
+/// image's bytes were already vouched for: [`download`] hashed the
+/// whole file against the release's SHA256SUMS, and hdiutil's default
+/// pass re-reads the entire image to answer the same question — 2.5s
+/// vs 0.3s measured on a 16 MB DMG, most of what the user waits
+/// through as "installing".
 fn attach(dmg: &Path) -> Result<PathBuf, String> {
     let out = Command::new("hdiutil")
-        .args(["attach", "-nobrowse", "-plist"])
+        .args(["attach", "-nobrowse", "-noverify", "-plist"])
         .arg(dmg.as_os_str())
         .output()
         .map_err(|e| e.to_string())?;
@@ -342,7 +347,7 @@ pub fn relaunch() {
         return;
     };
     let script = format!(
-        "while /bin/kill -0 {pid} 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$0\"",
+        "while /bin/kill -0 {pid} 2>/dev/null; do /bin/sleep 0.1; done; /usr/bin/open \"$0\"",
         pid = process::id()
     );
     match Command::new("/bin/sh")
