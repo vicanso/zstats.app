@@ -24,28 +24,29 @@ short_description = "A menu bar metrics panel written in Rust and GPUI."
 
 [dependencies]
 
-# Matched pair with gpui-component. Current component tip depends on zed
-# *without* a `rev=` — Cargo treats `git+…/zed?rev=X` and `git+…/zed` as
-# different package identities even when the commit is identical, so we must
-# use the same source form (no rev) here and let Cargo.lock pin the commit.
-# Pin only gpui-component's rev; after upgrade, confirm a single gpui via
-# `cargo tree -i gpui` and commit the lockfile.
-# component: 49229371e095bfd2ca77d336b5972b16956f0a87
-# zed (lockfile): 24e25552b1259d56a6fdd7956a419ed9e8a1a25e
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+# GPUI comes from crates.io as the `gpui-pre-*` family: zed publishes `gpui`
+# too slowly for gpui-kit, so gpui-kit ships a matching snapshot under those
+# names (0.3.x) and depends on it itself. The `package =` renames keep the
+# crate names the source uses (`gpui::`, `gpui_platform::`) and must stay on
+# the exact family gpui-kit's own manifest pins, or two GPUIs end up in the
+# tree — `cargo tree -i gpui-pre` must show one.
+gpui = { package = "gpui-pre", version = "0.3.3" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = [
     "font-kit",
     "x11",
     "wayland",
     "runtime_shaders",
 ] }
-# No `tree-sitter` feature: it exists for LanguageConfig / the code
-# editor's highlighter, which nothing here uses — dropping it sheds
-# tree-sitter + tree-sitter-json from the binary. If a future component
-# fails to compile wanting LanguageConfig, this is the switch.
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "49229371e095bfd2ca77d336b5972b16956f0a87" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "49229371e095bfd2ca77d336b5972b16956f0a87" }
-gpui_macros = { git = "https://github.com/zed-industries/zed" }
+gpui_macros = { package = "gpui-pre-macros", version = "0.3.3" }
+# gpui-kit bundles gpui-base + gpui-component (`gpui_kit::component::*`) and
+# the component icon assets (`gpui_kit::assets::Assets`). No `tree-sitter`:
+# that feature is LanguageConfig / the highlighter, which nothing here uses.
+gpui-kit = "0.6.0"
+# tinyvec 1.13.0 (crates.io, 2026-09-03) does not compile on rustc 1.98:
+# `use alloc::vec::{self, Vec}` shadows the `vec!` macro (Lokathor/tinyvec#225).
+# Pulled in by fontdb → usvg → gpui-pre / resvg. Pin until 1.13 is yanked or
+# patched; `=` so `cargo update` cannot pick 1.13 again.
+tinyvec = "=1.12.0"
 
 # Embedded metrics collection. `frontend` brings the alert rule engine,
 # rolling per-process averages and the settings model — and deliberately no
@@ -64,7 +65,7 @@ smol = "2.0.2"
 # reading the folder at runtime.
 # `include-exclude` powers the `#[include]` allowlist in `src/assets.rs`.
 # Declared here rather than relied on through feature unification with
-# gpui-component-assets, which is the only other crate turning it on.
+# gpui-kit-assets, which is the only other crate turning it on.
 rust-embed = { version = "8.12.0", default-features = false, features = [
     "compression",
     "include-exclude",
@@ -92,7 +93,7 @@ ureq = { version = "3", default-features = false, features = [
 sha2 = "0.11"
 rust-i18n = "4.2.1"
 sys-locale = "0.3.2"
-toml = "1.1.4"
+toml = "1.1.5"
 # Desktop banners. Cross-platform; macOS uses NSUserNotification
 # (`set_application` + `wait_for_action` for the click that opens Alerts).
 notify-rust = "4.18"
@@ -100,7 +101,7 @@ notify-rust = "4.18"
 # disk-analysis.md). Same engine diskonaut uses; pinned to a dedicated
 # 3-thread rayon pool at the call site so the resident collector's 2s
 # disk-IO sampling never competes with a default-parallelism walk.
-jwalk = "0.8"
+jwalk = "0.9"
 # `AssetSource` returns `gpui::Result`, which is anyhow's — gpui re-exports
 # the crate itself only under its `private` module ("here be dragons"), so
 # naming a missing asset in the error needs the direct dependency. Already in

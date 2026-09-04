@@ -1,0 +1,28 @@
+# Walk roots for the Caches analysis preset, macOS list.
+#
+# This is the *scope* the Caches chip walks — not the cleanhints
+# annotations, which attach owner/cleanup facts to rows after a scan.
+# One file per OS (caches-<os>.toml): a cache location does not
+# translate (~/Library/Caches has no prefix-rewrite counterpart on
+# Windows or Linux). Only this one exists today; the app builds on
+# macOS alone (see src/main.rs).
+#
+# Paths are relative to ~ unless they start with ~/ or /. The list *is*
+# the preset's identity: changing it makes the next Analyze a different
+# scope (new result file; the previous Δ does not apply). Missing paths
+# are skipped at walk time but stay in the list, so a machine without
+# ~/.m2 still has the same Caches identity.
+#
+# Admission: a well-known location that is wholly cache-like —
+# ~/.cargo/registry, not ~/.cargo (bin is installed software). Grow
+# this deliberately.
+
+roots = [
+  "Library/Caches",
+  ".cache",
+  "Library/Developer",
+  ".npm",
+  ".cargo/registry",
+  ".gradle",
+  ".m2",
+]

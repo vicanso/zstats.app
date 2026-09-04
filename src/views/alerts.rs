@@ -32,9 +32,9 @@ use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{IconName, Sizable};
-use gpui_component::{h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{IconName, Sizable};
+use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
 use zstats::settings::{FileConfig, PressureAlert};
@@ -1001,7 +1001,9 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
         // Log-out, not the footer's power glyph: that one quits *this*
         // app, and seeing both on the Alerts tab made the two requests
         // look like the same act.
-        .icon(gpui_component::Icon::from(assets::CustomIconName::LogOut))
+        .icon(gpui_kit::component::Icon::from(
+            assets::CustomIconName::LogOut,
+        ))
         .ghost()
         .xsmall()
         .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())

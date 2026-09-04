@@ -25,7 +25,7 @@ use super::widgets;
 use crate::bigfiles;
 use crate::cleanhints;
 use crate::confirm;
-use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult};
+use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult, ScanScope};
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -38,9 +38,9 @@ use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px, relative,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex};
 use rust_i18n::t;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -360,10 +360,10 @@ fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
 }
 
 /// Pick a folder to analyze instead of the default home tree — the
-/// native directory panel, and choosing starts the walk immediately.
-/// The panel takes key focus while it is up; this window survives that
-/// (it has a title bar, not the popover's hide-on-blur), and the walk
-/// would survive it either way.
+/// native directory panel. Choosing only selects: Analyze is what
+/// starts the walk. The panel takes key focus while it is up; this
+/// window survives that (it has a title bar, not the popover's
+/// hide-on-blur).
 fn analysis_pick_chip() -> AnyElement {
     let button = Button::new("ana-pick")
         .icon(IconName::FolderOpen)
@@ -383,7 +383,7 @@ fn analysis_pick_chip() -> AnyElement {
                     cx.update(|cx| {
                         cx.global::<ZStatsGlobalStore>()
                             .clone()
-                            .update(cx, |state, cx| state.start_disk_analysis_at(root, cx));
+                            .update(cx, |state, cx| state.set_disk_analysis_at(root, cx));
                     });
                 }
             })
@@ -395,8 +395,9 @@ fn analysis_pick_chip() -> AnyElement {
 }
 
 /// The "analysis scope" row: a dim label, the preset chips, and the
-/// folder picker. `None` while a walk runs — the header's cancel chip is
-/// the only control then.
+/// folder picker. Selecting a chip remembers the scope; Analyze walks
+/// it. `None` while a walk runs — the header's cancel chip is the only
+/// control then.
 ///
 /// The label carries the tooltip that says what a scope may be, and that
 /// the whole volume is deliberately not one of the options: the reason
@@ -422,26 +423,38 @@ fn analysis_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
                     .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_scope_tip")))
                     .child(i18n::tr("disk.ana_scope_label")),
             )
-            .children(analysis_preset_chips())
+            .children(analysis_preset_chips(state))
             .child(analysis_pick_chip())
             .into_any_element(),
     )
 }
 
-/// One-click preset scopes (docs/disk-analysis.md's scope table): the
-/// home tree, `~/Library` — the blind-spot close-up — and the merged
-/// cache roots. Clicking starts the walk immediately, same contract as
-/// the picker.
+/// Preset scopes (docs/disk-analysis.md's scope table): the home tree,
+/// `~/Library` — the blind-spot close-up — the merged cache roots, and
+/// the writable volume. Clicking selects; Analyze is what walks.
 ///
 /// `~` is a chip even though it is also the default, because a scope
 /// sticks once picked: after a `~/Library` run, "re-analyze" means
 /// `~/Library` this launch and the next. Without this chip the only way
 /// back was the ✕, which also deletes the cached result and the Δ
 /// baseline — a heavy price for changing your mind about scope.
-fn analysis_preset_chips() -> Vec<AnyElement> {
+fn analysis_preset_chips(state: &ZStatsAppState) -> Vec<AnyElement> {
+    let selected = state.disk_analysis_scope();
+    let is_sel = |scope: Option<ScanScope>| -> bool {
+        match (selected.as_ref(), scope.as_ref()) {
+            (Some(a), Some(b)) => a.roots == b.roots,
+            _ => false,
+        }
+    };
+    let home = diskscan::default_root();
+    let home_scope = home.clone().map(ScanScope::single);
+    let library_scope = home.clone().map(|h| ScanScope::single(h.join("Library")));
+    let caches_scope = ScanScope::cache_set();
+    let disk_scope = Some(ScanScope::whole_disk());
     let chip = |id: &'static str,
                 label: String,
                 tip: String,
+                on: bool,
                 go: fn(&mut ZStatsAppState, &mut gpui::Context<ZStatsAppState>)|
      -> AnyElement {
         div()
@@ -452,8 +465,11 @@ fn analysis_preset_chips() -> Vec<AnyElement> {
             .py(px(1.))
             .text_size(px(10.))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(theme::text_muted())
-            .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+            .when(on, |d| d.bg(theme::chip()).text_color(theme::text()))
+            .when(!on, |d| {
+                d.text_color(theme::text_muted())
+                    .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+            })
             .tooltip(widgets::wrap_tooltip(tip))
             .on_click(move |_, _window, cx| {
                 cx.global::<ZStatsGlobalStore>().clone().update(cx, go);
@@ -461,7 +477,7 @@ fn analysis_preset_chips() -> Vec<AnyElement> {
             .child(label)
             .into_any_element()
     };
-    vec![
+    let mut chips = vec![
         chip(
             "ana-preset-home",
             // A word, not the path: `~` alone is a one-character chip
@@ -472,9 +488,10 @@ fn analysis_preset_chips() -> Vec<AnyElement> {
             // "Library" would collide with /Library and /System/Library.
             i18n::tr("disk.ana_preset_home"),
             i18n::tr("disk.ana_preset_home_tip"),
+            is_sel(home_scope),
             |state, cx| {
                 if let Some(home) = diskscan::default_root() {
-                    state.start_disk_analysis_at(home, cx);
+                    state.set_disk_analysis_at(home, cx);
                 }
             },
         ),
@@ -482,9 +499,10 @@ fn analysis_preset_chips() -> Vec<AnyElement> {
             "ana-preset-library",
             "~/Library".into(),
             i18n::tr("disk.ana_preset_library_tip"),
+            is_sel(library_scope),
             |state, cx| {
                 if let Some(home) = diskscan::default_root() {
-                    state.start_disk_analysis_at(home.join("Library"), cx);
+                    state.set_disk_analysis_at(home.join("Library"), cx);
                 }
             },
         ),
@@ -492,19 +510,55 @@ fn analysis_preset_chips() -> Vec<AnyElement> {
             "ana-preset-caches",
             i18n::tr("disk.ana_preset_caches"),
             i18n::tr("disk.ana_preset_caches_tip"),
-            |state, cx| state.start_disk_analysis_caches(cx),
+            is_sel(caches_scope),
+            |state, cx| state.set_disk_analysis_caches(cx),
         ),
-        // Last, and deliberately so: it is the slowest by a wide margin
-        // and the only one that needs Full Disk Access to be complete.
-        // It is also the only scope that can see the asset caches and
-        // system-wide libraries a home walk structurally cannot.
+        // Last among presets, and deliberately so: it is the slowest
+        // by a wide margin and the only one that needs Full Disk
+        // Access to be complete. It is also the only scope that can
+        // see the asset caches and system-wide libraries a home walk
+        // structurally cannot.
         chip(
             "ana-preset-disk",
             i18n::tr("disk.ana_preset_disk"),
             i18n::tr("disk.ana_preset_disk_tip"),
-            |state, cx| state.start_disk_analysis_whole_disk(cx),
+            is_sel(disk_scope),
+            |state, cx| state.set_disk_analysis_whole_disk(cx),
         ),
-    ]
+    ];
+    // A picked folder is not a preset — without a chip here the
+    // selection would only live in Analyze's next walk, and the row
+    // would look like nothing was chosen.
+    if let Some(scope) = selected.as_ref() {
+        let preset = [
+            home.clone().map(ScanScope::single),
+            home.map(|h| ScanScope::single(h.join("Library"))),
+            ScanScope::cache_set(),
+            Some(ScanScope::whole_disk()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|p| p.roots == scope.roots);
+        if !preset {
+            let home_s = env::var("HOME").unwrap_or_default();
+            let label = scope_display(&scope.roots, &scope.base, &home_s);
+            chips.push(
+                div()
+                    .id("ana-preset-custom")
+                    .flex_none()
+                    .rounded(px(4.))
+                    .px(px(5.))
+                    .py(px(1.))
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .bg(theme::chip())
+                    .text_color(theme::text())
+                    .child(div().max_w(px(140.)).min_w_0().truncate().child(label))
+                    .into_any_element(),
+            );
+        }
+    }
+    chips
 }
 /// When permission gaps hid part of the tree, say so and offer the one
 /// switch that covers them all. macOS 15+ gates every other app's

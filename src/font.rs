@@ -17,7 +17,7 @@
 //! also what keeps the panel reading as a native card, not a terminal.
 
 use gpui::{App, Div, SharedString, Styled};
-use gpui_component::Theme;
+use gpui_kit::component::Theme;
 
 use crate::assets;
 use crate::i18n;
@@ -73,7 +73,7 @@ pub fn register(cx: &App) {
     }
 }
 
-/// Point gpui-component's theme at the bundled family so its own widgets
+/// Point gpui-kit's theme at the bundled family so its own widgets
 /// (and anything reading `Theme::mono_font_family`) match ours.
 ///
 /// `Theme::change` rebuilds Theme from stock defaults (Menlo on macOS), so

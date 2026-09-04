@@ -18,7 +18,7 @@ use gpui::{
     AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px,
 };
-use gpui_component::{Icon, Sizable, Size, h_flex, v_flex};
+use gpui_kit::component::{Icon, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::time::Duration;

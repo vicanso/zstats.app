@@ -17,6 +17,7 @@
 
 use crate::assetinfo;
 pub use crate::assetinfo::AssetNote;
+use crate::cachepreset;
 use crate::cleanhints;
 use crate::prefs;
 use jwalk::{Parallelism, WalkDirGeneric};
@@ -244,35 +245,17 @@ impl ScanScope {
         Self::single(whole_disk_root())
     }
 
-    /// The explicit cache roots, merged into one ranked view under the
-    /// home base: the three macOS/XDG locations, then the tool caches
-    /// that live directly in `~` and a full home walk would bury among
-    /// project noise. Admission bar: a well-known location that is
-    /// wholly cache-like — `~/.cargo/registry` rather than `~/.cargo`,
-    /// whose `bin` is installed software, not cache. Missing paths
-    /// (most machines have only a few of the dot ones) are skipped at
-    /// walk time but stay in the list — see [`ScanResult::roots`].
-    ///
-    /// This list IS the preset's cache identity: every edit renames the
-    /// cache file, orphaning the previous result and Δ baseline once.
-    /// Grow it deliberately, not entry-by-entry.
+    /// The Caches chip's walk roots, merged into one ranked view.
+    /// The list lives in [`crate::cachepreset`] — embedded default,
+    /// user file, optional GitHub pull — same shape as cleanhints.
+    /// Empty only when even the built-ins failed to parse.
     pub fn cache_set() -> Option<Self> {
         let home = default_root()?;
-        Some(Self {
-            roots: [
-                "Library/Caches",
-                ".cache",
-                "Library/Developer",
-                ".npm",
-                ".cargo/registry",
-                ".gradle",
-                ".m2",
-            ]
-            .iter()
-            .map(|sub| home.join(sub))
-            .collect(),
-            base: home,
-        })
+        let roots = cachepreset::roots();
+        if roots.is_empty() {
+            return None;
+        }
+        Some(Self { roots, base: home })
     }
 }
 
@@ -427,10 +410,10 @@ fn run(
                             if deny.iter().any(|d| child.path() == *d) {
                                 // Pruned, not visited: the whole point is that
                                 // no syscall ever lands inside.
-                                child.read_children_path = None;
+                                child.read_children = None;
                                 protected.fetch_add(1, Ordering::Relaxed);
                             } else if excluded.iter().any(|d| child.path() == *d) {
-                                child.read_children_path = None;
+                                child.read_children = None;
                                 excluded_hits.fetch_add(1, Ordering::Relaxed);
                             }
                         } else if child.file_type.is_file() {

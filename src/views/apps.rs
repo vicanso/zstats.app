@@ -27,7 +27,7 @@ use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, div, list, px,
 };
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};

@@ -12,6 +12,7 @@ use crate::alertlog;
 use crate::alerttpl;
 use crate::bigfiles;
 use crate::bigfiles::BigFilesScan;
+use crate::cachepreset;
 use crate::cleanhints;
 use crate::diskscan::{self, DiffBaseline, ScanEvent, ScanResult, ScanScope};
 use crate::fullscan::{self, GroupScan, Scan};
@@ -33,7 +34,7 @@ use gpui::{
     AppContext, Bounds, Context, Entity, Focusable, Global, ListAlignment, ListState, Pixels,
     ScrollHandle, Window, px,
 };
-use gpui_component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use std::array;
 use std::cell::Cell;
 use std::cmp::Reverse;
@@ -423,6 +424,12 @@ pub enum UpdateStatus {
 pub enum HintsSync {
     Running,
     Done(cleanhints::RemoteUpdate),
+}
+
+/// The Caches-preset roots fetch — same question, different file.
+pub enum CachesSync {
+    Running,
+    Done(cachepreset::RemoteUpdate),
 }
 
 /// The alert-template fetch, and the revert beside it, for the Config
@@ -922,6 +929,8 @@ pub struct ZStatsAppState {
     history_sort: HistorySort,
     /// The last (or in-flight) clean-hints update fetch.
     hints_sync: Option<HintsSync>,
+    /// The last (or in-flight) Caches-preset roots fetch.
+    caches_sync: Option<CachesSync>,
     template_sync: Option<TemplateSync>,
     /// Throttle for the alert list's midnight sweep.
     alert_day_checked_at: Option<Instant>,
@@ -1077,6 +1086,7 @@ impl Default for ZStatsAppState {
             history_range: HistoryRange::default(),
             history_sort: HistorySort::default(),
             hints_sync: None,
+            caches_sync: None,
             template_sync: None,
             update_status: None,
             alert_day_checked_at: None,
@@ -1748,6 +1758,23 @@ impl ZStatsAppState {
             .filter(|diff| diff.roots() == result.roots)
     }
 
+    /// The scope Analyze will walk: the session pick, or home when
+    /// nothing has been chosen. The chips read this so Home lights up
+    /// as the default rather than looking unselected.
+    pub fn disk_analysis_scope(&self) -> Option<ScanScope> {
+        self.disk_analysis_root
+            .clone()
+            .or_else(|| diskscan::default_root().map(ScanScope::single))
+    }
+
+    /// Remember a scope without walking it. Analyze is what starts the
+    /// walk — picking a chip used to launch immediately, which made a
+    /// mis-tap cost minutes and hid the selected state.
+    pub fn set_disk_analysis_scope(&mut self, scope: ScanScope, cx: &mut Context<Self>) {
+        self.disk_analysis_root = Some(scope);
+        cx.notify();
+    }
+
     /// Start (or restart) the top-level analysis — of the session's
     /// picked scope, or the home tree by default. A drill-down is left
     /// via "back", not by rescanning, so the stack is dropped here.
@@ -1764,12 +1791,13 @@ impl ZStatsAppState {
         self.launch_disk_analysis(scope, true, cx);
     }
 
-    /// Analyze a user-chosen root — the folder picker's entry point.
-    /// The bare root volume is refused rather than walked: firmlinks
+    /// Point Analyze at a user-chosen root — the folder picker's
+    /// entry. Does not walk: that is the chip's job. The bare root
+    /// volume is refused rather than remembered: firmlinks
     /// double-count, and /System plus TCC would distort every figure
     /// (docs/disk-analysis.md's scope table) — the answer would be
     /// wrong, not merely slow.
-    pub fn start_disk_analysis_at(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    pub fn set_disk_analysis_at(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         if root == Path::new("/") {
             self.cancel_disk_analysis_walk();
             self.drop_expansions();
@@ -1777,33 +1805,25 @@ impl ZStatsAppState {
             cx.notify();
             return;
         }
-        let scope = ScanScope::single(root);
-        self.disk_analysis_root = Some(scope.clone());
-        self.launch_disk_analysis(scope, true, cx);
+        self.set_disk_analysis_scope(ScanScope::single(root), cx);
     }
 
-    /// Analyze the whole writable volume — the scope that can see what
-    /// no home-shaped one can (`diskscan::whole_disk_root` explains why
-    /// its root is not `/`). Minutes, not seconds, and the slowest
-    /// preset by far; the walk survives every surface like the others.
-    pub fn start_disk_analysis_whole_disk(&mut self, cx: &mut Context<Self>) {
-        let scope = diskscan::ScanScope::whole_disk();
-        self.disk_analysis_root = Some(scope.clone());
-        self.launch_disk_analysis(scope, true, cx);
+    /// Point Analyze at the whole writable volume — the scope that can
+    /// see what no home-shaped one can (`diskscan::whole_disk_root`
+    /// explains why its root is not `/`).
+    pub fn set_disk_analysis_whole_disk(&mut self, cx: &mut Context<Self>) {
+        self.set_disk_analysis_scope(diskscan::ScanScope::whole_disk(), cx);
     }
 
-    /// Analyze the cache-set preset — the explicit cache roots merged
-    /// into one ranked view (docs/disk-analysis.md's scope table). Same
-    /// session semantics as a picked folder: re-analyze means this scope
-    /// until the results are cleared.
-    pub fn start_disk_analysis_caches(&mut self, cx: &mut Context<Self>) {
+    /// Point Analyze at the cache-set preset — the explicit cache roots
+    /// merged into one ranked view (docs/disk-analysis.md's scope table).
+    pub fn set_disk_analysis_caches(&mut self, cx: &mut Context<Self>) {
         let Some(scope) = ScanScope::cache_set() else {
             self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
             cx.notify();
             return;
         };
-        self.disk_analysis_root = Some(scope.clone());
-        self.launch_disk_analysis(scope, true, cx);
+        self.set_disk_analysis_scope(scope, cx);
     }
 
     /// Open or close one ranked directory, in place.
@@ -2759,6 +2779,31 @@ impl ZStatsAppState {
 
     pub fn hints_sync(&self) -> Option<&HintsSync> {
         self.hints_sync.as_ref()
+    }
+
+    pub fn caches_sync(&self) -> Option<&CachesSync> {
+        self.caches_sync.as_ref()
+    }
+
+    /// Fetch the published Caches roots on the background executor.
+    /// One at a time, same as the clean hints.
+    pub fn update_cachepreset(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.caches_sync, Some(CachesSync::Running)) {
+            return;
+        }
+        self.caches_sync = Some(CachesSync::Running);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async { cachepreset::update_from_remote() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.caches_sync = Some(CachesSync::Done(outcome));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Fetch the published rules on the background executor. One at a

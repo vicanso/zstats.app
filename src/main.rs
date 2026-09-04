@@ -30,6 +30,7 @@ mod assetinfo;
 mod assets;
 mod autostart;
 mod bigfiles;
+mod cachepreset;
 mod cleanhints;
 mod confirm;
 mod diskscan;
@@ -82,7 +83,7 @@ use gpui::{
     Subscription, TitlebarOptions, Window, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
-use gpui_component::{ActiveTheme, Icon, Root, Sizable, Size, Theme, ThemeMode};
+use gpui_kit::component::{ActiveTheme, Icon, Root, Sizable, Size, Theme, ThemeMode};
 
 /// Shown in the app menu, the tray tooltip, the task switcher and the Linux
 /// title bar.
@@ -136,7 +137,7 @@ const AUX_MIN_WINDOW_SIZE: (f32, f32) = (460., 420.);
 actions!(zstats, [Quit, CloseWindow]);
 
 /// The root view. Owns the window-lifecycle subscriptions and hands the
-/// panel itself to `views::root`; the gpui-component dialog / notification
+/// panel itself to `views::root`; the gpui-kit dialog / notification
 /// layers are mounted over it.
 struct ZStatsApp {
     /// Whether the window has ever held focus. A freshly created window also
@@ -258,7 +259,7 @@ fn theme_mode_for_appearance(appearance: WindowAppearance) -> ThemeMode {
     }
 }
 
-/// gpui-component Theme plus our own tokens. `Theme::change` resets the
+/// gpui-kit Theme plus our own tokens. `Theme::change` resets the
 /// mono family, so [`font::apply`] has to run every time. `appearance` is
 /// what the OS reports; a pinned theme preference wins over it.
 fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
@@ -524,7 +525,7 @@ struct SettingsWindow {
     scroll: ScrollHandle,
     /// The proxy setting's text field. Lives with this window, like the
     /// panel's filter input lives with the panel — not in global state.
-    proxy_input: gpui::Entity<gpui_component::input::InputState>,
+    proxy_input: gpui::Entity<gpui_kit::component::input::InputState>,
     /// Whether the field currently parses; drives the inline warning.
     /// Only valid values are persisted, so junk never reaches app.toml.
     proxy_valid: bool,
@@ -538,14 +539,14 @@ impl SettingsWindow {
         let store = cx.global::<ZStatsGlobalStore>().clone();
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         let proxy_input = cx.new(|cx| {
-            gpui_component::input::InputState::new(window, cx)
+            gpui_kit::component::input::InputState::new(window, cx)
                 .placeholder(i18n::tr("config.proxy_placeholder"))
                 .default_value(prefs::proxy())
         });
         cx.subscribe(
             &proxy_input,
-            |this, input, event: &gpui_component::input::InputEvent, cx| {
-                if matches!(event, gpui_component::input::InputEvent::Change) {
+            |this, input, event: &gpui_kit::component::input::InputEvent, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::Change) {
                     let value = input.read(cx).value().to_string();
                     this.proxy_valid = proxy::is_valid_proxy_setting(&value);
                     if this.proxy_valid {
@@ -587,7 +588,7 @@ impl Render for SettingsWindow {
         // in screen space and would hand out the title bar's height as
         // if it were usable, putting the card that much past the bottom.
         let body_height = f32::from(window.viewport_size().height) - AUX_BODY_PAD * 2.;
-        let body = gpui_component::v_flex()
+        let body = gpui_kit::component::v_flex()
             .gap(px(8.))
             .children(views::config::render(
                 state,
@@ -610,7 +611,7 @@ impl Render for SettingsWindow {
             .bg(bg)
             .text_color(fg)
             .child(
-                gpui_component::h_flex()
+                gpui_kit::component::h_flex()
                     .size_full()
                     .child(settings_nav(section, cx))
                     .child(
@@ -644,7 +645,7 @@ fn settings_nav(
         .read(cx)
         .update_nudge()
         .is_some();
-    gpui_component::v_flex()
+    gpui_kit::component::v_flex()
         .id("settings-nav")
         .flex_none()
         .w(px(132.))
@@ -694,7 +695,7 @@ fn settings_nav(
                             }
                         }))
                         .child(
-                            gpui_component::h_flex()
+                            gpui_kit::component::h_flex()
                                 .items_center()
                                 .gap(px(6.))
                                 .child(
@@ -757,7 +758,7 @@ struct StorageWindow {
     /// Where a directory to leave out of the analysis is typed.
     /// Committed on Enter, never on a keystroke — half a path is a path
     /// that excludes the wrong thing.
-    exclude_input: gpui::Entity<gpui_component::input::InputState>,
+    exclude_input: gpui::Entity<gpui_kit::component::input::InputState>,
 }
 
 impl StorageWindow {
@@ -765,7 +766,7 @@ impl StorageWindow {
         let store = cx.global::<ZStatsGlobalStore>().clone();
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         let exclude_input = cx.new(|cx| {
-            gpui_component::input::InputState::new(window, cx)
+            gpui_kit::component::input::InputState::new(window, cx)
                 .placeholder(i18n::tr("disk.ana_exclude_placeholder"))
         });
         // `subscribe_in`, not `subscribe`: clearing the field afterwards
@@ -773,8 +774,11 @@ impl StorageWindow {
         cx.subscribe_in(
             &exclude_input,
             window,
-            |this, input, event: &gpui_component::input::InputEvent, window, cx| {
-                if !matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
+            |this, input, event: &gpui_kit::component::input::InputEvent, window, cx| {
+                if !matches!(
+                    event,
+                    gpui_kit::component::input::InputEvent::PressEnter { .. }
+                ) {
                     return;
                 }
                 let typed = input.read(cx).value().to_string();
@@ -812,7 +816,7 @@ impl Render for StorageWindow {
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
-        let body = gpui_component::v_flex()
+        let body = gpui_kit::component::v_flex()
             .gap(px(8.))
             .children(views::storage::render(state, &self.exclude_input));
         div()
@@ -1204,8 +1208,8 @@ fn main() {
         #[cfg(target_os = "macos")]
         dock::hide_dock_icon();
 
-        // Must run before touching any gpui-component feature.
-        gpui_component::init(cx);
+        // Must run before touching any gpui-kit component.
+        gpui_kit::init(cx);
         font::register(cx);
         // Feeds both the theme resolution and the locale pin below, so it
         // has to precede them.

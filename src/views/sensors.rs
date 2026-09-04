@@ -12,7 +12,7 @@ use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, div, px,
 };
-use gpui_component::{h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 
 /// A sensor reads as hot at this fraction of its own ceiling — the same

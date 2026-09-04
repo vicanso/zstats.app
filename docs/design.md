@@ -1,6 +1,6 @@
 # zstats.app
 
-macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats Popover v3 shadcn`，指标由 [zstats](https://crates.io/crates/zstats) 嵌入式采集。基于 [gpui](https://github.com/zed-industries/zed) + [gpui-component](https://github.com/longbridge/gpui-component)。
+macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats Popover v3 shadcn`，指标由 [zstats](https://crates.io/crates/zstats) 嵌入式采集。基于 [gpui-kit](https://gpui-kit.com)（crates.io 上的 `gpui-pre-*` 快照 + gpui-component）。
 
 **支持平台：macOS。** 其它平台**当前编译不过**（见「已知问题 / TODO」）：托盘（Linux）、窗口显隐、多屏定位、异常进程扫描、Dock 隐藏都只有 macOS 实现，而其中三个模块被六处无条件 import 引用。
 
@@ -337,7 +337,7 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
 
   想看到模糊，上面盖的每一层都必须让路，缺一层就是「完全没有透明效果」：
 
-  1. `Root::render` 会铺一层不透明的 `theme.tokens.background`（`gpui-component/crates/ui/src/root.rs:566`）。它的 `refine_style` 排在那句 `bg` 之后，所以 `root.bg(transparent_black())` 能覆盖掉。
+  1. `Root::render` 会铺一层不透明的 `theme.tokens.background`。它的 `refine_style` 排在那句 `bg` 之后，所以 `root.bg(transparent_black())` 能覆盖掉。
   2. 根视图自己的着色层浓度，深浅色分开定值。深色 `0.55`：主题背景是 `l ≈ 0.04` 的近黑，叠在本来就暗的 material 上，太浓会把模糊压成纯黑。浅色 `0.80`：比深色浓，因为浅色面板是深色文字——material 透得越多，桌面细节越会跟着穿上来跟字打架。0.8 是实测下来既看得出模糊、文字又不受干扰的点。
   3. material：gpui 硬编码 `NSVisualEffectMaterial::Selection`（选中高亮用的），`use_popover_material()` 在窗口首帧把它改成 `Popover`，也就是 AppKit 给菜单栏面板用的那个。
 - **无 Dock 图标**（`src/dock.rs`）：有**两个**独立来源会把图标放进 Dock，各治一个，少一个就会闪。

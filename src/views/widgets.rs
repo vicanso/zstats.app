@@ -11,8 +11,8 @@ use gpui::{
     AnyElement, AnyView, App, Div, ElementId, FontWeight, InteractiveElement, IntoElement,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 
 /// Long-copy tooltip: wraps inside the 320px panel and uses caption size
 /// instead of the default `text_sm` one-liner.
@@ -67,7 +67,7 @@ pub fn wrap_tooltip_lines(
 
 /// Give a control a *wrapping* tooltip when it cannot build one itself.
 ///
-/// gpui-component's `Button::tooltip` takes a plain string and renders
+/// gpui-kit's `Button::tooltip` takes a plain string and renders
 /// it on a single line. That is right for "Reveal in Finder" and wrong
 /// for a sentence: at fifty-odd characters the tooltip grows wider than
 /// the 320px panel it is explaining, and the tail runs off screen. The

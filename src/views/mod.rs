@@ -44,8 +44,8 @@ use gpui::{
     AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, div, px,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 
 /// Height of the tab strip: 14 top pad + a 34-tall well (3 + 28 + 3) + 8 gap.

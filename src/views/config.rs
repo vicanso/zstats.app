@@ -22,6 +22,7 @@ use crate::alerttpl;
 use crate::assets;
 use crate::autostart;
 use crate::bigfiles;
+use crate::cachepreset;
 use crate::cleanhints;
 use crate::confirm;
 use crate::font;
@@ -29,7 +30,9 @@ use crate::format;
 use crate::i18n;
 use crate::opener;
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
-use crate::state::{HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{
+    CachesSync, HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore,
+};
 use crate::theme;
 use crate::updater;
 use gpui::Entity;
@@ -38,10 +41,10 @@ use gpui::{
     AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
     Stateful, StatefulInteractiveElement, Styled, div, img, px, relative,
 };
-use gpui_component::input::{Input, InputState};
-use gpui_component::switch::Switch;
-use gpui_component::text::TextView;
-use gpui_component::{Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{Icon, IconName, Sizable, h_flex, v_flex};
 use rust_i18n::t;
 use std::collections::BTreeMap;
 use std::env;
@@ -88,7 +91,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Interface => Icon::new(IconName::Palette),
             SettingsSection::Config => Icon::new(IconName::Settings2),
-            // gpui-component ships no shield; ours rides CustomIconName.
+            // gpui-kit ships no shield; ours rides CustomIconName.
             SettingsSection::Permissions => assets::CustomIconName::Shield.into(),
             SettingsSection::About => Icon::new(IconName::Info),
         }
@@ -200,6 +203,7 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
         }
     }
     cards.push(hints_card(state));
+    cards.push(caches_card(state));
     cards.push(reset_card());
     cards
 }
@@ -393,7 +397,7 @@ fn update_notes_box(notes: &str) -> AnyElement {
                 .text_color(theme::text_muted())
                 // git-cliff notes are markdown — headings, bullets,
                 // commit links. TextView renders them natively (the
-                // markdown crate is a hard dep of gpui-component, so
+                // markdown crate is a hard dep of gpui-kit, so
                 // this capability was already paid for), and its links
                 // open in the browser on click.
                 .child(TextView::markdown(
@@ -1417,6 +1421,113 @@ fn hints_sync_note(state: &ZStatsAppState) -> Option<AnyElement> {
         return None;
     };
     use crate::cleanhints::RemoteUpdate;
+    let text = match outcome {
+        RemoteUpdate::Updated(n) => t!("config.hints_updated", n = n).to_string(),
+        RemoteUpdate::AlreadyCurrent => i18n::tr("config.hints_current"),
+        RemoteUpdate::Invalid => i18n::tr("config.hints_remote_invalid"),
+        RemoteUpdate::Failed(e) => t!("config.hints_update_failed", e = e.as_str()).to_string(),
+    };
+    Some(
+        div()
+            .px(px(13.))
+            .pb(px(9.))
+            .child(widgets::note(text))
+            .into_any_element(),
+    )
+}
+
+/// Walk roots for the Caches chip — same override/fetch shape as the
+/// cleanhints card above it, a different file so a pulled annotation
+/// cannot change what gets scanned.
+fn caches_card(state: &ZStatsAppState) -> AnyElement {
+    let (from_user, count) = cachepreset::info();
+    let source = if from_user {
+        t!("config.caches_user", n = count)
+    } else {
+        t!("config.caches_builtin", n = count)
+    };
+    widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                "cfg-caches-info",
+                i18n::tr("config.caches_preset"),
+                t!("config.caches_preset_note", file = cachepreset::FILE).to_string(),
+            ),
+            Some(widgets::note(source.to_string())),
+        ))
+        .child(
+            h_flex()
+                .items_center()
+                .justify_end()
+                .gap(px(8.))
+                .px(px(13.))
+                .py(px(8.))
+                .child(caches_update_chip(state))
+                .child(
+                    div()
+                        .id("cfg-caches-reload")
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::inset())
+                        .px(px(10.))
+                        .py(px(3.))
+                        .text_size(px(11.))
+                        .text_color(theme::text())
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .on_click(|_, _window, cx| {
+                            cachepreset::reload();
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |_, cx| cx.notify());
+                        })
+                        .child(i18n::tr("config.hints_reload")),
+                ),
+        )
+        .children(caches_sync_note(state))
+        .into_any_element()
+}
+
+fn caches_update_chip(state: &ZStatsAppState) -> AnyElement {
+    let running = matches!(state.caches_sync(), Some(CachesSync::Running));
+    let chip = div()
+        .id("cfg-caches-update")
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::inset())
+        .px(px(10.))
+        .py(px(3.))
+        .text_size(px(11.))
+        .text_color(if running {
+            theme::text_dim()
+        } else {
+            theme::text()
+        })
+        .child(i18n::tr(if running {
+            "config.hints_updating"
+        } else {
+            "config.hints_update"
+        }));
+    if running {
+        return chip.into_any_element();
+    }
+    chip.hover(|d| d.bg(theme::surface_raised()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.update_cachepreset(cx));
+        })
+        .into_any_element()
+}
+
+fn caches_sync_note(state: &ZStatsAppState) -> Option<AnyElement> {
+    let Some(CachesSync::Done(outcome)) = state.caches_sync() else {
+        return None;
+    };
+    use crate::cachepreset::RemoteUpdate;
     let text = match outcome {
         RemoteUpdate::Updated(n) => t!("config.hints_updated", n = n).to_string(),
         RemoteUpdate::AlreadyCurrent => i18n::tr("config.hints_current"),

@@ -3,12 +3,12 @@
 //! rust-embed's `compression` feature zstd-compresses each file into the
 //! binary; [`get`] inflates on first read. Also implements [`AssetSource`]
 //! so gpui can load `icons/power.svg` the same way it loads `IconName` SVGs
-//! from gpui-component.
+//! from gpui-kit.
 
 use anyhow::anyhow;
 use gpui::{AssetSource, Result, SharedString};
-use gpui_component::Icon;
-use gpui_component_assets::Assets as ComponentAssets;
+use gpui_kit::assets::Assets as ComponentAssets;
+use gpui_kit::component::Icon;
 use rust_embed::RustEmbed;
 use std::borrow::Cow;
 
@@ -23,13 +23,14 @@ use std::borrow::Cow;
 ///
 /// The `include` attributes need rust-embed's `include-exclude` feature. It
 /// is declared in `Cargo.toml` rather than left to feature unification with
-/// gpui-component-assets, which happens to enable it today.
+/// gpui-kit-assets, which happens to enable it today.
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/*.svg"]
 #[include = "fonts/*.ttf"]
 #[include = "locales/*.toml"]
 #[include = "cleanhints-*.toml"]
+#[include = "caches-*.toml"]
 #[include = "zstats-icon.png"]
 pub struct Assets;
 
@@ -63,7 +64,7 @@ impl AssetSource for Assets {
     }
 }
 
-/// The SVGs this app ships itself, because gpui-component's `IconName` has no
+/// The SVGs this app ships itself, because gpui-kit's `IconName` has no
 /// equivalent for them.
 ///
 /// Named rather than written out as paths at the call site: the filename then
@@ -108,6 +109,7 @@ impl From<CustomIconName> for Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cachepreset::FILE as CACHES_FILE;
     use crate::cleanhints::FILE as HINTS_FILE;
 
     /// Every name resolves to a file that is actually embedded. Without this
@@ -139,6 +141,7 @@ mod tests {
         // Through the constant, not the literal: the hints file is named
         // per platform, and the allowlist glob has to keep matching it.
         assert!(get(HINTS_FILE).is_some());
+        assert!(get(CACHES_FILE).is_some());
         assert!(get("zstats-icon.png").is_some());
         assert!(
             !Assets::iter().any(|p| p.ends_with(".DS_Store")),

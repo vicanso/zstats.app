@@ -18,8 +18,8 @@ use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, div, px,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex};
 use rust_i18n::t;
 use std::process;
 use zstats::snapshot::DiskSnapshot;

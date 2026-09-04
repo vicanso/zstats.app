@@ -16,7 +16,7 @@ use gpui::{
     AnyElement, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
     div, px, relative,
 };
-use gpui_component::{h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 
 /// Floor for the bar scale, below which the busiest row does not get to

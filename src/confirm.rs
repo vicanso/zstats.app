@@ -1,7 +1,7 @@
 //! In-window confirm sheet.
 //!
 //! Destructive actions (eject, kill) open this before they run. Built on
-//! gpui-component's `AlertDialog`, sized to the 320px panel — the stock
+//! gpui-kit's `AlertDialog`, sized to the 320px panel — the stock
 //! title / `text_sm` body / default buttons read as a full-size window
 //! dialog and swamp the popover.
 
@@ -9,10 +9,10 @@ use crate::i18n;
 use crate::theme;
 use gpui::prelude::*;
 use gpui::{App, FontWeight, Window, div, px, relative};
-use gpui_component::WindowExt;
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dialog::DialogFooter;
-use gpui_component::{Sizable, h_flex};
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::dialog::DialogFooter;
+use gpui_kit::component::{Sizable, h_flex};
 use std::rc::Rc;
 
 /// Ask, then run `on_ok` only if the user confirms.
@@ -33,7 +33,7 @@ pub fn ask(
         let on_ok = on_ok.clone();
         let ok = ok.clone();
         let cancel = cancel.clone();
-        // No backdrop dismissal to ask for: gpui-component deprecated
+        // No backdrop dismissal to ask for: gpui-kit deprecated
         // `AlertDialog::overlay_closable` into a no-op ("disabled by
         // design"), so the call only produced a warning. Esc still
         // closes (`keyboard` defaults true) and Cancel is always on the

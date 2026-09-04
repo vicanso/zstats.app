@@ -13,8 +13,8 @@ use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, div, px,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::collections::HashSet;
 use zstats::snapshot::{
@@ -184,30 +184,40 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                         Hsla::from(theme::text()),
                     )
                 })
-                // The climb, next to the level it led to. Muted on
-                // purpose: a rise is news, not a threshold, and accent
-                // stays reserved for over-the-line (`theme.rs`).
-                .children(delta.map(|delta| {
-                    div()
-                        .id(("top-app-rise", g.root_pid as usize))
-                        .flex_none()
-                        .font_family(font::MONO)
-                        .text_size(px(10.))
-                        .text_color(theme::text_muted())
-                        .tooltip(widgets::wrap_tooltip(
-                            t!("overview.rise_row_tip", delta = format::pct(delta)).to_string(),
-                        ))
-                        .child(format!("↑{}", format::pct(delta)))
-                }))
+                // Climb + current as one right-hand cluster. Three
+                // `justify_between` children parked the rise in the
+                // leftover middle, so a short name left a hole and a
+                // long one shoved the arrow into the percent. Muted
+                // on purpose: a rise is news, not a threshold, and
+                // accent stays reserved for over-the-line (`theme.rs`).
                 .child(
-                    div()
-                        .id(("top-app-pct", g.root_pid as usize))
+                    h_flex()
                         .flex_none()
-                        .font_family(font::MONO)
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(theme::text_for(hot))
-                        .child(format::pct_col(g.cpu_usage_percent)),
+                        .items_baseline()
+                        .gap(px(6.))
+                        .children(delta.map(|delta| {
+                            div()
+                                .id(("top-app-rise", g.root_pid as usize))
+                                .flex_none()
+                                .font_family(font::MONO)
+                                .text_size(px(10.))
+                                .text_color(theme::text_muted())
+                                .tooltip(widgets::wrap_tooltip(
+                                    t!("overview.rise_row_tip", delta = format::pct(delta))
+                                        .to_string(),
+                                ))
+                                .child(format!("↑{}", format::pct(delta)))
+                        }))
+                        .child(
+                            div()
+                                .id(("top-app-pct", g.root_pid as usize))
+                                .flex_none()
+                                .font_family(font::MONO)
+                                .text_size(px(12.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(theme::text_for(hot))
+                                .child(format::pct_col(g.cpu_usage_percent)),
+                        ),
                 )
         }))
         .into_any_element()
