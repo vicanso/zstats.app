@@ -793,7 +793,44 @@ pub enum MemberTable {
         /// A refresh in flight keeps the last photograph on screen.
         refreshing: bool,
     },
-    Failed,
+    /// First photograph failed. Retried after
+    /// [`metrics::PANEL_PROCESS_INTERVAL`], same clock as a Ready
+    /// refresh — without this, Overview's job face stays wrong until
+    /// hide resets the table to Off.
+    Failed {
+        at: Instant,
+    },
+}
+
+/// What [`ZStatsAppState::ensure_member_table`] should do with the
+/// current photograph. Extracted so the retry clock can be tested
+/// without spawning a collector.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MemberTableNext {
+    /// In flight, or the last attempt is still fresh.
+    Hold,
+    /// Start (or refresh) now.
+    Restart,
+    /// `Off`: fall through to the "do we even need a table" checks.
+    FallThrough,
+}
+
+fn member_table_next(table: &MemberTable, now: Instant, interval: Duration) -> MemberTableNext {
+    match table {
+        MemberTable::Running => MemberTableNext::Hold,
+        MemberTable::Ready {
+            refreshing: true, ..
+        } => MemberTableNext::Hold,
+        MemberTable::Ready { at, .. } if now.saturating_duration_since(*at) < interval => {
+            MemberTableNext::Hold
+        }
+        MemberTable::Ready { .. } => MemberTableNext::Restart,
+        MemberTable::Failed { at } if now.saturating_duration_since(*at) < interval => {
+            MemberTableNext::Hold
+        }
+        MemberTable::Failed { .. } => MemberTableNext::Restart,
+        MemberTable::Off => MemberTableNext::FallThrough,
+    }
 }
 
 pub struct ZStatsAppState {
@@ -3147,7 +3184,7 @@ impl ZStatsAppState {
             // job-faced row back to `login`. Hide still drops it.
         } else {
             self.selected_app = Some(root_pid);
-            if matches!(self.member_table, MemberTable::Failed) {
+            if matches!(self.member_table, MemberTable::Failed { .. }) {
                 self.member_table = MemberTable::Off;
             }
             let expected = self.group_process_count(root_pid).unwrap_or(1);
@@ -3164,7 +3201,7 @@ impl ZStatsAppState {
         self.set_tab(Tab::Apps, cx);
         if self.selected_app != Some(root_pid) {
             self.selected_app = Some(root_pid);
-            if matches!(self.member_table, MemberTable::Failed) {
+            if matches!(self.member_table, MemberTable::Failed { .. }) {
                 self.member_table = MemberTable::Off;
             }
             let expected = self.group_process_count(root_pid).unwrap_or(1);
@@ -3260,20 +3297,17 @@ impl ZStatsAppState {
     }
 
     fn ensure_member_table(&mut self, root: u32, expected: u32, cx: &mut Context<Self>) {
-        match &self.member_table {
-            MemberTable::Running => return,
-            MemberTable::Failed => return,
-            MemberTable::Ready {
-                refreshing: true, ..
-            } => return,
-            MemberTable::Ready { at, .. } if at.elapsed() < metrics::PANEL_PROCESS_INTERVAL => {
-                return;
-            }
-            MemberTable::Ready { .. } => {
+        match member_table_next(
+            &self.member_table,
+            Instant::now(),
+            metrics::PANEL_PROCESS_INTERVAL,
+        ) {
+            MemberTableNext::Hold => return,
+            MemberTableNext::Restart => {
                 self.start_member_table(cx);
                 return;
             }
-            MemberTable::Off => {}
+            MemberTableNext::FallThrough => {}
         }
         if expected <= 1 {
             return;
@@ -3338,7 +3372,7 @@ impl ZStatsAppState {
                                 at: *at,
                                 refreshing: false,
                             },
-                            _ => MemberTable::Failed,
+                            _ => MemberTable::Failed { at: Instant::now() },
                         }
                     }
                 };
@@ -3532,6 +3566,55 @@ mod tests {
             read_bytes_per_sec: None,
             write_bytes_per_sec: None,
         }
+    }
+
+    fn ready_table(at: Instant, refreshing: bool) -> MemberTable {
+        MemberTable::Ready {
+            processes: std::sync::Arc::new(vec![]),
+            pgids: std::sync::Arc::new(std::collections::HashMap::new()),
+            at,
+            refreshing,
+        }
+    }
+
+    #[test]
+    fn a_failed_member_table_retries_after_the_process_cadence() {
+        let interval = metrics::PANEL_PROCESS_INTERVAL;
+        let t0 = Instant::now();
+        assert_eq!(
+            member_table_next(&MemberTable::Failed { at: t0 }, t0, interval),
+            MemberTableNext::Hold,
+            "just failed: do not hammer the full table"
+        );
+        assert_eq!(
+            member_table_next(
+                &MemberTable::Failed { at: t0 },
+                t0 + interval + Duration::from_secs(1),
+                interval,
+            ),
+            MemberTableNext::Restart,
+        );
+        assert_eq!(
+            member_table_next(&MemberTable::Running, t0, interval),
+            MemberTableNext::Hold,
+        );
+        assert_eq!(
+            member_table_next(&ready_table(t0, true), t0 + interval + interval, interval),
+            MemberTableNext::Hold,
+            "a refresh in flight is not a second fetch"
+        );
+        assert_eq!(
+            member_table_next(&MemberTable::Off, t0, interval),
+            MemberTableNext::FallThrough,
+        );
+        assert_eq!(
+            member_table_next(
+                &ready_table(t0, false),
+                t0 + interval + Duration::from_secs(1),
+                interval,
+            ),
+            MemberTableNext::Restart,
+        );
     }
 
     /// The query arrives lowercased (the store lowers it on every change);

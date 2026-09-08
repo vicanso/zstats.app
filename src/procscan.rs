@@ -68,10 +68,12 @@ pub struct AbnormalProcess {
 ///
 /// Reports everything it finds — deciding which ones have persisted long
 /// enough to be worth showing needs history, which lives in the store.
-pub fn scan() -> Vec<AbnormalProcess> {
-    let Some(raw) = all_processes() else {
-        return Vec::new();
-    };
+///
+/// `None` is a failed read, not an empty machine: the caller must not
+/// treat it as "no zombies" or the observation clocks reset. `Some(vec![])`
+/// is the real empty.
+pub fn scan() -> Option<Vec<AbnormalProcess>> {
+    let raw = all_processes()?;
     let mut found: Vec<AbnormalProcess> = raw
         .as_chunks::<KINFO_PROC_SIZE>()
         .0
@@ -101,7 +103,43 @@ pub fn scan() -> Vec<AbnormalProcess> {
     // Oldest first: a zombie sitting there for days is the signal; one that
     // appeared this second is probably about to be reaped.
     found.sort_by_key(|p| Reverse(p.age));
-    found
+    Some(found)
+}
+
+/// Kernel `p_comm` for `pid`, or `None` if the process is gone or the
+/// table cannot be read. Truncated to 16 bytes — that is the field.
+///
+/// Used at quit delivery to confirm the pid is still the program the
+/// card named. Not a metrics source: `ProcessSnapshot::name` stays
+/// zstats'. `KERN_PROC_PID` rather than the full table, so a click
+/// does not walk every process.
+pub fn comm(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as i32,
+    ];
+    let mut buf = vec![0u8; KINFO_PROC_SIZE];
+    let mut len = buf.len();
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len < OFF_COMM + COMM_LEN {
+        return None;
+    }
+    let name = read_name(&buf[OFF_COMM..OFF_COMM + COMM_LEN]);
+    (!name.is_empty()).then_some(name)
 }
 
 /// `sysctl(KERN_PROC_ALL)` — the same source `ps` reads.
@@ -257,7 +295,7 @@ mod tests {
 
     #[test]
     fn scanning_the_live_system_is_consistent() {
-        let found = scan();
+        let found = scan().expect("KERN_PROC_ALL should answer on this machine");
         // Cannot assert on the count — a machine may legitimately have none.
         // What must hold is that every entry is well-formed and sorted.
         for p in &found {
@@ -271,5 +309,13 @@ mod tests {
             found.windows(2).all(|w| w[0].age >= w[1].age),
             "oldest first"
         );
+    }
+
+    #[test]
+    fn comm_answers_for_this_process_and_refuses_pid_zero() {
+        let me = std::process::id();
+        let name = comm(me).expect("this process has a kernel name");
+        assert!(!name.is_empty());
+        assert!(comm(0).is_none(), "pid 0 is a process group, not a name");
     }
 }

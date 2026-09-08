@@ -629,16 +629,16 @@ fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement 
             state,
         ))
         .when(terminate::can_quit_app(g.root_pid), |d| {
-            d.child(
-                h_flex()
-                    .justify_end()
-                    .child(quit_button(g.root_pid, trend::tree_key(g).to_string())),
-            )
+            d.child(h_flex().justify_end().child(quit_button(
+                g.root_pid,
+                trend::tree_key(g).to_string(),
+                g.name.clone(),
+            )))
         })
         .into_any_element()
 }
 
-fn quit_button(pid: u32, name: String) -> AnyElement {
+fn quit_button(pid: u32, display: String, identity: String) -> AnyElement {
     let label = i18n::tr("apps.quit_ok");
     div()
         .id(("app-quit", pid as usize))
@@ -653,15 +653,16 @@ fn quit_button(pid: u32, name: String) -> AnyElement {
         .justify_center()
         .hover(|d| d.bg(theme::accent_wash(10)))
         .on_click(move |_, window, cx| {
-            let name = name.clone();
+            let display = display.clone();
+            let identity = identity.clone();
             confirm::ask(
                 window,
                 cx,
-                t!("apps.quit_title", name = name.clone()).to_string(),
-                t!("apps.quit_body", name = name).to_string(),
+                t!("apps.quit_title", name = display.clone()).to_string(),
+                t!("apps.quit_body", name = display).to_string(),
                 i18n::tr("apps.quit_ok"),
                 move |_| {
-                    if !terminate::request_quit(pid) {
+                    if !terminate::request_quit(pid, &identity) {
                         tracing::warn!("quit request for pid {pid} was not delivered");
                     }
                 },

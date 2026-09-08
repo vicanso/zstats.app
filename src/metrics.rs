@@ -342,12 +342,15 @@ fn spawn_abnormal_scan(cx: &mut App) {
                 .spawn(async { procscan::scan() })
                 .await;
             // `update` returns `()` in this gpui pin; a dropped app simply
-            // stops polling this task.
-            cx.update(|cx| {
-                cx.global::<ZStatsGlobalStore>()
-                    .clone()
-                    .update(cx, |state, cx| state.set_abnormal(found, cx));
-            });
+            // stops polling this task. A failed scan is not "no zombies":
+            // skip the replace so observation clocks keep running.
+            if let Some(found) = found {
+                cx.update(|cx| {
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.set_abnormal(found, cx));
+                });
+            }
             cx.background_executor().timer(ABNORMAL_SCAN_INTERVAL).await;
         }
     })

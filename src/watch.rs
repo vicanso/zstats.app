@@ -179,6 +179,9 @@ impl SustainedWatch {
             // and the new tenant's history is not the old one's.
             if p.cpu_time_ms < entry.cpu_time_last_ms {
                 *entry = Stretch::new(now, p.cpu_time_ms, &p.name);
+                // Still in the map, so prune will not clear this. The
+                // new tenant must not inherit the old announcement.
+                self.notified.remove(&p.pid);
                 continue;
             }
 
@@ -202,6 +205,10 @@ impl SustainedWatch {
                 .is_some_and(|q| now.duration_since(q) > SUSTAINED_GRACE)
             {
                 *entry = Stretch::new(now, p.cpu_time_ms, &p.name);
+                // Same as pid reuse: the stretch was reset in place, so
+                // prune keeps `notified` and a second two-hour hold
+                // would otherwise stay silent.
+                self.notified.remove(&p.pid);
                 continue;
             }
 
@@ -371,6 +378,8 @@ impl NetActivity {
 mod tests {
     use super::*;
     use crate::procscan::ProcState;
+    use std::collections::HashMap;
+    use zstats::snapshot::ProcessSnapshot;
 
     #[test]
     fn active_lists_only_qualifying_stretches() {
@@ -479,6 +488,138 @@ mod tests {
         watch.stretches.clear();
         watch.prune(Instant::now());
         assert!(watch.notified.is_empty(), "must re-arm after a real stop");
+    }
+
+    /// A process that stays in the table: name, instantaneous %, lifetime
+    /// counter. `record` opens a stretch from the percentage and judges
+    /// it from the counter, so both have to be filled in.
+    fn proc(pid: u32, name: &str, cpu_pct: f32, cpu_time_ms: u64) -> ProcessSnapshot {
+        ProcessSnapshot {
+            pid,
+            name: name.into(),
+            display_name: None,
+            cmd: String::new(),
+            cpu_usage_percent: cpu_pct,
+            cpu_time_ms,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            virtual_memory_bytes: 0,
+            run_time_secs: 0,
+            parent_pid: None,
+            user_id: None,
+            status: String::new(),
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    /// Counter delta that reads as `pct` of one core over `span`.
+    fn burnt_ms(span: Duration, pct: f64) -> u64 {
+        (span.as_secs_f64() * 1000.0 * pct / 100.0) as u64
+    }
+
+    #[test]
+    fn a_quiet_reset_while_the_pid_stays_re_arms() {
+        // The pid never leaves the table, so prune will not clear
+        // `notified`. Quiet past the grace window is a new episode
+        // anyway, and must announce again once it qualifies.
+        let mut watch = SustainedWatch::default();
+        let stats = HashMap::new();
+        let t0 = Instant::now();
+        let held = DEFAULT_SUSTAINED_AFTER + Duration::from_secs(60);
+
+        watch.record(&[proc(42, "helper", 12.0, 0)], &stats, rule(BAR), t0);
+        let t1 = t0 + held;
+        watch.record(
+            &[proc(42, "helper", 12.0, burnt_ms(held, 11.0))],
+            &stats,
+            rule(BAR),
+            t1,
+        );
+        assert_eq!(watch.take_notices().len(), 1, "first stretch notifies");
+
+        // Recent rate drops to zero; the clock is still inside grace.
+        let t_dip = t1 + Duration::from_secs(1);
+        watch.record(
+            &[proc(42, "helper", 0.0, burnt_ms(held, 11.0))],
+            &stats,
+            rule(BAR),
+            t_dip,
+        );
+        assert!(
+            watch.take_notices().is_empty(),
+            "a dip inside grace is not a new episode"
+        );
+
+        // Past grace: the next stretch starts from zero, even though
+        // the pid is still in the map.
+        let t_reset = t_dip + SUSTAINED_GRACE + Duration::from_secs(1);
+        watch.record(
+            &[proc(42, "helper", 0.0, burnt_ms(held, 11.0))],
+            &stats,
+            rule(BAR),
+            t_reset,
+        );
+        assert!(watch.take_notices().is_empty());
+        assert!(
+            !watch.notified.contains(&42),
+            "a real stop must re-arm even while the pid stays listed"
+        );
+
+        // New stretch, same pid, qualifies again.
+        let t2 = t_reset + held;
+        watch.record(
+            &[proc(
+                42,
+                "helper",
+                12.0,
+                burnt_ms(held, 11.0) + burnt_ms(held, 11.0),
+            )],
+            &stats,
+            rule(BAR),
+            t2,
+        );
+        let notices = watch.take_notices();
+        assert_eq!(notices.len(), 1, "the second stretch must notify");
+        assert_eq!(notices[0].pid, 42);
+    }
+
+    #[test]
+    fn a_reused_pid_is_a_new_tenant_and_notifies_again() {
+        let mut watch = SustainedWatch::default();
+        let stats = HashMap::new();
+        let t0 = Instant::now();
+        let held = DEFAULT_SUSTAINED_AFTER + Duration::from_secs(60);
+
+        watch.record(&[proc(7, "old", 12.0, 0)], &stats, rule(BAR), t0);
+        let t1 = t0 + held;
+        watch.record(
+            &[proc(7, "old", 12.0, burnt_ms(held, 11.0))],
+            &stats,
+            rule(BAR),
+            t1,
+        );
+        assert_eq!(watch.take_notices().len(), 1);
+
+        // Lifetime counter went backwards: this pid is someone else now.
+        let t_reuse = t1 + Duration::from_secs(1);
+        watch.record(&[proc(7, "new", 12.0, 50)], &stats, rule(BAR), t_reuse);
+        assert!(watch.take_notices().is_empty(), "the reset tick is empty");
+        assert!(
+            !watch.notified.contains(&7),
+            "the new tenant must not inherit the old announcement"
+        );
+
+        let t2 = t_reuse + held;
+        watch.record(
+            &[proc(7, "new", 12.0, 50 + burnt_ms(held, 11.0))],
+            &stats,
+            rule(BAR),
+            t2,
+        );
+        let notices = watch.take_notices();
+        assert_eq!(notices.len(), 1, "the new tenant notifies on its own clock");
+        assert_eq!(notices[0].name, "new");
     }
 
     fn zombie(pid: u32) -> AbnormalProcess {

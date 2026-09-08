@@ -278,7 +278,16 @@ fn same_thresholds(a: &Template, b: &Template) -> bool {
 
 fn write_template(text: &str, template: &Template) -> RemoteUpdate {
     let dir = zstats::settings::default_dir();
-    let path = zstats::settings::template_path(&dir);
+    let result = write_template_in(&dir, text, template);
+    if matches!(result, RemoteUpdate::Updated(_)) {
+        reload();
+        metrics::request_reload();
+    }
+    result
+}
+
+fn write_template_in(dir: &Path, text: &str, template: &Template) -> RemoteUpdate {
+    let path = zstats::settings::template_path(dir);
     let live = match fs::read_to_string(&path) {
         // A broken override parses to `None` and is therefore never
         // "already current" — replacing it is the fix.
@@ -298,17 +307,29 @@ fn write_template(text: &str, template: &Template) -> RemoteUpdate {
     {
         // Local already says what the remote says — the standing offer,
         // if any, is honoured by existing.
-        clear_offer_in(&dir);
+        clear_offer_in(dir);
         return RemoteUpdate::AlreadyCurrent;
     }
-    if let Err(e) = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, text)) {
+    if let Err(e) = fs::create_dir_all(dir) {
         return RemoteUpdate::Failed(e.to_string());
     }
-    reload();
-    metrics::request_reload();
+    let tmp = path.with_extension("toml.tmp");
+    if let Err(e) = fs::write(&tmp, text) {
+        return RemoteUpdate::Failed(e.to_string());
+    }
+    // 0600: the table names the programs you run.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return RemoteUpdate::Failed(e.to_string());
+    }
     // Applying is the other way an offer is honoured; the dot goes out
     // by the state changing, not by bookkeeping racing it.
-    clear_offer_in(&dir);
+    clear_offer_in(dir);
     RemoteUpdate::Updated(entries(template))
 }
 
@@ -498,7 +519,7 @@ fn ignore_offer_in(dir: &Path) {
 mod tests {
     use super::{
         RemoteUpdate, RemoteVerdict, clear_offer_in, entries, fingerprint, ignore_offer_in,
-        nudge_in, read_check_in, record_probe_in, same_thresholds, validate,
+        nudge_in, read_check_in, record_probe_in, same_thresholds, validate, write_template_in,
     };
     use zstats::alerts::{TEMPLATE_VERSION, Template};
 
@@ -583,6 +604,42 @@ mod tests {
             !same_thresholds(builtin, &changed),
             "one added threshold has to count as different"
         );
+
+        let dir = scratch("same-as-builtin");
+        match write_template_in(&dir, "unused", builtin) {
+            RemoteUpdate::AlreadyCurrent => {}
+            _ => panic!("matching the built-in must not write"),
+        }
+        assert!(
+            !zstats::settings::template_path(&dir).exists(),
+            "an identical table must not create an override file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_template_lands_via_rename_and_is_private() {
+        let dir = scratch("atomic-write");
+        let text =
+            format!("version = {TEMPLATE_VERSION}\n[cpu]\ngopls = 42.0\n[app_mem]\nXcode = 30.0\n");
+        let template = validate(&text).unwrap_or_else(|_| panic!("a valid table must be accepted"));
+        match write_template_in(&dir, &text, &template) {
+            RemoteUpdate::Updated(n) => assert_eq!(n, 2),
+            _ => panic!("a new table must write"),
+        }
+        let path = zstats::settings::template_path(&dir);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(
+            !path.with_extension("toml.tmp").exists(),
+            "the temp file must not remain after rename"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

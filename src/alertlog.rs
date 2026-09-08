@@ -194,15 +194,26 @@ fn save_in(dir: &Path, episodes: &[Restored], today: jiff::civil::Date) {
         .collect();
     doc.insert("episode".into(), toml::Value::Array(rows));
     let Ok(text) = toml::to_string(&toml::Value::Table(doc)) else {
+        tracing::warn!("could not serialise today's alert log");
         return;
     };
 
-    if fs::create_dir_all(dir).is_err() {
+    if let Err(e) = fs::create_dir_all(dir) {
+        tracing::warn!(
+            path = %dir.display(),
+            error = %e,
+            "could not create alert log directory"
+        );
         return;
     }
     let path = day_file(dir, today);
     let tmp = path.with_extension("toml.tmp");
-    if fs::write(&tmp, text).is_err() {
+    if let Err(e) = fs::write(&tmp, &text) {
+        tracing::warn!(
+            path = %tmp.display(),
+            error = %e,
+            "could not write alert log"
+        );
         return;
     }
     // 0600: an alert names the programs you run.
@@ -211,7 +222,14 @@ fn save_in(dir: &Path, episodes: &[Restored], today: jiff::civil::Date) {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
-    if fs::rename(&tmp, &path).is_err() {
+    if let Err(e) = fs::rename(&tmp, &path) {
+        tracing::warn!(
+            from = %tmp.display(),
+            to = %path.display(),
+            error = %e,
+            "could not replace alert log"
+        );
+        let _ = fs::remove_file(&tmp);
         return;
     }
     // The day file now holds everything the legacy one did.

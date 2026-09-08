@@ -57,13 +57,43 @@ pub fn method_for(pid: u32) -> QuitMethod {
 }
 
 /// Deliver the quit request. `false` means nothing was delivered (the
-/// process is already gone, or permissions changed since [`can_quit`]) —
-/// *not* that the target refused, which both tiers are free to do.
-pub fn request_quit(pid: u32) -> bool {
+/// process is already gone, permissions changed, this is us / init, or
+/// `pid` no longer belongs to `expected_name`) — *not* that the target
+/// refused, which both tiers are free to do.
+///
+/// `expected_name` is the matching identity ([`zstats`] `name`, not
+/// `display_name`). Re-checked here because a live card's pid can be
+/// recycled in-session; [`can_quit`] only answers "may I signal this
+/// pid". [`can_term`] is the same policy [`request_term`] re-checks.
+pub fn request_quit(pid: u32, expected_name: &str) -> bool {
+    if !can_term(pid) {
+        tracing::warn!(pid, "refusing to quit");
+        return false;
+    }
+    match crate::procscan::comm(pid) {
+        Some(live) if names_match(expected_name, &live) => {}
+        Some(live) => {
+            tracing::warn!(
+                pid,
+                expected = expected_name,
+                live,
+                "pid is no longer that process"
+            );
+            return false;
+        }
+        None => {
+            tracing::warn!(pid, expected = expected_name, "could not read process name");
+            return false;
+        }
+    }
     // The audit line for the app's rarest act: asking something to die.
     // Logged at the delivery point so every caller (alert card, Apps
     // expansion) is covered once.
-    tracing::info!(pid, "quit requested (app-level, SIGTERM fallback)");
+    tracing::info!(
+        pid,
+        name = expected_name,
+        "quit requested (app-level, SIGTERM fallback)"
+    );
     if let Some(app) = running_application(pid) {
         // `terminate` returns false when the request could not even be
         // delivered; a live app that chooses to show a save dialog instead
@@ -75,8 +105,19 @@ pub fn request_quit(pid: u32) -> bool {
         // state AppKit will not talk to) — fall through and try the signal.
     }
     // SAFETY: plain SIGTERM to a specific pid; never pid 0 / -1, which
-    // would signal a whole group.
-    pid != 0 && unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 }
+    // would signal a whole group. `can_term` already refused those.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 }
+}
+
+/// Kernel `p_comm` is 16 bytes. zstats' `name` can be longer
+/// (`Google Chrome Helper (Renderer)`), so a live comm that is exactly
+/// that width is treated as a prefix of the expected name — and the
+/// reverse, if a truncated expected ever arrives.
+fn names_match(expected: &str, live: &str) -> bool {
+    const COMM_MAX: usize = 16;
+    expected == live
+        || (live.len() == COMM_MAX && expected.starts_with(live))
+        || (expected.len() == COMM_MAX && live.starts_with(expected))
 }
 
 fn running_application(pid: u32) -> Option<objc2::rc::Retained<NSRunningApplication>> {
@@ -144,6 +185,8 @@ mod tests {
         // The delivering end refuses the same pids, not just the button.
         assert!(!request_term(1));
         assert!(!request_term(std::process::id()));
+        assert!(!request_quit(1, "launchd"));
+        assert!(!request_quit(std::process::id(), "zstats"));
     }
     use std::process;
 
@@ -152,6 +195,24 @@ mod tests {
         assert!(can_quit(process::id()));
         // pid 0 addresses the whole process group; request_quit must refuse
         // it outright rather than pass it to kill().
-        assert!(!request_quit(0));
+        assert!(!request_quit(0, "anything"));
+    }
+
+    #[test]
+    fn names_match_accepts_a_truncated_kernel_comm() {
+        assert!(names_match("helper", "helper"));
+        assert!(names_match(
+            "Google Chrome Helper (Renderer)",
+            "Google Chrome He",
+        ));
+        assert!(names_match(
+            "Google Chrome He",
+            "Google Chrome Helper (Renderer)",
+        ));
+        assert!(!names_match("helper", "bash"));
+        assert!(
+            !names_match("Google Chrome Helper (Renderer)", "Google Chrome"),
+            "a shorter live name that is not the 16-byte cap is a different process"
+        );
     }
 }

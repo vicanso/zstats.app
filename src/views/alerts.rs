@@ -954,8 +954,9 @@ fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
     }
     let event = &seen.event;
     // The confirm sheet speaks the name a person recognises; delivery
-    // is by pid either way, so the display name risks nothing.
-    let (pid, name) = match (&event.subject, event.kind()) {
+    // matches on `name`, the identity thresholds use. A recycled pid
+    // that now holds a different program must not inherit this button.
+    let (pid, display, identity) = match (&event.subject, event.kind()) {
         (
             AlertSubject::Process {
                 pid,
@@ -963,7 +964,11 @@ fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
                 display_name,
             },
             AlertKind::Memory,
-        ) => (*pid, display_name.clone().unwrap_or_else(|| name.clone())),
+        ) => (
+            *pid,
+            display_name.clone().unwrap_or_else(|| name.clone()),
+            name.clone(),
+        ),
         (
             AlertSubject::App {
                 root_pid,
@@ -975,26 +980,29 @@ fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
         ) => (
             *root_pid,
             display_name.clone().unwrap_or_else(|| name.clone()),
+            name.clone(),
         ),
         _ => return None,
     };
     // No control that could only fail: a subject this user cannot signal
-    // (root-owned, or already gone) simply gets no button.
-    if !terminate::can_quit(pid) {
+    // (root-owned, init, ourselves, or already gone) simply gets no button.
+    if !terminate::can_term(pid) || !terminate::can_quit(pid) {
         return None;
     }
     Some(quit_request_button(
         ("quit-subject", index).into(),
         pid,
-        name,
+        display,
+        identity,
     ))
 }
 
 /// The refusable-quit control itself, shared between the memory alert's
 /// head and the pressure card's consumer rows. Callers gate on
-/// `terminate::can_quit` first.
+/// `terminate::can_term` and `can_quit` first. `display` is the sheet;
+/// `identity` is what delivery matches against the live `p_comm`.
 #[cfg(target_os = "macos")]
-fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
+fn quit_request_button(id: gpui::ElementId, pid: u32, display: String, identity: String) -> Button {
     use crate::terminate::{self, QuitMethod};
 
     Button::new(id)
@@ -1006,17 +1014,18 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
         ))
         .ghost()
         .xsmall()
-        .tooltip(t!("alerts.quit_tip", name = name.clone()).to_string())
+        .tooltip(t!("alerts.quit_tip", name = display.clone()).to_string())
         .on_click(move |_, window, cx| {
             // Resolved at click time, not render time: whether the pid
             // still counts as an application can change in between, and
             // the sheet must describe what will actually be sent.
             let body = match terminate::method_for(pid) {
-                QuitMethod::App => t!("alerts.quit_body_app", name = name.clone()),
-                QuitMethod::Term => t!("alerts.quit_body_term", name = name.clone()),
+                QuitMethod::App => t!("alerts.quit_body_app", name = display.clone()),
+                QuitMethod::Term => t!("alerts.quit_body_term", name = display.clone()),
             }
             .to_string();
-            let title = t!("alerts.quit_title", name = name.clone()).to_string();
+            let title = t!("alerts.quit_title", name = display.clone()).to_string();
+            let identity = identity.clone();
             confirm::ask(
                 window,
                 cx,
@@ -1024,7 +1033,7 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, name: String) -> Button {
                 body,
                 i18n::tr("alerts.quit_ok"),
                 move |_| {
-                    if !terminate::request_quit(pid) {
+                    if !terminate::request_quit(pid, &identity) {
                         tracing::warn!("quit request for pid {pid} was not delivered");
                     }
                 },
@@ -1093,12 +1102,14 @@ fn consumer_rows(index: usize, event: &AlertEvent, live: bool) -> Option<AnyElem
 
 #[cfg(target_os = "macos")]
 fn consumer_quit(index: usize, row: usize, c: &zstats::alerts::MemoryConsumer) -> Option<Button> {
-    if !terminate::can_quit(c.pid) {
+    if !terminate::can_term(c.pid) || !terminate::can_quit(c.pid) {
         return None;
     }
+    let display = c.display_name.clone().unwrap_or_else(|| c.name.clone());
     Some(quit_request_button(
         SharedString::from(format!("quit-consumer-{index}-{row}")).into(),
         c.pid,
+        display,
         c.name.clone(),
     ))
 }

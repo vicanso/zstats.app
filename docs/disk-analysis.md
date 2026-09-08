@@ -140,7 +140,8 @@ APFS 克隆和硬链接会被重复计；跨目录求和大于卷用量是正常
 | 用户自选目录 | **已落地** | 「分析范围」行的文件夹按钮（`NSOpenPanel`，只允许目录）只选定范围，点「分析」才走树。选中的预设或自选路径有 chip 高亮。范围行在走树进行中整体隐藏——中途换范围必须先取消，绝不静默重启。选定的根对本次会话生效——「重新分析」此后指它，「清除结果」恢复默认 `~`。选择器抢焦点时窗口照常留着（它有标题栏，不是 hide-on-blur 的 popover）|
 | `~/Library` | **已落地**（预设 chip） | 盲区特写，便宜一半以上。「分析范围」行的一键 chip（与文件夹按钮同行——标题行只留查询/分析两个态标签，多语言下不与徽章争宽度），选定后点分析才走树 |
 | 缓存根集合 | **已落地**（预设 chip） | 默认七条：`~/Library/Caches`、`~/.cache`、`~/Library/Developer`，加上 `~/.npm`、`~/.cargo/registry`、`~/.gradle`、`~/.m2`——合并走树（`ScanScope`，多根）。清单与 cleanhints 同形：内置 `assets/caches-macos.toml`，`~/.zstats/caches-macos.toml` 整文件覆盖，Config 页可拉 GitHub 上的已发布副本；**不**和 cleanhints 混在一个文件里，注解不能改走哪些根。换清单 = 换身份（新结果文件，旧 Δ 不跟），对下一次 Analyze 生效，不打断正在跑的走树。不存在的路径跳过不报错，身份按请求集合原样记。caption 逐条列出根（`a + b + c`） |
-| `/` | **不做**，至少不进 P2 | firmlink 双计、`/System`、TCC、网络卷、可能几十分钟 I/O——算出来的总量是错的，不只是慢。选择器选到 `/` 会被明确拒绝（Failed + 原因），不是静默走一半；「分析范围」标签的 tooltip 也把这条理由摆在**找不到这个选项的人会看的地方**，而不是只写在选完之后的报错里 |
+| 整盘 | **已落地**（预设 chip） | 根是可写数据卷 `/System/Volumes/Data`（无数据卷时回退 `/`，见 `diskscan::whole_disk_root`）。从 `/` 走会因 firmlink 把同一批目录算两遍，还会错过数据卷顶层没有 firmlink 的目录（`.Spotlight-V100`、`MobileSoftwareUpdate`）。剪掉 `Volumes`（别的盘）和 `home`（autofs）。分钟级，需要完全磁盘访问才完整 |
+| `/` | 选择器拒绝 | 文件夹按钮选到 `/` 会 Failed + `ana_root_unsupported`，不是静默走一半。整盘预设已经覆盖可回收的那一卷；「分析范围」标签的 tooltip 把「为什么没有 /」写在找不到这个选项的人会看的地方 |
 
 范围写进 `ScanResult.root`。换根等于换一份缓存，对不上就当没有。
 

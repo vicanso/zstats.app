@@ -399,11 +399,10 @@ fn analysis_pick_chip() -> AnyElement {
 /// it. `None` while a walk runs — the header's cancel chip is the only
 /// control then.
 ///
-/// The label carries the tooltip that says what a scope may be, and that
-/// the whole volume is deliberately not one of the options: the reason
-/// (firmlinks double-count, /System, TCC) belongs where someone looks
-/// for the missing choice, not only in the error they get after picking
-/// `/` in the folder panel.
+/// The label's tooltip names the presets, including Whole disk (the
+/// data volume, not `/`). `/` is still refused by the folder picker —
+/// firmlinks would double-count — and that reason belongs where someone
+/// looks for the missing choice, not only in the error after picking it.
 fn analysis_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
     if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
         return None;
