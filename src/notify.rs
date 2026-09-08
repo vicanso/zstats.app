@@ -24,6 +24,14 @@
 //! (measured, with an osascript banner as the working control). An API
 //! that pretends to deliver is worse than one that refuses.
 //!
+//! Identifiers are per episode (`zstats-proc-{pid}-{kind}`, matching
+//! `state::Episode`), not per post. UN treats a repeated identifier as
+//! an update, so a persist-reminder or a 10-minute re-cross replaces the
+//! row instead of stacking "1 minute ago" beside "11 minutes ago". The
+//! Alerts tab is the history; the banner is the current one. Launch
+//! sweeps the old `zstats-banner-{n}` sequence — those rows cannot
+//! merge themselves.
+//!
 //! Non-macOS keeps the notify-rust transport (one delivery thread, bounded
 //! queue) unchanged — XDG banners auto-expire, so the wait there is
 //! bounded by the server, not the user. See "Platform reality" in
@@ -53,6 +61,10 @@ static CLICK: OnceLock<smol::channel::Sender<()>> = OnceLock::new();
 /// One banner to deliver. Owned data — on non-macOS it crosses to the
 /// delivery thread.
 struct Banner {
+    /// UN identifier. The same episode must keep the same id so a
+    /// follow-up *replaces* the banner in Notification Center instead
+    /// of stacking a second timestamp next to it.
+    id: String,
     title: String,
     subtitle: String,
     body: String,
@@ -78,14 +90,14 @@ mod native {
     use objc2::rc::Retained;
     use objc2::runtime::{NSObject, ProtocolObject};
     use objc2::{AnyThread, define_class, msg_send};
-    use objc2_foundation::{NSBundle, NSError, NSObjectProtocol, NSString};
+    use objc2_foundation::{NSArray, NSBundle, NSError, NSObjectProtocol, NSString};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
         UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use std::mem;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::ptr::NonNull;
 
     /// Whether this process runs from a real `.app`. UN throws an
     /// Objective-C exception for a bare binary, so the answer gates every
@@ -162,6 +174,7 @@ mod native {
         // must outlive it — the `forget` below makes ours immortal.
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         mem::forget(delegate);
+        sweep_legacy_banner_ids();
 
         // The denial is logged, not surfaced: the user answered the
         // system's own dialog, and nagging past that answer is exactly
@@ -198,12 +211,13 @@ mod native {
         if !banner.silent {
             content.setSound(Some(&UNNotificationSound::defaultSound()));
         }
-        // Unique per banner: UN treats a repeated identifier as an update
-        // to the existing notification, and every alert here is its own.
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = format!("zstats-banner-{}", SEQ.fetch_add(1, Ordering::Relaxed));
+        // Stable per episode: UN treats a repeated identifier as an
+        // update. A unique id per post stacked Mail's 10-minute
+        // re-cross as "1 minute ago" beside "11 minutes ago", which
+        // reads as two crises. The Alerts tab is the history; the
+        // banner is the current one.
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSString::from_str(&id),
+            &NSString::from_str(&banner.id),
             &content,
             None,
         );
@@ -214,6 +228,34 @@ mod native {
         });
         UNUserNotificationCenter::currentNotificationCenter()
             .addNotificationRequest_withCompletionHandler(&request, Some(&done));
+    }
+
+    /// Drop leftover unique-id banners from builds that numbered every
+    /// post. UN will not merge those with the stable identifiers we now
+    /// use, so Mail's 10-minute re-cross would otherwise keep sitting
+    /// next to its replacement until the user cleared Notification
+    /// Center by hand.
+    fn sweep_legacy_banner_ids() {
+        let done = RcBlock::new(|notes: NonNull<NSArray<UNNotification>>| {
+            let stale: Vec<Retained<NSString>> = unsafe { notes.as_ref() }
+                .to_vec()
+                .into_iter()
+                .map(|n| n.request().identifier())
+                .filter(|id| id.to_string().starts_with("zstats-banner-"))
+                .collect();
+            if stale.is_empty() {
+                return;
+            }
+            tracing::info!(
+                count = stale.len(),
+                "removing stacked banners from unique-id delivery"
+            );
+            let ids = NSArray::from_retained_slice(&stale);
+            UNUserNotificationCenter::currentNotificationCenter()
+                .removeDeliveredNotificationsWithIdentifiers(&ids);
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getDeliveredNotificationsWithCompletionHandler(&done);
     }
 }
 
@@ -307,6 +349,7 @@ pub fn start(cx: &mut gpui::App) {
 /// Show one system notification for a freshly fired alert.
 pub fn post(event: &AlertEvent) {
     dispatch(Banner {
+        id: episode_banner_id(event),
         title: subject_title(&event.subject),
         subtitle: notify_subtitle(event),
         body: notify_body(event),
@@ -323,6 +366,7 @@ pub fn post(event: &AlertEvent) {
 /// exist inside a panel nobody has a reason to open.
 pub fn post_sustained(notice: &state::SustainedNotice) {
     dispatch(Banner {
+        id: format!("zstats-sustained-{}", notice.pid),
         title: notice.name.clone(),
         subtitle: t!(
             "alerts.sustained_subtitle",
@@ -366,6 +410,7 @@ fn unused_clause(pid: u32) -> String {
 /// re-arms only once the climb is gone).
 pub fn post_memory_creep(creep: &state::MemoryCreep) {
     dispatch(Banner {
+        id: format!("zstats-creep-{}", creep.name),
         title: creep.name.clone(),
         subtitle: t!(
             "alerts.creep_subtitle",
@@ -384,6 +429,26 @@ pub fn post_memory_creep(creep: &state::MemoryCreep) {
 fn signal_click() {
     if let Some(tx) = CLICK.get() {
         let _ = tx.try_send(());
+    }
+}
+
+/// Stable UN identifier for one alerting episode: who, plus what about
+/// them. Matches `state::Episode` so a follow-up of Mail CPU replaces
+/// the Mail CPU banner and never a disk one.
+fn episode_banner_id(event: &AlertEvent) -> String {
+    let kind = match event.kind() {
+        AlertKind::Cpu => "cpu",
+        AlertKind::AppCpu => "appcpu",
+        AlertKind::Memory => "mem",
+        AlertKind::AppMemory => "appmem",
+        AlertKind::Disk => "disk",
+        AlertKind::Pressure => "pressure",
+    };
+    match &event.subject {
+        AlertSubject::Process { pid, .. } => format!("zstats-proc-{pid}-{kind}"),
+        AlertSubject::App { root_pid, .. } => format!("zstats-app-{root_pid}-{kind}"),
+        AlertSubject::Volume { mount_point } => format!("zstats-vol-{mount_point}-{kind}"),
+        AlertSubject::System => format!("zstats-sys-{kind}"),
     }
 }
 
@@ -500,6 +565,71 @@ fn window_mins(window: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::time::Duration;
+    use zstats::{AlertDetail, AlertEvent, AlertSubject};
+
+    fn cpu_event(pid: u32) -> AlertEvent {
+        AlertEvent {
+            subject: AlertSubject::Process {
+                pid,
+                name: "Mail".into(),
+                display_name: Some("Mail".into()),
+            },
+            detail: AlertDetail::Cpu {
+                avg_percent: 91.0,
+                threshold_percent: 90.0,
+                window: Duration::from_secs(60),
+                runaway: true,
+            },
+            repeat_after: None,
+        }
+    }
+
+    /// A follow-up of the same (pid, kind) must keep the identifier, or
+    /// Notification Center stacks a new row and the timestamps look like
+    /// two episodes ten minutes apart. A cooldown re-cross is the same
+    /// story with `repeat_after` empty — it has to replace too.
+    #[test]
+    fn a_follow_up_keeps_the_banner_id() {
+        let first = cpu_event(43709);
+        let mut again = cpu_event(43709);
+        again.repeat_after = Some(Duration::from_secs(30 * 60));
+        assert_eq!(episode_banner_id(&first), episode_banner_id(&again));
+        assert_eq!(
+            episode_banner_id(&first),
+            episode_banner_id(&cpu_event(43709)),
+            "a re-cross of the same pid is still that banner"
+        );
+        assert_ne!(
+            episode_banner_id(&first),
+            episode_banner_id(&cpu_event(1)),
+            "a different pid is a different banner"
+        );
+        assert!(
+            !episode_banner_id(&first).starts_with("zstats-banner-"),
+            "the launch sweep deletes the old sequential prefix"
+        );
+    }
+
+    /// CPU and memory of one process are two stories; sharing a banner
+    /// would let a CPU follow-up overwrite the memory row.
+    #[test]
+    fn cpu_and_memory_do_not_share_a_banner() {
+        let cpu = cpu_event(43709);
+        let mem = AlertEvent {
+            subject: cpu.subject.clone(),
+            detail: AlertDetail::Memory {
+                avg_bytes: 1,
+                share_percent: 50.0,
+                threshold_bytes: 1,
+                threshold_percent: 40.0,
+                window: Duration::from_secs(300),
+            },
+            repeat_after: None,
+        };
+        assert_ne!(episode_banner_id(&cpu), episode_banner_id(&mem));
+    }
 
     /// The notification identity now IS the bundle — UN attributes by the
     /// real .app, no claimed id to keep in step with Cargo.toml. What is

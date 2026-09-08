@@ -277,9 +277,11 @@ zedis 的 logger 原样适配：stdout + `~/.zstats/logs/zstats-app.log.<日期>
 
 ## 系统通知
 
-告警触发时发原生横幅，macOS 走 `NSUserNotification`。点击横幅会打开 popover 并切到 Alerts 页。系统横幅的外观不能自定义。
+告警触发时发原生横幅，macOS 走 `UNUserNotificationCenter`。点击横幅会打开 popover 并切到 Alerts 页。系统横幅的外观不能自定义。
 
 **macOS 上投递走 `UNUserNotificationCenter`：fire-and-forget + 常驻 delegate。** `addNotificationRequest:` 异步返回；点击由启动时装好的 delegate 在主 run loop 上接收（gpui 本来就在泵它），任何一条横幅的点击都等于「打开 Alerts 页」，所以 delegate 无需携带 per-notification 状态；`willPresent` 回调放行 Banner|List|Sound，让面板打开（应用最前）时横幅照常出现——菜单栏应用的「最前」正是用户在看告警的时刻。fire-and-forget 是目的而不是省事：更早的 notify-rust `wait_for_action` 版本要等用户*处理掉*横幅才返回，一条躺着没人理的横幅能把投递线程停到天亮，第 17 条起静默丢弃。用户的注意力不是可以串行化的资源。
+
+**UN identifier 按 episode 稳定**（`zstats-proc-{pid}-{kind}`，与 `state::Episode` 同一把钥匙），同一条故事的 30 分钟 follow-up、以及冷却后再越线，都是更新那一行，不是并排两条时间戳。Alerts 页才是历史。曾经每条用递增序号（`zstats-banner-{n}`），Mail 在 runaway 线附近按默认 10 分钟冷却重开，通知中心就会堆成「1 分钟前」挨着「11 分钟前」。启动时清掉旧的序号行——已经堆上的不会自己合并。
 
 **前任 `NSUserNotification` 在 macOS 26 上死于无声**，这是整次迁移的起因：当年选它是因为裸 `cargo run` 没有 bundle、UN 会直接抛异常，而它到 26.5 变成了彻底的 no-op——`deliverNotification:` 正常返回、什么都不显示、系统连通知设置条目都不建（实测，`osascript` 的横幅作为对照正常弹出）。假装投递的 API 比拒绝投递的更糟，所以它没有作为回退保留：裸 `cargo run` 现在诚实地没有横幅，启动时日志说一次。
 
