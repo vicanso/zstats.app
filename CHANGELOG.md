@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.3](https://github.com/vicanso/zstats.app/compare/v0.2.1..v0.2.3) - 2026-09-08
+
+### 🐛 Bug Fixes
+
+- A quiet stretch re-arms, quit checks the name, and a failed scan keeps its clock - ([20940cc](https://github.com/vicanso/zstats.app/commit/20940cca5ac65a4fc396b524d6edd44d605fd03e))
+- The same episode keeps one banner, and launch clears the stacked leftovers - ([968801a](https://github.com/vicanso/zstats.app/commit/968801a932a82006e8bcfc44c8b25d8b8c2aeb7c))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.2.2 - ([e8d600d](https://github.com/vicanso/zstats.app/commit/e8d600d77047cab7ebcd7287d16c78352a31eadb))
+- Switch the UI stack to gpui-kit - ([51aa981](https://github.com/vicanso/zstats.app/commit/51aa9819ca6c5a43a5be24630ce233a08b14249f))
+
 ## [0.2.1](https://github.com/vicanso/zstats.app/compare/v0.2.0..v0.2.1) - 2026-08-30
 
 ### ⛰️  Features
