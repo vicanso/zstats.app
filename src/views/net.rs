@@ -137,8 +137,8 @@ fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> A
                 .truncate()
                 .child(n.interface.clone()),
         )
-        .child(
-            v_flex()
+        .child({
+            let rates = v_flex()
                 .flex_1()
                 .min_w_0()
                 .child(
@@ -162,9 +162,64 @@ fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> A
                         .mt(px(5.))
                         .child(bar(n.received_bytes_per_sec, scale, theme::ink()))
                         .child(bar(n.transmitted_bytes_per_sec, scale, theme::text_dim())),
-                ),
-        )
+                )
+                .children(errors_line(n));
+            match packets_tip(n) {
+                Some(tip) => div()
+                    .id(gpui::SharedString::from(format!(
+                        "net-pkts-{}",
+                        n.interface
+                    )))
+                    .flex_1()
+                    .min_w_0()
+                    .tooltip(widgets::wrap_tooltip(tip))
+                    .child(rates)
+                    .into_any_element(),
+                None => rates.into_any_element(),
+            }
+        })
         .into_any_element()
+}
+
+/// Error rates only when something is actually erroring. A healthy
+/// interface is not a row of zeros. Display only — zstats has no
+/// error-rate alert.
+fn errors_line(n: &zstats::snapshot::NetworkSnapshot) -> Option<AnyElement> {
+    let text = errors_label(n)?;
+    Some(
+        div()
+            .mt(px(4.))
+            .font_family(font::MONO)
+            .text_size(px(9.))
+            .text_color(theme::accent_light())
+            .child(text)
+            .into_any_element(),
+    )
+}
+
+fn errors_label(n: &zstats::snapshot::NetworkSnapshot) -> Option<String> {
+    match (n.received_errors_per_sec, n.transmitted_errors_per_sec) {
+        (None, None) => None,
+        (rx, tx) => {
+            let rx = rx.unwrap_or(0);
+            let tx = tx.unwrap_or(0);
+            (rx + tx > 0).then(|| t!("net.errors", rx = rx, tx = tx).to_string())
+        }
+    }
+}
+
+fn packets_tip(n: &zstats::snapshot::NetworkSnapshot) -> Option<String> {
+    match (n.received_packets_per_sec, n.transmitted_packets_per_sec) {
+        (None, None) => None,
+        (rx, tx) => Some(
+            t!(
+                "net.packets_tip",
+                rx = rx.unwrap_or(0),
+                tx = tx.unwrap_or(0)
+            )
+            .to_string(),
+        ),
+    }
 }
 
 /// How many idle names the compact line keeps before an ellipsis.
@@ -300,5 +355,19 @@ mod tests {
 
         // An empty page still divides by something.
         assert_eq!(scale_for(&[]), SCALE_FLOOR_BYTES);
+    }
+
+    #[test]
+    fn error_rates_stay_off_a_healthy_row() {
+        let quiet = net(1000, 1000);
+        assert!(errors_label(&quiet).is_none());
+        assert!(packets_tip(&quiet).is_none());
+        let mut noisy = net(1000, 1000);
+        noisy.received_errors_per_sec = Some(12);
+        noisy.transmitted_errors_per_sec = Some(0);
+        assert!(errors_label(&noisy).unwrap().contains("12"));
+        noisy.received_packets_per_sec = Some(800);
+        noisy.transmitted_packets_per_sec = Some(90);
+        assert!(packets_tip(&noisy).is_some());
     }
 }

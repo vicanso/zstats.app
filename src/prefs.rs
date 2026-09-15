@@ -41,11 +41,12 @@ pub enum ThemePref {
 }
 
 /// What the menu bar shows. `Auto` is the default and the only mode that
-/// moves: CPU until memory is the thing that needs attention, then
-/// memory until it is not — recovered for five minutes, or the card
-/// dismissed (`tray::face_for` says exactly when). The two
-/// pinned modes are for the reader who always wants the same figure
-/// there; `Both` keeps two status items, CPU to the left of memory.
+/// moves: CPU until memory or a full disk is the thing that needs
+/// attention, then that face until it is not — recovered for five
+/// minutes, or the card dismissed (`tray::face_for` says exactly when;
+/// memory wins if both are on). The two pinned modes are for the
+/// reader who always wants the same figure there; `Both` keeps two
+/// status items, CPU to the left of memory. Disk is Auto-only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TrayPref {
     #[default]
@@ -160,6 +161,17 @@ static ANALYSIS_ROOTS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 /// file — expanded on read, never by the writer, so the file keeps the
 /// `~` the user typed.
 static ANALYSIS_EXCLUDE: RwLock<Vec<String>> = RwLock::new(Vec::new());
+/// Panel stays on screen through focus loss. Absent key is the popover
+/// default (auto-hide). Debug builds already skip auto-hide; this is
+/// for the installed build, when you need the panel next to another
+/// window.
+static PINNED: AtomicBool = AtomicBool::new(false);
+/// Last panel tab as its file key, `None` = Overview / unset. Written on
+/// each tab switch so a restart opens where the reader left, not always
+/// on Overview. Kept as the string the file holds: `Tab::from_pref_key`
+/// is the one table of names, and an unknown key restores to Overview
+/// there — a second table here could only drift from it.
+static LAST_TAB: RwLock<Option<String>> = RwLock::new(None);
 
 /// Floor accepted from the file or the picker. Below this the built-in
 /// dark/light default is used instead.
@@ -443,6 +455,8 @@ pub fn load() {
     *ANALYSIS_EXCLUDE
         .write()
         .expect("analysis exclude pref lock poisoned") = prefs.analysis_exclude;
+    PINNED.store(prefs.pinned, Ordering::Relaxed);
+    *LAST_TAB.write().expect("last tab pref lock poisoned") = prefs.last_tab;
 }
 
 /// Remember and persist a language choice. Only the store is infallible —
@@ -493,6 +507,11 @@ fn persist() {
             .read()
             .expect("analysis exclude pref lock poisoned")
             .clone(),
+        pinned: PINNED.load(Ordering::Relaxed),
+        last_tab: LAST_TAB
+            .read()
+            .expect("last tab pref lock poisoned")
+            .clone(),
     };
     if let Err(e) = write(&dir, &prefs) {
         tracing::error!("could not write {}: {e}", file_path(&dir).display());
@@ -528,6 +547,10 @@ struct Prefs {
     proxy: String,
     analysis_roots: Vec<String>,
     analysis_exclude: Vec<String>,
+    pinned: bool,
+    /// `tab` in the file; `None` is Overview, omitted like every other
+    /// default.
+    last_tab: Option<String>,
 }
 
 fn read(dir: &Path) -> Prefs {
@@ -570,6 +593,14 @@ fn read(dir: &Path) -> Prefs {
         proxy: get("proxy").unwrap_or_default().trim().to_string(),
         analysis_roots: list("analysis_roots"),
         analysis_exclude: list("analysis_exclude"),
+        pinned: table
+            .get("pinned")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+        last_tab: get("tab")
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -584,6 +615,40 @@ fn parse_hours_as_minutes(value: &toml::Value) -> Option<u16> {
         return None;
     }
     u16::try_from((hours * 60.0).round() as i64).ok()
+}
+
+/// Whether the panel stays up through focus loss.
+pub fn pinned() -> bool {
+    PINNED.load(Ordering::Relaxed)
+}
+
+/// Remember and persist the pin. Auto-hide reads this on the next
+/// deactivation; the caller notifies so the footer chip flips now.
+pub fn set_pinned(on: bool) {
+    PINNED.store(on, Ordering::Relaxed);
+    persist();
+}
+
+/// Last panel tab as a file key; `None` is Overview (the default).
+/// Unvalidated — `Tab::from_pref_key` decides what it names.
+pub fn last_tab_key() -> Option<String> {
+    LAST_TAB
+        .read()
+        .expect("last tab pref lock poisoned")
+        .clone()
+}
+
+/// Remember the tab if it moved. Overview omits the key.
+pub fn set_last_tab_key(key: Option<&str>) {
+    {
+        let mut last = LAST_TAB.write().expect("last tab pref lock poisoned");
+        if last.as_deref() == key {
+            return;
+        }
+        *last = key.map(str::to_string);
+    }
+    // Lock released first: `persist` reads it back.
+    persist();
 }
 
 /// `None` when the key is missing, unparsable, or below [`OPACITY_MIN`].
@@ -636,6 +701,12 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     }
     if !prefs.proxy.is_empty() {
         doc.insert("proxy".into(), toml::Value::String(prefs.proxy.clone()));
+    }
+    if prefs.pinned {
+        doc.insert("pinned".into(), toml::Value::Boolean(true));
+    }
+    if let Some(key) = prefs.last_tab.as_deref() {
+        doc.insert("tab".into(), toml::Value::String(key.into()));
     }
     let mut list = |key: &str, values: &[String]| {
         if !values.is_empty() {
@@ -700,6 +771,8 @@ mod tests {
                 // Nothing in the UI writes this one; it still has to
                 // come back out, or a theme change would eat it.
                 analysis_exclude: vec!["~/github".to_string()],
+                pinned: true,
+                last_tab: Some("alerts".into()),
             },
         )
         .unwrap();
@@ -717,6 +790,8 @@ mod tests {
             ]
         );
         assert_eq!(back.analysis_exclude, vec!["~/github".to_string()]);
+        assert!(back.pinned);
+        assert_eq!(back.last_tab.as_deref(), Some("alerts"));
         // The switch is stored as the off value only.
         assert!(back.muted);
         let text = fs::read_to_string(file_path(&dir)).unwrap();
@@ -745,6 +820,8 @@ mod tests {
             !text.contains("analysis_exclude"),
             "an empty exclusion list should omit the key"
         );
+        assert!(!text.contains("pinned"), "unpinned should omit the key");
+        assert!(!text.contains("tab"), "Overview should omit the key");
         let back = read(&dir);
         assert_eq!(back.language, LanguagePref::System);
         assert_eq!(back.theme, ThemePref::System);
@@ -753,6 +830,8 @@ mod tests {
         assert!(back.proxy.is_empty());
         assert!(back.analysis_roots.is_empty());
         assert!(back.analysis_exclude.is_empty());
+        assert!(!back.pinned);
+        assert!(back.last_tab.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

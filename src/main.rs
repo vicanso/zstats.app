@@ -134,17 +134,37 @@ const AUX_WINDOW_SIZE: (f32, f32) = (507., 620.);
 /// wider than the opening width would silently widen the window.
 const AUX_MIN_WINDOW_SIZE: (f32, f32) = (460., 420.);
 
-actions!(zstats, [Quit, CloseWindow]);
+actions!(
+    zstats,
+    [
+        Quit,
+        CloseWindow,
+        TogglePin,
+        GoTab1,
+        GoTab2,
+        GoTab3,
+        GoTab4,
+        GoTab5,
+        GoTab6,
+        GoTab7,
+    ]
+);
 
 /// The root view. Owns the window-lifecycle subscriptions and hands the
 /// panel itself to `views::root`; the gpui-kit dialog / notification
 /// layers are mounted over it.
 struct ZStatsApp {
+    /// Keyboard anchor so ⌘1–7 and the pin binding reach the panel.
+    /// Same reason the auxiliary windows hold one.
+    focus_handle: gpui::FocusHandle,
     /// Whether the window has ever held focus. A freshly created window also
     /// gets a deactivation callback before it is first activated; closing on
     /// that one would make it flash open and vanish.
     was_active: bool,
     _activation: Subscription,
+    /// Pulls focus back onto the panel when the focused element leaves
+    /// the tree. See `ZStatsApp::new`.
+    _focus_restore: Subscription,
     /// Follows System Settings → Appearance so our tokens stay in sync
     /// with the Popover material (they are not derived from Theme).
     _appearance: Subscription,
@@ -164,8 +184,10 @@ impl ZStatsApp {
                 return;
             }
             // Debug keeps the panel up so you can inspect it from the IDE
-            // or another window. Release still collapses to the tray.
-            if cfg!(debug_assertions) {
+            // or another window. Release still collapses to the tray,
+            // unless the footer pin is in — that is only auto-hide,
+            // the tray click still toggles.
+            if cfg!(debug_assertions) || prefs::pinned() {
                 return;
             }
             cx.global::<ZStatsGlobalStore>()
@@ -207,9 +229,21 @@ impl ZStatsApp {
             }
         });
 
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+        // Focus that leaves with its element — the name filter closed by
+        // a hide, a chip button on the tab ⌘-switched away from, a
+        // dialog dismissed — falls back to the dispatch root, which is
+        // gpui-kit's `Root`, above the "Panel" context. ⌘1–7 and ⌘P then
+        // matched nothing until a click happened to refocus the panel.
+        let focus_restore = cx.on_focus_lost(window, |this, window, cx| {
+            window.focus(&this.focus_handle, cx);
+        });
         Self {
+            focus_handle,
             was_active: false,
             _activation: activation,
+            _focus_restore: focus_restore,
             _appearance: appearance,
             _metrics: metrics,
         }
@@ -241,6 +275,19 @@ impl Render for ZStatsApp {
         div()
             .relative()
             .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context("Panel")
+            .on_action(cx.listener(|_, _: &TogglePin, _, cx| {
+                prefs::set_pinned(!prefs::pinned());
+                cx.notify();
+            }))
+            .on_action(cx.listener(|_, _: &GoTab1, _, cx| go_panel_tab(cx, 0)))
+            .on_action(cx.listener(|_, _: &GoTab2, _, cx| go_panel_tab(cx, 1)))
+            .on_action(cx.listener(|_, _: &GoTab3, _, cx| go_panel_tab(cx, 2)))
+            .on_action(cx.listener(|_, _: &GoTab4, _, cx| go_panel_tab(cx, 3)))
+            .on_action(cx.listener(|_, _: &GoTab5, _, cx| go_panel_tab(cx, 4)))
+            .on_action(cx.listener(|_, _: &GoTab6, _, cx| go_panel_tab(cx, 5)))
+            .on_action(cx.listener(|_, _: &GoTab7, _, cx| go_panel_tab(cx, 6)))
             .bg(cx.theme().background.opacity(tint))
             .text_color(cx.theme().foreground)
             .child(views::root(cx))
@@ -945,6 +992,13 @@ pub fn open_storage_window(cx: &mut App) {
     }
 }
 
+fn go_panel_tab(cx: &mut Context<ZStatsApp>, index: usize) {
+    let tab = state::Tab::ALL[index];
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, cx| state.set_tab(tab, cx));
+}
+
 /// Create the main window. With a tray `anchor` it opens under the tray icon;
 /// without one (startup, or the tray menu's "Show Window") it restores the
 /// last known position.
@@ -1144,13 +1198,17 @@ fn after_app_borrow(cx: &App, f: impl FnOnce() + 'static) {
     cx.foreground_executor().spawn(async move { f() }).detach();
 }
 
-/// Panel on screen: fast collector cadence, and if Alerts is the
-/// visible tab the tray spec has been seen.
+/// Panel on screen: fast collector cadence, the visible tab's entry
+/// work (it is being visited), and if Alerts is that tab the tray spec
+/// has been seen. `shown()` first — the entry work checks visibility.
 fn mark_panel_shown(cx: &mut App) {
     cx.global::<metrics::CollectorPace>().shown();
     cx.global::<ZStatsGlobalStore>()
         .clone()
-        .update(cx, |state, cx| state.see_alerts_if_showing(cx));
+        .update(cx, |state, cx| {
+            state.enter_shown_tab(cx);
+            state.see_alerts_if_showing(cx);
+        });
 }
 
 /// Banner click, or anything else that wants the Alerts tab in front:
@@ -1234,6 +1292,9 @@ fn main() {
             // opens showing what already fired, not an empty list that
             // implies a quiet morning.
             state.restore_alerts();
+            // Only the selection: the tab's entry work waits for the
+            // panel to be shown (`mark_panel_shown`).
+            state.restore_session_tab();
             state
         });
         cx.set_global(ZStatsGlobalStore::new(app_state));
@@ -1273,6 +1334,14 @@ fn main() {
                 CloseWindow,
                 Some("StorageWindow"),
             ),
+            KeyBinding::new("cmd-1", GoTab1, Some("Panel")),
+            KeyBinding::new("cmd-2", GoTab2, Some("Panel")),
+            KeyBinding::new("cmd-3", GoTab3, Some("Panel")),
+            KeyBinding::new("cmd-4", GoTab4, Some("Panel")),
+            KeyBinding::new("cmd-5", GoTab5, Some("Panel")),
+            KeyBinding::new("cmd-6", GoTab6, Some("Panel")),
+            KeyBinding::new("cmd-7", GoTab7, Some("Panel")),
+            KeyBinding::new("cmd-p", TogglePin, Some("Panel")),
         ]);
         install_menus(cx);
 

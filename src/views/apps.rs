@@ -214,6 +214,13 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
     // every keystroke, same as the process full-scan card.
     let bar_full = bar_full_for(sort, groups.iter());
 
+    if state.take_app_reveal()
+        && let Some(sel) = state.selected_app()
+        && let Some(ix) = visible.iter().position(|&i| groups[i].root_pid == sel)
+    {
+        data.list.scroll_to_reveal_item(ix);
+    }
+
     widgets::list_shell()
         .child(widgets::list_header(
             t!("apps.full_count", shown = count, total = data.total).to_string(),

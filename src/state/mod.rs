@@ -7,14 +7,22 @@
 //! rather than in the root view — window geometry, the selected tab, per-tab
 //! scroll offsets. Collected metrics are the main tenant, and sampling runs
 //! whether or not a window exists at all.
+//!
+//! Disk analysis lives in [`analysis`], alert episodes in [`alerts`]: both
+//! are store-owned, but changing either used to mean editing this whole file.
 
-use crate::alertlog;
+mod alerts;
+mod analysis;
+
+pub use alerts::SeenAlert;
+pub use analysis::{BigFiles, DiskAnalysis, Expansion};
+
+use alerts::{AlertBook, keep_alert};
+use analysis::Analysis;
+
 use crate::alerttpl;
-use crate::bigfiles;
-use crate::bigfiles::BigFilesScan;
 use crate::cachepreset;
 use crate::cleanhints;
-use crate::diskscan::{self, DiffBaseline, ScanEvent, ScanResult, ScanScope};
 use crate::fullscan::{self, GroupScan, Scan};
 use crate::history;
 use crate::history::Spender;
@@ -27,46 +35,32 @@ use crate::spaceinfo::{self, SpaceInfo};
 use crate::tray;
 use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
-use crate::volflag;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedRule, SustainedWatch};
 use gpui::{
-    AppContext, Bounds, Context, Entity, Focusable, Global, ListAlignment, ListState, Pixels,
+    App, AppContext, Bounds, Context, Entity, Focusable, Global, ListAlignment, ListState, Pixels,
     ScrollHandle, Window, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use std::array;
 use std::cell::Cell;
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::ops::Deref;
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zstats::settings::FileConfig;
-use zstats::snapshot::SystemSnapshot;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
-use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity, Tick};
+use zstats::{AlertEvent, Tick};
 
 /// Used when config.toml sets no `alert-cpu` — zstats' own default is 30%.
 /// The sustained bar is that line divided by `prefs::sustained_divisor`
 /// (3 unless app.toml says): derived rather than fixed so tightening
 /// `alert-cpu` tightens this too.
 const SUSTAINED_FALLBACK_ALERT: f64 = 30.0;
-
-/// How many past alerts the Alerts tab can show.
-const MAX_ALERTS: usize = 20;
-
-/// Days the Alerts tab's read-only record reaches back — a week, the
-/// span "how often did this fire" is usually asked over. The files
-/// keep a month (`alertlog::RETENTION_DAYS`); the tab shows the part
-/// that fits a glance.
-const ALERT_HISTORY_DAYS: u16 = 7;
 
 /// How to order the process list. A view preference, deliberately not
 /// persisted — it is for looking at something right now, not a setting.
@@ -78,6 +72,10 @@ pub enum ProcSort {
     #[default]
     Cpu,
     Memory,
+    /// Combined disk read+write rate. Same truncated-list contract as
+    /// Memory: the collector already ranked by CPU then memory, so this
+    /// only reorders that set. Name stays last — it ranks by no magnitude.
+    DiskIo,
     Name,
 }
 
@@ -86,7 +84,8 @@ impl ProcSort {
     pub fn next(self) -> Self {
         match self {
             ProcSort::Cpu => ProcSort::Memory,
-            ProcSort::Memory => ProcSort::Name,
+            ProcSort::Memory => ProcSort::DiskIo,
+            ProcSort::DiskIo => ProcSort::Name,
             ProcSort::Name => ProcSort::Cpu,
         }
     }
@@ -96,17 +95,19 @@ impl ProcSort {
         match self {
             ProcSort::Cpu => "processes.sort_cpu",
             ProcSort::Memory => "processes.sort_memory",
+            ProcSort::DiskIo => "processes.sort_io",
             ProcSort::Name => "processes.sort_name",
         }
     }
 
-    /// i18n key for the tooltip. Memory / name only reorder the already
+    /// i18n key for the tooltip. Memory / IO / name only reorder the already
     /// truncated list — that caveat has to live somewhere, and the chip
     /// itself is too short to carry it.
     pub fn tip_key(self) -> &'static str {
         match self {
             ProcSort::Cpu => "processes.sort_cpu_tip",
             ProcSort::Memory => "processes.sort_memory_tip",
+            ProcSort::DiskIo => "processes.sort_io_tip",
             ProcSort::Name => "processes.sort_name_tip",
         }
     }
@@ -117,6 +118,7 @@ impl ProcSort {
         match self {
             ProcSort::Cpu => "processes.sort_cpu_tip_full",
             ProcSort::Memory => "processes.sort_memory_tip_full",
+            ProcSort::DiskIo => "processes.sort_io_tip_full",
             ProcSort::Name => "processes.sort_name_tip_full",
         }
     }
@@ -209,6 +211,33 @@ impl Tab {
         }
     }
 
+    /// File key in `app.toml`; `None` for Overview, which is the default
+    /// and is expressed by leaving the key out.
+    pub fn pref_key(self) -> Option<&'static str> {
+        match self {
+            Tab::Overview => None,
+            Tab::Apps => Some("apps"),
+            Tab::Processes => Some("processes"),
+            Tab::Hardware => Some("hardware"),
+            Tab::Net => Some("network"),
+            Tab::Alerts => Some("alerts"),
+            Tab::History => Some("history"),
+        }
+    }
+
+    /// Inverse of [`Self::pref_key`]. Unknown or missing → Overview.
+    pub fn from_pref_key(key: Option<&str>) -> Self {
+        match key {
+            Some("apps") => Tab::Apps,
+            Some("processes") => Tab::Processes,
+            Some("hardware") => Tab::Hardware,
+            Some("network") => Tab::Net,
+            Some("alerts") => Tab::Alerts,
+            Some("history") => Tab::History,
+            _ => Tab::Overview,
+        }
+    }
+
     /// Tooltip / spoken name in the active locale.
     pub fn title(self) -> String {
         i18n::tr(match self {
@@ -221,19 +250,6 @@ impl Tab {
             Tab::History => "tabs.history",
         })
     }
-}
-
-/// Identity of an alerting episode: who, plus what about them.
-///
-/// Both halves are needed — one process can be over on CPU and on memory at
-/// the same time, and those are two separate stories.
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum Episode {
-    /// By pid, not name: two processes can share a name.
-    Process(u32, AlertKind),
-    App(u32, AlertKind),
-    Volume(String, AlertKind),
-    System(AlertKind),
 }
 
 /// How far back the History tab reads. A view preference like
@@ -319,75 +335,6 @@ impl HistorySort {
     }
 }
 
-/// The directory analyser (docs/disk-analysis.md). Deliberately NOT reset
-/// on hide, unlike every other one-shot: a `~/Library` walk is minutes,
-/// and the panel auto-hides on any focus loss — hide-resets would mean no
-/// scan ever finishes. Only the explicit cancel stops one.
-#[derive(Default)]
-pub enum DiskAnalysis {
-    #[default]
-    Off,
-    Running {
-        run_id: u64,
-        dirs_done: usize,
-        /// What this walk covers — named in the progress caption, so a
-        /// user returning mid-run knows *which* scope is being walked.
-        scope: ScanScope,
-        /// The latest mid-walk snapshot — lower bounds that only grow,
-        /// rendered under the running banner so minutes-long walks pay
-        /// out from their first seconds.
-        partial: Option<ScanResult>,
-        /// Whether a finished result is written to the per-root cache.
-        /// True for top-level analyses (the "last analysed X" a fresh
-        /// launch opens with). Expansion sub-walks never come through
-        /// here at all — they write into `expanded`, not the card.
-        persist: bool,
-        cancel: Arc<AtomicBool>,
-    },
-    Ready(ScanResult),
-    Failed(String),
-}
-
-/// What sits under an opened directory row (`toggle_expansion`).
-///
-/// `Ready` is the ranked directory table for that path — it may be
-/// empty, and empty is an answer: nothing inside cleared the bar the
-/// tables rank by. There is no `Ready`-from-index vs `Ready`-from-walk
-/// distinction on purpose; the rows are built by the same `tables()`
-/// either way, and where they came from would only invite the reader to
-/// trust one over the other.
-pub enum Expansion {
-    /// The index had nothing recorded here, so a walk of this subtree is
-    /// running. Seconds, and only ever one at a time.
-    Walking,
-    Ready(Vec<diskscan::DirHit>),
-    Failed,
-}
-
-/// The Hardware tab's one-shot large-file query, same lifecycle shape as
-/// the full process scans: `Off → Running → Ready/Failed`, reset on hide.
-#[derive(Default)]
-pub enum BigFiles {
-    #[default]
-    Off,
-    Running,
-    Ready {
-        scan: BigFilesScan,
-        /// Rows the previous listing would have shown and did not — see
-        /// [`bigfiles::Baseline::is_new`]. Empty when there was nothing
-        /// to compare against, which is not the same as "nothing is new".
-        added: HashSet<PathBuf>,
-        /// When that previous listing was taken. `None` on a first run,
-        /// where marking everything new would say nothing at all.
-        since: Option<SystemTime>,
-    },
-    /// `indexing_off` selects the honest message: a disabled Spotlight
-    /// index would otherwise masquerade as "no big files".
-    Failed {
-        indexing_off: bool,
-    },
-}
-
 /// The version check / assisted download, for the About page.
 pub enum UpdateStatus {
     Checking,
@@ -457,230 +404,18 @@ pub enum TemplateSync {
 /// panel's default cadence, so it only ever fires for a replug.
 const EJECT_HIDE_MAX: Duration = Duration::from_secs(60);
 
-/// How far back the auto-quiet rule looks, and how many banners it lets
-/// through in that span before it stops interrupting.
-///
-/// Aimed at a condition that keeps crossing, clearing and crossing again:
-/// zstats already spaces the reminders *inside* one episode (the pressure
-/// rule backs off 30m/1h/2h/4h), but a flapping subject opens a fresh
-/// episode each time and each one is news. Two banners is enough to have
-/// said it; a third within the hour is the same sentence again.
-///
-/// Deliberately per episode, not global: a second, different subject
-/// crossing its line is new information and must still arrive.
-const NOISY_WINDOW: Duration = Duration::from_secs(3600);
-const NOISY_AFTER: usize = 2;
+/// History rows younger than this survive a reveal onto the tab. The
+/// records file gains one line a minute, so a re-read inside that
+/// minute can only return what is already on screen.
+const HISTORY_FRESH: Duration = Duration::from_secs(60);
 
-/// How long a memory-class episode must look recovered before Auto
-/// puts the tray back on CPU. Same five minutes zstats waits to end a
-/// pressure episode (`PRESSURE_REARM` = `SLOW_WINDOW`): a one-sample
-/// dip must not flip the icon, and the face turns back when the engine
-/// would have cleared that episode, not five minutes after. Process
-/// and app memory get the same hold so a leak that just went under
-/// its own bar does not flicker the menu bar. The card stays.
-const TRAY_RECOVER: Duration = Duration::from_secs(5 * 60);
-
-/// One episode's quiet hours: banners are skipped until the deadline.
-struct Snooze {
-    until: Instant,
-    /// Wall-clock form of `until` ("14:32"), fixed at snooze time — the
-    /// deadline does not move, so neither should its label.
-    until_label: String,
-}
-
-impl Episode {
-    fn of(event: &AlertEvent) -> Self {
-        let kind = event.kind();
-        match &event.subject {
-            AlertSubject::Process { pid, .. } => Episode::Process(*pid, kind),
-            AlertSubject::App { root_pid, .. } => Episode::App(*root_pid, kind),
-            AlertSubject::Volume { mount_point } => Episode::Volume(mount_point.clone(), kind),
-            AlertSubject::System => Episode::System(kind),
-        }
-    }
-}
-
-/// A disk alert the user cannot act on is not news: a read-only extra
-/// volume (an installer DMG under `/Volumes`) is full by construction.
-/// Other kinds, and the boot disk, pass. `statfs` failing is fail-open
-/// — see [`volflag`].
-fn keep_alert(event: &AlertEvent) -> bool {
-    let AlertSubject::Volume { mount_point } = &event.subject else {
-        return true;
-    };
-    if event.kind() != AlertKind::Disk {
-        return true;
-    }
-    if !volflag::skips_disk_alert(mount_point) {
-        return true;
-    }
-    tracing::info!(
-        kind = ?event.kind(),
-        subject = ?event.subject,
-        banner = "skipped",
-        "disk alert skipped: volume is read-only"
-    );
-    false
-}
-
-/// One alerting episode, with the freshest numbers it has reported.
-///
-/// [`AlertEvent`] carries no timestamp of its own, and `Tick::alerts` reports
-/// the *moment* a threshold is crossed rather than a standing list — so the
-/// "currently interesting" list the design shows has to be accumulated here.
-///
-/// Accumulated by episode, not by event. zstats alerts once on the crossing,
-/// once more after 30 minutes if it still holds, then stays quiet until the
-/// value falls back and re-arms. Appending a card per event would give the
-/// same condition two entries, and a value hovering at the threshold could
-/// push everything else out of a 20-slot list on its own.
-pub struct SeenAlert {
-    /// Stable id for the UI. The deque reorders as episodes resurface, so an
-    /// index would silently reassign element state — hover, tooltips, the
-    /// expanded editor — to a different card.
-    pub seq: u64,
-    /// When this episode first crossed. Wall clock, not `Instant`:
-    /// these outlive the process now ([`crate::alertlog`]), and a
-    /// monotonic clock restarts with the machine.
-    pub first_at: SystemTime,
-    /// Most recent report within the episode.
-    pub at: SystemTime,
-    /// How many times zstats has reported it — 1 on the crossing, 2 once the
-    /// 30-minute follow-up lands.
-    pub reports: u32,
-    /// Whether this episode has been reported *in this session*.
-    ///
-    /// The gate on every acting control the card carries. A card
-    /// restored from yesterday names a pid, and after a reboot macOS
-    /// hands low pids straight back out — so "quit Google Chrome ·
-    /// 923" could deliver SIGTERM to whatever holds 923 now. Nothing in
-    /// `terminate::can_quit` catches that: `kill(pid, 0)` answers "may
-    /// I signal this pid", never "is this still that program". So the
-    /// buttons appear only once a live report has confirmed the pid
-    /// during this run — restored cards are records to read, and the
-    /// Processes tab still offers a quit for anything actually running.
-    pub live: bool,
-    /// When this memory-class episode last started looking recovered,
-    /// for the tray's Auto face. `None` while it still holds. The card
-    /// stays on the Alerts tab; the menu bar goes back to CPU after
-    /// [`TRAY_RECOVER`]. Display-layer only — the engine is not asked.
-    recovered_since: Option<SystemTime>,
-    pub event: AlertEvent,
-}
-
-impl SeenAlert {
-    /// Time since the most recent report. A clock stepped backwards
-    /// (NTP, a manual change) reads as "just now" rather than a
-    /// negative age.
-    pub fn age(&self) -> Duration {
-        self.at.elapsed().unwrap_or_default()
-    }
-
-    /// First report to last report, once that differs from [`age`] by
-    /// enough to be worth a second timestamp. Not "still happening":
-    /// zstats goes quiet after the follow-up, so this span can end
-    /// hours before the card is read.
-    pub fn span(&self) -> Option<Duration> {
-        let span = self.at.duration_since(self.first_at).unwrap_or_default();
-        (span >= Duration::from_secs(60)).then_some(span)
-    }
-
-    fn recovered_for(&self, now: SystemTime) -> bool {
-        self.recovered_since
-            .is_some_and(|at| now.duration_since(at).unwrap_or_default() >= TRAY_RECOVER)
-    }
-}
-
-fn is_memory_class(kind: AlertKind) -> bool {
-    matches!(
-        kind,
-        AlertKind::Memory | AlertKind::AppMemory | AlertKind::Pressure
-    )
-}
-
-/// Whether this episode is worth the menu bar changing face.
-///
-/// Every memory-class episode qualifies except **kernel pressure at
-/// the warning tier**, and the exception is about what warning *means*
-/// on this platform: a memory-heavy Mac sits at warning as its steady
-/// state — zstats says so in the pressure rule's own comment, and
-/// makes that tier wait five times as long before reporting for
-/// exactly this reason. A face that spends half the day on memory has
-/// stopped being a signal, so the tray waits for the kernel's
-/// `critical` while the card and the banner still carry the warning.
-///
-/// The severity is `AlertEvent::severity()`, zstats' own field — the
-/// panel is choosing *which verdict deserves the menu bar*, not
-/// deciding when memory is a problem, and it reads no raw
-/// `pressure_level` to do it. Process and application memory episodes
-/// are Warning by construction in zstats (only pressure ≥ 4 and a
-/// runaway CPU are Critical), so gating the whole class on severity
-/// would have deleted the face's original job: naming the process or
-/// tree that is eating the machine.
-///
-/// An episode that escalated from warning to critical turns the face
-/// the moment the worsening is reported (`record_alert` keeps the
-/// newest event), and keeps it through a fall back to warning — that
-/// tail is still one unrecovered critical episode, and it ends the way
-/// every other one does, on `TRAY_RECOVER` of the kernel calling the
-/// machine normal again.
-fn turns_the_face(event: &AlertEvent) -> bool {
-    match event.kind() {
-        AlertKind::Pressure => event.severity() == Severity::Critical,
-        kind => is_memory_class(kind),
-    }
-}
-
-/// Whether this memory-class event still holds in `snapshot`.
-///
-/// `None` if this sample cannot say (no pressure level, process
-/// collection off). `false` if the subject is gone or its figure is
-/// under the bar the event itself recorded — not a new threshold.
-fn memory_event_holds(event: &AlertEvent, snapshot: &SystemSnapshot) -> Option<bool> {
-    match &event.detail {
-        AlertDetail::Pressure { .. } => {
-            // zstats: `level <= 1` is normal. No level → cannot say.
-            Some(snapshot.memory.pressure_level? > 1)
-        }
-        AlertDetail::Memory {
-            threshold_bytes,
-            threshold_percent,
-            ..
-        } => {
-            let held = match &event.subject {
-                AlertSubject::Process { pid, name, .. } => {
-                    let processes = snapshot.processes.as_deref()?;
-                    let Some(p) = processes.iter().find(|p| p.pid == *pid) else {
-                        return Some(false);
-                    };
-                    if p.name != *name {
-                        return Some(false);
-                    }
-                    p.phys_footprint_bytes.unwrap_or(p.memory_bytes)
-                }
-                AlertSubject::App { root_pid, name, .. } => {
-                    let groups = snapshot.process_groups.as_deref()?;
-                    let Some(g) = groups.iter().find(|g| g.root_pid == *root_pid) else {
-                        return Some(false);
-                    };
-                    if g.name != *name {
-                        return Some(false);
-                    }
-                    g.phys_footprint_bytes.unwrap_or(g.memory_bytes)
-                }
-                _ => return Some(false),
-            };
-            if *threshold_bytes > 0 {
-                Some(held >= *threshold_bytes)
-            } else if *threshold_percent > 0.0 && snapshot.memory.total_bytes > 0 {
-                let share = held as f64 / snapshot.memory.total_bytes as f64 * 100.0;
-                Some(share >= *threshold_percent)
-            } else {
-                None
-            }
-        }
-        _ => Some(false),
-    }
+/// Whether the panel is on screen. Tab-entry work (History read,
+/// `tmutil` probe, topology fetch) keys off this rather than the
+/// selected tab alone: the tab outlives a hide and, since it is
+/// remembered, a restart too.
+fn panel_visible(cx: &App) -> bool {
+    cx.try_global::<metrics::CollectorPace>()
+        .is_some_and(|p| p.is_visible())
 }
 
 /// The one-shot listing of every process, behind the All chip.
@@ -837,31 +572,11 @@ pub struct ZStatsAppState {
     window_bounds: Option<Bounds<Pixels>>,
     scale_factor: f32,
     last_auto_hide: Option<Instant>,
-    latest: Option<Tick>,
-    alerts: VecDeque<SeenAlert>,
-    /// Today's episodes the user has acknowledged with ✕. Out of the
-    /// list and off the tab's tint, but written back into today's file
-    /// with `dismissed = true`: the record of the day must say what
-    /// fired, not what was left unread. Retired with the list at
-    /// midnight; bounded like it.
-    dismissed_today: Vec<alertlog::Restored>,
-    /// The past week's files, read at launch, on entering the Alerts
-    /// tab and when the day turns — never per frame. Read-only on
-    /// screen; nothing in it can be acted on (the pids are history).
-    alert_history: Vec<alertlog::DayLog>,
-    /// Tray corner spec: a live `AlertEvent` has landed since the user
-    /// last looked at the Alerts tab. Display of "you have not opened
-    /// that list", not a second threshold — the engine already decided
-    /// the condition. Restored (`live = false`) cards do not count;
-    /// session-only, like the snooze beside it.
-    tray_alert_unseen: bool,
-    tab: Tab,
+    pub(crate) latest: Option<Tick>,
+    pub(crate) alert_book: AlertBook,
+    pub(crate) tab: Tab,
     selected_pid: Option<u32>,
     selected_app: Option<u32>,
-    /// Which alert card is expanded for threshold editing. Keyed by the
-    /// settings key + override name (process / app / mount), not the
-    /// deque index — new events push to the front.
-    selected_alert: Option<(String, String)>,
     settings: Option<FileConfig>,
     /// UI filter: show only the abnormal entries, not the whole table.
     only_abnormal: bool,
@@ -869,41 +584,16 @@ pub struct ZStatsAppState {
     show_unused_nets: bool,
     /// UI filter: reveal every temperature sensor, not just the preview.
     show_all_sensors: bool,
-    /// The Hardware tab's large-file query. Query-like state: reset on hide.
-    big_files: BigFiles,
-    /// The directory analyser. Survives hide (see [`DiskAnalysis`]).
-    disk_analysis: DiskAnalysis,
-    /// Outer results parked while drilled into a subtree — each level is
-    /// a finished `ScanResult` (a few KB), so "back" restores instantly
-    /// instead of re-walking the parent for half a minute.
-    /// Rows the reader opened in the analysis tables, and what is under
-    /// each. Session state that belongs to the result on screen: a new
-    /// walk, a cleared result or a fresh window drops it.
-    expanded: HashMap<PathBuf, Expansion>,
-    /// Monotonic id for expansion sub-walks. One runs at a time; a
-    /// superseded one's events land nowhere, same guard as the main walk.
-    expand_runs: u64,
-    expand_cancel: Option<Arc<AtomicBool>>,
-    /// The user-picked analysis scope for this session — a chosen folder
-    /// or the cache-set preset; `None` means the default (~). The
-    /// re-analyze chip re-walks whatever this says, so picking a scope
-    /// once makes the chip mean that scope until the results are
-    /// cleared.
-    disk_analysis_root: Option<ScanScope>,
-    /// The run before the current result, flattened for per-row Δs —
-    /// rebuilt from the rotated `.prev` cache file whenever a top-level
-    /// walk finishes (and once at launch), never during drills.
-    analysis_diff: Option<DiffBaseline>,
+    /// Directory analyser + large-file query. Survives hide for the
+    /// analyser (see [`DiskAnalysis`]); the listing is query-like and
+    /// reset on hide.
+    pub(crate) analysis: Analysis,
     /// The boot volume's purgeable-space / snapshot readout, refreshed
     /// lazily while Hardware is the visible tab (throttled below) — a
     /// panel-owned query, deliberately not a Monitor metric.
     space: Option<SpaceInfo>,
     space_at: Option<Instant>,
     space_inflight: bool,
-    /// Whether the dirs table shows every retained row (up to
-    /// `TABLE_KEEP`) or the display default. A per-visit choice: reset
-    /// when the disk-space window is built fresh, not persisted.
-    analysis_show_all_dirs: bool,
     /// The settings window, if one was ever opened. Kept so a second
     /// click focuses the existing window; a handle whose window the user
     /// closed fails its update and a fresh window is built instead.
@@ -911,24 +601,10 @@ pub struct ZStatsAppState {
     /// The disk-space window (large files + the analyser), same
     /// reuse-or-rebuild contract as [`Self::settings_window`].
     storage_window: Option<gpui::AnyWindowHandle>,
-    /// Monotonic id for analyser runs, so a stale run's channel events
-    /// can never land into a newer run's state.
-    disk_analysis_runs: u64,
     /// Volumes this session has successfully ejected, and when. They
     /// are hidden from the Hardware tab until the snapshot stops
     /// listing them — see [`Self::mark_ejected`].
-    ejected: HashMap<String, Instant>,
-    /// When each episode's banners were actually delivered, newest last.
-    /// Drives the auto-quiet rule ([`NOISY_AFTER`]); trimmed to
-    /// [`NOISY_WINDOW`] on every read, so it cannot grow. Session-only,
-    /// like the snooze beside it — a restart is a deliberate act and
-    /// starts the count over.
-    banner_sent: HashMap<Episode, Vec<Instant>>,
-    /// Banner snoozes by episode: the user asked for quiet on this subject
-    /// until a deadline. Delivery-layer only — events still land in the
-    /// alerts list and the engine's rules are untouched. Deliberately not
-    /// persisted: a snooze means "not now", and a restart is a new now.
-    snoozed: HashMap<Episode, Snooze>,
+    pub(crate) ejected: HashMap<String, Instant>,
     proc_sort: ProcSort,
     app_sort: AppSort,
     /// The three observers that answer questions zstats' own rules cannot —
@@ -960,6 +636,9 @@ pub struct ZStatsAppState {
     /// read walks a day of JSONL and there is no reason to pay for it before
     /// somebody asks.
     history: Option<Vec<Spender>>,
+    /// When `history` last landed, so a reveal onto History inside
+    /// [`HISTORY_FRESH`] keeps the rows instead of re-reading.
+    history_loaded_at: Option<Instant>,
     /// The window `history` was (or is being) read for.
     history_range: HistoryRange,
     /// The order the History list shows.
@@ -969,8 +648,6 @@ pub struct ZStatsAppState {
     /// The last (or in-flight) Caches-preset roots fetch.
     caches_sync: Option<CachesSync>,
     template_sync: Option<TemplateSync>,
-    /// Throttle for the alert list's midnight sweep.
-    alert_day_checked_at: Option<Instant>,
     /// A newer release a silent check found (its tag) — the settings
     /// gear's dot. Loaded from the check file at launch, refreshed by
     /// every check, cleared by comparison once the update is installed.
@@ -1008,8 +685,6 @@ pub struct ZStatsAppState {
     /// list must be rebuilt when the row set changes — both want the text
     /// as plain state, not behind an entity read.
     proc_filter_text: String,
-    /// Monotonic id source for [`SeenAlert::seq`].
-    next_seq: u64,
     /// One scroll offset per tab, indexed by [`Tab::index`].
     ///
     /// Has to live here rather than on the element: gpui keys element state by
@@ -1030,87 +705,32 @@ pub struct ZStatsAppState {
     /// consumer is the render pass, which holds `&self`; taken once,
     /// so the reader's own scrolling wins from the frame after.
     app_reveal: Cell<bool>,
+    /// Same one-shot for the Processes list, armed by [`Self::reveal_pid`].
+    proc_reveal: Cell<bool>,
 }
 
 impl Default for ZStatsAppState {
     fn default() -> Self {
-        // The scope a fresh launch restores: the last finished top-level
-        // walk's, from app.toml — or the default home walk when the key
-        // is absent. Restoring the scope also restores what "re-analyze"
-        // means, same as if the user had just picked it.
-        let restored: Option<ScanScope> = {
-            let roots = prefs::analysis_roots();
-            (!roots.is_empty()).then(|| ScanScope {
-                // The cache-set preset is the only multi-root producer,
-                // and its base is home; a single stored root is its own
-                // base — the same derivation `ScanScope`'s constructors
-                // use.
-                base: if roots.len() > 1 {
-                    diskscan::default_root().unwrap_or_else(|| roots[0].clone())
-                } else {
-                    roots[0].clone()
-                },
-                roots,
-            })
-        };
-        let launch_roots: Vec<PathBuf> = restored
-            .as_ref()
-            .map(|s| s.roots.clone())
-            .or_else(|| diskscan::default_root().map(|home| vec![home]))
-            .unwrap_or_default();
-        // Cache pairs no launch can restore any more (scopes analysed
-        // once and abandoned) age out here — a handful of stats.
-        diskscan::sweep_orphans(&[
-            &diskscan::default_root()
-                .map(|h| vec![h])
-                .unwrap_or_default(),
-            &launch_roots,
-        ]);
         Self {
             window_bounds: None,
             scale_factor: 1.0,
             last_auto_hide: None,
             latest: None,
-            alerts: VecDeque::new(),
-            dismissed_today: Vec::new(),
-            alert_history: Vec::new(),
-            tray_alert_unseen: false,
+            alert_book: AlertBook::default(),
             tab: Tab::default(),
             selected_pid: None,
             selected_app: None,
-            selected_alert: None,
             settings: None,
             only_abnormal: false,
             show_unused_nets: false,
             show_all_sensors: false,
-            big_files: BigFiles::default(),
-            // A fresh launch opens with the last finished analysis, if
-            // one was cached — "see last time's numbers first".
-            disk_analysis: (!launch_roots.is_empty())
-                .then(|| diskscan::load_cache(&launch_roots))
-                .flatten()
-                .map(DiskAnalysis::Ready)
-                .unwrap_or_default(),
-            expanded: HashMap::new(),
-            expand_runs: 0,
-            expand_cancel: None,
-            disk_analysis_root: restored,
-            // The baseline outlives restarts the same way the result
-            // does: through its file.
-            analysis_diff: (!launch_roots.is_empty())
-                .then(|| diskscan::load_prev_cache(&launch_roots))
-                .flatten()
-                .map(|prev| DiffBaseline::from_result(&prev)),
-            analysis_show_all_dirs: false,
+            analysis: Analysis::default(),
             space: None,
             space_at: None,
             space_inflight: false,
             settings_window: None,
             storage_window: None,
-            disk_analysis_runs: 0,
             ejected: HashMap::new(),
-            banner_sent: HashMap::new(),
-            snoozed: HashMap::new(),
             proc_sort: ProcSort::default(),
             app_sort: AppSort::default(),
             sustained: SustainedWatch::default(),
@@ -1120,13 +740,13 @@ impl Default for ZStatsAppState {
             mem_trend: AppTrend::default(),
             creep_notified: HashMap::new(),
             history: None,
+            history_loaded_at: None,
             history_range: HistoryRange::default(),
             history_sort: HistorySort::default(),
             hints_sync: None,
             caches_sync: None,
             template_sync: None,
             update_status: None,
-            alert_day_checked_at: None,
             update_nudge: updater::nudge(),
             template_nudge: alerttpl::nudge(),
             update_ignored: updater::ignored(),
@@ -1138,14 +758,31 @@ impl Default for ZStatsAppState {
             proc_filter: None,
             proc_filter_open: false,
             proc_filter_text: String::new(),
-            next_seq: 0,
             scroll: array::from_fn(|_| ScrollHandle::new()),
             proc_rows_scroll: ScrollHandle::new(),
             history_rows_scroll: ScrollHandle::new(),
             app_rows_scroll: ScrollHandle::new(),
             app_reveal: Cell::new(false),
+            proc_reveal: Cell::new(false),
         }
     }
+}
+
+/// A live tree whose matchable `name` is this one. Name, not pid: a
+/// restart changes the root, and a recycled pid must not inherit a
+/// dead program's jump.
+fn live_group_root(groups: &[ProcessGroupSnapshot], name: &str) -> Option<u32> {
+    groups.iter().find(|g| g.name == name).map(|g| g.root_pid)
+}
+
+/// A live process still holding this history identity. Prefer the same
+/// pid only while it still has that `name`; otherwise the first live
+/// process with the name (restarted). Pid-only is rejected.
+fn live_process_pid(processes: &[ProcessSnapshot], name: &str, pid: u32) -> Option<u32> {
+    if processes.iter().any(|p| p.pid == pid && p.name == name) {
+        return Some(pid);
+    }
+    processes.iter().find(|p| p.name == name).map(|p| p.pid)
 }
 
 impl ZStatsAppState {
@@ -1261,8 +898,10 @@ impl ZStatsAppState {
         self.note_memory_recovery(wall);
         // Piggyback on the tick rather than the render: views are pure
         // functions and cannot start work, and a fresh probe is only
-        // interesting while someone is looking at the Hardware tab.
-        if self.tab == Tab::Hardware {
+        // interesting while someone is looking at the Hardware tab —
+        // on screen, not merely selected: the tab survives hide (and a
+        // restart), and the probe spawns `tmutil` once a minute.
+        if self.tab == Tab::Hardware && panel_visible(cx) {
             self.ensure_space_info(cx);
         }
         self.prune_stale_alerts();
@@ -1306,276 +945,9 @@ impl ZStatsAppState {
         self.space.as_ref()
     }
 
-    /// Fold one alert into the list, merging into its episode if that episode
-    /// is already there and moving it back to the front.
-    fn record_alert(&mut self, event: AlertEvent, now: SystemTime) {
-        // A live report is news the tray spec can show. Ingest clears
-        // it again if the Alerts tab is already on screen; a follow-up
-        // of an episode they already saw re-lights once they look away,
-        // the same way it would a banner.
-        self.tray_alert_unseen = true;
-        let episode = Episode::of(&event);
-        if let Some(i) = self
-            .alerts
-            .iter()
-            .position(|seen| Episode::of(&seen.event) == episode)
-            && let Some(mut seen) = self.alerts.remove(i)
-        {
-            seen.at = now;
-            seen.reports += 1;
-            // A live report just named this pid: the card may act again.
-            seen.live = true;
-            seen.recovered_since = None;
-            // Keep the newest reading: the follow-up carries current numbers,
-            // and a card showing the crossing value 30 minutes on is stale.
-            seen.event = event;
-            self.alerts.push_front(seen);
-            return;
-        }
-
-        self.next_seq += 1;
-        self.alerts.push_front(SeenAlert {
-            seq: self.next_seq,
-            first_at: now,
-            at: now,
-            reports: 1,
-            live: true,
-            recovered_since: None,
-            event,
-        });
-        while self.alerts.len() > MAX_ALERTS {
-            self.alerts.pop_back();
-        }
-    }
-
-    /// Fill the list from today's saved episodes. Called once at
-    /// startup rather than from `Default` so the startup order stays
-    /// visible in `main` — and so tests construct an empty state
-    /// instead of inheriting the developer's own alerts.
-    pub fn restore_alerts(&mut self) {
-        self.adopt_alerts(alertlog::load());
-        self.refresh_alert_history();
-    }
-
-    /// The restore proper, minus the file read: episodes join the list
-    /// with fresh ids from the same counter live ones use, so a later
-    /// crossing of the same condition merges into the restored episode
-    /// instead of opening a duplicate beside it.
-    fn adopt_alerts(&mut self, saved: Vec<alertlog::Restored>) {
-        for saved in saved {
-            self.next_seq += 1;
-            self.alerts.push_back(SeenAlert {
-                seq: self.next_seq,
-                first_at: saved.first_at,
-                at: saved.at,
-                reports: saved.reports,
-                // Read-only until a live report confirms the subject —
-                // see [`SeenAlert::live`].
-                live: false,
-                recovered_since: None,
-                event: saved.event,
-            });
-        }
-    }
-
-    /// Drop one episode from the list and the file. Display-layer only,
-    /// like the banner snooze: the engine keeps evaluating, and a
-    /// condition that still holds re-opens the episode on its next
-    /// report. Without this the list has no acknowledgement path at
-    /// all — it outlives restarts now, so the tab's alert tint would
-    /// otherwise stay lit for the rest of the day.
-    pub fn dismiss_alert(&mut self, seq: u64, cx: &mut Context<Self>) {
-        if self.drop_alert(seq) {
-            self.persist_alerts();
-            cx.notify();
-        }
-    }
-
-    /// The removal proper, minus the file write — `true` when the list
-    /// actually changed.
-    fn drop_alert(&mut self, seq: u64) -> bool {
-        let Some(index) = self.alerts.iter().position(|seen| seen.seq == seq) else {
-            return false;
-        };
-        let Some(seen) = self.alerts.remove(index) else {
-            return false;
-        };
-        // Out of the list, into the record: the day's file keeps it
-        // with the acknowledgement, so the week still says it fired.
-        self.dismissed_today.push(alertlog::Restored {
-            event: seen.event,
-            first_at: seen.first_at,
-            at: seen.at,
-            reports: seen.reports,
-            dismissed: true,
-        });
-        if self.dismissed_today.len() > MAX_ALERTS {
-            self.dismissed_today.remove(0);
-        }
-        true
-    }
-
-    /// Retire episodes that are no longer today's. The file already
-    /// draws this boundary when it loads; a session that runs past
-    /// midnight has to draw it too, or "today's alerts" would quietly
-    /// mean "since this app started". Throttled — the check is a
-    /// calendar conversion, not something to do 30 times a minute.
-    fn prune_stale_alerts(&mut self) {
-        const CHECK_EVERY: Duration = Duration::from_secs(60);
-        if self
-            .alert_day_checked_at
-            .is_some_and(|at| at.elapsed() < CHECK_EVERY)
-        {
-            return;
-        }
-        self.alert_day_checked_at = Some(Instant::now());
-        if self.retain_today(SystemTime::now()) {
-            self.persist_alerts();
-        }
-    }
-
-    /// Keep only `now`'s episodes — `true` when something was retired.
-    /// A clock with no readable calendar (before the epoch) prunes
-    /// nothing: dropping the list on a broken clock is worse than
-    /// keeping it.
-    fn retain_today(&mut self, now: SystemTime) -> bool {
-        let Some(today) = alertlog::local_date(now) else {
-            return false;
-        };
-        let before = self.alerts.len() + self.dismissed_today.len();
-        self.alerts
-            .retain(|seen| alertlog::local_date(seen.at).as_deref() == Some(today.as_str()));
-        self.dismissed_today
-            .retain(|e| alertlog::local_date(e.at).as_deref() == Some(today.as_str()));
-        let retired = self.alerts.len() + self.dismissed_today.len() != before;
-        if retired {
-            // Yesterday is now a past day: its file was written as it
-            // happened, so the record only needs re-reading.
-            self.refresh_alert_history();
-        }
-        retired
-    }
-
-    fn persist_alerts(&self) {
-        let episodes: Vec<alertlog::Restored> = self
-            .alerts
-            .iter()
-            .map(|seen| alertlog::Restored {
-                event: seen.event.clone(),
-                first_at: seen.first_at,
-                at: seen.at,
-                reports: seen.reports,
-                dismissed: false,
-            })
-            .chain(self.dismissed_today.iter().map(|e| alertlog::Restored {
-                event: e.event.clone(),
-                first_at: e.first_at,
-                at: e.at,
-                reports: e.reports,
-                dismissed: true,
-            }))
-            .collect();
-        alertlog::save(&episodes);
-    }
-
-    /// The past week's record, newest day first, today excluded.
-    pub fn alert_history(&self) -> &[alertlog::DayLog] {
-        &self.alert_history
-    }
-
-    /// Re-read the past days' files. A handful of small files, read on
-    /// the events that can change what they say — launch, entering the
-    /// tab, the day turning — never per frame.
-    pub fn refresh_alert_history(&mut self) {
-        self.alert_history = alertlog::recent(ALERT_HISTORY_DAYS);
-    }
-
     /// The most recent collection, or `None` before the first one lands.
     pub fn latest(&self) -> Option<&Tick> {
         self.latest.as_ref()
-    }
-
-    pub fn alerts(&self) -> &VecDeque<SeenAlert> {
-        &self.alerts
-    }
-
-    /// The one question the tray's auto mode asks the store: is memory
-    /// what needs attention right now? A memory-class episode (process,
-    /// application, or kernel pressure) reported *this session*, not
-    /// yet dismissed, and not recovered for [`TRAY_RECOVER`]. Restored
-    /// episodes do not count: they are yesterday-shaped records, and
-    /// the tray is about now. Dismissing the card still switches back
-    /// immediately; a condition that still holds re-opens it on the
-    /// next report.
-    ///
-    /// Recovery is the event's own bar against this tick's numbers —
-    /// `threshold_bytes` on the card, `pressure_level > 1` for the
-    /// kernel verdict — not a second threshold. Turning *on* still
-    /// waits for zstats to report: the raw level flaps, and reading it
-    /// to face memory would put that flap on the menu bar. Turning
-    /// *off* after five minutes of the same "normal" zstats uses to
-    /// end a pressure episode is the clear side of that rule, which
-    /// the list never heard.
-    pub fn memory_needs_attention(&self) -> bool {
-        self.memory_needs_attention_at(SystemTime::now())
-    }
-
-    fn memory_needs_attention_at(&self, now: SystemTime) -> bool {
-        self.alerts
-            .iter()
-            .any(|seen| seen.live && turns_the_face(&seen.event) && !seen.recovered_for(now))
-    }
-
-    /// Start or reset each live memory episode's recovery clock from
-    /// this tick. Unknown samples (no process table, no pressure
-    /// level) leave the clock where it was.
-    ///
-    /// Both transitions are logged, and at INFO rather than DEBUG on
-    /// purpose: the question they answer — "the episode looks over,
-    /// why is the menu bar still on memory?" — is asked about the
-    /// *installed* build, where DEBUG is not being captured. It was
-    /// asked once with no record to answer it from, and the honest
-    /// reply was a guess about the level flapping. A reset line with
-    /// how long the clock had run says which of the two it was.
-    /// Transitions only: the arm re-holds every tick the condition
-    /// holds, and those would be a line every few seconds saying
-    /// nothing changed.
-    fn note_memory_recovery(&mut self, now: SystemTime) {
-        let Some(tick) = self.latest.as_ref() else {
-            return;
-        };
-        let snapshot = &tick.snapshot;
-        for seen in &mut self.alerts {
-            if !seen.live || !is_memory_class(seen.event.kind()) {
-                continue;
-            }
-            match memory_event_holds(&seen.event, snapshot) {
-                Some(true) => {
-                    // Only a clock that was actually running is a reset;
-                    // the arm holds on every tick the condition holds,
-                    // and logging those would be a line every few
-                    // seconds saying nothing changed.
-                    if let Some(started) = seen.recovered_since.take() {
-                        tracing::info!(
-                            kind = ?seen.event.kind(),
-                            subject = ?seen.event.subject,
-                            ran_for = ?now.duration_since(started).unwrap_or_default(),
-                            "memory recovery clock reset"
-                        );
-                    }
-                }
-                Some(false) if seen.recovered_since.is_none() => {
-                    seen.recovered_since = Some(now);
-                    tracing::info!(
-                        kind = ?seen.event.kind(),
-                        subject = ?seen.event.subject,
-                        after = ?TRAY_RECOVER,
-                        "memory recovery clock started"
-                    );
-                }
-                Some(false) | None => {}
-            }
-        }
     }
 
     /// What the collector is running with. Seeded at startup, then replaced
@@ -1780,405 +1152,6 @@ impl ZStatsAppState {
         cx.notify();
     }
 
-    // ---- directory analyser --------------------------------------------
-
-    pub fn disk_analysis(&self) -> &DiskAnalysis {
-        &self.disk_analysis
-    }
-
-    /// The Δ baseline for `result` — present only when a previous run of
-    /// the *same scope* exists, so drill views and freshly-picked roots
-    /// never show half-comparable deltas.
-    pub fn analysis_diff_for(&self, result: &ScanResult) -> Option<&DiffBaseline> {
-        self.analysis_diff
-            .as_ref()
-            .filter(|diff| diff.roots() == result.roots)
-    }
-
-    /// The scope Analyze will walk: the session pick, or home when
-    /// nothing has been chosen. The chips read this so Home lights up
-    /// as the default rather than looking unselected.
-    pub fn disk_analysis_scope(&self) -> Option<ScanScope> {
-        self.disk_analysis_root
-            .clone()
-            .or_else(|| diskscan::default_root().map(ScanScope::single))
-    }
-
-    /// Remember a scope without walking it. Analyze is what starts the
-    /// walk — picking a chip used to launch immediately, which made a
-    /// mis-tap cost minutes and hid the selected state.
-    pub fn set_disk_analysis_scope(&mut self, scope: ScanScope, cx: &mut Context<Self>) {
-        self.disk_analysis_root = Some(scope);
-        cx.notify();
-    }
-
-    /// Start (or restart) the top-level analysis — of the session's
-    /// picked scope, or the home tree by default. A drill-down is left
-    /// via "back", not by rescanning, so the stack is dropped here.
-    pub fn start_disk_analysis(&mut self, cx: &mut Context<Self>) {
-        let Some(scope) = self
-            .disk_analysis_root
-            .clone()
-            .or_else(|| diskscan::default_root().map(ScanScope::single))
-        else {
-            self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
-            cx.notify();
-            return;
-        };
-        self.launch_disk_analysis(scope, true, cx);
-    }
-
-    /// Point Analyze at a user-chosen root — the folder picker's
-    /// entry. Does not walk: that is the chip's job. The bare root
-    /// volume is refused rather than remembered: firmlinks
-    /// double-count, and /System plus TCC would distort every figure
-    /// (docs/disk-analysis.md's scope table) — the answer would be
-    /// wrong, not merely slow.
-    pub fn set_disk_analysis_at(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        if root == Path::new("/") {
-            self.cancel_disk_analysis_walk();
-            self.drop_expansions();
-            self.disk_analysis = DiskAnalysis::Failed(i18n::tr("disk.ana_root_unsupported"));
-            cx.notify();
-            return;
-        }
-        self.set_disk_analysis_scope(ScanScope::single(root), cx);
-    }
-
-    /// Point Analyze at the whole writable volume — the scope that can
-    /// see what no home-shaped one can (`diskscan::whole_disk_root`
-    /// explains why its root is not `/`).
-    pub fn set_disk_analysis_whole_disk(&mut self, cx: &mut Context<Self>) {
-        self.set_disk_analysis_scope(diskscan::ScanScope::whole_disk(), cx);
-    }
-
-    /// Point Analyze at the cache-set preset — the explicit cache roots
-    /// merged into one ranked view (docs/disk-analysis.md's scope table).
-    pub fn set_disk_analysis_caches(&mut self, cx: &mut Context<Self>) {
-        let Some(scope) = ScanScope::cache_set() else {
-            self.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
-            cx.notify();
-            return;
-        };
-        self.set_disk_analysis_scope(scope, cx);
-    }
-
-    /// Open or close one ranked directory, in place.
-    ///
-    /// This replaced a drill-down that made the clicked path the new root
-    /// and rebuilt the whole card. The answer was the same; the cost was
-    /// that everything else on screen moved, and a reader comparing two
-    /// branches lost their place on every click. Children are inserted
-    /// under the row instead, so nothing above it shifts.
-    ///
-    /// Two sources, and which one serves is invisible except in latency:
-    /// the finished scan's retained index answers instantly wherever it
-    /// recorded anything under this path (`diskscan::drill`), and the
-    /// derived result shares the same `Arc`, so depth stays free. Folded
-    /// leaves (`node_modules`, `.git`, a `CACHEDIR.TAG` tree) and
-    /// interiors whose every child fell under `INDEX_FLOOR` were never
-    /// recorded, and those take a real walk of that subtree — seconds,
-    /// reported in the row itself.
-    ///
-    /// Only a finished result can be opened: mid-walk tables are lower
-    /// bounds with no index behind them.
-    pub fn toggle_expansion(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.expanded.remove(&path).is_some() {
-            cx.notify();
-            return;
-        }
-        let DiskAnalysis::Ready(current) = &self.disk_analysis else {
-            return;
-        };
-        match diskscan::drill(current, &path) {
-            Some(derived) => {
-                self.expanded.insert(path, Expansion::Ready(derived.dirs));
-                cx.notify();
-            }
-            None => self.walk_expansion(path, cx),
-        }
-    }
-
-    /// The index had nothing under this row, so walk it. One at a time:
-    /// a second open cancels the first, whose thread stops and whose
-    /// events are dropped by the run-id guard either way.
-    fn walk_expansion(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if let Some(cancel) = self.expand_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        self.expand_runs += 1;
-        let run_id = self.expand_runs;
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.expand_cancel = Some(cancel.clone());
-        self.expanded.insert(path.clone(), Expansion::Walking);
-        cx.notify();
-
-        let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
-        diskscan::spawn(ScanScope::single(path.clone()), cancel, tx);
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
-                // Progress and partials are dropped on purpose: a subtree
-                // is seconds, and a row that reshuffles under the cursor
-                // costs more than the wait it saves.
-                let landed = match event {
-                    ScanEvent::Done(result) => Expansion::Ready(result.dirs),
-                    ScanEvent::Failed(e) => {
-                        tracing::warn!("expand {}: {e}", path.display());
-                        Expansion::Failed
-                    }
-                    _ => continue,
-                };
-                let _ = this.update(cx, |state, cx| {
-                    // Superseded by a newer open, or the row was closed
-                    // while the walk ran — either way this lands nowhere.
-                    if state.expand_runs != run_id
-                        || !matches!(state.expanded.get(&path), Some(Expansion::Walking))
-                    {
-                        return;
-                    }
-                    state.expanded.insert(path.clone(), landed);
-                    cx.notify();
-                });
-                break;
-            }
-        })
-        .detach();
-    }
-
-    /// What is under an opened row, or `None` when it is closed.
-    pub fn expansion(&self, path: &Path) -> Option<&Expansion> {
-        self.expanded.get(path)
-    }
-
-    /// Every open row closes when the result they describe goes away —
-    /// a new walk, a cleared card. Children of a replaced result would
-    /// be figures from a scan that is no longer on screen.
-    fn drop_expansions(&mut self) {
-        self.expanded.clear();
-        if let Some(cancel) = self.expand_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-    }
-
-    pub fn analysis_show_all_dirs(&self) -> bool {
-        self.analysis_show_all_dirs
-    }
-
-    pub fn set_analysis_show_all_dirs(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.analysis_show_all_dirs = show;
-        cx.notify();
-    }
-
-    /// Dismiss the analysis entirely — straight to Off, opened rows and
-    /// all. This is a view action, not a disk one: nothing is touched on
-    /// disk, and dropping the result also releases the retained index
-    /// every opened row was served from.
-    pub fn clear_disk_analysis(&mut self, cx: &mut Context<Self>) {
-        self.cancel_disk_analysis_walk();
-        // Clean slate includes the saved result — otherwise the next
-        // launch would resurrect what the user just dismissed.
-        let top_roots = match &self.disk_analysis {
-            DiskAnalysis::Ready(r) => Some(r.roots.clone()),
-            _ => None,
-        };
-        if let Some(roots) = top_roots {
-            diskscan::delete_cache(&roots);
-        }
-        // The baseline's file went with the cache; the flattened copy
-        // must not outlive it.
-        self.analysis_diff = None;
-        self.drop_expansions();
-        // Clean slate includes the picked scope: the next "Analyze"
-        // means the default home tree again — this launch and the next.
-        self.disk_analysis_root = None;
-        prefs::set_analysis_roots(&[]);
-        self.disk_analysis = DiskAnalysis::Off;
-        cx.notify();
-    }
-
-    /// The walk itself. Runs on its own thread; everything this state
-    /// learns — progress, completion, failure — arrives over the channel
-    /// drained below, guarded by `run_id` so a superseded run's late
-    /// events fall on the floor.
-    fn launch_disk_analysis(&mut self, scope: ScanScope, persist: bool, cx: &mut Context<Self>) {
-        self.cancel_disk_analysis_walk();
-        self.drop_expansions();
-        self.disk_analysis_runs += 1;
-        let run_id = self.disk_analysis_runs;
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.disk_analysis = DiskAnalysis::Running {
-            run_id,
-            dirs_done: 0,
-            scope: scope.clone(),
-            partial: None,
-            persist,
-            cancel: cancel.clone(),
-        };
-        cx.notify();
-
-        let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
-        diskscan::spawn(scope, cancel, tx);
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
-                let done = matches!(event, ScanEvent::Done(_) | ScanEvent::Failed(_));
-                let _ = this.update(cx, |state, cx| {
-                    // Only the run that owns the current Running state may
-                    // write; a cancelled or superseded run stays silent.
-                    let owns = matches!(
-                        state.disk_analysis,
-                        DiskAnalysis::Running { run_id: id, .. } if id == run_id
-                    );
-                    if !owns {
-                        return;
-                    }
-                    match event {
-                        ScanEvent::Progress { dirs_done } => {
-                            if let DiskAnalysis::Running { dirs_done: d, .. } =
-                                &mut state.disk_analysis
-                            {
-                                *d = dirs_done;
-                            }
-                        }
-                        ScanEvent::Partial(result) => {
-                            if let DiskAnalysis::Running { partial, .. } = &mut state.disk_analysis
-                            {
-                                *partial = Some(*result);
-                            }
-                        }
-                        ScanEvent::Done(result) => {
-                            // Only finished top-level walks reach the cache;
-                            // cancelled and failed runs never get here, so a
-                            // half table cannot overwrite a full one.
-                            if let DiskAnalysis::Running { persist: true, .. } = state.disk_analysis
-                            {
-                                // The save rotated the displaced run into
-                                // `.prev` — read it back as the Δ baseline.
-                                diskscan::save_cache(&result);
-                                state.analysis_diff = diskscan::load_prev_cache(&result.roots)
-                                    .map(|prev| DiffBaseline::from_result(&prev));
-                                // Remember the scope the next launch
-                                // restores; the default home walk is
-                                // expressed as the absent key.
-                                let is_default = diskscan::default_root()
-                                    .is_some_and(|home| result.roots == [home]);
-                                prefs::set_analysis_roots(if is_default {
-                                    &[]
-                                } else {
-                                    &result.roots
-                                });
-                            }
-                            state.disk_analysis = DiskAnalysis::Ready(*result);
-                        }
-                        ScanEvent::Failed(e) => {
-                            state.disk_analysis = DiskAnalysis::Failed(e);
-                        }
-                    }
-                    cx.notify();
-                });
-                if done {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// The explicit cancel — the only way a walk stops early. Partial
-    /// results are never kept, so this goes to Off rather than showing
-    /// half a table.
-    pub fn cancel_disk_analysis(&mut self, cx: &mut Context<Self>) {
-        self.cancel_disk_analysis_walk();
-        self.disk_analysis = DiskAnalysis::Off;
-        cx.notify();
-    }
-
-    fn cancel_disk_analysis_walk(&self) {
-        if let DiskAnalysis::Running { cancel, .. } = &self.disk_analysis {
-            cancel.store(true, Ordering::Relaxed);
-        }
-    }
-
-    // ---- banner snooze -------------------------------------------------
-
-    /// Quiet this episode's banners for `hours`. Suppression is delivery-
-    /// layer only: the engine keeps evaluating and the Alerts list keeps
-    /// recording — the interruption is what stops.
-    pub fn snooze_banners(&mut self, event: &AlertEvent, hours: u64, cx: &mut Context<Self>) {
-        let until_label = jiff::Zoned::now()
-            .checked_add(jiff::Span::new().hours(hours as i64))
-            .map(|z| z.strftime("%H:%M").to_string())
-            .unwrap_or_default();
-        self.snoozed.insert(
-            Episode::of(event),
-            Snooze {
-                until: Instant::now() + Duration::from_secs(hours * 3600),
-                until_label,
-            },
-        );
-        cx.notify();
-    }
-
-    pub fn unsnooze_banners(&mut self, event: &AlertEvent, cx: &mut Context<Self>) {
-        self.resume_banners(event);
-        cx.notify();
-    }
-
-    /// The un-mute proper, minus the repaint. "Resume" is unambiguous, so
-    /// it clears the auto-quiet too — one left standing would keep the
-    /// subject silent behind the user's back.
-    fn resume_banners(&mut self, event: &AlertEvent) {
-        let key = Episode::of(event);
-        self.snoozed.remove(&key);
-        self.banner_sent.remove(&key);
-    }
-
-    /// Whether this event's banner is muted right now. Runs on every fresh
-    /// event, which is also where expired entries get dropped — the map
-    /// never outlives its deadlines by more than one alert.
-    pub fn banner_snoozed(&mut self, event: &AlertEvent) -> bool {
-        let now = Instant::now();
-        self.snoozed.retain(|_, s| s.until > now);
-        self.snoozed.contains_key(&Episode::of(event))
-    }
-
-    /// Whether this event's banner is being held back because the same
-    /// episode has already interrupted [`NOISY_AFTER`] times inside
-    /// [`NOISY_WINDOW`]. Delivery-layer only, exactly like the snooze:
-    /// the engine keeps evaluating, the list keeps recording and the card
-    /// keeps counting reports — what stops is the interruption.
-    ///
-    /// Records the delivery it permits, so the window slides and the
-    /// subject gets its voice back once it quiets down.
-    pub fn banner_damped(&mut self, event: &AlertEvent, now: Instant) -> bool {
-        let sent = self.banner_sent.entry(Episode::of(event)).or_default();
-        sent.retain(|at| now.duration_since(*at) < NOISY_WINDOW);
-        if sent.len() >= NOISY_AFTER {
-            return true;
-        }
-        sent.push(now);
-        false
-    }
-
-    /// Whether a card should say it has gone auto-quiet. Read-only — the
-    /// count is only ever advanced by an actual delivery attempt.
-    pub fn banner_auto_quiet(&self, event: &AlertEvent) -> bool {
-        let now = Instant::now();
-        self.banner_sent
-            .get(&Episode::of(event))
-            .is_some_and(|sent| {
-                sent.iter()
-                    .filter(|at| now.duration_since(**at) < NOISY_WINDOW)
-                    .count()
-                    >= NOISY_AFTER
-            })
-    }
-
-    /// The "muted until 14:32" label for a card, if its episode is muted.
-    pub fn snoozed_until(&self, event: &AlertEvent) -> Option<&str> {
-        let snooze = self.snoozed.get(&Episode::of(event))?;
-        (snooze.until > Instant::now()).then_some(snooze.until_label.as_str())
-    }
-
     pub fn show_all_sensors(&self) -> bool {
         self.show_all_sensors
     }
@@ -2287,36 +1260,6 @@ impl ZStatsAppState {
         self.tab
     }
 
-    /// The tray corner spec is on: a live report has landed since the
-    /// Alerts tab was last on screen.
-    pub fn tray_alert_unseen(&self) -> bool {
-        self.tray_alert_unseen
-    }
-
-    /// The Alerts tab is (or is about to be) what the user is looking
-    /// at: the spec has done its job. Does not touch the episode list.
-    pub fn see_alerts(&mut self) {
-        self.tray_alert_unseen = false;
-    }
-
-    /// Reveal path: opening the panel onto Alerts is the same as
-    /// switching to it. Other tabs leave the spec — that is the
-    /// reminder to go look.
-    pub fn see_alerts_if_showing(&mut self, cx: &mut Context<Self>) {
-        if self.tab == Tab::Alerts {
-            self.see_alerts();
-            #[cfg(not(target_os = "linux"))]
-            tray::sync(cx, self);
-        }
-    }
-
-    fn alerts_are_showing(&self, cx: &Context<Self>) -> bool {
-        self.tab == Tab::Alerts
-            && cx
-                .try_global::<metrics::CollectorPace>()
-                .is_some_and(|p| p.is_visible())
-    }
-
     pub fn settings_window(&self) -> Option<gpui::AnyWindowHandle> {
         self.settings_window
     }
@@ -2337,145 +1280,6 @@ impl ZStatsAppState {
     /// back returns to where the list was left.
     pub fn scroll_handle(&self, tab: Tab) -> &ScrollHandle {
         &self.scroll[tab.index()]
-    }
-
-    // ---- large files ---------------------------------------------------
-
-    pub fn big_files(&self) -> &BigFiles {
-        &self.big_files
-    }
-
-    /// Run (or re-run) the large-file query on the background executor.
-    pub fn start_big_files(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.big_files, BigFiles::Running) {
-            return;
-        }
-        self.big_files = BigFiles::Running;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let scanned = cx
-                .background_executor()
-                .spawn(async { bigfiles::scan() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
-                // Same landing guard as the full scans: a hide mid-query
-                // reset this to Off, and the result must not undo that.
-                if !matches!(state.big_files, BigFiles::Running) {
-                    return;
-                }
-                state.big_files = match scanned {
-                    Ok(scan) => {
-                        // Compare first, then rotate: the baseline this
-                        // run is measured against is the one on disk
-                        // before it, and every finished query becomes the
-                        // next one's — so "new" always means "since you
-                        // last looked", with the caption naming when that
-                        // was.
-                        let baseline = bigfiles::load_baseline();
-                        let added = baseline
-                            .as_ref()
-                            .map(|base| {
-                                scan.files
-                                    .iter()
-                                    .filter(|f| base.is_new(f))
-                                    .map(|f| f.path.clone())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let since = baseline.as_ref().map(bigfiles::Baseline::at);
-                        bigfiles::save_baseline(&scan);
-                        BigFiles::Ready { scan, added, since }
-                    }
-                    Err(bigfiles::ScanError::IndexingOff) => {
-                        BigFiles::Failed { indexing_off: true }
-                    }
-                    Err(bigfiles::ScanError::Other(e)) => {
-                        tracing::error!("large-file query failed: {e}");
-                        BigFiles::Failed {
-                            indexing_off: false,
-                        }
-                    }
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// The delete button's confirmed action: move to the Trash, then drop
-    /// the row. A failed trash leaves the row — a file that is still there
-    /// must not vanish from the list.
-    /// Put the listing away — back to "not asked yet", which is what the
-    /// card shows before the first query. A view action only: the query
-    /// costs seconds to repeat, and the stored baseline stays, so the
-    /// next listing can still say what it added. Nothing on disk moves.
-    pub fn clear_big_files(&mut self, cx: &mut Context<Self>) {
-        self.big_files = BigFiles::Off;
-        cx.notify();
-    }
-
-    pub fn trash_big_file(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if let Err(e) = bigfiles::trash(path) {
-            tracing::warn!("trash {}: {e}", path.display());
-            return;
-        }
-        if let BigFiles::Ready { scan, added, .. } = &mut self.big_files {
-            scan.files.retain(|f| f.path != path);
-            scan.total = scan.total.saturating_sub(1);
-            added.remove(path);
-        }
-        cx.notify();
-    }
-
-    /// The analyser's confirmed clear action: move each listed
-    /// CACHEDIR.TAG tree to the Trash, then drop the rows that actually
-    /// went. A failed trash leaves its row — a directory still on disk
-    /// must not vanish from the list. Only rows are touched; every other
-    /// figure stays as scanned, with `scanned_at` as the staleness
-    /// boundary.
-    pub fn trash_regenerable(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let mut gone: Vec<&PathBuf> = Vec::new();
-        for path in paths {
-            match bigfiles::trash(path) {
-                Ok(()) => gone.push(path),
-                Err(e) => tracing::warn!("trash {}: {e}", path.display()),
-            }
-        }
-        if gone.is_empty() {
-            return;
-        }
-        // Prune every level, not just the visible one — a parked outer
-        // result restored via "back" must not resurrect trashed rows.
-        let prune = |result: &mut diskscan::ScanResult| {
-            result.regenerable.retain(|h| !gone.contains(&&h.path));
-            // A dominance chase can land the same tree in the directory
-            // table, and blind-spot files inside a trashed tree went with
-            // it — those rows would dangle.
-            result.dirs.retain(|h| !gone.contains(&&h.path));
-            result
-                .files
-                .retain(|f| !gone.iter().any(|g| f.path.starts_with(g)));
-            result
-                .suggestions
-                .retain(|h| !gone.iter().any(|g| h.path.starts_with(g)));
-        };
-        // The card always shows the session's top-level result now
-        // (opening a row nests under it instead of replacing it), so the
-        // one result on screen is exactly the one that owns a cache file.
-        if let DiskAnalysis::Ready(result) = &mut self.disk_analysis {
-            prune(result);
-            diskscan::resave_if_cached(result);
-        }
-        // Opened rows are tables too: a trashed tree must not survive as
-        // somebody's child row, and a row for the tree itself closes.
-        self.expanded
-            .retain(|path, _| !gone.iter().any(|g| path.starts_with(g)));
-        for state in self.expanded.values_mut() {
-            if let Expansion::Ready(rows) = state {
-                rows.retain(|h| !gone.iter().any(|g| h.path.starts_with(g)));
-            }
-        }
-        cx.notify();
     }
 
     /// Back to a clean slate for the next open. The name filter and the
@@ -2509,24 +1313,6 @@ impl ZStatsAppState {
         cx.notify();
     }
 
-    /// A freshly built disk-space window starts without yesterday's
-    /// index query, and with the dirs table folded back to its default
-    /// length. Only on a *new* window: raising one that is already open
-    /// must not wipe what its owner is reading.
-    ///
-    /// The analysis result itself survives on purpose — it costs minutes
-    /// to produce and is cached to disk across restarts; the caption says
-    /// how old it is.
-    pub fn reset_storage_views(&mut self, cx: &mut Context<Self>) {
-        self.big_files = BigFiles::Off;
-        self.analysis_show_all_dirs = false;
-        // Opened rows are questions too — a window opened tomorrow should
-        // show the result the way a finished scan leaves it, not a tree
-        // somebody unfolded yesterday.
-        self.drop_expansions();
-        cx.notify();
-    }
-
     pub fn proc_rows_scroll(&self) -> &ScrollHandle {
         &self.proc_rows_scroll
     }
@@ -2542,31 +1328,67 @@ impl ZStatsAppState {
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
-            if tab == Tab::Hardware {
-                self.ensure_space_info(cx);
+            prefs::set_last_tab_key(tab.pref_key());
+            // A hidden switch (a banner click about to reveal Alerts)
+            // leaves the entry work to `enter_shown_tab`, which the
+            // reveal runs — doing it here too would read twice.
+            if panel_visible(cx) {
+                self.enter_tab(cx);
             }
-            // Opening History is what pays for reading it. Re-read on every
-            // visit rather than caching: the file grows a line a minute, and
-            // a stale "today" is worse than a moment's wait.
-            if tab == Tab::History {
-                self.load_history(cx);
-            }
-            // The past week's files are small and change only at
-            // midnight; re-reading them on the way into the tab is
-            // what keeps a day-old photograph from being the record.
             if tab == Tab::Alerts {
-                self.refresh_alert_history();
                 self.see_alerts();
                 #[cfg(not(target_os = "linux"))]
                 tray::sync(cx, self);
             }
-            // Apps / Overview titles need the full ppid chain and the
-            // process groups for a job face. Kick it here so the first
-            // paint after the switch is not waiting on the next tick.
-            if matches!(tab, Tab::Apps | Tab::Overview) {
-                self.ensure_apps_topology(cx);
-            }
             cx.notify();
+        }
+    }
+
+    /// Launch: put the last tab on and nothing else. Not a look at
+    /// Alerts (the spec waits until the panel is actually shown), no
+    /// `app.toml` rewrite, and none of the tab's entry work — a login
+    /// launch may never open the panel, and the History rows read now
+    /// would be what the first open showed hours later.
+    /// [`Self::enter_shown_tab`] does that work when the panel appears.
+    pub fn restore_session_tab(&mut self) {
+        self.tab = Tab::from_pref_key(prefs::last_tab_key().as_deref());
+    }
+
+    /// The panel just came on screen (built, or revealed from the tray):
+    /// the tab it shows is being visited, so it gets the same entry work
+    /// a click on it would.
+    pub fn enter_shown_tab(&mut self, cx: &mut Context<Self>) {
+        self.enter_tab(cx);
+    }
+
+    fn enter_tab(&mut self, cx: &mut Context<Self>) {
+        let tab = self.tab;
+        if tab == Tab::Hardware {
+            self.ensure_space_info(cx);
+        }
+        // Opening History is what pays for reading it. Re-read on every
+        // visit rather than caching: the file grows a line a minute, and
+        // a stale "today" is worse than a moment's wait. A reveal counts
+        // as a visit, so rows younger than that minute are kept — tray
+        // toggles would otherwise re-read a 30-day window each time.
+        if tab == Tab::History
+            && !self
+                .history_loaded_at
+                .is_some_and(|at| at.elapsed() < HISTORY_FRESH)
+        {
+            self.load_history(cx);
+        }
+        // The past week's files are small and change only at
+        // midnight; re-reading them on the way into the tab is
+        // what keeps a day-old photograph from being the record.
+        if tab == Tab::Alerts {
+            self.refresh_alert_history();
+        }
+        // Apps / Overview titles need the full ppid chain and the
+        // process groups for a job face. Kick it here so the first
+        // paint after the switch is not waiting on the next tick.
+        if matches!(tab, Tab::Apps | Tab::Overview) {
+            self.ensure_apps_topology(cx);
         }
     }
 
@@ -2931,6 +1753,7 @@ impl ZStatsAppState {
         }
         self.history_range = range;
         self.history = None;
+        self.history_loaded_at = None;
         self.load_history(cx);
     }
 
@@ -2954,6 +1777,7 @@ impl ZStatsAppState {
             let _ = this.update(cx, |state, cx| {
                 if state.history_range == range {
                     state.history = Some(rows);
+                    state.history_loaded_at = Some(Instant::now());
                     cx.notify();
                 }
             });
@@ -3217,6 +2041,55 @@ impl ZStatsAppState {
         self.app_reveal.take()
     }
 
+    /// Jump from an alert card or History row to the Processes tab with
+    /// this pid selected and expanded — same non-toggle as [`Self::reveal_app`].
+    /// The abnormal-only filter would hide a normal target, so it comes off;
+    /// a name filter that already hides the row is left alone (nowhere to
+    /// scroll is the honest outcome, same as Apps).
+    pub fn reveal_pid(&mut self, pid: u32, cx: &mut Context<Self>) {
+        self.set_tab(Tab::Processes, cx);
+        self.only_abnormal = false;
+        if self.selected_pid != Some(pid) {
+            self.selected_pid = Some(pid);
+        }
+        self.proc_reveal.set(true);
+        cx.notify();
+    }
+
+    /// True exactly once per [`Self::reveal_pid`].
+    pub fn take_proc_reveal(&self) -> bool {
+        self.proc_reveal.take()
+    }
+
+    /// History names a process by `(pid, name)` from a file that outlives
+    /// the process. Prefer a live tree with that matchable `name` (survives
+    /// a restart); else a live process still holding that pid-and-name, or
+    /// the same name under a new pid; else just open Processes. A pid-only
+    /// hit is rejected: macOS recycles low pids.
+    pub fn reveal_history_subject(&mut self, pid: u32, name: &str, cx: &mut Context<Self>) {
+        let groups = self
+            .latest
+            .as_ref()
+            .and_then(|t| t.snapshot.process_groups.as_deref());
+        if let Some(groups) = groups
+            && let Some(root) = live_group_root(groups, name)
+        {
+            self.reveal_app(root, cx);
+            return;
+        }
+        let processes = self
+            .latest
+            .as_ref()
+            .and_then(|t| t.snapshot.processes.as_deref());
+        if let Some(processes) = processes
+            && let Some(live) = live_process_pid(processes, name, pid)
+        {
+            self.reveal_pid(live, cx);
+            return;
+        }
+        self.set_tab(Tab::Processes, cx);
+    }
+
     /// The uncapped process table, once Apps/Overview needed a job face
     /// or an expansion asked for members.
     pub fn member_processes(&self) -> Option<&[ProcessSnapshot]> {
@@ -3268,10 +2141,7 @@ impl ZStatsAppState {
         {
             self.ensure_member_table(pid, n, cx);
         }
-        let visible = cx
-            .try_global::<metrics::CollectorPace>()
-            .is_some_and(|p| p.is_visible());
-        if !visible || !matches!(self.tab, Tab::Apps | Tab::Overview) {
+        if !panel_visible(cx) || !matches!(self.tab, Tab::Apps | Tab::Overview) {
             return;
         }
         if let Some((root, n)) = self.tree_needing_topology() {
@@ -3382,21 +2252,6 @@ impl ZStatsAppState {
         .detach();
     }
 
-    pub fn selected_alert(&self) -> Option<&(String, String)> {
-        self.selected_alert.as_ref()
-    }
-
-    /// Clicking the open card closes it, as with process rows.
-    pub fn toggle_alert(&mut self, key: &str, name: &str, cx: &mut Context<Self>) {
-        let id = (key.to_string(), name.to_string());
-        self.selected_alert = if self.selected_alert.as_ref() == Some(&id) {
-            None
-        } else {
-            Some(id)
-        };
-        cx.notify();
-    }
-
     // ---- window --------------------------------------------------------
 
     /// Where the main window was last seen. Used when reopening without a
@@ -3406,8 +2261,9 @@ impl ZStatsAppState {
     }
 
     /// Last known display scale factor, mirrored from the main window. Only
-    /// a fallback: on macOS the menu bar's own factor is read from
-    /// `NSScreen`, which is both more accurate and available with no window.
+    /// a fallback for placement when AppKit has no screen list (off the
+    /// main thread, or not macOS). On macOS the tray's scale is resolved
+    /// per display — see `placement::resolve_icon`.
     pub fn scale_factor(&self) -> f32 {
         self.scale_factor
     }
@@ -3529,8 +2385,10 @@ fn setting_rebuilds_collector(key: &str) -> bool {
 }
 
 /// Screen rectangle of the tray icon, in **physical** pixels with a top-left
-/// origin — that's what `tray_icon` reports. Converting to gpui's logical
-/// `Pixels` needs the scale factor, see [`ZStatsAppState::scale_factor`].
+/// origin — that's what `tray_icon` reports. It multiplied the AppKit
+/// logical frame by *that status item's* `backingScaleFactor`, so converting
+/// back has to pick the matching screen (see `placement::resolve_icon`),
+/// not the window's last-known [`ZStatsAppState::scale_factor`].
 #[derive(Clone, Copy, Debug)]
 pub struct TrayAnchor {
     pub x: f64,
@@ -3542,11 +2400,10 @@ pub struct TrayAnchor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::env;
     use std::fs;
+    use std::path::PathBuf;
     use std::process;
-    use zstats::AlertDetail;
 
     fn snap(pid: u32, name: &str) -> ProcessSnapshot {
         ProcessSnapshot {
@@ -3632,194 +2489,6 @@ mod tests {
         assert!(filtered_indices(&procs, "xcode").is_empty());
     }
 
-    #[test]
-    fn snooze_mutes_by_episode_and_expires() {
-        let mut state = ZStatsAppState::new();
-        let event = cpu_alert(7);
-
-        // Active snooze mutes this episode, and only this episode: the
-        // same pid's MEMORY alert is a different story and stays loud.
-        state.snoozed.insert(
-            Episode::of(&event),
-            Snooze {
-                until: Instant::now() + Duration::from_secs(3600),
-                until_label: "14:32".into(),
-            },
-        );
-        assert!(state.banner_snoozed(&event));
-        assert!(!state.banner_snoozed(&mem_alert(7)));
-        assert_eq!(state.snoozed_until(&event), Some("14:32"));
-
-        // Past the deadline the entry is pruned on the next check.
-        state.snoozed.get_mut(&Episode::of(&event)).unwrap().until =
-            Instant::now() - Duration::from_secs(1);
-        assert!(!state.banner_snoozed(&event));
-        assert!(state.snoozed.is_empty(), "expired snooze should be pruned");
-    }
-
-    #[test]
-    fn a_writable_disk_still_alerts_and_statfs_failure_is_fail_open() {
-        assert!(super::keep_alert(&cpu_alert(1)));
-        assert!(
-            super::keep_alert(&disk_alert("/")),
-            "the boot volume must still alert"
-        );
-        assert!(
-            super::keep_alert(&disk_alert("/Volumes/no-such-volume")),
-            "a mount we cannot inspect is not silently exempted"
-        );
-    }
-
-    fn disk_alert(mount: &str) -> AlertEvent {
-        AlertEvent {
-            subject: AlertSubject::Volume {
-                mount_point: mount.into(),
-            },
-            detail: AlertDetail::Disk {
-                used_percent: 99.0,
-                threshold_percent: 90.0,
-                available_bytes: 0,
-                total_bytes: 1 << 30,
-            },
-            repeat_after: None,
-        }
-    }
-
-    fn cpu_alert(pid: u32) -> AlertEvent {
-        AlertEvent {
-            subject: AlertSubject::Process {
-                pid,
-                name: format!("p{pid}"),
-                display_name: None,
-            },
-            detail: AlertDetail::Cpu {
-                avg_percent: 90.0,
-                threshold_percent: 30.0,
-                window: Duration::from_secs(60),
-                runaway: false,
-            },
-            repeat_after: None,
-        }
-    }
-
-    fn mem_alert(pid: u32) -> AlertEvent {
-        AlertEvent {
-            subject: AlertSubject::Process {
-                pid,
-                name: format!("p{pid}"),
-                display_name: None,
-            },
-            detail: AlertDetail::Memory {
-                avg_bytes: 1 << 30,
-                share_percent: 40.0,
-                threshold_percent: 25.0,
-                threshold_bytes: 4 << 30,
-                window: Duration::from_secs(60),
-            },
-            repeat_after: None,
-        }
-    }
-
-    fn pressure_alert(level: u32) -> AlertEvent {
-        AlertEvent {
-            subject: AlertSubject::System,
-            detail: AlertDetail::Pressure {
-                level,
-                sustained: Duration::from_secs(300),
-                swap_used_bytes: 1 << 30,
-                swap_total_bytes: 2 << 30,
-                compressed_bytes: None,
-                top_consumers: vec![],
-            },
-            repeat_after: None,
-        }
-    }
-
-    fn empty_tick() -> Tick {
-        use zstats::snapshot::{CpuSnapshot, HostInfo, LoadSnapshot, MemorySnapshot};
-        Tick {
-            snapshot: SystemSnapshot {
-                timestamp: jiff::Timestamp::now(),
-                host: HostInfo {
-                    hostname: String::new(),
-                    os_name: String::new(),
-                    os_version: String::new(),
-                    kernel_version: None,
-                    arch: String::new(),
-                    uptime_secs: 0,
-                    labels: HashMap::new(),
-                },
-                cpu: CpuSnapshot {
-                    usage_percent: 0.0,
-                    per_core_usage: vec![],
-                    logical_cores: 1,
-                    physical_cores: None,
-                    frequency_mhz: None,
-                    per_core_frequency_mhz: vec![],
-                    brand: None,
-                    perf_levels: None,
-                },
-                memory: MemorySnapshot {
-                    total_bytes: 16 << 30,
-                    used_bytes: 0,
-                    available_bytes: 16 << 30,
-                    swap_total_bytes: 0,
-                    swap_used_bytes: 0,
-                    used_percent: 0.0,
-                    swap_used_percent: 0.0,
-                    compressed_bytes: None,
-                    pressure_level: Some(1),
-                },
-                disks: None,
-                networks: None,
-                processes: None,
-                process_groups: None,
-                total_processes: None,
-                battery: None,
-                load: LoadSnapshot {
-                    load1: 0.0,
-                    load5: 0.0,
-                    load15: 0.0,
-                },
-                temperatures: None,
-                io_totals: Default::default(),
-                capabilities: Default::default(),
-                extras: HashMap::new(),
-            },
-            alerts: vec![],
-            process_stats: HashMap::new(),
-            records: vec![],
-        }
-    }
-
-    /// zstats reports a crossing once and follows up once 30 minutes later.
-    /// Both describe the same episode, and a list that appends a card per
-    /// event turns one problem into two — then lets a flapping process crowd
-    /// everything else out of the 20 slots.
-    #[test]
-    fn repeat_reports_merge_into_one_episode() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-
-        state.record_alert(cpu_alert(7), t0);
-        state.record_alert(cpu_alert(7), t0 + Duration::from_secs(1800));
-        assert_eq!(state.alerts().len(), 1, "same process, same measure");
-        assert_eq!(state.alerts()[0].reports, 2);
-        assert_eq!(state.alerts()[0].span(), Some(Duration::from_secs(1800)));
-
-        // Same process over on a *different* measure is a separate story.
-        state.record_alert(mem_alert(7), t0);
-        // A different process likewise.
-        state.record_alert(cpu_alert(8), t0);
-        assert_eq!(state.alerts().len(), 3);
-
-        // Resurfacing moves an episode back to the front without duplicating.
-        state.record_alert(cpu_alert(7), t0 + Duration::from_secs(3600));
-        assert_eq!(state.alerts().len(), 3);
-        assert_eq!(state.alerts()[0].reports, 3);
-        assert_eq!(state.alerts()[0].seq, 1, "still the episode opened first");
-    }
-
     /// The hide exists because zstats serves the disk list from cache
     /// between refreshes; it must end the moment the snapshot agrees,
     /// and it must not outlive a drive that came back.
@@ -3860,346 +2529,6 @@ mod tests {
         assert!(!state.is_ejected("/Volumes/USB"), "the cap releases it");
     }
 
-    /// A subject that keeps crossing, clearing and crossing again opens a
-    /// fresh episode each time, and each one used to interrupt. Two is
-    /// enough to have said it; the rest go to the list only.
-    #[test]
-    fn a_flapping_subject_stops_interrupting_after_two_banners() {
-        let mut state = ZStatsAppState::new();
-        let t0 = Instant::now();
-        let event = cpu_alert(7);
-
-        assert!(!state.banner_damped(&event, t0), "first one interrupts");
-        assert!(
-            !state.banner_damped(&event, t0 + Duration::from_secs(600)),
-            "so does the second"
-        );
-        assert!(
-            state.banner_damped(&event, t0 + Duration::from_secs(1200)),
-            "the third within the hour does not"
-        );
-        assert!(state.banner_auto_quiet(&event), "and the card says so");
-
-        // A different subject is different news — it must still arrive.
-        assert!(!state.banner_damped(&mem_alert(9), t0 + Duration::from_secs(1200)));
-
-        // Once the window has slid past both deliveries, it speaks again.
-        let later = t0 + Duration::from_secs(3600 + 700);
-        assert!(
-            !state.banner_damped(&event, later),
-            "quiet for an hour buys back a banner"
-        );
-    }
-
-    /// "Resume" has to mean resume: an auto-quiet that outlived the
-    /// explicit un-mute would keep the subject silent behind the user.
-    #[test]
-    fn resuming_a_snooze_also_clears_the_auto_quiet() {
-        let mut state = ZStatsAppState::new();
-        let t0 = Instant::now();
-        let event = cpu_alert(7);
-        assert!(!state.banner_damped(&event, t0));
-        assert!(!state.banner_damped(&event, t0));
-        assert!(state.banner_auto_quiet(&event));
-
-        state.resume_banners(&event);
-        assert!(!state.banner_auto_quiet(&event));
-        assert!(
-            !state.banner_damped(&event, t0),
-            "and the next one interrupts again"
-        );
-    }
-
-    /// A restart is not a new problem: an episode read back from the
-    /// file is the same episode, so the next report merges into it and
-    /// the count keeps climbing.
-    #[test]
-    fn a_restored_episode_is_continued_not_duplicated() {
-        let mut state = ZStatsAppState::new();
-        let morning = SystemTime::now() - Duration::from_secs(4 * 3600);
-        state.adopt_alerts(vec![alertlog::Restored {
-            event: cpu_alert(7),
-            first_at: morning,
-            at: morning,
-            reports: 2,
-            dismissed: false,
-        }]);
-        assert_eq!(state.alerts().len(), 1);
-
-        state.record_alert(cpu_alert(7), SystemTime::now());
-        assert_eq!(state.alerts().len(), 1, "same condition, same episode");
-        assert_eq!(state.alerts()[0].reports, 3, "the count carries over");
-        assert!(
-            state.alerts()[0]
-                .span()
-                .is_some_and(|s| s >= Duration::from_secs(4 * 3600)),
-            "the episode still knows it started this morning"
-        );
-
-        // A different condition opens its own card with its own id.
-        state.record_alert(mem_alert(7), SystemTime::now());
-        assert_eq!(state.alerts().len(), 2);
-        assert_ne!(state.alerts()[0].seq, state.alerts()[1].seq);
-    }
-
-    /// The tray spec is "a live report you have not opened Alerts
-    /// for", not a count of cards. Restored episodes are yesterday's
-    /// news; a follow-up of one already seen re-lights once they look
-    /// away.
-    #[test]
-    fn a_live_report_lights_the_tray_spec_until_alerts_are_shown() {
-        let mut state = ZStatsAppState::new();
-        assert!(!state.tray_alert_unseen());
-
-        state.adopt_alerts(vec![alertlog::Restored {
-            event: cpu_alert(7),
-            first_at: SystemTime::now(),
-            at: SystemTime::now(),
-            reports: 1,
-            dismissed: false,
-        }]);
-        assert!(
-            !state.tray_alert_unseen(),
-            "a restored card is not a new alert"
-        );
-
-        state.record_alert(cpu_alert(8), SystemTime::now());
-        assert!(state.tray_alert_unseen(), "a live report lights the spec");
-
-        state.see_alerts();
-        assert!(!state.tray_alert_unseen());
-
-        state.record_alert(cpu_alert(8), SystemTime::now());
-        assert!(
-            state.tray_alert_unseen(),
-            "a follow-up while away re-lights"
-        );
-    }
-
-    /// The acting controls on a card are gated on the pid having been
-    /// confirmed *this session*: after a reboot the pid a restored card
-    /// names may belong to something else entirely, and "quit Chrome"
-    /// would deliver SIGTERM to whatever holds it now.
-    #[test]
-    fn a_restored_card_cannot_act_until_a_live_report_confirms_it() {
-        let mut state = ZStatsAppState::new();
-        state.adopt_alerts(vec![alertlog::Restored {
-            event: mem_alert(923),
-            first_at: SystemTime::now() - Duration::from_secs(7200),
-            at: SystemTime::now() - Duration::from_secs(7200),
-            reports: 1,
-            dismissed: false,
-        }]);
-        assert!(!state.alerts()[0].live, "restored is read-only");
-
-        // The same condition reported again names the pid live.
-        state.record_alert(mem_alert(923), SystemTime::now());
-        assert!(state.alerts()[0].live, "a live report re-arms the card");
-        assert_eq!(state.alerts().len(), 1, "still one episode");
-    }
-
-    /// The list outlives restarts now, so it needs a way to be put down
-    /// — otherwise the tab's alert tint stays lit for the rest of the
-    /// day with nothing the user can do about it.
-    #[test]
-    fn dismiss_removes_one_episode_and_leaves_the_rest() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(cpu_alert(7), t0);
-        state.record_alert(cpu_alert(8), t0);
-        let doomed = state.alerts()[0].seq;
-
-        assert!(state.drop_alert(doomed));
-        assert_eq!(state.alerts().len(), 1);
-        assert_ne!(state.alerts()[0].seq, doomed);
-        assert!(
-            !state.drop_alert(doomed),
-            "dismissing twice changes nothing"
-        );
-    }
-
-    /// Auto faces memory while a live memory episode still holds, and
-    /// only after five minutes under the event's own bar — not on a
-    /// one-sample dip, and not by evaluating a new threshold.
-    #[test]
-    fn auto_tray_returns_to_cpu_five_minutes_after_memory_recovers() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(mem_alert(7), t0);
-        assert!(
-            state.memory_needs_attention_at(t0),
-            "a live memory episode faces memory"
-        );
-
-        let mut tick = empty_tick();
-        let mut p = snap(7, "p7");
-        p.phys_footprint_bytes = Some(100 << 20);
-        tick.snapshot.processes = Some(Arc::new(vec![p]));
-        state.latest = Some(tick);
-        state.note_memory_recovery(t0);
-        assert!(
-            state.memory_needs_attention_at(t0),
-            "just recovered is still memory"
-        );
-        assert!(
-            state.memory_needs_attention_at(t0 + Duration::from_secs(4 * 60 + 59)),
-            "four minutes under the bar is not five"
-        );
-        assert!(
-            !state.memory_needs_attention_at(t0 + TRAY_RECOVER),
-            "five minutes under the event's bar returns to CPU"
-        );
-    }
-
-    #[test]
-    fn auto_tray_stays_on_memory_while_the_process_is_still_over() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(mem_alert(7), t0);
-        let mut tick = empty_tick();
-        let mut p = snap(7, "p7");
-        p.phys_footprint_bytes = Some(8 << 30);
-        tick.snapshot.processes = Some(Arc::new(vec![p]));
-        state.latest = Some(tick);
-        state.note_memory_recovery(t0);
-        assert!(state.memory_needs_attention_at(t0 + TRAY_RECOVER));
-    }
-
-    #[test]
-    fn auto_tray_faces_memory_again_if_the_condition_returns() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(mem_alert(7), t0);
-        let mut quiet = empty_tick();
-        let mut p = snap(7, "p7");
-        p.phys_footprint_bytes = Some(100 << 20);
-        quiet.snapshot.processes = Some(Arc::new(vec![p.clone()]));
-        state.latest = Some(quiet);
-        state.note_memory_recovery(t0);
-
-        p.phys_footprint_bytes = Some(8 << 30);
-        let mut loud = empty_tick();
-        loud.snapshot.processes = Some(Arc::new(vec![p]));
-        state.latest = Some(loud);
-        state.note_memory_recovery(t0 + Duration::from_secs(60));
-        assert!(
-            state.memory_needs_attention_at(t0 + TRAY_RECOVER + Duration::from_secs(60)),
-            "crossing again resets the five minutes"
-        );
-    }
-
-    #[test]
-    fn auto_tray_pressure_returns_after_five_minutes_of_normal() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(pressure_alert(4), t0);
-        let mut tick = empty_tick();
-        tick.snapshot.memory.pressure_level = Some(4);
-        state.latest = Some(tick);
-        state.note_memory_recovery(t0);
-        assert!(state.memory_needs_attention_at(t0));
-
-        let mut normal = empty_tick();
-        normal.snapshot.memory.pressure_level = Some(1);
-        state.latest = Some(normal);
-        state.note_memory_recovery(t0);
-        assert!(state.memory_needs_attention_at(t0 + Duration::from_secs(60)));
-        assert!(!state.memory_needs_attention_at(t0 + TRAY_RECOVER));
-    }
-
-    /// A memory-heavy Mac sits at the kernel's warning tier as its
-    /// steady state, so that tier does not get the menu bar — the card
-    /// and the banner still carry it. Critical does, and an episode
-    /// that escalates turns the face on the report that says so.
-    #[test]
-    fn auto_tray_waits_for_critical_pressure_but_not_for_warning() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(pressure_alert(2), t0);
-        let mut warned = empty_tick();
-        warned.snapshot.memory.pressure_level = Some(2);
-        state.latest = Some(warned);
-        state.note_memory_recovery(t0);
-        assert!(
-            !state.memory_needs_attention_at(t0),
-            "warning is this platform's normal, not news for the menu bar"
-        );
-        // The episode is still on the tab: only the face is withheld.
-        assert_eq!(state.alerts().len(), 1);
-
-        // Worsening is reported as a fresh event on the same episode.
-        state.record_alert(pressure_alert(4), t0);
-        let mut critical = empty_tick();
-        critical.snapshot.memory.pressure_level = Some(4);
-        state.latest = Some(critical);
-        state.note_memory_recovery(t0);
-        assert!(state.memory_needs_attention_at(t0));
-    }
-
-    /// The clock's two transitions are what the log reports, so the
-    /// state they read from has to move exactly once per transition:
-    /// the arm re-holds on every tick the condition holds, and a line
-    /// per tick would drown the one that matters.
-    #[test]
-    fn the_recovery_clock_moves_only_on_a_transition() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(pressure_alert(4), t0);
-        let normal = || {
-            let mut tick = empty_tick();
-            tick.snapshot.memory.pressure_level = Some(1);
-            tick
-        };
-        state.latest = Some(normal());
-        state.note_memory_recovery(t0);
-        let started = state.alerts()[0].recovered_since.expect("clock started");
-        // A second quiet tick must not restart it — that would push the
-        // deadline out forever and log a line each time.
-        state.latest = Some(normal());
-        state.note_memory_recovery(t0 + Duration::from_secs(5));
-        assert_eq!(state.alerts()[0].recovered_since, Some(started));
-
-        // Back over the line: cleared, so the next quiet tick is a
-        // genuine restart.
-        let mut over = empty_tick();
-        over.snapshot.memory.pressure_level = Some(4);
-        state.latest = Some(over);
-        state.note_memory_recovery(t0 + Duration::from_secs(60));
-        assert!(state.alerts()[0].recovered_since.is_none());
-        state.latest = Some(normal());
-        state.note_memory_recovery(t0 + Duration::from_secs(65));
-        assert_eq!(
-            state.alerts()[0].recovered_since,
-            Some(t0 + Duration::from_secs(65))
-        );
-    }
-
-    /// A process over its memory bar is Warning in zstats — only
-    /// pressure ≥ 4 and a runaway CPU are Critical — so gating the
-    /// whole class on severity would have deleted the face's original
-    /// job.
-    #[test]
-    fn auto_tray_still_turns_for_a_process_memory_episode() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        state.record_alert(mem_alert(7), t0);
-        assert_eq!(state.alerts()[0].event.severity(), Severity::Warning);
-        assert!(state.memory_needs_attention_at(t0));
-    }
-
-    #[test]
-    fn auto_tray_ignores_restored_memory_episodes() {
-        let mut state = ZStatsAppState::new();
-        state.adopt_alerts(vec![alertlog::Restored {
-            event: mem_alert(7),
-            first_at: SystemTime::now(),
-            at: SystemTime::now(),
-            reports: 1,
-            dismissed: false,
-        }]);
-        assert!(!state.memory_needs_attention_at(SystemTime::now()));
-    }
-
     /// The creep re-arm is the clock, not the figure. With nothing
     /// over the bar this tick, the first shape read "climb gone" and
     /// re-armed — a GC sawtooth crossing 1 GB every few minutes became
@@ -4231,49 +2560,6 @@ mod tests {
         }
     }
 
-    /// "Today's alerts" has to keep meaning today on a machine that
-    /// never restarts — the file draws that boundary when it loads, and
-    /// a session running past midnight has to draw it too.
-    #[test]
-    fn the_day_boundary_retires_yesterdays_episodes() {
-        let mut state = ZStatsAppState::new();
-        let now = SystemTime::now();
-        state.record_alert(cpu_alert(7), now - Duration::from_secs(3 * 86_400));
-        state.record_alert(cpu_alert(8), now);
-        assert_eq!(state.alerts().len(), 2);
-
-        assert!(state.retain_today(now), "the stale one is retired");
-        assert_eq!(state.alerts().len(), 1);
-        assert!(matches!(
-            state.alerts()[0].event.subject,
-            AlertSubject::Process { pid: 8, .. }
-        ));
-        assert!(!state.retain_today(now), "nothing left to retire");
-    }
-
-    /// The id has to outlive reordering — it is what element state (hover,
-    /// the expanded editor) is keyed on.
-    #[test]
-    fn episode_ids_are_unique_and_stable() {
-        let mut state = ZStatsAppState::new();
-        let t0 = SystemTime::now();
-        for pid in 1..=3 {
-            state.record_alert(cpu_alert(pid), t0);
-        }
-        let before: Vec<_> = state
-            .alerts()
-            .iter()
-            .map(|a| (a.seq, a.event.kind()))
-            .collect();
-        // Push the oldest back to the front.
-        state.record_alert(cpu_alert(1), t0 + Duration::from_secs(60));
-        let after: Vec<_> = state.alerts().iter().map(|a| a.seq).collect();
-        assert_eq!(after, vec![1, 3, 2], "order changes, ids do not");
-        assert_eq!(before.len(), 3);
-        let unique: HashSet<u64> = after.iter().copied().collect();
-        assert_eq!(unique.len(), 3, "ids must not collide");
-    }
-
     #[test]
     fn sustained_bar_follows_the_configured_alert_threshold() {
         let state = ZStatsAppState::new();
@@ -4295,13 +2581,72 @@ mod tests {
             seen.push(cur);
         }
         assert_eq!(cur, ProcSort::default(), "cycle should return to start");
-        assert_eq!(seen.len(), 3, "every ordering should be reachable");
+        assert_eq!(seen.len(), 4, "every ordering should be reachable");
 
         let mut app = AppSort::default();
         app = app.next();
         assert_eq!(app, AppSort::Memory);
         app = app.next();
         assert_eq!(app, AppSort::Cpu, "apps cycle is two-way");
+    }
+
+    fn group(root_pid: u32, name: &str) -> ProcessGroupSnapshot {
+        ProcessGroupSnapshot {
+            root_pid,
+            name: name.into(),
+            display_name: None,
+            process_count: 1,
+            cpu_usage_percent: 0.0,
+            memory_bytes: 0,
+            phys_footprint_bytes: None,
+            read_bytes_per_sec: None,
+            write_bytes_per_sec: None,
+        }
+    }
+
+    #[test]
+    fn history_jumps_to_a_live_tree_by_name_not_a_recycled_pid() {
+        let groups = [group(10, "Chrome"), group(20, "code")];
+        assert_eq!(
+            live_group_root(&groups, "Chrome"),
+            Some(10),
+            "a restart that kept the name still lands on the live tree"
+        );
+        assert_eq!(
+            live_group_root(&groups, "helper"),
+            None,
+            "a helper name is not a tree"
+        );
+    }
+
+    #[test]
+    fn history_jumps_to_a_live_process_only_while_the_name_matches() {
+        let procs = [snap(7, "Chrome"), snap(8, "code")];
+        assert_eq!(live_process_pid(&procs, "Chrome", 7), Some(7));
+        assert_eq!(
+            live_process_pid(&procs, "Chrome", 99),
+            Some(7),
+            "restarted: same name, new pid"
+        );
+        assert_eq!(
+            live_process_pid(&procs, "Chrome", 8),
+            Some(7),
+            "pid 8 is code now — do not follow the recycled pid"
+        );
+        assert_eq!(live_process_pid(&procs, "gone", 7), None);
+    }
+
+    #[test]
+    fn tab_pref_keys_round_trip_and_overview_is_absent() {
+        for tab in Tab::ALL {
+            assert_eq!(Tab::from_pref_key(tab.pref_key()), tab);
+        }
+        assert!(Tab::Overview.pref_key().is_none());
+        assert_eq!(
+            Tab::from_pref_key(Some("config")),
+            Tab::Overview,
+            "Config is a window"
+        );
     }
 
     #[test]

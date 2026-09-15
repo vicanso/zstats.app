@@ -37,6 +37,7 @@ pub mod widgets;
 
 use crate::assets::CustomIconName;
 use crate::i18n;
+use crate::prefs;
 use crate::state::{Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
@@ -138,7 +139,7 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
             theme::text_dim()
         };
         let id = tab.label();
-        let title = tab.title();
+        let title = t!("tabs.shortcut", name = tab.title(), n = tab.index() + 1).to_string();
         div()
             .id(id)
             .flex_1()
@@ -239,6 +240,37 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
         .pb(px(6.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
+        .child({
+            // Stays with the right-hand cluster: a lone icon on the
+            // left read as an unfinished row. Pin only stops auto-hide
+            // — tray click still toggles, and this is not a second
+            // window model.
+            let pinned = prefs::pinned();
+            let pin_tip = i18n::tr(if pinned { "common.unpin" } else { "common.pin" });
+            div()
+                .id("pin")
+                .flex_none()
+                .p(px(4.))
+                .rounded(px(6.))
+                .when(pinned, |d| d.bg(theme::chip()))
+                .tooltip(move |window, cx| Tooltip::new(pin_tip.clone()).build(window, cx))
+                .hover(|d| d.bg(theme::surface_raised()))
+                .child(
+                    Icon::from(CustomIconName::Pin)
+                        .with_size(Size::Size(px(14.)))
+                        .text_color(Hsla::from(if pinned {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        })),
+                )
+                .on_click(|_, _window, cx| {
+                    prefs::set_pinned(!prefs::pinned());
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |_, cx| cx.notify());
+                })
+        })
         .child({
             // Config lives in its own window, not a tab: a settings
             // session should not be cut short by the popover auto-hiding

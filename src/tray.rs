@@ -28,6 +28,7 @@ const MENU_ID_QUIT: &str = "quit";
 pub enum TrayFace {
     Cpu,
     Memory,
+    Disk,
 }
 
 /// One `NSStatusItem` and what it currently wears. Dropping it removes the
@@ -55,14 +56,16 @@ struct Item {
 ///
 /// `*_hot` is the same die with a template spec in the corner — same
 /// ink as the glyph (white on a dark menu bar), not a painted colour.
-/// Both faces carry one: Auto/Both can be wearing the memory stick
-/// when an alert lands, and a spec that only exists on CPU would
-/// vanish the moment memory needed attention.
+/// Every Auto face carries one: Auto can be wearing the memory stick
+/// or the disk when an alert lands, and a spec that only exists on CPU
+/// would vanish the moment the face moved.
 struct Faces {
     cpu: Option<Icon>,
     cpu_hot: Option<Icon>,
     memory: Option<Icon>,
     memory_hot: Option<Icon>,
+    disk: Option<Icon>,
+    disk_hot: Option<Icon>,
 }
 
 impl Faces {
@@ -72,6 +75,8 @@ impl Faces {
             (TrayFace::Cpu, false) => self.cpu.as_ref(),
             (TrayFace::Memory, true) => self.memory_hot.as_ref().or(self.memory.as_ref()),
             (TrayFace::Memory, false) => self.memory.as_ref(),
+            (TrayFace::Disk, true) => self.disk_hot.as_ref().or(self.disk.as_ref()),
+            (TrayFace::Disk, false) => self.disk.as_ref(),
         }
     }
 }
@@ -201,6 +206,24 @@ impl Figure {
             ),
         }
     }
+
+    /// Free space on the volume that earned the face, not used percent.
+    /// Used% is what the alert fired on, but the menu bar's job is the
+    /// same as memory's: how much is *left*. Same `gb_short` rounding.
+    fn disk(available: u64, total: u64, name: &str) -> Self {
+        Figure {
+            title: format::gb_short(available),
+            tip: format!(
+                "{APP_NAME} · {}",
+                t!(
+                    "tray.disk_tip",
+                    avail = format::gb(available),
+                    total = format::gb(total),
+                    name = name
+                )
+            ),
+        }
+    }
 }
 
 /// One status item wearing `face`, with the shared menu and tooltip.
@@ -242,27 +265,32 @@ fn build_item(label: &'static str, face: TrayFace, faces: &Faces) -> Option<Item
     }
 }
 
-/// The face for a preference and the store's answer to "is memory what
-/// needs attention right now" (`ZStatsAppState::memory_needs_attention`).
+/// The face for a preference and the store's answers to "what needs
+/// attention right now".
 ///
-/// Auto is the only mode with two answers, and it has exactly one
-/// trigger. CPU is the resting face — it is what a menu bar monitor is
-/// expected to show, and what the design's tray strip shows — so a CPU
-/// episode changes nothing: the figure it concerns is already there.
-/// Memory is the face that has to be *earned*, and when both are in
-/// trouble it wins, because memory is the one macOS escalates
-/// (compressor, swap, jetsam) while a busy CPU just stays busy. Auto
-/// switches back after the episode has looked recovered for five
-/// minutes, or immediately when the card is dismissed.
+/// Auto is the only mode that moves. CPU is the resting face — a CPU
+/// episode changes nothing, the figure is already there. Memory and
+/// disk both have to be *earned* from a live episode this session
+/// (`memory_needs_attention` / `disk_needs_attention`). When both are
+/// in trouble memory wins: macOS escalates memory (compressor, swap,
+/// jetsam) while a full disk stays full. Pinned modes ignore both
+/// signals. Auto switches back after the episode has looked recovered
+/// for five minutes, or immediately when the card is dismissed.
 ///
 /// This is the *primary* item's face. In Both that is memory: the
 /// second item lands to its left (see `TrayHandle::second`) and wears
-/// CPU, so the pair reads CPU · memory.
-pub fn face_for(pref: TrayPref, memory_needs_attention: bool) -> TrayFace {
+/// CPU, so the pair reads CPU · memory. Disk is Auto-only — it does
+/// not grow a third status item.
+pub fn face_for(
+    pref: TrayPref,
+    memory_needs_attention: bool,
+    disk_needs_attention: bool,
+) -> TrayFace {
     match pref {
         TrayPref::Cpu => TrayFace::Cpu,
         TrayPref::Memory | TrayPref::Both => TrayFace::Memory,
         TrayPref::Auto if memory_needs_attention => TrayFace::Memory,
+        TrayPref::Auto if disk_needs_attention => TrayFace::Disk,
         TrayPref::Auto => TrayFace::Cpu,
     }
 }
@@ -289,9 +317,20 @@ pub fn sync(cx: &App, state: &ZStatsAppState) {
                 let mem = &tick.snapshot.memory;
                 Figure::memory(mem.available_bytes, mem.total_bytes)
             }
+            TrayFace::Disk => match state.disk_face_volume() {
+                Some((avail, total, name)) => Figure::disk(avail, total, name),
+                None => Figure {
+                    title: format::PLACEHOLDER.to_string(),
+                    tip: APP_NAME.to_string(),
+                },
+            },
         })
     };
-    let face = face_for(pref, state.memory_needs_attention());
+    let face = face_for(
+        pref,
+        state.memory_needs_attention(),
+        state.disk_needs_attention(),
+    );
     // One spec, on the item that always exists. Both's second item is
     // the same news twice — two adjacent dots would look like two
     // alerts.
@@ -453,12 +492,14 @@ pub fn init_tray(cx: &mut App) {
         cpu_hot: tray_icon_hot(CustomIconName::Cpu),
         memory: tray_icon(CustomIconName::MemoryStick),
         memory_hot: tray_icon_hot(CustomIconName::MemoryStick),
+        disk: tray_icon(CustomIconName::HardDrive),
+        disk_hot: tray_icon_hot(CustomIconName::HardDrive),
     };
     // The store is empty here, so the face is the preference's resting
-    // one (`memory_needs_attention` = false): a pinned mode launches
-    // already wearing its face instead of flipping on the first sample.
+    // one (no live episode): a pinned mode launches already wearing
+    // its face instead of flipping on the first sample.
     let pref = prefs::tray();
-    let Some(primary) = build_item("primary", face_for(pref, false), &faces) else {
+    let Some(primary) = build_item("primary", face_for(pref, false, false), &faces) else {
         return;
     };
     // Both's second item is built here too rather than left to the first
@@ -543,7 +584,11 @@ mod tests {
     /// up as "the icon vanished the first time memory got tight".
     #[test]
     fn every_face_rasterises_to_a_visible_glyph() {
-        for glyph in [CustomIconName::Cpu, CustomIconName::MemoryStick] {
+        for glyph in [
+            CustomIconName::Cpu,
+            CustomIconName::MemoryStick,
+            CustomIconName::HardDrive,
+        ] {
             let rgba = rasterise_icon(glyph, ICON_SIZE).expect("icon should rasterise");
             assert_eq!(rgba.len() as u32, ICON_SIZE * ICON_SIZE * 4);
 
@@ -570,7 +615,11 @@ mod tests {
 
     #[test]
     fn a_template_spec_is_extra_alpha_in_the_top_left() {
-        for glyph in [CustomIconName::Cpu, CustomIconName::MemoryStick] {
+        for glyph in [
+            CustomIconName::Cpu,
+            CustomIconName::MemoryStick,
+            CustomIconName::HardDrive,
+        ] {
             let mut rgba = rasterise_icon(glyph, ICON_SIZE).expect("glyph");
             let cx = (DOT_INSET + DOT_DIAMETER / 2) as usize;
             let i = (cx * ICON_SIZE as usize + cx) * 4;
@@ -586,16 +635,20 @@ mod tests {
         }
     }
 
-    /// Auto's one trigger is memory; the pinned modes ignore it, and
-    /// Both's primary is the memory one (CPU goes on the item to its
-    /// left).
+    /// Auto rests on CPU, turns for memory or disk, and memory wins
+    /// when both are on. Pinned modes ignore both signals.
     #[test]
-    fn auto_rests_on_cpu_and_turns_only_for_memory() {
-        assert_eq!(face_for(TrayPref::Auto, false), TrayFace::Cpu);
-        assert_eq!(face_for(TrayPref::Auto, true), TrayFace::Memory);
-        assert_eq!(face_for(TrayPref::Cpu, true), TrayFace::Cpu);
-        assert_eq!(face_for(TrayPref::Memory, false), TrayFace::Memory);
-        assert_eq!(face_for(TrayPref::Both, false), TrayFace::Memory);
-        assert_eq!(face_for(TrayPref::Both, true), TrayFace::Memory);
+    fn auto_rests_on_cpu_and_turns_for_memory_or_disk() {
+        assert_eq!(face_for(TrayPref::Auto, false, false), TrayFace::Cpu);
+        assert_eq!(face_for(TrayPref::Auto, true, false), TrayFace::Memory);
+        assert_eq!(face_for(TrayPref::Auto, false, true), TrayFace::Disk);
+        assert_eq!(
+            face_for(TrayPref::Auto, true, true),
+            TrayFace::Memory,
+            "memory still wins when the disk is full too"
+        );
+        assert_eq!(face_for(TrayPref::Cpu, true, true), TrayFace::Cpu);
+        assert_eq!(face_for(TrayPref::Memory, false, true), TrayFace::Memory);
+        assert_eq!(face_for(TrayPref::Both, false, true), TrayFace::Memory);
     }
 }

@@ -79,9 +79,15 @@ pub enum CustomIconName {
     LogOut,
     /// The tray's memory face (`tray.rs`); lucide `memory-stick`.
     MemoryStick,
+    /// The tray's disk face (`tray.rs`); lucide `hard-drive`. Not the
+    /// Hardware tab's `IconName::HardDrive` — the tray rasterises its
+    /// own glyphs as templates.
+    HardDrive,
     Power,
     RefreshCw,
     Shield,
+    /// Footer pin: keeps the panel from auto-hiding on focus loss.
+    Pin,
 }
 
 impl CustomIconName {
@@ -92,9 +98,11 @@ impl CustomIconName {
             CustomIconName::History => "icons/history.svg",
             CustomIconName::LogOut => "icons/log-out.svg",
             CustomIconName::MemoryStick => "icons/memory-stick.svg",
+            CustomIconName::HardDrive => "icons/hard-drive.svg",
             CustomIconName::Power => "icons/power.svg",
             CustomIconName::RefreshCw => "icons/refresh-cw.svg",
             CustomIconName::Shield => "icons/shield.svg",
+            CustomIconName::Pin => "icons/pin.svg",
         }
         .into()
     }
@@ -123,9 +131,11 @@ mod tests {
             CustomIconName::History,
             CustomIconName::LogOut,
             CustomIconName::MemoryStick,
+            CustomIconName::HardDrive,
             CustomIconName::Power,
             CustomIconName::RefreshCw,
             CustomIconName::Shield,
+            CustomIconName::Pin,
         ] {
             let path = icon.path();
             assert!(get(&path).is_some(), "{path} is not embedded");

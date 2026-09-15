@@ -110,11 +110,25 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .overflow_y_scroll()
                 .max_h(px(rows_height(state, has_note)))
                 .children(shown.into_iter().enumerate().map(|(i, s)| {
+                    let pid = s.pid;
+                    let name = s.name.clone();
                     v_flex()
+                        .id(row_id(pid, &name))
                         .px(px(13.))
                         .py(px(9.))
                         .when(i != last, |d| {
                             d.border_b(px(1.)).border_color(theme::border_subtle())
+                        })
+                        // The row answers "who burned it" — Processes or
+                        // Apps answers the next question. Hover fill is
+                        // the affordance, same as Overview's top trees.
+                        .hover(|d| d.bg(theme::surface_raised()))
+                        .on_click(move |_, _window, cx| {
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| {
+                                    state.reveal_history_subject(pid, &name, cx)
+                                });
                         })
                         .child(
                             h_flex()
@@ -591,9 +605,24 @@ fn refresh_control() -> AnyElement {
         .into_any_element()
 }
 
+/// A row's element id. Spenders are grouped on `(pid, name)`, so the pid
+/// alone repeats: a week's range spans reboots that hand low pids back
+/// out, and an `exec` renames a process under the same pid. Two siblings
+/// with one id share gpui's pending-mouse-down cell, and the earlier row's
+/// mouse-up listener clears it before the later row can fire its click.
+fn row_id(pid: u32, name: &str) -> SharedString {
+    SharedString::from(format!("hist-row-{pid}-{name}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_sharing_a_pid_keep_distinct_ids() {
+        assert_ne!(row_id(400, "WindowServer"), row_id(400, "mds"));
+        assert_eq!(row_id(400, "mds"), row_id(400, "mds"));
+    }
 
     #[test]
     fn bucket_boundaries_read_as_wall_clock() {

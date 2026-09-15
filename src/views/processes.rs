@@ -46,39 +46,61 @@ pub(super) const BAR_FLOOR_PERCENT: f32 = 100.0;
 /// broken. Name order ranks by no magnitude at all, so there the page's
 /// own subject keeps the track.
 #[derive(Clone, Copy)]
+enum BarMeasure {
+    Cpu,
+    Memory,
+    DiskIo,
+}
+
+#[derive(Clone, Copy)]
 struct BarScale {
-    by_memory: bool,
+    measure: BarMeasure,
     full: f32,
 }
+
+/// Combined disk read+write below this does not get to define "full" —
+/// same number as the Network tab, and the same reason: a machine doing
+/// a few kB/s of housekeeping must not paint a saturated bar.
+const IO_FLOOR_BYTES: f32 = 64.0 * 1024.0;
 
 impl BarScale {
     /// Which page the maxima come from is the caller's call: the top
     /// list measures the rows it shows, the full listing measures the
     /// whole table rather than the filtered cut, so its meters do not
     /// rescale on every keystroke.
-    fn new(sort: ProcSort, cpu_max: f32, mem_max: u64) -> Self {
-        let by_memory = matches!(sort, ProcSort::Memory);
-        Self {
-            by_memory,
-            // Memory gets no floor-at-one-core equivalent: bytes have no
-            // natural unit to hold the track against, so the largest row
-            // on the page is the only honest full. A `max(1)` only keeps
-            // the division defined.
-            full: if by_memory {
-                (mem_max as f32).max(1.0)
-            } else {
-                cpu_max.max(BAR_FLOOR_PERCENT)
-            },
-        }
+    fn new(sort: ProcSort, cpu_max: f32, mem_max: u64, io_max: u64) -> Self {
+        let measure = match sort {
+            ProcSort::Memory => BarMeasure::Memory,
+            ProcSort::DiskIo => BarMeasure::DiskIo,
+            ProcSort::Cpu | ProcSort::Name => BarMeasure::Cpu,
+        };
+        let full = match measure {
+            // Memory / IO have no floor-at-one-core equivalent: bytes
+            // have no natural unit to hold the track against, so the
+            // largest row on the page is the only honest full. A
+            // `max(1)` only keeps the division defined. IO still has
+            // [`IO_FLOOR_BYTES`] so housekeeping cannot saturate it.
+            BarMeasure::Memory => (mem_max as f32).max(1.0),
+            BarMeasure::DiskIo => (io_max as f32).max(IO_FLOOR_BYTES),
+            BarMeasure::Cpu => cpu_max.max(BAR_FLOOR_PERCENT),
+        };
+        Self { measure, full }
     }
 
     fn fraction(&self, p: &ProcessSnapshot, cpu: f64) -> f32 {
-        if self.by_memory {
-            shown_memory(p) as f32 / self.full
-        } else {
-            cpu as f32 / self.full
+        match self.measure {
+            BarMeasure::Memory => shown_memory(p) as f32 / self.full,
+            BarMeasure::DiskIo => disk_io_bytes(p) as f32 / self.full,
+            BarMeasure::Cpu => cpu as f32 / self.full,
         }
     }
+}
+
+/// Combined disk throughput, `None` read as zero so a first sample
+/// (rates not yet differenced) sorts to the bottom rather than failing
+/// the ranking.
+fn disk_io_bytes(p: &ProcessSnapshot) -> u64 {
+    p.read_bytes_per_sec.unwrap_or(0) + p.write_bytes_per_sec.unwrap_or(0)
 }
 
 /// A burst this big is worth colour — one whole core.
@@ -201,6 +223,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     match state.proc_sort() {
         ProcSort::Cpu => {}
         ProcSort::Memory => rows.sort_by_key(|(p, _)| Reverse(shown_memory(p))),
+        ProcSort::DiskIo => rows.sort_by_key(|(p, _)| Reverse(disk_io_bytes(p))),
         // Case-insensitive, or every capitalised app name would sort ahead of
         // every lowercase daemon — not what "by name" means to someone
         // scanning for one. `_cached_` because the key allocates: plain
@@ -237,9 +260,23 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         state.proc_sort(),
         rows.iter().map(|(_, cpu)| *cpu as f32).fold(0.0, f32::max),
         rows.iter().map(|(p, _)| shown_memory(p)).max().unwrap_or(0),
+        rows.iter()
+            .map(|(p, _)| disk_io_bytes(p))
+            .max()
+            .unwrap_or(0),
     );
 
     let no_match = !filter.is_empty() && rows.is_empty() && !only_abnormal;
+
+    // A jump from an alert or History: put the selected row in view on
+    // this one paint. Index is into the children about to be painted —
+    // abnormal rows sit above the ranked list, so they shift it.
+    if state.take_proc_reveal()
+        && let Some(sel) = state.selected_pid()
+        && let Some(ix) = rows.iter().position(|(p, _)| p.pid == sel)
+    {
+        state.proc_rows_scroll().scroll_to_item(abnormal.len() + ix);
+    }
 
     let title = if only_abnormal {
         t!("processes.abnormal_only", count = abnormal.len()).to_string()
@@ -439,7 +476,16 @@ fn process_row(
                     div()
                         .font_family(font::MONO)
                         .text_color(theme::text_muted())
-                        .child(format::memory(shown_memory(p))),
+                        .child(match bar.measure {
+                            // The ranking key belongs on the row, not only
+                            // in the meter — memory sort already prints
+                            // memory here; IO has nowhere else to show it
+                            // on a collapsed row.
+                            BarMeasure::DiskIo => {
+                                disk_io_display(p.read_bytes_per_sec, p.write_bytes_per_sec)
+                            }
+                            _ => format::memory(shown_memory(p)),
+                        }),
                 ),
         )
         .child(div().mt(px(4.)).child(widgets::meter(
@@ -499,6 +545,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
             .map(|p| p.cpu_usage_percent)
             .fold(0.0, f32::max),
         processes.iter().map(shown_memory).max().unwrap_or(0),
+        processes.iter().map(disk_io_bytes).max().unwrap_or(0),
     );
     let chrome = FULL_CHROME_HEIGHT
         + if state.proc_filter_open() {
@@ -508,6 +555,13 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
         };
     let height =
         (super::body_height(state).unwrap_or(FULL_LIST_FALLBACK) - chrome).max(FULL_LIST_MIN);
+
+    if state.take_proc_reveal()
+        && let Some(sel) = state.selected_pid()
+        && let Some(ix) = visible.iter().position(|&i| processes[i].pid == sel)
+    {
+        data.list.scroll_to_reveal_item(ix);
+    }
 
     widgets::list_shell()
         .child(widgets::list_header(
@@ -1328,6 +1382,9 @@ fn sort_indices(indices: &mut [usize], processes: &[ProcessSnapshot], sort: Proc
         ProcSort::Memory => {
             indices.sort_by_key(|&i| Reverse(shown_memory(&processes[i])));
         }
+        ProcSort::DiskIo => {
+            indices.sort_by_key(|&i| Reverse(disk_io_bytes(&processes[i])));
+        }
         ProcSort::Name => indices.sort_by_cached_key(|&i| processes[i].name.to_lowercase()),
     }
 }
@@ -1530,11 +1587,11 @@ mod tests {
         let heavy = snap("heavy", 20.0, 8_000_000_000);
         let hot = snap("hot", 400.0, 100_000_000);
 
-        let by_cpu = BarScale::new(ProcSort::Cpu, 400.0, 8_000_000_000);
+        let by_cpu = BarScale::new(ProcSort::Cpu, 400.0, 8_000_000_000, 0);
         assert_eq!(by_cpu.fraction(&hot, 400.0), 1.0, "hottest fills the track");
         assert_eq!(by_cpu.fraction(&heavy, 20.0), 20.0 / 400.0);
 
-        let by_mem = BarScale::new(ProcSort::Memory, 400.0, 8_000_000_000);
+        let by_mem = BarScale::new(ProcSort::Memory, 400.0, 8_000_000_000, 0);
         assert_eq!(by_mem.fraction(&heavy, 20.0), 1.0, "largest fills it");
         assert_eq!(
             by_mem.fraction(&hot, 400.0),
@@ -1543,16 +1600,29 @@ mod tests {
 
         // Name order ranks by no magnitude, so the page's own subject
         // keeps the track.
-        let by_name = BarScale::new(ProcSort::Name, 400.0, 8_000_000_000);
+        let by_name = BarScale::new(ProcSort::Name, 400.0, 8_000_000_000, 0);
         assert_eq!(by_name.fraction(&hot, 400.0), 1.0);
 
         // A quiet page does not stretch its hottest 8% across the track.
-        let quiet = BarScale::new(ProcSort::Cpu, 8.0, 1_000);
+        let quiet = BarScale::new(ProcSort::Cpu, 8.0, 1_000, 0);
         assert_eq!(quiet.fraction(&snap("idle", 8.0, 1_000), 8.0), 0.08);
         // An empty page divides by something.
         assert_eq!(
-            BarScale::new(ProcSort::Memory, 0.0, 0).fraction(&snap("x", 0.0, 0), 0.0),
+            BarScale::new(ProcSort::Memory, 0.0, 0, 0).fraction(&snap("x", 0.0, 0), 0.0),
             0.0
+        );
+
+        let mut writer = snap("writer", 1.0, 1);
+        writer.read_bytes_per_sec = Some(0);
+        writer.write_bytes_per_sec = Some(8 * 1024 * 1024);
+        let mut quiet_io = snap("quiet", 1.0, 1);
+        quiet_io.read_bytes_per_sec = Some(1024);
+        quiet_io.write_bytes_per_sec = Some(0);
+        let by_io = BarScale::new(ProcSort::DiskIo, 400.0, 8_000_000_000, 8 * 1024 * 1024);
+        assert_eq!(by_io.fraction(&writer, 1.0), 1.0, "busiest fills the track");
+        assert!(
+            by_io.fraction(&quiet_io, 1.0) < 0.01,
+            "housekeeping is a sliver, not a full bar"
         );
     }
 
@@ -1598,6 +1668,27 @@ mod tests {
         assert_eq!(idx, vec![2, 0, 1]);
         sort_indices(&mut idx, &processes, ProcSort::Name);
         assert_eq!(idx, vec![1, 2, 0]); // Chrome, ice, zed
+
+        let mut io = processes;
+        io[0].write_bytes_per_sec = Some(100);
+        io[1].read_bytes_per_sec = Some(50);
+        io[2].read_bytes_per_sec = None;
+        io[2].write_bytes_per_sec = None;
+        let mut idx = vec![0, 1, 2];
+        sort_indices(&mut idx, &io, ProcSort::DiskIo);
+        assert_eq!(idx, vec![0, 1, 2], "combined R+W, None sorts as zero");
+    }
+
+    #[test]
+    fn missing_disk_rates_sort_as_zero() {
+        let mut a = snap("a", 0.0, 0);
+        a.read_bytes_per_sec = None;
+        a.write_bytes_per_sec = None;
+        let mut b = snap("b", 0.0, 0);
+        b.read_bytes_per_sec = Some(10);
+        b.write_bytes_per_sec = Some(5);
+        assert_eq!(disk_io_bytes(&a), 0);
+        assert_eq!(disk_io_bytes(&b), 15);
     }
 
     /// The expansion's alert-bar rows answer "why is this at 300% and

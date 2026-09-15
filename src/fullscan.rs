@@ -147,12 +147,14 @@ fn collect_once(config: CollectorConfig) -> Result<(SystemSnapshot, Duration), C
 
 /// Processes and nothing else. Every other subsystem is already riding the
 /// resident collector's tick, and disk capacity alone costs ~18ms a refresh.
+/// Per-process disk rates ride this same two-pass: without them the All
+/// listing's IO sort is a wall of `—`.
 fn process_config() -> CollectorConfig {
     CollectorConfig {
         collect_processes: true,
         max_processes: usize::MAX,
         collect_process_groups: false,
-        collect_process_disk_io: false,
+        collect_process_disk_io: true,
         per_core_cpu: false,
         collect_disks: false,
         collect_networks: false,

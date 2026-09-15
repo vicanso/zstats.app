@@ -320,7 +320,7 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
 /// Trigger / cancel for the directory analyser. Unlike the large-file
 /// chip, Running stays clickable — it IS the explicit cancel, the only
 /// way a walk stops early (closing this window deliberately does not,
-/// see state.rs).
+/// see `state/analysis.rs`).
 fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
     let running = matches!(state.disk_analysis(), DiskAnalysis::Running { .. });
     let label = if running {

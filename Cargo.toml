@@ -30,23 +30,23 @@ short_description = "A menu bar metrics panel written in Rust and GPUI."
 # crate names the source uses (`gpui::`, `gpui_platform::`) and must stay on
 # the exact family gpui-kit's own manifest pins, or two GPUIs end up in the
 # tree — `cargo tree -i gpui-pre` must show one.
-gpui = { package = "gpui-pre", version = "0.3.3" }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = [
+gpui = { package = "gpui-pre", version = "0.3.5" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.5", features = [
     "font-kit",
     "x11",
     "wayland",
     "runtime_shaders",
 ] }
-gpui_macros = { package = "gpui-pre-macros", version = "0.3.3" }
+gpui_macros = { package = "gpui-pre-macros", version = "0.3.5" }
 # gpui-kit bundles gpui-base + gpui-component (`gpui_kit::component::*`) and
 # the component icon assets (`gpui_kit::assets::Assets`). No `tree-sitter`:
 # that feature is LanguageConfig / the highlighter, which nothing here uses.
-gpui-kit = "0.6.0"
+gpui-kit = "0.6.1"
 # tinyvec 1.13.0 (crates.io, 2026-09-03) does not compile on rustc 1.98:
 # `use alloc::vec::{self, Vec}` shadows the `vec!` macro (Lokathor/tinyvec#225).
-# Pulled in by fontdb → usvg → gpui-pre / resvg. Pin until 1.13 is yanked or
-# patched; `=` so `cargo update` cannot pick 1.13 again.
-tinyvec = "=1.12.0"
+# 1.13.1 restored `vec!`; keep a floor so `cargo update` cannot pick 1.13.0.
+# Pulled in by fontdb → usvg → gpui-pre / resvg.
+tinyvec = "1.13.3"
 
 # Embedded metrics collection. `frontend` brings the alert rule engine,
 # rolling per-process averages and the settings model — and deliberately no
@@ -56,7 +56,7 @@ zstats = { version = "0.5.6", default-features = false, features = ["frontend"] 
 # and whose `MetricRecord::timestamp` is a `jiff::Timestamp`. Same version
 # zstats already pins, so this resolves to the one copy it is already
 # building — confirm with `cargo tree -i jiff` after any bump.
-jiff = "0.2.35"
+jiff = "0.2.37"
 # Hands collected ticks (and tray events) from their blocking threads onto
 # gpui's main-thread executor. Already in the tree via gpui.
 smol = "2.0.2"
@@ -91,9 +91,9 @@ ureq = { version = "3", default-features = false, features = [
 # stop verifying. Already in the tree — rust-embed builds the same
 # version for its own hashing — so this costs no extra compilation.
 sha2 = "0.11"
-rust-i18n = "4.2.1"
+rust-i18n = "4.2.2"
 sys-locale = "0.3.2"
-toml = "1.1.5"
+toml = "1.1.6"
 # Desktop banners. Cross-platform; macOS uses NSUserNotification
 # (`set_application` + `wait_for_action` for the click that opens Alerts).
 notify-rust = "4.18"

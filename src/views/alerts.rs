@@ -33,7 +33,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{IconName, Sizable};
+use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
@@ -721,7 +721,7 @@ fn alert_head(
             // not change the pointer over clickable things, so "the whole row
             // does something" has no way to announce itself.
             .children(quit_button(index, seen))
-            .children(hardware_button(index, &seen.event))
+            .children(goto_button(index, seen))
             .children(target.map(|tgt| {
                 // The note this tooltip carries used to be a line of its
                 // own at the foot of every card — one line per card, on
@@ -763,25 +763,67 @@ fn alert_head(
     .into_any_element()
 }
 
-/// Disk alerts jump to the Hardware tab: the volume cards and the
-/// space tooling (large files, the analyser) live there, and without
-/// this the two halves of the story were disconnected — an alert said
-/// "full" while the remedy sat two tabs away.
-fn hardware_button(index: usize, event: &AlertEvent) -> Option<Button> {
-    matches!(event.kind(), AlertKind::Disk).then(|| {
-        Button::new(("goto-hardware", index))
-            .icon(IconName::HardDrive)
+/// Where a card's subject lives on the panel. Disk stays ungated: a
+/// volume is still that volume after a restart. Process and app jumps
+/// need [`SeenAlert::live`] — a restored card's pid may now belong to
+/// someone else, the same reason the quit button stays off.
+#[derive(Debug, PartialEq, Eq)]
+enum Goto {
+    Hardware,
+    Process(u32),
+    App(u32),
+}
+
+fn goto_target(seen: &SeenAlert) -> Option<Goto> {
+    match &seen.event.subject {
+        AlertSubject::Volume { .. } if matches!(seen.event.kind(), AlertKind::Disk) => {
+            Some(Goto::Hardware)
+        }
+        AlertSubject::Process { pid, .. } if seen.live => Some(Goto::Process(*pid)),
+        AlertSubject::App { root_pid, .. } if seen.live => Some(Goto::App(*root_pid)),
+        _ => None,
+    }
+}
+
+/// Jump to the tab that actually shows this subject. An explicit
+/// control rather than a clickable card: macOS does not change the
+/// pointer over clickable things, so "the whole card does something"
+/// has no way to announce itself.
+fn goto_button(index: usize, seen: &SeenAlert) -> Option<Button> {
+    let target = goto_target(seen)?;
+    let (id, icon, tip) = match target {
+        Goto::Hardware => (
+            ("goto-hardware", index),
+            Icon::new(IconName::HardDrive),
+            i18n::tr("alerts.goto_hardware"),
+        ),
+        Goto::Process(_) => (
+            ("goto-process", index),
+            Icon::new(IconName::Cpu),
+            i18n::tr("alerts.goto_process"),
+        ),
+        Goto::App(_) => (
+            ("goto-app", index),
+            Icon::from(assets::CustomIconName::AppWindow),
+            i18n::tr("alerts.goto_app"),
+        ),
+    };
+    Some(
+        Button::new(id)
+            .icon(icon)
             .ghost()
             .xsmall()
-            .tooltip(i18n::tr("alerts.goto_hardware"))
-            .on_click(|_, _window, cx| {
+            .tooltip(tip)
+            .on_click(move |_, _window, cx| {
                 cx.global::<ZStatsGlobalStore>()
                     .clone()
-                    .update(cx, |state, cx| {
-                        state.set_tab(crate::state::Tab::Hardware, cx)
+                    .update(cx, |state, cx| match target {
+                        Goto::Hardware => state.set_tab(crate::state::Tab::Hardware, cx),
+                        Goto::Process(pid) => state.reveal_pid(pid, cx),
+                        Goto::App(root) => state.reveal_app(root, cx),
                     });
-            })
-    })
+            }),
+    )
 }
 
 fn alert_title(subject: &AlertSubject) -> AnyElement {
@@ -1461,6 +1503,60 @@ mod tests {
         let t = override_target(&cpu_process("ghostty")).expect("target");
         assert_eq!(t.key, "alert-cpu");
         assert_eq!(t.name, "ghostty");
+    }
+
+    fn seen(event: AlertEvent, live: bool) -> SeenAlert {
+        SeenAlert::for_test(event, live)
+    }
+
+    #[test]
+    fn a_live_process_card_jumps_to_that_pid() {
+        assert_eq!(
+            goto_target(&seen(cpu_process("ghostty"), true)),
+            Some(Goto::Process(1))
+        );
+        assert_eq!(
+            goto_target(&seen(cpu_process("ghostty"), false)),
+            None,
+            "a restored card's pid may now belong to someone else"
+        );
+    }
+
+    #[test]
+    fn a_disk_card_jumps_to_hardware_even_when_restored() {
+        let event = AlertEvent {
+            subject: AlertSubject::Volume {
+                mount_point: "/".into(),
+            },
+            detail: AlertDetail::Disk {
+                used_percent: 99.0,
+                threshold_percent: 90.0,
+                available_bytes: 0,
+                total_bytes: 1 << 30,
+            },
+            repeat_after: None,
+        };
+        assert_eq!(goto_target(&seen(event, false)), Some(Goto::Hardware));
+    }
+
+    #[test]
+    fn a_live_app_card_jumps_to_the_tree() {
+        let event = AlertEvent {
+            subject: AlertSubject::App {
+                root_pid: 42,
+                name: "Chrome".into(),
+                display_name: None,
+                process_count: 12,
+            },
+            detail: AlertDetail::Cpu {
+                avg_percent: 200.0,
+                threshold_percent: 80.0,
+                window: Duration::from_secs(60),
+                runaway: false,
+            },
+            repeat_after: None,
+        };
+        assert_eq!(goto_target(&seen(event, true)), Some(Goto::App(42)));
     }
 
     /// A hold that just crossed the two-hour bar is news; a live alert

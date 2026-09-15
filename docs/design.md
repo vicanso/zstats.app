@@ -17,7 +17,7 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 | `watch.rs` | 三个 zstats 告警看不到的观察器：持续负载、异常进程、接口活跃度 |
 | `fullscan.rs` | 一次性全量进程扫描，只在点「全部」时执行 |
 | `history.rs` | 读当天历史文件，按累计 CPU 时间排名 |
-| `state.rs` | 全局状态：采集结果、告警 episode、窗口几何、UI 选择态 |
+| `state/` | 全局状态：采集结果、告警 episode（`alerts.rs`）、磁盘分析（`analysis.rs`）、窗口几何、UI 选择态 |
 | `views/` | 八个视图 + 共用控件 + 设计 token（`theme.rs`） |
 | `format.rs` | 所有数字 → 字符串的规则，纯函数、有单测 |
 | `notify.rs` | 系统横幅：单线程有界队列 |
@@ -127,7 +127,7 @@ README 把「能对不同 app 指定不同规则」当卖点，而这些规则�
 
 ### 告警按 episode 归并
 
-zstats 的告警是 episode 语义：跨越阈值报一次，30 分钟后若仍成立再报一次跟进，然后沉默到值落回并重新武装。所以 `state.rs` 按 `(对象, 度量)` 归并而不是每个事件压一张卡——否则同一个条件会占两张卡，而一个在阈值附近反复进出的进程能独自占满 20 条上限。卡片的 element id 用的是 episode 自己的递增序号，不是队列下标：队列会随着 episode 重新浮上来而重排，用下标会把这张卡的 hover / 展开状态交给顶替它位置的另一条告警。
+zstats 的告警是 episode 语义：跨越阈值报一次，30 分钟后若仍成立再报一次跟进，然后沉默到值落回并重新武装。所以 `state/alerts.rs` 按 `(对象, 度量)` 归并而不是每个事件压一张卡——否则同一个条件会占两张卡，而一个在阈值附近反复进出的进程能独自占满 20 条上限。卡片的 element id 用的是 episode 自己的递增序号，不是队列下标：队列会随着 episode 重新浮上来而重排，用下标会把这张卡的 hover / 展开状态交给顶替它位置的另一条告警。
 
 这份列表会**镜像到按日的文件 `~/.zstats/alerts-YYYY-MM-DD.toml`**（`alertlog.rs`，0600，写临时文件后 rename）：重启后早上烧过的那条还在，而不是一张空表暗示「今天很安静」。当天的文件喂列表，范围与 History 的日界一致；恢复只是记忆，不重发横幅、不重新评估任何条件——恢复回来的 episode 就是同一条件再次触发时归并进去的那一条（`reports` 继续累加，`span` 仍从早上算起）。解析失败的条目单条丢弃，半截文件的代价是它截断的那几条，不是整张表。
 
@@ -164,7 +164,7 @@ zstats 按平台编译进一张表，给「本来就忙、本来就大」的程�
 
 覆盖文件被拒时单独报一种状态（`Source::Broken`），不伪装成「正在用内置表」——那不是实际发生的事：`load_template` 返回错误、`reload_settings` 整体失败、采集器留着旧阈值不动，而 Alerts 页看上去只会像是坏了。「改用内置」按钮只在存在覆盖文件时出现，删掉它并触发重载。
 
-还有一层**自动降噪**（`state.rs` 的 `banner_damped`）：同一条 episode 在一小时内已经弹过两次横幅，后续横幅暂停，直到时间窗滑过那两次投递。它针对的是**反复越线又回落**的主体——zstats 已经在一条 episode *内部*把提醒拉开（压力规则 30m/1h/2h/4h 递增退避），但每次重新越线都会开一条新 episode，每一条都当作新消息送达。按 episode 计数是刻意的：另一个主体越线是另一件事，照常送达。卡片上有「已降噪」标签并附说明——**一条悄悄不再出现的横幅，和一条不再触发的规则，从外面看是一样的**，所以必须说出来；点「恢复」两层一起清除，且都不跨重启（与旁边会持久化的列表不同）。
+还有一层**自动降噪**（`state/alerts.rs` 的 `banner_damped`）：同一条 episode 在一小时内已经弹过两次横幅，后续横幅暂停，直到时间窗滑过那两次投递。它针对的是**反复越线又回落**的主体——zstats 已经在一条 episode *内部*把提醒拉开（压力规则 30m/1h/2h/4h 递增退避），但每次重新越线都会开一条新 episode，每一条都当作新消息送达。按 episode 计数是刻意的：另一个主体越线是另一件事，照常送达。卡片上有「已降噪」标签并附说明——**一条悄悄不再出现的横幅，和一条不再触发的规则，从外面看是一样的**，所以必须说出来；点「恢复」两层一起清除，且都不跨重启（与旁边会持久化的列表不同）。
 
 同一块编辑区里还有**横幅静音**（1 小时 / 3 小时）。它刻意做在投递层而不是规则层：引擎照常评估、告警照常进列表、config.toml 一个字节不动——被压住的只有横幅这一次打扰。临时改阈值再定时改回的方案被否掉了：那会污染与 CLI 共享的配置，应用中途退出还会把「临时」变成永久。静音按 episode（对象 + 度量）生效、到点自动过期、不跨重启持久化——静音的语义是「现在别吵」，重启后已是新的「现在」。
 
@@ -318,9 +318,9 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
 - **重绘要按可见性门控**。窗口是移出屏幕而不是销毁的，gpui 并不知道它看不见，会老老实实继续渲染一个没人能看到的面板——实测空闲 CPU 因此从 0.6% 涨到 2.0%。`CollectorPace::is_visible()` 同时管采样节奏和「这次 tick 要不要重绘」。
 - **跨 Space**。普通窗口属于它被创建时的那个桌面，从别的桌面唤起会让 macOS 切回去——对一个从菜单栏召唤出来的东西来说很突兀。`NSWindowCollectionBehavior::CanJoinAllSpaces | FullScreenAuxiliary`（后者保证在全屏应用之上唤起时不会先退出全屏）。gpui 的 `WindowKind::PopUp` 自带这个行为，但那是 nonactivating panel，拿不到键盘焦点。
 - **托盘点击的 toggle**：点图标会先让窗口失焦（触发自动收起），点击事件随后才到。所以 `TOGGLE_GRACE`（300ms）内如果刚发生过自动收起，这次点击就不再开窗 —— 于是表现为 toggle。`took_recent_auto_hide` 会取走标记，只生效一次。
-- **托盘图标**：`assets/icons/cpu.svg` 与 `memory-stick.svg` 在启动时由 `resvg` 光栅化成两张位图缓存在 `TrayHandle` 里。用主体（CPU die / 内存条）而不是趋势箭头：箭头对数据下了断言（「数字在涨」），而主体本身不下断言。
+- **托盘图标**：`assets/icons/cpu.svg`、`memory-stick.svg` 与 `hard-drive.svg` 在启动时由 `resvg` 光栅化成位图缓存在 `TrayHandle` 里。用主体（CPU die / 内存条 / 磁盘）而不是趋势箭头：箭头对数据下了断言（「数字在涨」），而主体本身不下断言。
 
-  **图标会换脸，但换脸不是面板自己的判断。** `app.toml` 的 `tray` 偏好四档（`tray.rs` 的 `face_for`）：`cpu` / `memory` 钉死一项；`both` 放**两个** `NSStatusItem`——AppKit 把新建的状态项插在已有项的**左边**（`tray-icon` 不设 `autosaveName`，位置不会被记住），所以后建的 `second` 在左、戴 CPU，常驻的 `primary` 戴内存，左→右就是 CPU · 内存（选择器那档叫「两者」——原本写作「CPU + 内存」，四个 chip 一行放不下 320px）；两个项共用同一套菜单和点击线程，点到哪个就以哪个的 rect 为锚点，切档时建或 drop 第二个项（drop 即从菜单栏移除），启动时若已是 both 则两个一起建，不让第二个晚几秒才长出来；缺省的 Auto 平时是 CPU，只有一个触发条件——`state.rs` 的 `memory_needs_attention()`：本次会话报告过、尚未关掉、且通过 `turns_the_face` 的一条内存类 episode（Memory / AppMemory / Pressure）。**`turns_the_face` 只挡一样东西：warning 档的内核压力。**理由是这一档在这个平台上的含义——内存大户机器的稳态就是 warning（zstats 在压力规则的注释里原话如此，也正因如此让这一档等 5 倍时长才上报），而一张半天都在显示内存的脸已经不是信号了；卡片和横幅照常承载 warning，只有菜单栏等 critical。判据用的是 zstats 自己的 `severity()`，绝不读原始 `pressure_level`；按**种类**而不是笼统按严重度，是因为进程/应用内存 episode 在上游天生就是 Warning（只有压力 ≥ 4 和 CPU runaway 是 Critical），笼统一刀会把内存脸最初的职责——点名正在吃掉机器的那个进程或那棵树——整个删掉。warning 升级到 critical 时，那条上报会立刻翻脸（`record_alert` 保留最新事件）；之后即使回落到 warning 也保持，因为那仍是同一条尚未恢复的 critical episode，退出方式和其它 episode 一样。**切过去**完全是 zstats 规则引擎已经做出的裁决；**切回来**有两条路：关掉卡片立刻回，或者该 episode 按**它自己记录的那条线**（`AlertDetail` 里的 `threshold_bytes` / 压力事件对应 `pressure_level > 1`）连续恢复满 `TRAY_RECOVER`（5 分钟，镜像 zstats 结束压力 episode 的 `PRESSURE_REARM`）后自动回。恢复判定（`memory_event_holds`）是这个面板里**唯一一处拿实时数字对阈值**的地方，边界收得很紧：用的是事件自己带的线而不是新阈值，读的是 zstats 自己的字段，结论只落在托盘的脸上——不开合 episode、不动列表、不发横幅，卡片和页签着色照旧到关闭或跨日为止。之所以需要它：引擎对进程/应用内存 episode 只有 30 分钟一次跟进、之后沉默，「已经恢复」这件事引擎从来不说，没有这个判定，Auto 的脸一旦换成内存就只能等人手动关卡片。subject 掉出 top-N 表按「已恢复」读——掉出内存榜本身就是不再是大户；该 tick 说不了话（无进程表、无压力等级）则时钟原地不动。昨天恢复的 episode 不算——托盘说的是现在。
+  **图标会换脸，但换脸不是面板自己的判断。** `app.toml` 的 `tray` 偏好四档（`tray.rs` 的 `face_for`）：`cpu` / `memory` 钉死一项；`both` 放**两个** `NSStatusItem`——AppKit 把新建的状态项插在已有项的**左边**（`tray-icon` 不设 `autosaveName`，位置不会被记住），所以后建的 `second` 在左、戴 CPU，常驻的 `primary` 戴内存，左→右就是 CPU · 内存（选择器那档叫「两者」——原本写作「CPU + 内存」，四个 chip 一行放不下 320px）；两个项共用同一套菜单和点击线程，点到哪个就以哪个的 rect 为锚点，切档时建或 drop 第二个项（drop 即从菜单栏移除），启动时若已是 both 则两个一起建，不让第二个晚几秒才长出来；缺省的 Auto 平时是 CPU，有两个触发条件：`memory_needs_attention()`（本次会话报告过、尚未关掉、且通过 `turns_the_face` 的一条内存类 episode）和 `disk_needs_attention()`（本次会话的磁盘满 episode，ingest 已丢掉只读额外卷；且卷还在——被推出、或已不在本 tick 磁盘列表里的卷立刻交还这张脸：恢复时钟照走，插回同一路径会清零，但此刻没有卷可报，否则菜单栏会在整个恢复窗口里挂着磁盘图标配 `—`）。两边都有事时内存赢——macOS 会把内存一路升级，盘满只是满。磁盘是 Auto 专属，不增第三个状态项。内存那条仍由 `turns_the_face` 把关：**`turns_the_face` 只挡一样东西：warning 档的内核压力。**理由是这一档在这个平台上的含义——内存大户机器的稳态就是 warning（zstats 在压力规则的注释里原话如此，也正因如此让这一档等 5 倍时长才上报），而一张半天都在显示内存的脸已经不是信号了；卡片和横幅照常承载 warning，只有菜单栏等 critical。判据用的是 zstats 自己的 `severity()`，绝不读原始 `pressure_level`；按**种类**而不是笼统按严重度，是因为进程/应用内存 episode 在上游天生就是 Warning（只有压力 ≥ 4 和 CPU runaway 是 Critical），笼统一刀会把内存脸最初的职责——点名正在吃掉机器的那个进程或那棵树——整个删掉。warning 升级到 critical 时，那条上报会立刻翻脸（`record_alert` 保留最新事件）；之后即使回落到 warning 也保持，因为那仍是同一条尚未恢复的 critical episode，退出方式和其它 episode 一样。**切过去**完全是 zstats 规则引擎已经做出的裁决；**切回来**有两条路：关掉卡片立刻回，或者该 episode 按**它自己记录的那条线**（`AlertDetail` 里的 `threshold_bytes` / 压力事件对应 `pressure_level > 1`）连续恢复满 `TRAY_RECOVER`（5 分钟，镜像 zstats 结束压力 episode 的 `PRESSURE_REARM`）后自动回。恢复判定（`memory_event_holds`）是这个面板里**唯一一处拿实时数字对阈值**的地方，边界收得很紧：用的是事件自己带的线而不是新阈值，读的是 zstats 自己的字段，结论只落在托盘的脸上——不开合 episode、不动列表、不发横幅，卡片和页签着色照旧到关闭或跨日为止。之所以需要它：引擎对进程/应用内存 episode 只有 30 分钟一次跟进、之后沉默，「已经恢复」这件事引擎从来不说，没有这个判定，Auto 的脸一旦换成内存就只能等人手动关卡片。subject 掉出 top-N 表按「已恢复」读——掉出内存榜本身就是不再是大户；该 tick 说不了话（无进程表、无压力等级）则时钟原地不动。昨天恢复的 episode 不算——托盘说的是现在。
 
   **有意不读最新样本上的原始 `pressure_level`。** 它会抖——zstats 自己的注释记录了一个连续的压力条件在 5.5 小时里产出四次「新」warning——所以 zstats 的压力规则要求 warning 持续 5 分钟（critical 1 分钟）才报，回到 normal 也要保持 5 分钟才算 episode 结束。托盘如果绕开这层直接读原始值，就是把 zstats 刚去掉的抖动重新漏到菜单栏上，用一个更粗的裁决覆盖一个更细的。结果是脸和横幅同一时刻切换、从不早于横幅，也就不需要自己的最小切换周期：切过去的时机由 zstats 的持续要求决定，切回来的时机由 5 分钟恢复保持（或用户关卡片）决定——恢复判定也从不读原始压力值抖一下就动：一次跌回把 `recovered_since` 记下，五分钟内任何一个样本重新过线就清零重来，两端都不是 tick 级的量。CPU 是静息脸，所以一条 CPU 告警什么也不改（它关心的数字本来就在那里）；两边都有事时内存赢，因为 macOS 会把内存一路升级（压缩、swap、jetsam），而 CPU 忙只是忙。脸和旁边的数字永远一致：CPU 脸配 `cpu.usage_percent`（整数百分比），内存脸配 `memory.available_bytes`（`format::gb_short`，`8.1G`），都是 zstats 的字段。内存**有意不用 used%**：macOS 的缓存会填满所有空闲内存，健康的机器 used% 也在六十几，脸切过去时旁边一个 "62%" 说明不了为什么切；随机器吃紧真正下降的是可用量，也是概览 hero 和总量配对的那个数（同一个 `format::gb` 取整）。裸露的 `8.1G` 靠状态项的 tooltip 说明是什么（`zstats · 可用 8.1 GB，共 24 GB`），tooltip 跟着标题的变化门一起设。同步点在 `metrics.rs` 每次 `ingest` **之后**（这一 tick 合并进去的 episode 要在同一 tick 生效）以及选择器改动时。
 
@@ -334,7 +334,7 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
 
   注意 `with_app_identity()` 里补 titlebar 的分支必须跳过 macOS，否则会把红绿灯又装回去。
 - **退出按钮**：面板 footer 右侧。accessory app 没有应用菜单栏、没有 Dock 图标可右键、窗口也没有关闭按钮，所以退出必须有个看得见的入口（托盘右键菜单的 Quit 仍在）。
-- **窗口定位**（`placement.rs`）：`TrayIconEvent::Click` 带的图标矩形是物理像素，换算成逻辑坐标后，窗口以图标为中心水平居中、下方留 6px，再夹进该显示器的 `visible_bounds()`（已排除菜单栏和 Dock）—— 只有居中会越界时才贴边。纯几何部分是 `anchored_origin()`，单元测试覆盖了居中 / 贴左 / 贴右 / 窗口超高四种情况。`ZSTATS_DEBUG_POSITION=1` 会打印整条换算链，多屏定位出问题时可以定位到具体哪一步。
+- **窗口定位**（`placement.rs`）：`TrayIconEvent::Click` 带的图标矩形是物理像素——tray-icon 用**那颗状态项自己的** `backingScaleFactor` 乘过 AppKit 逻辑坐标，不是一块全局物理空间。换算回逻辑时对每块屏用它自己的 scale 试算，收回来的图标中心落在*那块屏*上才算一致；混 DPI 时两个试算都可能一致（1x 图标的物理 x 除以 2 仍落在 2x 主屏上），再用收回来的高度贴近菜单栏条（~24pt）的那次。逻辑坐标下窗口以图标为中心水平居中、下方留 6px，再夹进该屏的 `visibleFrame`（已排除菜单栏和 Dock）—— 只有居中会越界时才贴边。纯几何部分是 `anchored_origin()` / `resolve_icon()`，单元测试覆盖了居中 / 贴左 / 贴右 / 窗口超高，以及 2x+1x 并排、对调、上下叠放。`ZSTATS_DEBUG_POSITION=1` 会打印整条换算链和每一次试算，多屏定位出问题时可以定位到具体哪一步。
 - **毛玻璃**：`WindowBackgroundAppearance::Blurred`，gpui 在 macOS 上用 `NSVisualEffectView` 实现。仅 macOS 启用：其他平台 `Blurred` 文档标注「not always supported」，退化后是纯透明，会直接看到桌面。
 
   想看到模糊，上面盖的每一层都必须让路，缺一层就是「完全没有透明效果」：
@@ -356,7 +356,7 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
   swizzle 是运行时改别人的行为，风险要认：gpui 若改用其他 API 设 policy，这段会静默失效（表现是图标又开始闪，不会崩）。**上游给 `Application` 加一个 activation policy 选项就能删掉它** —— 目前 zed 仓库没有相关 issue。
 
   代价：accessory app 没有应用菜单栏，`cx.set_menus` 的菜单不再显示。退出只剩托盘菜单的 Quit，或窗口有焦点时的 ⌘Q（keymap 绑定仍有效）。`set_menus` 保留着，改回 `Regular` 就会恢复。
-- **scale factor**：换算需要菜单栏所在屏幕的 scale factor，而 gpui 的 `PlatformDisplay` 不暴露它。macOS 走 AppKit 直接读 `NSScreen::screens()[0].backingScaleFactor()`（`screens()[0]` 恒为含菜单栏那块屏，`mainScreen` 则跟着 key window 走）；其他平台回退到主窗口每帧镜像进 `ZStatsAppState` 的值。
+- **scale factor**：tray-icon 报物理像素，换算要 scale，而 gpui 的 `PlatformDisplay` 不暴露它。macOS 遍历 `NSScreen`，每块屏带自己的 `backingScaleFactor`（`screens()[0]` 仍是含菜单栏、也是 AppKit 全局原点的那块，但图标可能在别的屏上——「Displays have separate Spaces」时每块屏都有菜单栏）。选哪块屏的 scale 见上面窗口定位；主窗口每帧镜像进 `ZStatsAppState` 的值只在拿不到 `NSScreen` 列表时作退路。
 
 **面板之外还有两个普通窗口**：设置（`open_settings_window`）与磁盘空间
 （`open_storage_window`，大文件 + 目录分析）。两者**开在同一个尺寸**
@@ -371,7 +371,7 @@ Esc/⌘W（`CloseWindow` 一个 action、两个上下文），键不会漏进面
 store：磁盘窗口的重绘订阅**不走** `CollectorPace::is_visible()` 门控，那道门是给「移出
 屏幕但还活着」的面板准备的，普通窗口要么开着可见、要么已经不在。
 
-窗口虽然不再被销毁重建，**任何需要跨「隐藏 → 唤起」存活的状态仍然必须放进 `src/state.rs`**：gpui 会丢弃当帧没有绘制的元素状态。窗口尺寸、当前 tab、每个 tab 的滚动位置都是这样保存的——滚动位置尤其如此，只给每个 tab 一个不同的 element id 是不够的，因为任一时刻只有活跃 tab 被绘制，句柄必须由 store 持有。
+窗口虽然不再被销毁重建，**任何需要跨「隐藏 → 唤起」存活的状态仍然必须放进 `src/state/`**：gpui 会丢弃当帧没有绘制的元素状态。窗口尺寸、当前 tab、每个 tab 的滚动位置都是这样保存的——滚动位置尤其如此，只给每个 tab 一个不同的 element id 是不够的，因为任一时刻只有活跃 tab 被绘制，句柄必须由 store 持有。
 
 ## 性能
 
@@ -407,9 +407,11 @@ release 构建、托盘常驻不开窗、cputime 差值 ÷ 墙钟实测：
 
 其他平台仍用 `cx.displays()`。
 
-### 多显示器不同 DPI 时托盘定位会偏
+### 多显示器不同 DPI 时托盘定位（已修）
 
-托盘报的是物理像素，换算成逻辑坐标需要 scale factor，而选哪块屏的 scale 又得先知道图标在哪块屏——互为前提。现在统一用 `screens()[0]`（菜单栏所在屏）的倍率，所以**多屏同 DPI 时正确**，混合 DPI（比如内置 Retina + 外接 1x）时托盘在副屏的定位会偏。彻底修需要按屏试算再回选。
+托盘报的是物理像素，换算成逻辑坐标需要 scale factor，而选哪块屏的 scale 又得先知道图标在哪块屏——互为前提。曾经统一用 `screens()[0]`（菜单栏所在屏）的倍率，所以**多屏同 DPI 时正确**，混合 DPI（内置 Retina + 外接 1x，图标点在副屏上）会把面板挂到错误的逻辑 x。
+
+`placement::resolve_icon` 按屏试算再回选：每块屏用自己的 `backingScaleFactor` 去除物理坐标，收回来的图标中心必须落在*那块屏*的 `frame` 上。混 DPI 时两次试算都能自洽——1x 图标的物理 x 除以 2 仍在 2x 主屏里——再用收回来的高度贴近菜单栏条（~24pt）的那次；错 scale 会得到一半或一倍的高度。同 DPI 的两块屏高度相同，靠「中心落在哪块 frame」区分。`ZSTATS_DEBUG_POSITION=1` 把每一次试算打出来。
 
 ### 非 macOS 平台编译不过
 

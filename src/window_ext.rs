@@ -88,9 +88,9 @@ pub fn is_visible(window: &Window) -> bool {
 ///
 /// `origin` is in gpui's coordinate space — logical pixels, top-left of the
 /// primary display, y growing downwards. AppKit places windows from the
-/// bottom-left with y growing up, so the y axis is flipped against the height
-/// of the screen that owns the menu bar (`screens()[0]`, the same one the tray
-/// geometry is resolved against).
+/// bottom-left with y growing up, so the y axis is flipped against the
+/// height of `screens()[0]`: that screen is the origin of AppKit's global
+/// space, whether or not the tray icon (and so the panel) lives on it.
 pub fn show_retained_at(ns: &NSWindow, origin: Point<Pixels>) {
     if let Some(screen_height) = menu_bar_screen_height() {
         let height = ns.frame().size.height;
@@ -107,7 +107,11 @@ fn menu_bar_screen_height() -> Option<f64> {
     Some(screen.frame().size.height)
 }
 
-/// Visible area of the screen containing `point`, in gpui's coordinate space.
+/// Every `NSScreen`, already flipped into gpui space, with the backing
+/// scale tray-icon multiplies that screen's logical coordinates by.
+///
+/// Empty when this is not the main thread — `NSScreen::screens` needs it,
+/// and the tray click is hopped onto the main queue before we get here.
 ///
 /// Not `cx.displays()`: gpui's macOS `PlatformDisplay::bounds()` throws the
 /// global origin away and reports every display at `(0, 0)`
@@ -115,28 +119,42 @@ fn menu_bar_screen_height() -> Option<f64> {
 /// global coordinates, then sets `origin: Default::default()`). With two
 /// screens that makes them indistinguishable, so a lookup by position always
 /// matches the first one and the panel is pinned to the primary display.
+pub fn screens() -> Vec<(Bounds<Pixels>, Bounds<Pixels>, f32)> {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    let screens = NSScreen::screens(mtm);
+    let Some(primary) = screens.firstObject() else {
+        return Vec::new();
+    };
+    // AppKit's global origin is the bottom-left of the primary screen;
+    // gpui's is its top-left. Same flip [`to_gpui`] uses for a single rect.
+    let primary_height = primary.frame().size.height;
+    screens
+        .iter()
+        .map(|screen| {
+            (
+                to_gpui(screen.frame(), primary_height),
+                to_gpui(screen.visibleFrame(), primary_height),
+                screen.backingScaleFactor() as f32,
+            )
+        })
+        .collect()
+}
+
+/// Visible area of the screen containing `point`, in gpui's coordinate space.
 ///
 /// `visibleFrame` excludes the menu bar and the Dock, which is what the panel
-/// should be clamped into.
+/// should be clamped into. Placement normally takes the visible rect from
+/// [`screens`] after resolving the tray's scale; this is the point-lookup
+/// fallback when that resolution had no screen list.
 pub fn visible_bounds_containing(point: Point<Pixels>) -> Option<Bounds<Pixels>> {
-    let mtm = objc2::MainThreadMarker::new()?;
-    let screens = NSScreen::screens(mtm);
-    // AppKit's global origin is the bottom-left of the primary screen, which
-    // is `screens[0]`; gpui's is its top-left.
-    let primary_height = screens.firstObject()?.frame().size.height;
-
-    let mut fallback = None;
-    for screen in screens.iter() {
-        let frame = to_gpui(screen.frame(), primary_height);
-        let visible = to_gpui(screen.visibleFrame(), primary_height);
-        if fallback.is_none() {
-            fallback = Some(visible);
-        }
-        if frame.contains(&point) {
-            return Some(visible);
-        }
-    }
-    fallback
+    let screens = screens();
+    screens
+        .iter()
+        .find(|(frame, _, _)| frame.contains(&point))
+        .or(screens.first())
+        .map(|(_, visible, _)| *visible)
 }
 
 /// Flip an AppKit rect (bottom-left origin, y up) into gpui's space

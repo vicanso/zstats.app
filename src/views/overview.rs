@@ -56,8 +56,18 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             i18n::tr("common.waiting_sample_body"),
         )];
     };
+    let watts = snapshot
+        .battery
+        .as_ref()
+        .and_then(|b| b.power_watts)
+        .filter(|w| *w > WATTS_FLOOR);
     vec![
-        processor(&snapshot.cpu, &snapshot.load),
+        processor(
+            &snapshot.cpu,
+            &snapshot.load,
+            snapshot.host.uptime_secs,
+            watts,
+        ),
         top_apps(state),
         memory(
             &snapshot.memory,
@@ -67,6 +77,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ),
     ]
 }
+
+/// Below this, a reported draw is noise (idle leakage, a full battery
+/// sitting on AC). Same floor the zstats CLI uses before printing W.
+const WATTS_FLOOR: f32 = 0.1;
 
 /// A tree's recent minutes must sit this many percent-of-one-core
 /// points above its earlier-hour average before the card calls it
@@ -84,7 +98,8 @@ const RISE_FLOOR: f32 = 15.0;
 /// snapshot ranking. Always [`TOP_N`] rows: climbers take the top, the
 /// rest of the slots keep the current CPU ranking so a quiet climb
 /// (two trees) does not leave the card three rows short of the window.
-/// All still opens the full Apps list. Battery / watts stay on Sensors.
+/// All still opens the full Apps list. Live watts sit beside CPU% when
+/// the battery reports a draw; the full battery card stays on Hardware.
 fn top_apps(state: &ZStatsAppState) -> AnyElement {
     let Some(tick) = state.latest() else {
         return widgets::empty_card(
@@ -280,7 +295,12 @@ fn top_apps_all() -> AnyElement {
         .into_any_element()
 }
 
-fn processor(cpu: &CpuSnapshot, load: &LoadSnapshot) -> AnyElement {
+fn processor(
+    cpu: &CpuSnapshot,
+    load: &LoadSnapshot,
+    uptime_secs: u64,
+    watts: Option<f32>,
+) -> AnyElement {
     let header_right = processor_caption(cpu);
     let mut body = card()
         .child(widgets::card_header(
@@ -306,7 +326,9 @@ fn processor(cpu: &CpuSnapshot, load: &LoadSnapshot) -> AnyElement {
                             20.,
                         )),
                 )
-                .child(load_caption(load, cpu.logical_cores)),
+                .child(load_caption(load, cpu.logical_cores))
+                .children(watts.map(watts_caption))
+                .child(uptime_caption(uptime_secs)),
         );
 
     // Apple Silicon and friends: usage split by performance cluster.
@@ -404,6 +426,34 @@ fn load_caption(load: &LoadSnapshot, cores: u32) -> AnyElement {
         .text_color(theme::text_dim())
         .tooltip(widgets::wrap_tooltip(tip))
         .child(text)
+        .into_any_element()
+}
+
+/// Live draw, next to CPU%: "150% while drawing 22 W" is a different
+/// story from 150% on the charger at 2 W. Absent on desktops and VMs,
+/// and omitted below [`WATTS_FLOOR`] so idle leakage is not a figure.
+fn watts_caption(watts: f32) -> AnyElement {
+    div()
+        .id("cpu-watts")
+        .font_family(font::MONO)
+        .text_size(px(10.))
+        .text_color(theme::text_dim())
+        .tooltip(widgets::wrap_tooltip(i18n::tr("overview.watts_tip")))
+        .child(format!("{watts:.1} W"))
+        .into_any_element()
+}
+
+/// Time since boot. Always present — even a just-booted machine has a
+/// number — and it is the sentence Overview was missing: how long this
+/// load has had to build.
+fn uptime_caption(secs: u64) -> AnyElement {
+    div()
+        .id("cpu-uptime")
+        .font_family(font::MONO)
+        .text_size(px(10.))
+        .text_color(theme::text_dim())
+        .tooltip(widgets::wrap_tooltip(i18n::tr("overview.uptime_tip")))
+        .child(t!("overview.uptime", time = format::uptime(secs)).to_string())
         .into_any_element()
 }
 

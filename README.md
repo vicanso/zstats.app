@@ -20,12 +20,14 @@ Most menu-bar monitors paint pretty numbers, nag you, or both — and they treat
 
 ## Watch
 
-- Live CPU% beside the tray icon — and while a memory alert you have not dismissed is on the Alerts tab (a process, an app, or kernel pressure), the item turns into a memory stick with the memory still available instead. Or pin it to CPU or memory for good, or keep both side by side
-- Overview: P/E cores, memory and compression, kernel memory pressure, disk and network throughput
+- Live CPU% beside the tray icon — and while a memory alert you have not dismissed is on the Alerts tab (a process, an app, or kernel pressure), the item turns into a memory stick with the memory still available instead; a disk-full alert turns it into a disk with the space still free. Or pin it to CPU or memory for good, or keep both side by side
+- ⌘1–7 switch tabs, and the panel reopens on the one you left; pin it (the footer pin, or ⌘P) to keep it up beside another window instead of hiding on focus loss
+- Overview: P/E cores, uptime and live power draw, memory and compression, kernel memory pressure, disk and network throughput
 - Apps aggregated by process tree — one row for a browser and all its helpers
-- Processes ranked by a 60-second average, with a name filter and a one-click full-table scan
+- Processes ranked by a 60-second average, by memory, or by disk IO, with a name filter and a one-click full-table scan
 - Hardware: volumes, hottest sensors first, battery health
-- History: what actually burned CPU *today*, ranked by accumulated time, not a spike
+- Network: per-interface rates, packets per second on hover, and error rates only while an interface is actually erroring
+- History: what actually burned CPU *today*, ranked by accumulated time, not a spike; click a row to open that app or process
 
 ## Alert
 
@@ -35,6 +37,7 @@ The headline is **a base threshold combined with per-program ones**: one global 
 - **Two granularities**: rules watch the single **process** and, separately, the whole **application** — its process tree summed. A runaway helper trips the process line; a browser quietly holding 4 GB across 37 helpers trips the application line, though no single member ever crosses one. Each level carries its own base threshold and its own per-name overrides
 - **Slow burns get named too**: a process holding CPU for hours without ever crossing a line (25% for an hour, say) is called out by the sustained-load watcher — delivered as a silent banner, never a nag. How long counts as "sustained", and how far under the alert line the bar sits, are yours to set
 - Native notification banners; snooze an episode for 1 or 3 hours
+- Every card jumps to its subject: the process, the app tree, or the disk tools for a full volume
 - Memory-pressure cards list the top consumers and offer a polite quit (⌘Q / SIGTERM — never SIGKILL)
 
 ## Reclaim disk
