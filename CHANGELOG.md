@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0](https://github.com/vicanso/zstats.app/compare/v0.2.3..v0.3.0) - 2026-09-15
+
+### ⛰️  Features
+
+- A full disk turns the tray, the panel pins and keeps its tab, and cards and History rows jump to their subject - ([33edc2f](https://github.com/vicanso/zstats.app/commit/33edc2f61647f0614792c12ebfd1397e381f1fb0))
+
 ## [0.2.3](https://github.com/vicanso/zstats.app/compare/v0.2.1..v0.2.3) - 2026-09-08
 
 ### 🐛 Bug Fixes
