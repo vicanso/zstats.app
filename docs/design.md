@@ -271,6 +271,16 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 
 状态机上「安装中」与「下载中」是两个状态：hdiutil + ditto 要几秒，进度条不该停在 100% 假装字节还在流动。完成态的按钮从「退出以安装」变成「重启 zstats」：`updater::relaunch` 把重启交给一个游离的 `sh`——等本 pid 退出后 `open` bundle，路径经 `$0` 传入，脚本里没有引号拼接——app 随即退出，shell 作为 launchd 的孤儿活到 `open` 完成，永远不会成为我们的僵尸。Gatekeeper 不会再审视这份拷贝：ureq 下载不写 quarantine xattr，完整性由 SHA256SUMS 校验承担——手拖时代这也已是事实，改的只是谁来搬。回退路径落回的手拖完成态仍显示旧文案与「退出以安装」。
 
+### GitHub 打不开时的 Gitee 回退（`updater.rs`）
+
+发版流水线把每个 tag 的 release 原样镜像到 Gitee（`publish.yml` 的 `gitee` job），`updater` 因此有了第二个来源：检查版本先问 `api.github.com`，失败再问 `gitee.com/api/v5/.../releases/latest`；下载同理，GitHub 的直链失败后按 tag 查到 release id、再从附件列表里按文件名取 `browser_download_url`。两个来源的 JSON 都用 `tag_name` 和 `body` 两个字段，所以解析那一段不需要知道是谁回答的。
+
+**镜像之所以安全，是因为它不是第二次构建。** 流水线上传的就是 GitHub release 上那几个文件本身，`SHA256SUMS` 也在其中，所以为下载背书的仍是同一行摘要——镜像端换掉文件的话，`file_sha256` 会像遇到损坏传输一样拒绝它。这也是为什么回退只加来源、不加信任假设。
+
+顺序是 GitHub 在前：它是源站，直链不需要额外查询，网络正常的用户不为「镜像存在」付任何代价；被墙的用户每个文件多付一次请求超时。检查两天才跑一次、下载是一次点击，这比猜错该优先问谁便宜。Gitee 的 release id 要从 JSON 里读一个数字（`json_num_field`），它把 release 自己的 `id` 放在 `author` 之前，所以取第一个匹配是对的；即使读错，下一次请求只会 404 并报告镜像不可用——决定装什么的始终是校验和。
+
+镜像覆盖不到的仍是三处 raw 文件请求：告警模板（`alerttpl.rs`，拉的是 zstats 仓库）、清理规则与缓存预设（`cleanhints.rs` / `cachepreset.rs`）。它们要么等代码也镜像过去，要么继续靠配置页的代理。
+
 ### 与设计稿有意的偏差
 
 - **毛玻璃**：设计稿是实心 `#09090b`，这里保留 vibrancy，观感更通透。**白色壁纸曾把整个暗色面板打穿**（55% wash 放 45% 亮度进来，近白正文压在浅灰玻璃上，有实测截图），根因在 gpui：它给 `Blurred` 垫的 `NSVisualEffectView` 子类钉死 `Selection` 材质、并在每次 `updateLayer` 把 layer 背景剥掉（自称 colorless）——剩下**纯 blur**，材质本该有的亮度钳制衬底根本留不住，`setMaterial: Popover` 设上去也会被剥。所以 `use_popover_material`（main.rs，建窗后首帧调用）在 gpui 的 blur 视图**之上**、Metal 内容层**之下**插一个**原生未子类化的** `NSVisualEffectView`（`.popover` 材质、`.behindWindow`、`.active`，autoresize 跟窗，重入时以 `isMemberOfClass` 认出自己直接返回）：popover 材质的亮度钳制正是系统菜单在任何壁纸上都保持暗底的机制——但对纯白只能压到中灰，所以暗色 wash 从 55% 降到 35% 而不是归零：白底下弱化文字仍可读，彩色壁纸的色相则清楚地透进玻璃（实测 20% 在白底会把说明文字洗掉，HUDWindow 材质在新系统上反而更透，都试过）。曾经试过反方向——把卡片涂到 94% 实心——白壁纸是修好了，玻璃也没了，黑底下卡片还和框架撞色；已回退，卡片仍是玻璃上的微提亮（暗 `0xffffff12`、浅 `0xfffffff2`）。那次弯路留下的一件对的东西保住了：卡片描边（`widgets::outline`，零布局 inset shadow，`theme::border()` 选墨色）从浅色专属改为两个主题都画——不欠壁纸任何东西的分隔。

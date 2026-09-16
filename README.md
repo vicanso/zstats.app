@@ -66,6 +66,8 @@ Nothing is cleaned or killed automatically. Mail, Messages and other protected d
 
 Download `zstats.dmg` from [Releases](../../releases) and drag it into Applications.
 
+Behind the Great Firewall, the same files are mirrored to [Gitee](https://gitee.com/vicanso/zstats.app/releases) on every release: the three DMGs and the `SHA256SUMS` they are listed in. The in-app updater falls back to that mirror on its own when GitHub cannot be reached, and verifies the download against the same checksum either way.
+
 ```bash
 make bundle          # or build from source (needs cargo-bundle)
 ```

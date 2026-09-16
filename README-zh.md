@@ -66,6 +66,8 @@ macOS 菜单栏系统监控，围绕「按应用定规则」构建：托盘实�
 
 从 [Releases](../../releases) 下载 `zstats.dmg`，拖进「应用程序」。
 
+GitHub 打不开的话，每次发版都会把同样的文件同步一份到 [Gitee](https://gitee.com/vicanso/zstats.app/releases)：三个 DMG 和它们对应的 `SHA256SUMS`。应用内的检查更新和下载在 GitHub 连不上时会自动改用这个镜像，校验和两边是同一份。
+
 ```bash
 make bundle          # 或从源码构建（需要 cargo-bundle）
 ```
