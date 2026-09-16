@@ -340,6 +340,8 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
 
   `tray-icon` **不支持 SVG**，只接受原始 RGBA（内部再编码成 PNG 交给 `NSImage`）。两个要点：macOS 会把图标缩放到 **18pt 高**，所以按 2x（36px）出图才不会在 Retina 上发虚；注册为 template image 后**只有 alpha 通道有效**，颜色由系统按明暗模式重新上色，因此渲染后把 RGB 抹成黑色。glyph 只占画布 78%——lucide 画到 24×24 viewBox 的边缘，1.0 的话图标会有整整 18pt 高，压过旁边约 12pt 的标题文字，系统图标都是自带留白的。另外 lucide 的 `stroke="currentColor"` 是 CSS 上下文关键字，usvg 解析不了，加载前需替换成具体颜色。有单测校验光栅化结果的覆盖率——解析失败会得到一张全透明位图，不报任何错，只表现为图标消失。
 - **托盘交互**：左键单击 toggle 窗口，右键弹出菜单（Show Window / Quit）。实现上是 `with_menu_on_left_click(false)` 关掉左键弹菜单，再监听 `TrayIconEvent::Click`；`MenuEvent` 和 `TrayIconEvent` 各用一个阻塞线程，汇入同一个 `smol::channel`。托盘标题显示当前那张脸的百分比（整机 CPU% 或内存 used%），取整到个位（菜单栏很挤，小数会让它每次采样都抖），并且标题和图标都是「和上次相同就不重设」（设标题会让菜单栏重新布局，换图标还要重建 `NSImage`）。
+
+  **`tray-icon` 必须 ≥ 0.25.1，这是下限不是偏好。** 0.25 之前，菜单一建好就被永久挂在 `NSStatusItem` 上，左右键的区分靠在按钮上盖一层子视图拦截鼠标事件来做。macOS 27 起，状态项只要挂着菜单就不再把左键事件转发给那层子视图：菜单自己弹出来，`with_menu_on_left_click(false)` 形同虚设，`TrayIconEvent::Click` 根本不发出，于是左键点托盘不再是 toggle 窗口，而是弹出 Show Window / Quit 两项——面板唯一的入口就这么没了。0.25.1 改成只在**要弹的那一刻**临时 `setMenu`、弹完置空（tauri-apps/tray-icon#365）。这条路径没有测试能覆盖，只能在真机上点，所以版本号本身就是这个约束的唯一记录。
 - **无标题栏**：macOS 上 `WindowOptions.titlebar` 留 `None`，而且**必须显式写出来**——`WindowOptions::default().titlebar` 是 `Some(..)`，字段留空会装回一个默认的（不透明、带红绿灯的）标题栏。
 
   留 `None` 时 gpui 用 `Titled | FullSizeContentView` 的 style mask，且**不含** `Closable`/`Miniaturizable`/`Resizable`（所以没有红绿灯、也不可缩放），同时照样会设 `titlebarAppearsTransparent` + `titleHidden`（`gpui_macos/src/window.rs:815,977`）。得到的仍是普通 titled window，系统圆角和阴影都在，也能正常拿键盘焦点。

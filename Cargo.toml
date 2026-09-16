@@ -120,8 +120,16 @@ tracing-appender = "0.2"
 time = "0.3"
 
 # Tray. Linux is excluded on purpose — see "已知问题 / TODO" in README.md.
+#
+# 0.25.1 is a floor, not a preference: every earlier version attaches the
+# menu to the `NSStatusItem` for good and relies on a subview over the
+# button to intercept clicks. macOS 27 stops forwarding left clicks to
+# that subview while a menu is attached, so the menu opened and
+# `with_menu_on_left_click(false)` — and with it the whole click path,
+# panel toggle included — did nothing. 0.25.1 attaches the menu only
+# while it is being presented (tauri-apps/tray-icon#365).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-tray-icon = "0.24.1"
+tray-icon = "0.25.1"
 # Rasterises the menu bar SVG at startup — tray-icon only accepts raw RGBA.
 # NOT the version gpui pulls in: it builds resvg 0.45, so the tree carries
 # both. Worth ~200 KB of duplicate SVG stack; aligning to 0.45 would drop
