@@ -1177,7 +1177,8 @@ fn reveal_main_window(cx: &mut App, handle: gpui::AnyWindowHandle, anchor: Optio
     let current = handle.update(cx, |_, window, _| window.bounds()).ok();
     let origin = match (anchor, current) {
         (Some(anchor), Some(bounds)) => bounds_below_tray(anchor, bounds.size, cx).origin,
-        // No anchor (the tray menu's "Show Window"): leave it where it was.
+        // No anchor at all (no tray, or AppKit has not laid the item
+        // out): leave the window where it was.
         _ => match current {
             Some(bounds) => bounds.origin,
             None => return,
@@ -1241,9 +1242,20 @@ pub fn show_main_window(cx: &mut App) {
         .clone()
         .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
 
+    // Anchored under the icon, exactly like a click on it: the panel
+    // belongs to the menu bar item, and a "Show Window" that reopened it
+    // wherever it happened to be last looked like the panel had come
+    // loose from its icon. `tray::anchor` reads the item's current rect
+    // rather than remembering the last click, so it is also right after
+    // the item moved (a face change resizes it, and the menu bar
+    // re-lays out whenever anything beside us appears or leaves).
+    #[cfg(not(target_os = "linux"))]
+    let anchor = tray::anchor(cx);
+    #[cfg(target_os = "linux")]
+    let anchor = None;
     match cx.windows().first().copied() {
         #[cfg(target_os = "macos")]
-        Some(handle) => reveal_main_window(cx, handle, None),
+        Some(handle) => reveal_main_window(cx, handle, anchor),
         #[cfg(not(target_os = "macos"))]
         Some(handle) => {
             cx.activate(true);
@@ -1251,7 +1263,7 @@ pub fn show_main_window(cx: &mut App) {
         }
         None => {
             cx.activate(true);
-            open_main_window(cx, None);
+            open_main_window(cx, anchor);
         }
     }
 }

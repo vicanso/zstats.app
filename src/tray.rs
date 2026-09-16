@@ -453,6 +453,30 @@ fn rasterise_icon_scaled(glyph: CustomIconName, size: u32, glyph_scale: f32) -> 
     Some(rgba)
 }
 
+/// Where the primary status item sits right now, in the physical pixels
+/// [`TrayAnchor`] carries — the same rect a click event hands over.
+///
+/// A click brings its own rect, so until the tray menu's "Show Window"
+/// (and the banner click behind it) wanted one, nothing ever asked the
+/// item where it was; those paths reopened the panel wherever it had
+/// last been left, which reads as the panel drifting away from its
+/// icon. In Both mode this is the right-hand item, the one that always
+/// exists.
+///
+/// `None` off macOS, without a tray, or when AppKit has not laid the
+/// item out yet — every caller then falls back to the last position,
+/// which is what they all did before.
+pub fn anchor(cx: &App) -> Option<TrayAnchor> {
+    let handle = cx.try_global::<TrayHandle>()?;
+    let rect = handle.primary.icon.rect()?;
+    Some(TrayAnchor {
+        x: rect.position.x,
+        y: rect.position.y,
+        width: f64::from(rect.size.width),
+        height: f64::from(rect.size.height),
+    })
+}
+
 /// Swap in a menu rebuilt in the active locale. The menu snapshots its item
 /// titles when built, so a language switch has to hand the tray a fresh one —
 /// the icon, tooltip and event threads stay put. A no-op without a tray.
