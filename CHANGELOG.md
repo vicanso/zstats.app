@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.1](https://github.com/vicanso/zstats.app/compare/v0.3.0..v0.3.1) - 2026-09-16
+
+### ⛰️  Features
+
+- Every release mirrors to Gitee, and the updater falls back there when GitHub is unreachable - ([014af7a](https://github.com/vicanso/zstats.app/commit/014af7a61824ce3ed75a082cd305ddbe5c23b761))
+- A switch keeps the Mac awake, and the footer says so while it is held - ([a436fed](https://github.com/vicanso/zstats.app/commit/a436fedeba6c00b9c9aad15d2f9c8d7502604998))
+
+### 🐛 Bug Fixes
+
+- Show Window opens the panel under the tray icon, not where it was last left - ([eb890fb](https://github.com/vicanso/zstats.app/commit/eb890fb04367f0ec965eb4ef7fc858f4e078c5aa))
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tray-icon (tauri-apps/tray-icon#365) - ([3da9a45](https://github.com/vicanso/zstats.app/commit/3da9a452d62953e0f2beceb25885d1c6702bf5c7))
+
 ## [0.3.0](https://github.com/vicanso/zstats.app/compare/v0.2.3..v0.3.0) - 2026-09-15
 
 ### ⛰️  Features
