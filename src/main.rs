@@ -29,6 +29,7 @@ mod alerttpl;
 mod assetinfo;
 mod assets;
 mod autostart;
+mod awake;
 mod bigfiles;
 mod cachepreset;
 mod cleanhints;
@@ -361,6 +362,18 @@ pub fn set_autostart_pref(on: bool, cx: &mut App) {
 /// recording untouched (`prefs::notifications` explains the split).
 pub fn set_notifications_pref(on: bool, cx: &mut App) {
     prefs::set_notifications(on);
+    repaint(cx);
+}
+
+/// The Interface page's keep-awake switch: persist, then hold or drop
+/// the assertion. The repaint is what flips the footer's indicator —
+/// the only place the panel says the Mac is being held awake.
+///
+/// Nothing releases it on quit: the kernel drops an assertion when its
+/// holder exits, so a crash cannot leave a Mac awake either.
+pub fn set_keep_awake_pref(on: bool, cx: &mut App) {
+    prefs::set_keep_awake(on);
+    awake::apply(on);
     repaint(cx);
 }
 
@@ -1272,6 +1285,11 @@ fn main() {
         // Feeds both the theme resolution and the locale pin below, so it
         // has to precede them.
         prefs::load();
+        // The keep-awake switch is the one preference that acts on the
+        // machine rather than on the panel, so a restart has to put it
+        // back in force — a switch left on that quietly lapsed would be
+        // a Mac sleeping through the job it was left awake for.
+        awake::apply(prefs::keep_awake());
         // Pin AppKit before the first frame, so a forced theme's vibrancy
         // material never briefly renders in the system appearance.
         #[cfg(target_os = "macos")]

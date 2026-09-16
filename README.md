@@ -22,6 +22,7 @@ Most menu-bar monitors paint pretty numbers, nag you, or both — and they treat
 
 - Live CPU% beside the tray icon — and while a memory alert you have not dismissed is on the Alerts tab (a process, an app, or kernel pressure), the item turns into a memory stick with the memory still available instead; a disk-full alert turns it into a disk with the space still free. Or pin it to CPU or memory for good, or keep both side by side
 - ⌘1–7 switch tabs, and the panel reopens on the one you left; pin it (the footer pin, or ⌘P) to keep it up beside another window instead of hiding on focus loss
+- Keep the Mac awake while a long job finishes: one switch in Config holds the same power assertion `caffeinate -i` takes, on battery too. The display still sleeps and the lid still sleeps the machine; the footer shows a cup while the hold is on, and one click on it lets the Mac sleep again
 - Overview: P/E cores, uptime and live power draw, memory and compression, kernel memory pressure, disk and network throughput
 - Apps aggregated by process tree — one row for a browser and all its helpers
 - Processes ranked by a 60-second average, by memory, or by disk IO, with a name filter and a one-click full-table scan
@@ -56,6 +57,8 @@ The panel acts on the system in exactly two places, both behind a confirm, both 
 | --- | --- |
 | Delete | Finder's move-to-Trash. Never `rm -rf`. |
 | Quit | A ⌘Q-equivalent request / SIGTERM. Never SIGKILL. |
+
+The optional keep-awake switch is the only other thing the panel asks of the system: one power assertion, visible in the footer while it is held, released when you turn it off or quit.
 
 Nothing is cleaned or killed automatically. Mail, Messages and other protected data are skipped without a touch. The one-time Desktop / Documents / Downloads prompt on first analysis *is* the analysis.
 

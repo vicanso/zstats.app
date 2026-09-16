@@ -9850,7 +9850,7 @@ dependencies = [
 
 [[package]]
 name = "zstats-app"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -9864,7 +9864,9 @@ dependencies = [
  "notify-rust",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-io-kit",
  "objc2-service-management",
  "objc2-user-notifications",
  "raw-window-handle",

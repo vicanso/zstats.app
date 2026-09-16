@@ -226,6 +226,35 @@ const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
 /// Config, GitHub and Quit sit together on the right — a lone icon on
 /// the left read as an unfinished row. Quit stays last so it is the
 /// edge action.
+/// Shown only while the Mac is being held awake. An indicator rather
+/// than a fourth permanent control: the switch lives on the Interface
+/// page, and this exists so "why will this Mac not sleep" has an answer
+/// on screen. Clicking it turns the hold off — the way out must not
+/// require finding the page that turned it on.
+fn keep_awake_chip() -> Option<AnyElement> {
+    if !prefs::keep_awake() {
+        return None;
+    }
+    let tip = i18n::tr("common.keep_awake_on");
+    Some(
+        div()
+            .id("keep-awake")
+            .flex_none()
+            .p(px(4.))
+            .rounded(px(6.))
+            .bg(theme::chip())
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .hover(|d| d.bg(theme::surface_raised()))
+            .child(
+                Icon::from(CustomIconName::Coffee)
+                    .with_size(Size::Size(px(14.)))
+                    .text_color(Hsla::from(theme::text())),
+            )
+            .on_click(|_, _window, cx| crate::set_keep_awake_pref(false, cx))
+            .into_any_element(),
+    )
+}
+
 fn footer(state: &ZStatsAppState) -> AnyElement {
     let github_tip = i18n::tr("common.github");
     let nudge = state.update_nudge().map(str::to_string);
@@ -240,6 +269,7 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
         .pb(px(6.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
+        .children(keep_awake_chip())
         .child({
             // Stays with the right-hand cluster: a lone icon on the
             // left read as an unfinished row. Pin only stops auto-hide

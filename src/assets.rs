@@ -88,6 +88,10 @@ pub enum CustomIconName {
     Shield,
     /// Footer pin: keeps the panel from auto-hiding on focus loss.
     Pin,
+    /// Footer keep-awake indicator; lucide `coffee`. gpui-kit has `Sun`
+    /// and `Moon`, but both read as the theme picker's glyphs — this
+    /// one has to say "the Mac is being held awake" and nothing else.
+    Coffee,
 }
 
 impl CustomIconName {
@@ -103,6 +107,7 @@ impl CustomIconName {
             CustomIconName::RefreshCw => "icons/refresh-cw.svg",
             CustomIconName::Shield => "icons/shield.svg",
             CustomIconName::Pin => "icons/pin.svg",
+            CustomIconName::Coffee => "icons/coffee.svg",
         }
         .into()
     }
@@ -136,6 +141,7 @@ mod tests {
             CustomIconName::RefreshCw,
             CustomIconName::Shield,
             CustomIconName::Pin,
+            CustomIconName::Coffee,
         ] {
             let path = icon.path();
             assert!(get(&path).is_some(), "{path} is not embedded");

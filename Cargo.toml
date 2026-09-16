@@ -185,6 +185,19 @@ objc2-service-management = { version = "0.3", default-features = false, features
     "objc2-foundation",
     "std",
 ] }
+# The Interface page's keep-awake switch holds one IOKit power
+# assertion (`awake.rs`). Already in the tree — zstats' battery
+# readings pull the same version — so this costs no extra build.
+objc2-io-kit = { version = "0.3", default-features = false, features = [
+    "pwr_mgt",
+    "std",
+] }
+# CFString for that assertion's type and name. Also already in the
+# tree: objc2-app-kit below depends on it.
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "CFString",
+    "std",
+] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     # NSAppearance backs the theme override: prefs.rs pins NSApp.appearance
     # so the vibrancy material follows a forced light/dark, not the system.

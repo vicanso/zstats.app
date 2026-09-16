@@ -166,6 +166,10 @@ static ANALYSIS_EXCLUDE: RwLock<Vec<String>> = RwLock::new(Vec::new());
 /// for the installed build, when you need the panel next to another
 /// window.
 static PINNED: AtomicBool = AtomicBool::new(false);
+/// Hold an IOKit assertion against idle system sleep (`awake.rs`).
+/// Absent key is off: a preference that keeps a Mac awake has to be
+/// asked for, never inherited from a default.
+static KEEP_AWAKE: AtomicBool = AtomicBool::new(false);
 /// Last panel tab as its file key, `None` = Overview / unset. Written on
 /// each tab switch so a restart opens where the reader left, not always
 /// on Overview. Kept as the string the file holds: `Tab::from_pref_key`
@@ -456,6 +460,7 @@ pub fn load() {
         .write()
         .expect("analysis exclude pref lock poisoned") = prefs.analysis_exclude;
     PINNED.store(prefs.pinned, Ordering::Relaxed);
+    KEEP_AWAKE.store(prefs.keep_awake, Ordering::Relaxed);
     *LAST_TAB.write().expect("last tab pref lock poisoned") = prefs.last_tab;
 }
 
@@ -508,6 +513,7 @@ fn persist() {
             .expect("analysis exclude pref lock poisoned")
             .clone(),
         pinned: PINNED.load(Ordering::Relaxed),
+        keep_awake: KEEP_AWAKE.load(Ordering::Relaxed),
         last_tab: LAST_TAB
             .read()
             .expect("last tab pref lock poisoned")
@@ -548,6 +554,7 @@ struct Prefs {
     analysis_roots: Vec<String>,
     analysis_exclude: Vec<String>,
     pinned: bool,
+    keep_awake: bool,
     /// `tab` in the file; `None` is Overview, omitted like every other
     /// default.
     last_tab: Option<String>,
@@ -597,6 +604,10 @@ fn read(dir: &Path) -> Prefs {
             .get("pinned")
             .and_then(toml::Value::as_bool)
             .unwrap_or(false),
+        keep_awake: table
+            .get("keep_awake")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
         last_tab: get("tab")
             .map(str::trim)
             .filter(|k| !k.is_empty())
@@ -615,6 +626,20 @@ fn parse_hours_as_minutes(value: &toml::Value) -> Option<u16> {
         return None;
     }
     u16::try_from((hours * 60.0).round() as i64).ok()
+}
+
+/// Whether the Mac is being kept awake. The preference; `awake.rs`
+/// turns it into the assertion and logs both transitions.
+pub fn keep_awake() -> bool {
+    KEEP_AWAKE.load(Ordering::Relaxed)
+}
+
+/// Remember and persist the keep-awake switch. Taking or dropping the
+/// assertion is the caller's half (`crate::set_keep_awake_pref`), so
+/// this module keeps touching nothing but the file.
+pub fn set_keep_awake(on: bool) {
+    KEEP_AWAKE.store(on, Ordering::Relaxed);
+    persist();
 }
 
 /// Whether the panel stays up through focus loss.
@@ -705,6 +730,9 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if prefs.pinned {
         doc.insert("pinned".into(), toml::Value::Boolean(true));
     }
+    if prefs.keep_awake {
+        doc.insert("keep_awake".into(), toml::Value::Boolean(true));
+    }
     if let Some(key) = prefs.last_tab.as_deref() {
         doc.insert("tab".into(), toml::Value::String(key.into()));
     }
@@ -772,6 +800,7 @@ mod tests {
                 // come back out, or a theme change would eat it.
                 analysis_exclude: vec!["~/github".to_string()],
                 pinned: true,
+                keep_awake: true,
                 last_tab: Some("alerts".into()),
             },
         )
@@ -791,6 +820,7 @@ mod tests {
         );
         assert_eq!(back.analysis_exclude, vec!["~/github".to_string()]);
         assert!(back.pinned);
+        assert!(back.keep_awake);
         assert_eq!(back.last_tab.as_deref(), Some("alerts"));
         // The switch is stored as the off value only.
         assert!(back.muted);
@@ -821,6 +851,10 @@ mod tests {
             "an empty exclusion list should omit the key"
         );
         assert!(!text.contains("pinned"), "unpinned should omit the key");
+        assert!(
+            !text.contains("keep_awake"),
+            "the default must not write a key that keeps a Mac awake"
+        );
         assert!(!text.contains("tab"), "Overview should omit the key");
         let back = read(&dir);
         assert_eq!(back.language, LanguagePref::System);
@@ -831,6 +865,7 @@ mod tests {
         assert!(back.analysis_roots.is_empty());
         assert!(back.analysis_exclude.is_empty());
         assert!(!back.pinned);
+        assert!(!back.keep_awake);
         assert!(back.last_tab.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
