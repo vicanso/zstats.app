@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.2](https://github.com/vicanso/zstats.app/compare/v0.3.0..v0.3.2) - 2026-09-17
+
+### ⛰️  Features
+
+- The Linux port builds and tests, and the panel anchors itself top-right on Wayland - ([b3258c5](https://github.com/vicanso/zstats.app/commit/b3258c5019258f2d9785a691fc5e155e88315199))
+- Every release mirrors to Gitee, and the updater falls back there when GitHub is unreachable - ([014af7a](https://github.com/vicanso/zstats.app/commit/014af7a61824ce3ed75a082cd305ddbe5c23b761))
+- A switch keeps the Mac awake, and the footer says so while it is held - ([a436fed](https://github.com/vicanso/zstats.app/commit/a436fedeba6c00b9c9aad15d2f9c8d7502604998))
+
+### 🐛 Bug Fixes
+
+- Settings, launch-at-login, and the Auto tray stop painting a lie - ([d944cdf](https://github.com/vicanso/zstats.app/commit/d944cdfb0315176797259a103a0c10786127e636))
+- Processor watts sit beside the chip, and uptime hugs the right - ([3db570a](https://github.com/vicanso/zstats.app/commit/3db570a59e39c13f80ec84a63f19ce77f48c2e6e))
+- The Gitee mirror tells gh which repository it is, and can be run for a tag by hand - ([96221a1](https://github.com/vicanso/zstats.app/commit/96221a1fd376816c8241477cc51977b9ed8673d0))
+- Show Window opens the panel under the tray icon, not where it was last left - ([eb890fb](https://github.com/vicanso/zstats.app/commit/eb890fb04367f0ec965eb4ef7fc858f4e078c5aa))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.1 - ([2346ec4](https://github.com/vicanso/zstats.app/commit/2346ec4a2316caebcf33cceb74930a54a5dba58e))
+- Update tray-icon (tauri-apps/tray-icon#365) - ([3da9a45](https://github.com/vicanso/zstats.app/commit/3da9a452d62953e0f2beceb25885d1c6702bf5c7))
+
 ## [0.3.1](https://github.com/vicanso/zstats.app/compare/v0.3.0..v0.3.1) - 2026-09-16
 
 ### ⛰️  Features
