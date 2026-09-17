@@ -122,18 +122,25 @@ pub fn list_shell() -> Div {
 }
 
 /// Card title on the left, an optional status pill on the right.
+///
+/// The title does not shrink; the right slot does (`min_w_0`). Processor
+/// puts a long chip name there, and without this the name shoved the
+/// live-watts figure off the card — `overflow_y_scroll` on the panel
+/// body also clips x.
 pub fn card_header(title: impl Into<SharedString>, right: Option<AnyElement>) -> AnyElement {
     h_flex()
         .items_center()
         .justify_between()
+        .gap(px(8.))
         .child(
             div()
+                .flex_none()
                 .text_size(px(12.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::text())
                 .child(title.into()),
         )
-        .children(right)
+        .children(right.map(|el| div().min_w_0().child(el)))
         .into_any_element()
 }
 

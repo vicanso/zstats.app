@@ -49,6 +49,14 @@ pub fn whole_pct(v: f32) -> String {
     }
 }
 
+/// Whole watts for the processor caption, floored. Zero (and anything
+/// that floors to it — idle leakage, a full battery sitting on AC) is
+/// not a figure, so the caption omits it. Negative flow is the same.
+pub fn whole_watts(w: f32) -> Option<u32> {
+    let n = w.floor();
+    (n >= 1.0).then_some(n as u32)
+}
+
 /// A load-average figure for the Processor card's footnote. One decimal
 /// is where the signal lives — a 10-core machine's 9.6 and 10.4 read on
 /// opposite sides of the core count — and past 100 even that is noise.
@@ -208,6 +216,9 @@ pub fn rate(bytes_per_sec: Option<u64>) -> String {
 /// unit is omitted — "2h", not "2h 00m": on a round figure the trailing
 /// zeros read as a glitch, and the precision they claim ("exactly on
 /// the hour") is not one a minute-granular label can honour anyway.
+///
+/// Process rows and battery estimates use this. Overview's processor
+/// footnote is tighter and uses [`uptime_short`].
 pub fn uptime(secs: u64) -> String {
     let d = secs / 86_400;
     let h = (secs % 86_400) / 3_600;
@@ -227,6 +238,24 @@ pub fn uptime(secs: u64) -> String {
     } else {
         format!("{m}m")
     }
+}
+
+/// One unit of uptime: "3d", "12h", "9m".
+///
+/// Overview's processor footnote sits next to the load triple; two units
+/// ("12h 07m") made that line a run-on, and a minute on a twelve-hour
+/// machine is not a figure anyone glances at. Days win over leftover
+/// hours the same way hours win over leftover minutes.
+pub fn uptime_short(secs: u64) -> String {
+    let d = secs / 86_400;
+    if d > 0 {
+        return format!("{d}d");
+    }
+    let h = secs / 3_600;
+    if h > 0 {
+        return format!("{h}h");
+    }
+    format!("{}m", secs / 60)
 }
 
 /// Digit grouping for counts ("48213" → "48,213") — past four digits a
@@ -322,6 +351,15 @@ mod tests {
         assert_eq!(gb_short(8_100_000_000), "7.5G");
         assert_eq!(gb_short(12 * 1024 * 1024 * 1024), "12G");
         assert_eq!(gb_short(0), "0.0G");
+    }
+
+    #[test]
+    fn whole_watts_floors_and_drops_zero() {
+        assert_eq!(whole_watts(14.8), Some(14));
+        assert_eq!(whole_watts(1.0), Some(1));
+        assert_eq!(whole_watts(0.9), None);
+        assert_eq!(whole_watts(0.0), None);
+        assert_eq!(whole_watts(-0.3), None);
     }
 
     #[test]
@@ -441,6 +479,15 @@ mod tests {
         assert_eq!(uptime(2 * 3_600), "2h");
         assert_eq!(uptime(3 * 86_400), "3d");
         assert_eq!(uptime(0), "0m");
+    }
+
+    #[test]
+    fn uptime_short_keeps_one_unit() {
+        assert_eq!(uptime_short(12 * 3_600 + 7 * 60), "12h");
+        assert_eq!(uptime_short(3 * 86_400 + 4 * 3_600), "3d");
+        assert_eq!(uptime_short(9 * 60), "9m");
+        assert_eq!(uptime_short(2 * 3_600), "2h");
+        assert_eq!(uptime_short(0), "0m");
     }
 
     #[test]

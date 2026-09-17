@@ -60,7 +60,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .battery
         .as_ref()
         .and_then(|b| b.power_watts)
-        .filter(|w| *w > WATTS_FLOOR);
+        .and_then(format::whole_watts);
     vec![
         processor(
             &snapshot.cpu,
@@ -78,10 +78,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     ]
 }
 
-/// Below this, a reported draw is noise (idle leakage, a full battery
-/// sitting on AC). Same floor the zstats CLI uses before printing W.
-const WATTS_FLOOR: f32 = 0.1;
-
 /// A tree's recent minutes must sit this many percent-of-one-core
 /// points above its earlier-hour average before the card calls it
 /// climbing. Below ~an eighth of a core the delta is scheduler mood and
@@ -98,8 +94,7 @@ const RISE_FLOOR: f32 = 15.0;
 /// snapshot ranking. Always [`TOP_N`] rows: climbers take the top, the
 /// rest of the slots keep the current CPU ranking so a quiet climb
 /// (two trees) does not leave the card three rows short of the window.
-/// All still opens the full Apps list. Live watts sit beside CPU% when
-/// the battery reports a draw; the full battery card stays on Hardware.
+/// All still opens the full Apps list.
 fn top_apps(state: &ZStatsAppState) -> AnyElement {
     let Some(tick) = state.latest() else {
         return widgets::empty_card(
@@ -299,9 +294,9 @@ fn processor(
     cpu: &CpuSnapshot,
     load: &LoadSnapshot,
     uptime_secs: u64,
-    watts: Option<f32>,
+    watts: Option<u32>,
 ) -> AnyElement {
-    let header_right = processor_caption(cpu);
+    let header_right = processor_caption(cpu, watts);
     let mut body = card()
         .child(widgets::card_header(
             i18n::tr("overview.processor"),
@@ -309,25 +304,32 @@ fn processor(
         ))
         .child(
             // Baseline-aligned so the footnote sits on the headline's
-            // line, not on the bottom of its taller box. Two hit areas,
-            // two tooltips: the figure explains its weighting, the load
-            // explains what a count means against this core count.
+            // line, not on the bottom of its taller box. Usage + load
+            // stay a left-hand pair; uptime hugs the right so the
+            // three-number load caption has room to breathe.
             h_flex()
+                .w_full()
                 .items_baseline()
-                .mt(px(4.))
+                .justify_between()
                 .gap(px(10.))
+                .mt(px(4.))
                 .child(
-                    div()
-                        .id("cpu-usage")
-                        .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
-                        .child(widgets::big_number(
-                            format::whole_pct(cpu.usage_percent),
-                            "%",
-                            20.,
-                        )),
+                    h_flex()
+                        .items_baseline()
+                        .gap(px(10.))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .id("cpu-usage")
+                                .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
+                                .child(widgets::big_number(
+                                    format::whole_pct(cpu.usage_percent),
+                                    "%",
+                                    20.,
+                                )),
+                        )
+                        .child(load_caption(load, cpu.logical_cores)),
                 )
-                .child(load_caption(load, cpu.logical_cores))
-                .children(watts.map(watts_caption))
                 .child(uptime_caption(uptime_secs)),
         );
 
@@ -374,13 +376,20 @@ fn processor(
     body.into_any_element()
 }
 
-/// Brand plus the reported clock, e.g. "Apple M4 Pro (4.5 GHz)".
+/// Brand plus the reported clock, e.g. "Apple M4 Pro (4.5 GHz)", and
+/// the live draw when the battery reports one.
 ///
 /// Apple Silicon does not expose live per-cluster MHz through sysinfo;
 /// this is the rated clock and usually never moves. zstats still only
 /// *asks* for it every 30s (cheaper than every usage sample) — that is
 /// a collect cadence, not a claim that the number changes.
-fn processor_caption(cpu: &CpuSnapshot) -> AnyElement {
+///
+/// Watts sit here rather than beside CPU%: identity (which chip, what
+/// it is drawing) vs activity (how busy, how long). The brand is the
+/// one that ellipsises — watts is `flex_none`, and the text has to live
+/// on the truncating div itself (`note()` wrapping it once shoved the
+/// figure off the card).
+fn processor_caption(cpu: &CpuSnapshot, watts: Option<u32>) -> AnyElement {
     let freq = cpu
         .frequency_mhz
         .map(|mhz| format!("{:.1} GHz", mhz as f64 / 1000.0));
@@ -393,12 +402,21 @@ fn processor_caption(cpu: &CpuSnapshot) -> AnyElement {
         (None, None) => i18n::tr("overview.freq_unknown"),
     };
     let tip = i18n::tr("overview.freq_tip");
-    div()
-        .id("cpu-brand")
-        .max_w(px(176.))
-        .truncate()
-        .tooltip(widgets::wrap_tooltip(tip))
-        .child(widgets::note(text))
+    h_flex()
+        .min_w_0()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .id("cpu-brand")
+                .min_w_0()
+                .truncate()
+                .text_size(px(10.))
+                .text_color(theme::text_dim())
+                .tooltip(widgets::wrap_tooltip(tip))
+                .child(text),
+        )
+        .children(watts.map(watts_caption))
         .into_any_element()
 }
 
@@ -429,17 +447,17 @@ fn load_caption(load: &LoadSnapshot, cores: u32) -> AnyElement {
         .into_any_element()
 }
 
-/// Live draw, next to CPU%: "150% while drawing 22 W" is a different
-/// story from 150% on the charger at 2 W. Absent on desktops and VMs,
-/// and omitted below [`WATTS_FLOOR`] so idle leakage is not a figure.
-fn watts_caption(watts: f32) -> AnyElement {
+/// Live draw, beside the chip name. Whole watts from [`format::whole_watts`];
+/// the caller already dropped zero. Absent on desktops and VMs.
+fn watts_caption(watts: u32) -> AnyElement {
     div()
         .id("cpu-watts")
+        .flex_none()
         .font_family(font::MONO)
         .text_size(px(10.))
         .text_color(theme::text_dim())
         .tooltip(widgets::wrap_tooltip(i18n::tr("overview.watts_tip")))
-        .child(format!("{watts:.1} W"))
+        .child(format!("{watts} W"))
         .into_any_element()
 }
 
@@ -449,11 +467,12 @@ fn watts_caption(watts: f32) -> AnyElement {
 fn uptime_caption(secs: u64) -> AnyElement {
     div()
         .id("cpu-uptime")
+        .flex_none()
         .font_family(font::MONO)
         .text_size(px(10.))
         .text_color(theme::text_dim())
         .tooltip(widgets::wrap_tooltip(i18n::tr("overview.uptime_tip")))
-        .child(t!("overview.uptime", time = format::uptime(secs)).to_string())
+        .child(t!("overview.uptime", time = format::uptime_short(secs)).to_string())
         .into_any_element()
 }
 
