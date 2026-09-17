@@ -358,6 +358,7 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
 
   注意 `with_app_identity()` 里补 titlebar 的分支必须跳过 macOS，否则会把红绿灯又装回去。
 - **退出按钮**：面板 footer 右侧。accessory app 没有应用菜单栏、没有 Dock 图标可右键、窗口也没有关闭按钮，所以退出必须有个看得见的入口（托盘右键菜单的 Quit 仍在）。
+- **Wayland 上没有窗口定位这回事**：客户端不能设坐标，所以面板走 wlr-layer-shell（`main.rs` 的 `panel_kind`），由合成器锚在右上角，namespace 固定为 `zstats`（Hyprland 的 `layerrule = blur, zstats` 匹配的就是它）。不设 `exclusive_zone` 等于设 0，语义是「我不占位，但请把我挪开别压住别人的占位区」，所以面板自动落在 bar 下面，不需要算 bar 的高度。合成器没有 layer-shell 时退回普通窗口并记一条 warn。详见 [`omarchy-port.md`](omarchy-port.md)。
 - **窗口定位**（`placement.rs`）：`TrayIconEvent::Click` 带的图标矩形是物理像素——tray-icon 用**那颗状态项自己的** `backingScaleFactor` 乘过 AppKit 逻辑坐标，不是一块全局物理空间。换算回逻辑时对每块屏用它自己的 scale 试算，收回来的图标中心落在*那块屏*上才算一致；混 DPI 时两个试算都可能一致（1x 图标的物理 x 除以 2 仍落在 2x 主屏上），再用收回来的高度贴近菜单栏条（~24pt）的那次。逻辑坐标下窗口以图标为中心水平居中、下方留 6px，再夹进该屏的 `visibleFrame`（已排除菜单栏和 Dock）—— 只有居中会越界时才贴边。纯几何部分是 `anchored_origin()` / `resolve_icon()`，单元测试覆盖了居中 / 贴左 / 贴右 / 窗口超高，以及 2x+1x 并排、对调、上下叠放。`ZSTATS_DEBUG_POSITION=1` 会打印整条换算链和每一次试算，多屏定位出问题时可以定位到具体哪一步。
 - **毛玻璃**：`WindowBackgroundAppearance::Blurred`，gpui 在 macOS 上用 `NSVisualEffectView` 实现。仅 macOS 启用：其他平台 `Blurred` 文档标注「not always supported」，退化后是纯透明，会直接看到桌面。
 
@@ -445,4 +446,8 @@ release 构建、托盘常驻不开窗、cputime 差值 ÷ 墙钟实测：
 
 因此 `main.rs` 与 `metrics.rs` 里保留的那批 `#[cfg(not(target_os = "macos"))]` 分支（窗口用销毁代替隐藏、`cx.displays()` 查屏、无毛玻璃）连编译都没经历过，更谈不上跑。保留它们是为了不堵死后续移植，但不应当理解为「支持」，也不应当理解为「现成的」。
 
-移植还有三条硬约束值得先知道：Linux 上 `tray-icon` **根本不发射点击事件**（其自身文档写明），所以拿不到锚定弹窗所需的图标屏幕矩形；Wayland 不允许客户端设置绝对窗口位置；`gpui_linux` 的 `activate` / `hide` 是静默 no-op。三条叠加意味着「点菜单栏图标弹出锚定面板」这个形态在 Linux 上无法还原。
+移植的硬约束这一年变了，逐条更新如下，完整的分阶段计划见 [`omarchy-port.md`](omarchy-port.md)：
+
+- ~~Linux 上 `tray-icon` 根本不发射点击事件~~——**已不成立**。`tray-icon` 0.25 新增 ksni 后端（StatusNotifierItem，走 D-Bus，不需要 GTK 事件循环），在 `activate` / `secondary_activate` 上发 `Click`。本仓库已在 0.25.1。
+- Wayland 不允许客户端设置绝对窗口位置——**仍然成立**，但正规机制是 wlr-layer-shell，而 gpui 已经实现（`WindowKind::LayerShell`，可设 anchor / margin / layer / namespace，`gpui-pre-linux` 里是真的 `zwlr_layer_shell_v1`）。面板锚在屏幕右上角由合成器摆放。
+- SNI **不提供图标屏幕矩形**——这是真正的降级：`rect` 为空，所以「锚在图标正下方」在 Linux 上无法还原，锚定改为屏幕边缘。

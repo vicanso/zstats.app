@@ -7,7 +7,7 @@ hardware = "硬件"
 network = "网络"
 alerts = "告警"
 settings = "设置"
-shortcut = "%{name} · ⌘%{n}"
+shortcut = "%{name} · %{hint}%{n}"
 
 [common]
 quit = "退出"

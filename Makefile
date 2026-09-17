@@ -1,7 +1,7 @@
 # Release version — Cargo.toml is the single source of truth.
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 
-.PHONY: dev debug run fmt lint test check release bundle bloat udeps clean version
+.PHONY: dev debug run fmt lint test check release bundle bloat udeps clean version linux-check linux-clean
 
 # --- develop ---------------------------------------------------------------
 
@@ -69,6 +69,42 @@ bundle:
 # banners silently lost (measured; see docs/design.md 系统通知). Unregistering
 # here keeps the installed copy the only claimant; Spotlight may quietly
 # re-add this one later, which is why it runs on every bundle rather than once.
+
+# --- linux port ------------------------------------------------------------
+
+# Compile and test the Linux side from this macOS machine, in a container.
+# See docs/omarchy-port.md; the short version is that it answers "does it
+# build and do the tests pass", and nothing about how the panel looks —
+# there is no compositor in there.
+#
+# arm64 only: Apple's `container` runs arm64 VMs with no emulation, so
+# x86_64 is CI's job (`.github/workflows/test.yml`).
+#
+# Three things here were learned the hard way. crates.io times out inside
+# that VM, so dependencies are vendored on the host and the build runs
+# `--offline` against them. `naga` needs more than the default memory or
+# the OOM killer takes it mid-compile. And the work directory lives outside
+# the repo so a Linux target tree never collides with the macOS one.
+LINUX_WORK ?= $(HOME)/.cache/zstats-linux
+
+linux-check:
+	@command -v container >/dev/null || { echo "needs Apple's container CLI (or swap in docker/podman)"; exit 1; }
+	@container image list | grep -q '^zstats-linux' || container build -t zstats-linux -f Containerfile .
+	@[ -d "$(LINUX_WORK)/vendor" ] || cargo vendor --locked "$(LINUX_WORK)/vendor" >/dev/null
+	@mkdir -p "$(LINUX_WORK)/target" "$(LINUX_WORK)/cargo-home"
+	@printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "/vendor"\n' > "$(LINUX_WORK)/cargo-home/config.toml"
+	container run --rm -m 12g -c 6 \
+		-v "$(CURDIR)":/src \
+		-v "$(LINUX_WORK)/target":/target \
+		-v "$(LINUX_WORK)/vendor":/vendor \
+		-v "$(LINUX_WORK)/cargo-home":/cargo-home \
+		-w /src -e CARGO_TARGET_DIR=/target -e CARGO_HOME=/cargo-home \
+		zstats-linux \
+		bash -c "cargo build --all-targets --offline && cargo test --offline"
+
+# Drop the container work tree (vendored crates and the Linux target dir).
+linux-clean:
+	rm -rf "$(LINUX_WORK)"
 
 # Where the release binary's size goes, by crate.
 bloat:

@@ -7,7 +7,7 @@ hardware = "Hardware"
 network = "Network"
 alerts = "Alerts"
 settings = "Settings"
-shortcut = "%{name} · ⌘%{n}"
+shortcut = "%{name} · %{hint}%{n}"
 
 [common]
 quit = "Quit"

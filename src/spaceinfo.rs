@@ -11,6 +11,8 @@
 //! demand, and forcing it is `tmutil`'s job behind admin rights, not
 //! ours.
 
+// `tmutil` is the only subprocess here.
+#[cfg(target_os = "macos")]
 use std::process;
 pub struct SpaceInfo {
     /// Bytes the system could free on demand (snapshots, regenerable

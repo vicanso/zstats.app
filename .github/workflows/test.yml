@@ -49,3 +49,46 @@ jobs:
         run: make lint
       - name: test
         run: make test
+
+  # The Linux port (docs/omarchy-port.md) is verified here, not on a
+  # developer's machine: the panel's macOS-only modules have Linux arms
+  # now, and the only way "does it still build there" stays true is a job
+  # that asks on every push. Both architectures, because Omarchy runs on
+  # x86_64 while the development machine is arm64 — arm64's bar is build
+  # and start, x86_64 is where the behaviour is checked by hand.
+  #
+  # No clippy here yet: the Linux arms are still arriving phase by phase
+  # and `--deny=warnings` would fail on a half-ported module rather than
+  # on a real fault. The macOS job above keeps that gate.
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: system dependencies
+        # xkbcommon links at build time (gpui turns the crate's default
+        # features off, so there is no dlopen shim), and gpui's x11
+        # backend pulls `xkbcommon-x11` and `xcb` in with it — the link
+        # step is where a missing one shows up, long after everything
+        # has compiled. fontconfig backs font-kit. Wayland and Vulkan are
+        # dlopened at runtime, so they are not needed to build.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-test-${{ matrix.runner }}
+      - name: build
+        run: cargo build --all-targets
+      - name: test
+        run: cargo test --workspace

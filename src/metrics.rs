@@ -98,10 +98,9 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How often to sweep for abnormal processes.
 ///
-/// Far cheaper than a metrics sample — one `sysctl` and a scan of the result,
-/// no per-process CPU/memory accounting — and what it looks for changes on the
-/// scale of minutes or days, not seconds.
-#[cfg(target_os = "macos")]
+/// Far cheaper than a metrics sample — one `sysctl` on macOS, one `/proc`
+/// walk on Linux, no per-process CPU/memory accounting — and what it looks
+/// for changes on the scale of minutes or days, not seconds.
 const ABNORMAL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Shared "the panel is on screen" flag, plus a way to wake the collector.
@@ -242,7 +241,6 @@ pub fn start(cx: &mut App) {
         }
     });
 
-    #[cfg(target_os = "macos")]
     spawn_abnormal_scan(cx);
 
     cx.spawn(async move |cx| {
@@ -335,7 +333,6 @@ pub fn start(cx: &mut App) {
 /// processes by CPU then memory, and an abnormal process scores near zero on
 /// both — on this machine they ranked 435th and below, so they can never
 /// appear in the panel's process table.
-#[cfg(target_os = "macos")]
 fn spawn_abnormal_scan(cx: &mut App) {
     cx.spawn(async move |cx| {
         loop {

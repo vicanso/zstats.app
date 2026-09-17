@@ -18,12 +18,18 @@
 use super::widgets::{self, card};
 use crate::alertlog::{self, DayLog};
 use crate::assets;
+// The sheet belongs to the app-level quit, which is macOS-only
+// (`terminate`); the process-level one lives on the Processes tab.
+#[cfg(target_os = "macos")]
 use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs;
 use crate::state::{MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
+// Every user of it sits behind the app-level quit, which only macOS has
+// (`terminate::method_for`); the Processes tab keeps the process-level one.
+#[cfg(target_os = "macos")]
 use crate::terminate;
 use crate::theme;
 use crate::trend;

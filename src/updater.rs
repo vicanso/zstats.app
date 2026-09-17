@@ -914,7 +914,10 @@ mod tests {
     }
 
     /// Build a DMG whose payload is `zstats.app` carrying `id` as its
-    /// bundle identifier, under `dir`. Real hdiutil, ~a second.
+    /// bundle identifier, under `dir`. Real hdiutil, ~a second — which is
+    /// why this and everything below it is macOS-only: the in-place
+    /// install is a `.app` on a mounted image, and Linux has neither.
+    #[cfg(target_os = "macos")]
     fn fixture_dmg(dir: &Path, id: &str, marker: &[u8], volname: &str) -> PathBuf {
         let contents = dir.join("payload").join(BUNDLE_NAME).join("Contents");
         fs::create_dir_all(contents.join("MacOS")).unwrap();
@@ -944,6 +947,7 @@ mod tests {
     }
 
     /// An old bundle standing where the install will land.
+    #[cfg(target_os = "macos")]
     fn fixture_target(dir: &Path) -> PathBuf {
         let target = dir.join("Applications").join(BUNDLE_NAME);
         fs::create_dir_all(target.join("Contents/MacOS")).unwrap();
@@ -953,6 +957,7 @@ mod tests {
 
     /// The asides this test run parked in temp — found by prefix, so
     /// the test can both assert the old bundle survived and clean up.
+    #[cfg(target_os = "macos")]
     fn asides() -> Vec<PathBuf> {
         let prefix = format!("zstats-previous-{}-", process::id());
         fs::read_dir(env::temp_dir())
@@ -971,6 +976,7 @@ mod tests {
     /// The whole in-place path against a real image: mount, verify the
     /// bundle id, rename the old bundle aside (kept, not deleted),
     /// copy the new one in, detach the volume.
+    #[cfg(target_os = "macos")]
     #[test]
     fn in_place_install_swaps_the_bundle_and_detaches() {
         let dir = env::temp_dir().join(format!("zstats-inplace-{}", process::id()));
@@ -1044,6 +1050,7 @@ mod tests {
 
     /// The identity gate fires before anything moves — and the volume
     /// still gets detached on the failure exit.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_foreign_bundle_is_refused_before_anything_moves() {
         let dir = env::temp_dir().join(format!("zstats-foreign-{}", process::id()));

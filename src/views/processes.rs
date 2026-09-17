@@ -1220,17 +1220,18 @@ fn abnormal_badge(pid: u32, state: ProcState, tip: String) -> AnyElement {
 /// The delivery itself lives in `terminate.rs` with the alert card's
 /// quit — the app acts on a process in exactly one module, and a
 /// syscall does what spawning `/bin/kill` used to.
-#[cfg(target_os = "macos")]
+///
+/// Both platforms, unlike the app-level tier above it: SIGTERM is the
+/// POSIX half, and `can_term` already decided the button exists. This
+/// used to be a `#[cfg(not(target_os = "macos"))]` empty stub, which is
+/// exactly the control-that-cannot-work the affordance rule forbids —
+/// the row rendered a Quit and the click went nowhere.
 fn kill(pid: u32) {
     // Inline: a signal is a syscall that returns immediately. The
     // thread this used to spawn was there for the `/bin/kill`
     // subprocess, and went away with it.
     crate::terminate::request_term(pid);
 }
-
-/// Never-run stub — see "Platform reality" in CLAUDE.md.
-#[cfg(not(target_os = "macos"))]
-fn kill(_pid: u32) {}
 
 /// The filter chip in the list header.
 ///

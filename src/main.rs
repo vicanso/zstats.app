@@ -2,24 +2,17 @@
 // app pops an empty terminal behind the window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// macOS only, and it fails here rather than six files later. `procscan`,
-// `terminate` and `window_ext` are declared `#[cfg(target_os = "macos")]`
-// below while six modules import them unconditionally, so another target
-// produces a scatter of unresolved-import errors that say nothing about
-// why. This says it once.
-//
-// The gates are deliberately NOT spread across those six files: a build
-// that compiles with no tray, no window show/hide, no abnormal-process
-// scan and a permanently failing Trash button would be a worse answer
-// than a build that stops. Adding them belongs to a port, where each
-// gated feature gets a real implementation or an honest empty state —
-// not to scaffolding kept warm for a port nobody has committed to. See
-// "非 macOS 平台编译不过" in docs/design.md for the full list.
-#[cfg(not(target_os = "macos"))]
+// macOS and Linux. Anything else fails here rather than six files later,
+// with the same reasoning the macOS-only guard carried before: a scatter
+// of unresolved imports says nothing about why. The Linux side is a port
+// in progress — see docs/omarchy-port.md for what each phase covers and
+// what is deliberately absent — and every gate below is either a real
+// implementation or an honest empty state, never scaffolding.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!(
-    "zstats-app builds on macOS only. See the platform section in docs/design.md \
-     — porting means implementing the tray, window show/hide, positioning and \
-     process scanning, not just satisfying the compiler."
+    "zstats-app builds on macOS and Linux. See docs/omarchy-port.md — porting \
+     to a third platform means implementing the tray, window show/hide, \
+     positioning and process scanning, not just satisfying the compiler."
 );
 
 mod about;
@@ -49,12 +42,10 @@ mod notify;
 mod opener;
 mod placement;
 mod prefs;
-#[cfg(target_os = "macos")]
 mod procscan;
 mod proxy;
 mod spaceinfo;
 mod state;
-#[cfg(target_os = "macos")]
 mod terminate;
 mod theme;
 #[cfg(not(target_os = "linux"))]
@@ -96,8 +87,17 @@ const LINUX_APP_ID: &str = "com.github.vicanso.zstats";
 /// Native vibrancy, but only on macOS: there gpui backs `Blurred` with an
 /// `NSVisualEffectView`. Elsewhere it's documented as "not always supported"
 /// and degrades to plain transparency, which would show the raw desktop.
+///
+/// Wayland gets `Transparent` rather than `Opaque` because the blur there
+/// is the *compositor's*, not ours: Hyprland's `layerrule = blur, zstats`
+/// matches the namespace [`panel_kind`] sets, and an opaque surface has
+/// nothing for it to blur. It costs nothing by default — the root wash
+/// below is 1.0 off macOS, so the panel is solid until the reader lowers
+/// the opacity preference, which is the other half of asking for glass.
 const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(target_os = "macos") {
     WindowBackgroundAppearance::Blurred
+} else if cfg!(target_os = "linux") {
+    WindowBackgroundAppearance::Transparent
 } else {
     WindowBackgroundAppearance::Opaque
 };
@@ -115,6 +115,15 @@ const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.35 } else 
 /// bleeds through and fights the dark text. Legibility wins; the effect is
 /// conceded. Dark mode keeps it, where the contrast actually carries.
 const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
+/// Gap between the panel and the screen edges it is anchored to on
+/// Wayland. Small on purpose: the panel is a popover hanging off the
+/// corner, not a floating window, and the compositor already keeps it
+/// clear of any bar that reserves space (an exclusive zone of 0 — which
+/// is what not calling `set_exclusive_zone` means — asks to be moved out
+/// of other surfaces' way rather than to occlude them).
+#[cfg(target_os = "linux")]
+const PANEL_MARGIN: f32 = 8.;
+
 /// Clicking the tray icon first takes focus away from the window, which
 /// auto-hides it, and only then delivers the click. A click landing inside
 /// this window of an auto-hide is read as "the user wanted it gone" and does
@@ -213,8 +222,16 @@ impl ZStatsApp {
                     }
                 });
             }
+            // Destroyed rather than hidden: `orderOut` is AppKit's, and
+            // a layer surface is cheap to rebuild. The pace still has to
+            // drop — the collector is resident either way, and without
+            // this it would keep sampling at the visible cadence for a
+            // panel that is gone.
             #[cfg(not(target_os = "macos"))]
-            window.remove_window();
+            {
+                cx.global::<metrics::CollectorPace>().hidden();
+                window.remove_window();
+            }
         });
         let appearance = cx.observe_window_appearance(window, |_this, window, cx| {
             apply_appearance(window.appearance(), cx);
@@ -1049,9 +1066,43 @@ fn go_panel_tab(cx: &mut Context<ZStatsApp>, index: usize) {
         .update(cx, |state, cx| state.set_tab(tab, cx));
 }
 
+/// How the panel asks to be placed on Wayland.
+///
+/// A client there cannot position a window, which is why the macOS
+/// arithmetic in `placement.rs` has no counterpart: the panel is a
+/// wlr-layer-shell surface and the *compositor* anchors it. Top-right,
+/// because that is where a menu-bar panel belongs and the tray icon it
+/// would otherwise hang under has no reportable position (the
+/// StatusNotifier protocol carries no rect — see docs/omarchy-port.md).
+///
+/// `Overlay` so the panel is not buried under the window it is describing;
+/// `OnDemand` because the Processes tab's name filter has to be typeable,
+/// while `Exclusive` would hold the keyboard hostage for as long as the
+/// panel is up; no exclusive zone, because a popover does not reserve
+/// desktop space the way a bar does.
+#[cfg(target_os = "linux")]
+fn panel_kind() -> gpui::WindowKind {
+    use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
+
+    gpui::WindowKind::LayerShell(LayerShellOptions {
+        // The handle Hyprland's `layerrule` matches on, and what
+        // `hyprctl layers` prints. Changing it breaks every user's blur
+        // rule, so it is a fixed name rather than the app id.
+        namespace: "zstats".into(),
+        layer: Layer::Overlay,
+        anchor: Anchor::TOP | Anchor::RIGHT,
+        exclusive_zone: None,
+        exclusive_edge: None,
+        // CSS order: top, right, bottom, left.
+        margin: Some((px(PANEL_MARGIN), px(PANEL_MARGIN), px(0.), px(0.))),
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+    })
+}
+
 /// Create the main window. With a tray `anchor` it opens under the tray icon;
 /// without one (startup, or the tray menu's "Show Window") it restores the
-/// last known position.
+/// last known position. On Wayland neither applies: [`panel_kind`] hands
+/// the placement to the compositor and only the size here is honoured.
 pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     let saved = cx.global::<ZStatsGlobalStore>().read(cx).window_bounds();
     let default_size = {
@@ -1066,74 +1117,19 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
         }
         None => saved.unwrap_or_else(|| Bounds::centered(None, default_size, cx)),
     };
-    let (min_w, min_h) = MIN_WINDOW_SIZE;
 
-    let opened = cx.open_window(
-        with_app_identity(WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(min_w), px(min_h))),
-            window_background: WINDOW_BACKGROUND,
-            // macOS: `None`, and it has to be written explicitly —
-            // `WindowOptions::default().titlebar` is `Some(..)`
-            // (`gpui/src/platform.rs:1964`), so leaving the field out would
-            // put a default (opaque, traffic-lit) title bar back.
-            //
-            // With `None`, gpui builds the window with a
-            // `Titled | FullSizeContentView` style mask and *without*
-            // `Closable`/`Miniaturizable`/`Resizable`, so there are no traffic
-            // lights, while it still applies `titlebarAppearsTransparent` +
-            // `titleHidden` (`gpui_macos/src/window.rs:815,977`). The result is
-            // a clean panel that is nonetheless a normal titled window — it
-            // keeps the system rounding and shadow, and can still take keyboard
-            // focus, which `WindowKind::PopUp` (a nonactivating panel) could
-            // not. Linux keeps server-side decorations with the title from
-            // `with_app_identity`.
-            #[cfg(target_os = "macos")]
-            titlebar: None,
-            #[cfg(target_os = "windows")]
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                ..Default::default()
-            }),
-            // macOS only: create the window hidden and reveal it after the
-            // first themed frame (see `on_next_frame` below) so there's no
-            // white flash. Windows drives frames from WM_PAINT, which hidden
-            // windows never receive — the reveal would deadlock and the window
-            // would never appear; Wayland can't reliably reveal a window that
-            // was never mapped either.
-            show: cfg!(not(target_os = "macos")),
-            ..Default::default()
-        }),
-        |window, cx| {
-            // No `on_window_should_close` override: closing really closes, on
-            // every platform. `QuitMode::Explicit` keeps the process and the
-            // tray alive, and the next tray click rebuilds the window.
-
-            // Pairs with `show: false` above — macOS paints hidden windows, so
-            // this fires; on Windows / Linux it never would.
-            #[cfg(target_os = "macos")]
-            window.on_next_frame(|window, _cx| {
-                window.activate_window();
-                use_popover_material(window);
-                window_ext::join_all_spaces(window);
-            });
-
-            let view = cx.new(|cx| ZStatsApp::new(window, cx));
-            cx.new(|cx| {
-                let root = Root::new(view, window, cx);
-                match WINDOW_BACKGROUND {
-                    WindowBackgroundAppearance::Opaque => root,
-                    // `Root::render` paints an opaque `theme.tokens.background`
-                    // across the whole window, which would bury the vibrancy
-                    // layer. Its `refine_style` runs after that `bg`, so this
-                    // overrides it and lets our own translucent fill be the
-                    // only thing between the content and the blur.
-                    _ => root.bg(gpui::transparent_black()),
-                }
-            })
-        },
-    );
+    let opened = cx.open_window(panel_options(bounds, true), build_panel);
+    // No wlr-layer-shell under this compositor (a GNOME session, say): a
+    // plain window still shows every number, it just lands wherever the
+    // compositor decides. Saying so once beats not opening at all.
+    #[cfg(target_os = "linux")]
+    let opened = match opened {
+        Err(e) => {
+            tracing::warn!("layer-shell unavailable ({e}); opening a plain window");
+            cx.open_window(panel_options(bounds, false), build_panel)
+        }
+        ok => ok,
+    };
     match opened {
         Ok(handle) => {
             cx.global::<ZStatsGlobalStore>()
@@ -1143,6 +1139,87 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
         }
         Err(e) => tracing::error!("failed to open main window: {e}"),
     }
+}
+
+/// The panel's window options. `layer_shell` is consulted on Wayland only,
+/// where the first attempt asks for a layer surface and the fallback above
+/// asks for an ordinary window.
+fn panel_options(bounds: Bounds<gpui::Pixels>, layer_shell: bool) -> WindowOptions {
+    let _ = layer_shell;
+    let (min_w, min_h) = MIN_WINDOW_SIZE;
+    #[allow(unused_mut)]
+    let mut options = with_app_identity(WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(min_w), px(min_h))),
+        window_background: WINDOW_BACKGROUND,
+        // macOS: `None`, and it has to be written explicitly —
+        // `WindowOptions::default().titlebar` is `Some(..)`
+        // (`gpui/src/platform.rs:1964`), so leaving the field out would
+        // put a default (opaque, traffic-lit) title bar back.
+        //
+        // With `None`, gpui builds the window with a
+        // `Titled | FullSizeContentView` style mask and *without*
+        // `Closable`/`Miniaturizable`/`Resizable`, so there are no traffic
+        // lights, while it still applies `titlebarAppearsTransparent` +
+        // `titleHidden` (`gpui_macos/src/window.rs:815,977`). The result is
+        // a clean panel that is nonetheless a normal titled window — it
+        // keeps the system rounding and shadow, and can still take keyboard
+        // focus, which `WindowKind::PopUp` (a nonactivating panel) could
+        // not. Linux keeps server-side decorations with the title from
+        // `with_app_identity`.
+        #[cfg(target_os = "macos")]
+        titlebar: None,
+        #[cfg(target_os = "windows")]
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            ..Default::default()
+        }),
+        // macOS only: create the window hidden and reveal it after the
+        // first themed frame (see `on_next_frame` below) so there's no
+        // white flash. Windows drives frames from WM_PAINT, which hidden
+        // windows never receive — the reveal would deadlock and the window
+        // would never appear; Wayland can't reliably reveal a window that
+        // was never mapped either.
+        show: cfg!(not(target_os = "macos")),
+        ..Default::default()
+    });
+    #[cfg(target_os = "linux")]
+    if layer_shell {
+        options.kind = panel_kind();
+    }
+    options
+}
+
+/// The panel's view tree. A plain function rather than the closure it used
+/// to be, so the Wayland fallback can build it a second time.
+fn build_panel(window: &mut Window, cx: &mut App) -> gpui::Entity<Root> {
+    // No `on_window_should_close` override: closing really closes, on
+    // every platform. `QuitMode::Explicit` keeps the process and the
+    // tray alive, and the next tray click rebuilds the window.
+
+    // Pairs with `show: false` above — macOS paints hidden windows, so
+    // this fires; on Windows / Linux it never would.
+    #[cfg(target_os = "macos")]
+    window.on_next_frame(|window, _cx| {
+        window.activate_window();
+        use_popover_material(window);
+        window_ext::join_all_spaces(window);
+    });
+
+    let view = cx.new(|cx| ZStatsApp::new(window, cx));
+    cx.new(|cx| {
+        let root = Root::new(view, window, cx);
+        match WINDOW_BACKGROUND {
+            WindowBackgroundAppearance::Opaque => root,
+            // `Root::render` paints an opaque `theme.tokens.background`
+            // across the whole window, which would bury the vibrancy
+            // layer. Its `refine_style` runs after that `bg`, so this
+            // overrides it and lets our own translucent fill be the
+            // only thing between the content and the blur.
+            _ => root.bg(gpui::transparent_black()),
+        }
+    })
 }
 
 /// The popover panel, if that window is still alive.
@@ -1195,6 +1272,7 @@ pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        cx.global::<metrics::CollectorPace>().hidden();
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
 }
@@ -1416,14 +1494,20 @@ fn main() {
                 CloseWindow,
                 Some("StorageWindow"),
             ),
-            KeyBinding::new("cmd-1", GoTab1, Some("Panel")),
-            KeyBinding::new("cmd-2", GoTab2, Some("Panel")),
-            KeyBinding::new("cmd-3", GoTab3, Some("Panel")),
-            KeyBinding::new("cmd-4", GoTab4, Some("Panel")),
-            KeyBinding::new("cmd-5", GoTab5, Some("Panel")),
-            KeyBinding::new("cmd-6", GoTab6, Some("Panel")),
-            KeyBinding::new("cmd-7", GoTab7, Some("Panel")),
-            KeyBinding::new("cmd-p", TogglePin, Some("Panel")),
+            // `secondary-`, not `cmd-`: gpui reads `cmd` as the *platform*
+            // modifier, which is Super on Linux — and Super is the
+            // compositor's on a Hyprland desktop (Omarchy binds Super+1..n
+            // to workspaces), so those presses would never reach the
+            // panel. `secondary` is ⌘ on macOS and Ctrl elsewhere, which
+            // is also what the tab tooltips say (`views::shortcut_hint`).
+            KeyBinding::new("secondary-1", GoTab1, Some("Panel")),
+            KeyBinding::new("secondary-2", GoTab2, Some("Panel")),
+            KeyBinding::new("secondary-3", GoTab3, Some("Panel")),
+            KeyBinding::new("secondary-4", GoTab4, Some("Panel")),
+            KeyBinding::new("secondary-5", GoTab5, Some("Panel")),
+            KeyBinding::new("secondary-6", GoTab6, Some("Panel")),
+            KeyBinding::new("secondary-7", GoTab7, Some("Panel")),
+            KeyBinding::new("secondary-p", TogglePin, Some("Panel")),
         ]);
         install_menus(cx);
 

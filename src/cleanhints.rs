@@ -337,6 +337,9 @@ owner = "skipped too"
         assert!(!nm.matches(&p("/Users/x/dev/node_modules_backup")));
     }
 
+    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
+    // the runtime degrades to "no hints", but these assert content.
+    #[cfg(target_os = "macos")]
     #[test]
     fn user_file_replaces_the_embedded_list_wholesale() {
         let home = p("/Users/x");
@@ -385,6 +388,9 @@ owner = "skipped too"
     /// A user file written before the per-OS split keeps working: it is
     /// adopted under the platform name once, and an already-migrated
     /// directory is left alone.
+    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
+    // the runtime degrades to "no hints", but these assert content.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_pre_split_user_file_is_adopted_not_ignored() {
         let home = p("/Users/x");
@@ -418,6 +424,9 @@ owner = "skipped too"
     /// Every embedded entry must parse into one of the two rule forms —
     /// a typo in the shipped file should fail here, not silently drop
     /// the entry at runtime.
+    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
+    // the runtime degrades to "no hints", but these assert content.
+    #[cfg(target_os = "macos")]
     #[test]
     fn embedded_defaults_all_parse() {
         let raw = assets::get(FILE).expect("embedded");
@@ -431,6 +440,9 @@ owner = "skipped too"
     /// Working trees, pulled models and uv's hard-linked cache must stay
     /// annotation-only — trashable here would put a delete button on
     /// user data (docs/disk-analysis.md).
+    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
+    // the runtime degrades to "no hints", but these assert content.
+    #[cfg(target_os = "macos")]
     #[test]
     fn annotation_only_locations_are_not_trashable() {
         let home = p("/Users/x");

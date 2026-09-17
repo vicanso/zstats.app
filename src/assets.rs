@@ -156,8 +156,14 @@ mod tests {
         assert!(get("locales/en.toml").is_some());
         // Through the constant, not the literal: the hints file is named
         // per platform, and the allowlist glob has to keep matching it.
-        assert!(get(HINTS_FILE).is_some());
-        assert!(get(CACHES_FILE).is_some());
+        // Only macOS ships one today — Linux gets its own in phase 6 of
+        // docs/omarchy-port.md, and until then the runtime degrades to
+        // "no hints" rather than failing, so there is nothing to assert.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(get(HINTS_FILE).is_some());
+            assert!(get(CACHES_FILE).is_some());
+        }
         assert!(get("zstats-icon.png").is_some());
         assert!(
             !Assets::iter().any(|p| p.ends_with(".DS_Store")),

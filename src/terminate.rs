@@ -25,7 +25,13 @@
 //! `SIGKILL` is deliberately absent from both. It cannot be refused, which
 //! makes it a data-loss button; a process stuck enough to ignore SIGTERM is
 //! Activity Monitor's job, not a metrics panel's.
+//!
+//! Off macOS there is no application tier at all: nothing answers "is this
+//! pid an application" the way LaunchServices does, so [`method_for`] is
+//! always `Term`, [`can_quit_app`] is always false and the Apps expansion
+//! grows no Quit button. SIGTERM, the half that is POSIX, is unchanged.
 
+#[cfg(target_os = "macos")]
 use objc2_app_kit::NSRunningApplication;
 
 /// How [`request_quit`] would deliver the request, so the confirm sheet can
@@ -48,12 +54,19 @@ pub fn can_quit(pid: u32) -> bool {
 }
 
 /// Which tier `pid` falls in right now.
+#[cfg(target_os = "macos")]
 pub fn method_for(pid: u32) -> QuitMethod {
     if running_application(pid).is_some() {
         QuitMethod::App
     } else {
         QuitMethod::Term
     }
+}
+
+/// Always the signal tier: see the module doc.
+#[cfg(not(target_os = "macos"))]
+pub fn method_for(_pid: u32) -> QuitMethod {
+    QuitMethod::Term
 }
 
 /// Deliver the quit request. `false` means nothing was delivered (the
@@ -94,6 +107,7 @@ pub fn request_quit(pid: u32, expected_name: &str) -> bool {
         name = expected_name,
         "quit requested (app-level, SIGTERM fallback)"
     );
+    #[cfg(target_os = "macos")]
     if let Some(app) = running_application(pid) {
         // `terminate` returns false when the request could not even be
         // delivered; a live app that chooses to show a save dialog instead
@@ -113,13 +127,20 @@ pub fn request_quit(pid: u32, expected_name: &str) -> bool {
 /// (`Google Chrome Helper (Renderer)`), so a live comm that is exactly
 /// that width is treated as a prefix of the expected name — and the
 /// reverse, if a truncated expected ever arrives.
+/// The width the kernel truncates a process name to: 16 bytes of `p_comm`
+/// on macOS, 15 characters in `/proc/<pid>/comm` on Linux.
+#[cfg(target_os = "macos")]
+const COMM_MAX: usize = 16;
+#[cfg(not(target_os = "macos"))]
+const COMM_MAX: usize = 15;
+
 fn names_match(expected: &str, live: &str) -> bool {
-    const COMM_MAX: usize = 16;
     expected == live
         || (live.len() == COMM_MAX && expected.starts_with(live))
         || (expected.len() == COMM_MAX && live.starts_with(expected))
 }
 
+#[cfg(target_os = "macos")]
 fn running_application(pid: u32) -> Option<objc2::rc::Retained<NSRunningApplication>> {
     if pid == 0 {
         return None;
@@ -200,19 +221,19 @@ mod tests {
 
     #[test]
     fn names_match_accepts_a_truncated_kernel_comm() {
+        let full = "Google Chrome Helper (Renderer)";
+        // Truncated the way this kernel truncates: 16 bytes on macOS, 15
+        // on Linux. Hard-coding either width made the test a claim about
+        // the other platform's kernel.
+        let capped = &full[..COMM_MAX];
+
         assert!(names_match("helper", "helper"));
-        assert!(names_match(
-            "Google Chrome Helper (Renderer)",
-            "Google Chrome He",
-        ));
-        assert!(names_match(
-            "Google Chrome He",
-            "Google Chrome Helper (Renderer)",
-        ));
+        assert!(names_match(full, capped));
+        assert!(names_match(capped, full));
         assert!(!names_match("helper", "bash"));
         assert!(
-            !names_match("Google Chrome Helper (Renderer)", "Google Chrome"),
-            "a shorter live name that is not the 16-byte cap is a different process"
+            !names_match(full, "Google Chrome"),
+            "a shorter live name that is not the cap is a different process"
         );
     }
 }

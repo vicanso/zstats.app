@@ -122,6 +122,18 @@ fn tab_icon(tab: Tab) -> Icon {
     }
 }
 
+/// How the tab shortcuts are spelled for this platform. gpui's
+/// `secondary-` modifier is ⌘ on macOS and Ctrl everywhere else (Super
+/// belongs to the compositor on a Hyprland desktop), so the tooltip has
+/// to say which one rather than hard-coding the Mac symbol.
+fn shortcut_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl+"
+    }
+}
+
 /// Every view in a single icon row — Control Center / Stats, not a text grid.
 /// Full names live on the tooltip.
 fn tab_strip(state: &ZStatsAppState) -> AnyElement {
@@ -139,7 +151,13 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
             theme::text_dim()
         };
         let id = tab.label();
-        let title = t!("tabs.shortcut", name = tab.title(), n = tab.index() + 1).to_string();
+        let title = t!(
+            "tabs.shortcut",
+            name = tab.title(),
+            hint = shortcut_hint(),
+            n = tab.index() + 1
+        )
+        .to_string();
         div()
             .id(id)
             .flex_1()

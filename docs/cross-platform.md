@@ -2,7 +2,7 @@
 
 这份文档回答一个假设性问题：**假如 zstats 按 [`zstats/docs/cross-platform.md`](https://github.com/vicanso/zstats) 那七条做完了优化，面板这边要跟着改什么。**
 
-它不是移植计划。面板自身的移植可行性是另一件事，结论写在 `design.md` 的「非 macOS 平台编译不过」一节：Linux 上托盘不发点击事件、Wayland 不允许客户端定位窗口、`gpui_linux` 的 `activate`/`hide` 是静默 no-op，三条叠加意味着「点菜单栏图标弹出锚定面板」这个形态在 Linux 上无法还原；Windows 外壳可行但数据层要等 zstats 补课。**本文只处理数据层那一半**——即使面板永远只跑在 macOS 上，其中一部分改动（第一节）也是净收益。
+它不是移植计划。面板自身的移植计划是另一份文档：[`omarchy-port.md`](omarchy-port.md)，针对 Omarchy（Hyprland + Wayland），里面更正了 `design.md` 里那几条已经过时的结论——托盘点击在 ksni 后端上是有的，窗口定位有 layer-shell 这条正路，真正的降级是 SNI 不给图标矩形。Windows 外壳可行但数据层要等 zstats 补课。**本文只处理数据层那一半**——即使面板永远只跑在 macOS 上，其中一部分改动（第一节）也是净收益。
 
 贯穿全文的硬约束：**macOS 上的行为不得倒退。** 每条方案都按「capabilities 在 macOS 上三项全真、
 新写的『不支持』分支在 macOS 上不可达」设计。唯一有意改变 macOS 观感的是第一节里进程展开行的那句空值说明——

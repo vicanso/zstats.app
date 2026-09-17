@@ -8,6 +8,7 @@
 //! not of AppKit.
 
 use crate::state::{TrayAnchor, ZStatsGlobalStore};
+#[cfg(target_os = "macos")]
 use crate::window_ext;
 use gpui::{App, Bounds, Pixels, Point, Size, point, px, size};
 use std::env;

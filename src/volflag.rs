@@ -7,10 +7,16 @@
 //! `MNT_RDONLY`. sysinfo already knows the flag; `DiskSnapshot` does
 //! not forward it, so the engine cannot skip these.
 //!
-//! Only `/Volumes/…` is eligible. On Apple Silicon `/` itself is
+//! Only `/Volumes/…` is eligible on macOS. On Apple Silicon `/` itself is
 //! read-only (the sealed system volume); skipping every `MNT_RDONLY`
 //! mount would swallow the boot-disk alert, which is the one that
 //! matters. Fail-open: a mount `statfs` cannot read still alerts.
+//!
+//! Linux has no sealed system volume, so the eligibility rule is simply
+//! "not `/`": a read-only mount there is a loop-mounted image or a
+//! read-only remote share, and the same sentence applies — nothing the
+//! user can do frees space on it. `statvfs`'s `ST_RDONLY` is the flag,
+//! and the fail-open posture is identical.
 
 use std::ffi::CString;
 use std::mem::MaybeUninit;
@@ -28,6 +34,7 @@ pub fn skips_disk_alert(mount: &str) -> bool {
 /// boot disk. Trailing slashes stripped so `/Volumes/Foo/` still
 /// qualifies; `/Volumes` itself is a directory on the data volume,
 /// not a mount of one.
+#[cfg(target_os = "macos")]
 fn extra_volume(mount: &str) -> Option<&str> {
     let mount = mount.trim_end_matches('/');
     mount
@@ -36,23 +43,65 @@ fn extra_volume(mount: &str) -> Option<&str> {
         .filter(|m| m.len() > "/Volumes/".len())
 }
 
+/// Anything but the root filesystem. Linux has no sealed system volume,
+/// so a read-only `/` is a deliberate appliance setup rather than the
+/// default, and the boot-disk alert it would swallow is one the user
+/// asked for.
+#[cfg(not(target_os = "macos"))]
+fn extra_volume(mount: &str) -> Option<&str> {
+    let trimmed = mount.trim_end_matches('/');
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+#[cfg(target_os = "macos")]
 fn is_read_only(mount: &str) -> bool {
     let Ok(c_path) = CString::new(mount) else {
         return false;
     };
     let mut buf = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `c_path` is a valid NUL-terminated path and `buf` is a
+    // correctly sized, writable `statfs`.
     let rc = unsafe { libc::statfs(c_path.as_ptr(), buf.as_mut_ptr()) };
     if rc != 0 {
         return false;
     }
+    // SAFETY: a zero return means the kernel filled the struct.
     let buf = unsafe { buf.assume_init() };
     (buf.f_flags & libc::MNT_RDONLY as u32) != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_read_only(mount: &str) -> bool {
+    let Ok(c_path) = CString::new(mount) else {
+        return false;
+    };
+    let mut buf = MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: same contract as the macOS arm — valid path, sized buffer.
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), buf.as_mut_ptr()) };
+    if rc != 0 {
+        return false;
+    }
+    // SAFETY: a zero return means the kernel filled the struct.
+    let buf = unsafe { buf.assume_init() };
+    (buf.f_flag & libc::ST_RDONLY) != 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::{extra_volume, skips_disk_alert};
 
+    /// `/` is the one mount Linux never skips: it is where the alert that
+    /// matters comes from.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn root_is_never_an_extra_volume_on_linux() {
+        assert_eq!(extra_volume("/"), None);
+        assert_eq!(extra_volume("/run/media/me/ISO"), Some("/run/media/me/ISO"));
+        assert!(!skips_disk_alert("/"), "the boot disk must keep alerting");
+    }
+
+    /// The `/Volumes` rule is macOS's; Linux has its own test above.
+    #[cfg(target_os = "macos")]
     #[test]
     fn only_named_volumes_entries_qualify() {
         assert_eq!(

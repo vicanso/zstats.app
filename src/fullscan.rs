@@ -196,14 +196,15 @@ mod tests {
     fn scans_the_whole_table_with_usable_cpu() {
         let scan = scan().expect("collect");
 
-        // Any real machine runs far more than the collector's default 50,
-        // which is the entire reason this exists.
-        assert!(
-            scan.processes.len() > 50,
-            "only {} processes — the cap is still being applied",
-            scan.processes.len()
+        // "No cap" is `len == total`, not a process count: a threshold
+        // like "more than the collector's default 50" is a claim about
+        // the machine running the test, and a container or a minimal VM
+        // has fewer processes than that while capping nothing.
+        assert_eq!(
+            scan.processes.len(),
+            scan.total,
+            "the table was truncated — the cap is still being applied"
         );
-        assert!(scan.total >= scan.processes.len());
         assert!(scan.window >= SETTLE);
 
         // Not every process is busy, but on a machine running a test suite
@@ -217,11 +218,8 @@ mod tests {
     #[test]
     fn scans_every_process_tree() {
         let scan = scan_groups().expect("collect");
-        assert!(
-            scan.groups.len() > 50,
-            "only {} trees — the cap is still being applied",
-            scan.groups.len()
-        );
+        // Same reasoning as above: the cap shows up as a truncated table,
+        // not as a small one.
         assert_eq!(scan.total, scan.groups.len());
         assert!(scan.window >= SETTLE);
         assert!(
@@ -242,8 +240,21 @@ mod tests {
     #[test]
     fn list_processes_returns_the_uncapped_table() {
         let processes = list_processes().expect("collect");
+        // Against a capped run of the same config rather than against a
+        // process count: "more than 50" is a claim about the machine, and
+        // this has to hold in a container too. A machine with fewer than
+        // three processes cannot run this test suite.
+        let capped = LocalCollector::new(CollectorConfig {
+            max_processes: 3,
+            ..process_config()
+        })
+        .collect()
+        .expect("collect")
+        .processes
+        .unwrap_or_default();
+        assert_eq!(capped.len(), 3, "the capped run is the control");
         assert!(
-            processes.len() > 50,
+            processes.len() > capped.len(),
             "only {} processes — the cap is still being applied",
             processes.len()
         );

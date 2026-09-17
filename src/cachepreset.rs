@@ -220,6 +220,9 @@ roots = [
         );
     }
 
+    // No `caches-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
+    // the runtime degrades to "no hints", but these assert content.
+    #[cfg(target_os = "macos")]
     #[test]
     fn user_file_replaces_the_embedded_list_wholesale() {
         let home = p("/Users/x");
@@ -254,6 +257,9 @@ roots = [
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // No `caches-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
+    // the runtime degrades to "no hints", but these assert content.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_embedded_file_parses() {
         let bytes = assets::get(FILE).expect("caches list is embedded");

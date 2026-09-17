@@ -105,6 +105,12 @@ jwalk = "0.9"
 # the tree via gpui, so nothing extra gets built.
 anyhow = "1"
 
+# `kill(pid, 0)` and SIGTERM (`terminate.rs`), `statfs`/`statvfs` flags
+# (`volflag.rs`), and `_SC_CLK_TCK` for `/proc` ages (`procscan`). Both
+# supported platforms need it, so it sits here rather than in one of the
+# target sections below.
+libc = "0.2"
+
 # Tracing to stdout + a daily-rolling file under ~/.zstats/logs
 # (logger.rs, the zedis logger adapted). The zstats crate already emits
 # tracing events (scheduler, alert engine) that were dropped for want of
@@ -137,7 +143,6 @@ resvg = "0.46"
 # gpui's `PlatformDisplay` doesn't expose a scale factor. Same versions gpui
 # itself pins, so nothing new gets built.
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
 objc2 = "0.6"
 # NSGeometry: NSPoint / NSRect for positioning the panel window.
 # NSString and the bundle / file / URL types: notify.rs, Trash, boot-volume

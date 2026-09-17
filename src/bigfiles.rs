@@ -20,6 +20,8 @@
 //! unlink. Same posture as `terminate.rs`: the panel delivers refusable,
 //! reversible requests; it does not destroy.
 
+// Only `reveal` needs it, and that is Finder's.
+#[cfg(target_os = "macos")]
 use crate::opener;
 use crate::prefs;
 use std::cmp::Reverse;
