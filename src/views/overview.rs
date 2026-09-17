@@ -226,6 +226,9 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                                 .text_size(px(12.))
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .text_color(theme::text_for(hot))
+                                .tooltip(widgets::wrap_tooltip(i18n::tr(
+                                    "overview.top_app_pct_tip",
+                                )))
                                 .child(format::pct_col(g.cpu_usage_percent)),
                         ),
                 )

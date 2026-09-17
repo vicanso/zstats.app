@@ -122,7 +122,11 @@ impl CollectorPace {
     ///
     /// Sampling immediately matters — the collector may be seconds into an
     /// idle wait when the tray is clicked, and opening onto stale numbers
-    /// would read as broken.
+    /// would read as broken. That tick always refreshes whole-machine CPU
+    /// (the tray / Processor headline). Process trees stay on their own
+    /// cadence ([`PANEL_PROCESS_INTERVAL`]): busting zstats' cache means
+    /// rebuilding the collector, and the first sample after that is `—`.
+    /// Overview's copy says so, rather than substituting a second listing.
     pub fn shown(&self) {
         self.visible.store(true, Ordering::Relaxed);
         let _ = self.wake.send(());

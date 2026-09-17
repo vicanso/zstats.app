@@ -46,7 +46,8 @@ use std::array;
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::hash_map::{DefaultHasher, Entry};
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::ops::Deref;
 use std::path::Path;
@@ -594,6 +595,11 @@ pub struct ZStatsAppState {
     space: Option<SpaceInfo>,
     space_at: Option<Instant>,
     space_inflight: bool,
+    /// The popover panel. Hidden rather than destroyed on macOS, so this
+    /// outlives hide → show. Settings and storage already keep theirs;
+    /// `cx.windows().first()` is SlotMap insertion order, not "the
+    /// panel", and would `orderOut` the wrong window once another exists.
+    panel_window: Option<gpui::AnyWindowHandle>,
     /// The settings window, if one was ever opened. Kept so a second
     /// click focuses the existing window; a handle whose window the user
     /// closed fails its update and a fresh window is built instead.
@@ -601,6 +607,10 @@ pub struct ZStatsAppState {
     /// The disk-space window (large files + the analyser), same
     /// reuse-or-rebuild contract as [`Self::settings_window`].
     storage_window: Option<gpui::AnyWindowHandle>,
+    /// Bumped by the Interface page's pref setters ([`crate::repaint`]).
+    /// Prefs live in `app.toml`, not this struct, so a collector tick
+    /// must not look like a chip click to the settings window's observer.
+    ui_epoch: u64,
     /// Volumes this session has successfully ejected, and when. They
     /// are hidden from the Hardware tab until the snapshot stops
     /// listing them — see [`Self::mark_ejected`].
@@ -728,8 +738,10 @@ impl Default for ZStatsAppState {
             space: None,
             space_at: None,
             space_inflight: false,
+            panel_window: None,
             settings_window: None,
             storage_window: None,
+            ui_epoch: 0,
             ejected: HashMap::new(),
             proc_sort: ProcSort::default(),
             app_sort: AppSort::default(),
@@ -1260,8 +1272,53 @@ impl ZStatsAppState {
         self.tab
     }
 
+    pub fn panel_window(&self) -> Option<gpui::AnyWindowHandle> {
+        self.panel_window
+    }
+
+    pub fn set_panel_window(&mut self, handle: gpui::AnyWindowHandle) {
+        self.panel_window = Some(handle);
+    }
+
     pub fn settings_window(&self) -> Option<gpui::AnyWindowHandle> {
         self.settings_window
+    }
+
+    /// Interface-page prefs are not fields here. Bumping this is what
+    /// makes the settings window's observer treat a chip click as news
+    /// without also following every collector tick.
+    pub fn bump_ui(&mut self) {
+        self.ui_epoch = self.ui_epoch.wrapping_add(1);
+    }
+
+    /// What the settings window actually paints from this store. A
+    /// collector tick changes `latest` and must not match; an update
+    /// download, a template fetch, a config.toml write, or a pref chip
+    /// must. Compared by the window's observer so it can skip `notify`.
+    pub fn settings_paint_token(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.ui_epoch.hash(&mut h);
+        self.settings
+            .as_ref()
+            .map(|s| s as *const FileConfig as usize)
+            .unwrap_or(0)
+            .hash(&mut h);
+        self.update_nudge.hash(&mut h);
+        self.update_ignored.hash(&mut h);
+        self.template_nudge.hash(&mut h);
+        hash_update_status(&self.update_status, &mut h);
+        hash_template_sync(&self.template_sync, &mut h);
+        match &self.hints_sync {
+            None => 0u8.hash(&mut h),
+            Some(HintsSync::Running) => 1u8.hash(&mut h),
+            Some(HintsSync::Done(_)) => 2u8.hash(&mut h),
+        }
+        match &self.caches_sync {
+            None => 0u8.hash(&mut h),
+            Some(CachesSync::Running) => 1u8.hash(&mut h),
+            Some(CachesSync::Done(_)) => 2u8.hash(&mut h),
+        }
+        h.finish()
     }
 
     pub fn set_settings_window(&mut self, handle: gpui::AnyWindowHandle) {
@@ -2339,6 +2396,58 @@ impl Deref for ZStatsGlobalStore {
     }
 }
 
+fn hash_update_status(status: &Option<UpdateStatus>, h: &mut impl Hasher) {
+    match status {
+        None => 0u8.hash(h),
+        Some(UpdateStatus::Checking) => 1u8.hash(h),
+        Some(UpdateStatus::Done(check)) => {
+            2u8.hash(h);
+            match check {
+                updater::UpdateCheck::UpToDate => 0u8.hash(h),
+                updater::UpdateCheck::Newer { version, .. } => {
+                    1u8.hash(h);
+                    version.hash(h);
+                }
+                updater::UpdateCheck::Failed(e) => {
+                    2u8.hash(h);
+                    e.hash(h);
+                }
+            }
+        }
+        Some(UpdateStatus::Downloading {
+            received, total, ..
+        }) => {
+            3u8.hash(h);
+            received.hash(h);
+            total.hash(h);
+        }
+        Some(UpdateStatus::Installing { .. }) => 4u8.hash(h),
+        Some(UpdateStatus::Installed { manual }) => {
+            5u8.hash(h);
+            manual.hash(h);
+        }
+        Some(UpdateStatus::DownloadFailed { version, error, .. }) => {
+            6u8.hash(h);
+            version.hash(h);
+            error.hash(h);
+        }
+    }
+}
+
+fn hash_template_sync(sync: &Option<TemplateSync>, h: &mut impl Hasher) {
+    match sync {
+        None => 0u8.hash(h),
+        Some(TemplateSync::Running) => 1u8.hash(h),
+        Some(TemplateSync::Done(_)) => 2u8.hash(h),
+        Some(TemplateSync::Reverted) => 3u8.hash(h),
+        Some(TemplateSync::NothingToRevert) => 4u8.hash(h),
+        Some(TemplateSync::RevertFailed(e)) => {
+            5u8.hash(h);
+            e.hash(h);
+        }
+    }
+}
+
 /// Write one `zstats -add` key into `<dir>/config.toml` and return the
 /// saved file. The Config tab and the Alerts chips both go through this
 /// so they share the CLI's validation.
@@ -2565,6 +2674,54 @@ mod tests {
         let state = ZStatsAppState::new();
         // No config loaded yet: zstats' own default of 30%, thirded.
         assert!((state.sustained_bar() - 10.0).abs() < f64::EPSILON);
+    }
+
+    /// The settings window observes this token instead of every store
+    /// notify. A collector tick (tab, selection, filters) must not
+    /// match; a pref chip, a download byte, or a config.toml write must.
+    #[test]
+    fn settings_paint_token_ignores_collector_ticks() {
+        let mut state = ZStatsAppState::new();
+        let a = state.settings_paint_token();
+        state.tab = Tab::Alerts;
+        state.selected_pid = Some(1);
+        state.only_abnormal = true;
+        assert_eq!(
+            state.settings_paint_token(),
+            a,
+            "panel selection is not settings"
+        );
+        state.bump_ui();
+        assert_ne!(
+            state.settings_paint_token(),
+            a,
+            "a pref chip must repaint settings"
+        );
+        let b = state.settings_paint_token();
+        state.update_status = Some(UpdateStatus::Downloading {
+            received: 10,
+            total: 100,
+            notes: String::new(),
+        });
+        assert_ne!(
+            state.settings_paint_token(),
+            b,
+            "download progress must move the About bar"
+        );
+        let c = state.settings_paint_token();
+        state.update_status = Some(UpdateStatus::Downloading {
+            received: 50,
+            total: 100,
+            notes: String::new(),
+        });
+        assert_ne!(state.settings_paint_token(), c);
+        let d = state.settings_paint_token();
+        state.settings = Some(FileConfig::default());
+        assert_ne!(
+            state.settings_paint_token(),
+            d,
+            "a config.toml write must repaint Config"
+        );
     }
 
     #[test]

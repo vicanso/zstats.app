@@ -302,9 +302,11 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
                 })
         })
         .child({
-            // Config lives in its own window, not a tab: a settings
-            // session should not be cut short by the popover auto-hiding
-            // on focus loss. The gear opens (or refocuses) it.
+            // Settings lives in its own window, not a tab: a session
+            // should not be cut short by the popover auto-hiding on
+            // focus loss. The gear opens (or refocuses) it. The window
+            // title and this tooltip say Settings; the page that edits
+            // config.toml inside it is still Config.
             //
             // One dot, two possible reasons — a second dot at this size
             // would be noise, and both answers are the same act (open
@@ -316,7 +318,7 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
                 // the About page has the download.
                 (Some(v), false) => t!("config.update_nudge_tip", v = v).to_string(),
                 (None, true) => i18n::tr("config.template_nudge_tip"),
-                (None, false) => i18n::tr("tabs.config"),
+                (None, false) => i18n::tr("tabs.settings"),
             };
             div()
                 .id("settings")

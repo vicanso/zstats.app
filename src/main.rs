@@ -350,9 +350,9 @@ fn apply_ns_appearance() {
 }
 
 /// The Interface page's launch-at-login switch. The OS records the
-/// state (System Settings → Login Items), we only relay — the chip
-/// re-reads the system's answer on repaint, so a failed register (a
-/// bundle-less debug run) shows as the switch simply staying off.
+/// state (System Settings → Login Items), we only relay — and only
+/// when the remembered status is one `register` / `unregister` can
+/// actually change. `requiresApproval` / `notFound` never reach here.
 pub fn set_autostart_pref(on: bool, cx: &mut App) {
     autostart::set_enabled(on);
     repaint(cx);
@@ -435,11 +435,16 @@ pub fn set_opacity_pref(value: Option<f32>, cx: &mut App) {
     repaint(cx);
 }
 
-/// Nudge the store so the visible panel repaints with the new preference.
+/// Nudge the store so the visible panel — and the settings window, if
+/// it is open — repaint with the new preference. Bumps `ui_epoch` so
+/// the settings observer can tell a chip click from a collector tick.
 fn repaint(cx: &mut App) {
     cx.global::<ZStatsGlobalStore>()
         .clone()
-        .update(cx, |_, cx| cx.notify());
+        .update(cx, |state, cx| {
+            state.bump_ui();
+            cx.notify();
+        });
 }
 
 fn install_menus(cx: &mut App) {
@@ -568,12 +573,15 @@ fn use_popover_material(window: &Window) {
     }
 }
 
-/// The settings window: a left nav (Config / About) and a scrolling
-/// body. A separate window rather than a tab so a settings session is
+/// The settings window: a left nav (Interface / Config / Permissions /
+/// About) and a scrolling body. Title and footer gear say Settings; the
+/// Config page is `config.toml`. A separate window rather than a tab so
+/// a settings session is
 /// not cut short by the popover auto-hiding on focus loss — and it is a
 /// *standard* window (title bar, traffic lights, opaque background), not
-/// a second popover. Repaints are driven by observing the store, the
-/// same signal the panel's per-tick repaint rides on.
+/// a second popover. Repaints follow a paint token (prefs, config.toml,
+/// update/template fetches), not the collector tick — this window does
+/// not draw `Tick` numbers.
 struct SettingsWindow {
     /// Keyboard anchor: gpui dispatches keystrokes along the focus path,
     /// so without a focused node the Escape / cmd-w bindings would never
@@ -589,15 +597,39 @@ struct SettingsWindow {
     /// Whether the field currently parses; drives the inline warning.
     /// Only valid values are persisted, so junk never reaches app.toml.
     proxy_valid: bool,
+    /// Re-reads launch-at-login when this window becomes key again —
+    /// the user may have just approved or revoked it in Login Items.
+    _activation: Subscription,
+    /// Last [`ZStatsAppState::settings_paint_token`]. The store observer
+    /// compares against this so a collector tick is not a full redraw.
+    paint_token: u64,
 }
 
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // The switch reads a cached status; this is the moment it can
-        // have moved without us (System Settings → Login Items).
+        // Cached status; this is the moment it can have moved without
+        // us (System Settings → Login Items). Activation below covers
+        // coming back from that pane without closing this window.
         autostart::refresh();
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                autostart::refresh();
+                if this.section == views::config::SettingsSection::Permissions {
+                    views::config::refresh_full_disk_access();
+                }
+                cx.notify();
+            }
+        });
         let store = cx.global::<ZStatsGlobalStore>().clone();
-        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let paint_token = store.read(cx).settings_paint_token();
+        cx.observe(&store, |this, store, cx| {
+            let token = store.read(cx).settings_paint_token();
+            if this.paint_token != token {
+                this.paint_token = token;
+                cx.notify();
+            }
+        })
+        .detach();
         let proxy_input = cx.new(|cx| {
             gpui_kit::component::input::InputState::new(window, cx)
                 .placeholder(i18n::tr("config.proxy_placeholder"))
@@ -627,6 +659,8 @@ impl SettingsWindow {
             scroll: ScrollHandle::new(),
             proxy_input,
             proxy_valid: true,
+            _activation: activation,
+            paint_token,
         }
     }
 }
@@ -741,6 +775,9 @@ fn settings_nav(
                             if this.section != item {
                                 this.section = item;
                                 this.scroll = ScrollHandle::new();
+                                if item == views::config::SettingsSection::Permissions {
+                                    views::config::refresh_full_disk_access();
+                                }
                                 // Entering About with a silent finding on
                                 // file: run a real check — the silent one
                                 // does not retain release notes, and the
@@ -938,7 +975,7 @@ pub fn open_settings_window(cx: &mut App) {
             // A real title bar on purpose — this window closes with its
             // own traffic lights, unlike the chromeless panel.
             titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from(i18n::tr("tabs.config"))),
+                title: Some(SharedString::from(i18n::tr("tabs.settings"))),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1098,9 +1135,24 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
         },
     );
     match opened {
-        Ok(_) => mark_panel_shown(cx),
+        Ok(handle) => {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, _| state.set_panel_window(handle.into()));
+            mark_panel_shown(cx);
+        }
         Err(e) => tracing::error!("failed to open main window: {e}"),
     }
+}
+
+/// The popover panel, if that window is still alive.
+///
+/// Settings and storage already keep a handle; looking up
+/// `cx.windows().first()` is gpui's SlotMap order, not "the panel".
+fn live_panel_handle(cx: &mut App) -> Option<gpui::AnyWindowHandle> {
+    let handle = cx.global::<ZStatsGlobalStore>().read(cx).panel_window()?;
+    handle.update(cx, |_, _, _| ()).ok()?;
+    Some(handle)
 }
 
 /// Left-clicking the tray icon: open the window under the icon, or close it if
@@ -1114,7 +1166,7 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
 ///     `TOGGLE_GRACE` stops this click from immediately reopening it.
 pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
     // First click of the session: nothing to reveal yet.
-    let Some(handle) = cx.windows().first().copied() else {
+    let Some(handle) = live_panel_handle(cx) else {
         cx.activate(true);
         open_main_window(cx, Some(anchor));
         return;
@@ -1153,7 +1205,7 @@ pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
 /// cycle (see `window_ext`), and this window is toggled constantly.
 pub fn hide_main_window(cx: &mut App) {
     #[cfg(target_os = "macos")]
-    if let Some(handle) = cx.windows().first().copied() {
+    if let Some(handle) = live_panel_handle(cx) {
         let ns = handle
             .update(cx, |_, window, cx| {
                 cx.global::<ZStatsGlobalStore>()
@@ -1253,7 +1305,7 @@ pub fn show_main_window(cx: &mut App) {
     let anchor = tray::anchor(cx);
     #[cfg(target_os = "linux")]
     let anchor = None;
-    match cx.windows().first().copied() {
+    match live_panel_handle(cx) {
         #[cfg(target_os = "macos")]
         Some(handle) => reveal_main_window(cx, handle, anchor),
         #[cfg(not(target_os = "macos"))]

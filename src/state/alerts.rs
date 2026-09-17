@@ -170,8 +170,17 @@ impl SeenAlert {
     }
 
     fn recovered_for(&self, now: SystemTime) -> bool {
-        self.recovered_since
-            .is_some_and(|at| now.duration_since(at).unwrap_or_default() >= TRAY_RECOVER)
+        let Some(at) = self.recovered_since else {
+            return false;
+        };
+        if self.event.kind() == AlertKind::Disk {
+            // Disk used-% is a slow state. Once this tick is under the
+            // event's own bar, the face can drop — a volume that just
+            // went under 90% does not flap the way kernel pressure does.
+            // Memory still waits [`TRAY_RECOVER`].
+            return true;
+        }
+        now.duration_since(at).unwrap_or_default() >= TRAY_RECOVER
     }
 
     #[cfg(test)]
@@ -559,10 +568,11 @@ impl ZStatsAppState {
     }
 
     /// Auto's second trigger: a live disk episode from this session,
-    /// not yet dismissed, not recovered for [`TRAY_RECOVER`], whose
-    /// volume is still there. Same recovery clock as memory — the
-    /// event's own used-% bar against this tick. Restored cards do not
-    /// count. Memory still wins when both are on (`tray::face_for`).
+    /// not yet dismissed, still at or over the event's own used-% bar,
+    /// whose volume is still there. Unlike memory, a tick already under
+    /// the bar drops the face immediately — disk used-% does not flap.
+    /// Restored cards do not count. Memory still wins when both are on
+    /// (`tray::face_for`).
     ///
     /// The presence check is what keeps the face honest after an eject
     /// or an unplug: the clock still starts (a replug onto the same path
@@ -692,8 +702,7 @@ impl ZStatsAppState {
                         tracing::info!(
                             kind = ?seen.event.kind(),
                             subject = ?seen.event.subject,
-                            after = ?TRAY_RECOVER,
-                            "disk recovery clock started"
+                            "disk face recovered: used percent under the bar"
                         );
                     } else {
                         tracing::info!(
@@ -1433,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_tray_returns_to_cpu_five_minutes_after_disk_recovers() {
+    fn auto_tray_returns_to_cpu_once_disk_is_under_the_bar() {
         let mut state = ZStatsAppState::new();
         let t0 = SystemTime::now();
         state.record_alert(disk_alert("/"), t0);
@@ -1442,13 +1451,12 @@ mod tests {
         state.latest = Some(tick);
         state.note_memory_recovery(t0);
         assert!(
-            state.disk_needs_attention_at(t0),
-            "just recovered is still disk"
+            !state.disk_needs_attention_at(t0),
+            "this tick is already under the event's used-% bar"
         );
-        assert!(state.disk_needs_attention_at(t0 + Duration::from_secs(4 * 60 + 59)));
         assert!(
-            !state.disk_needs_attention_at(t0 + TRAY_RECOVER),
-            "five minutes under the event's used-% bar returns to CPU"
+            state.alerts()[0].recovered_since.is_some(),
+            "the card stays; only the face drops"
         );
     }
 

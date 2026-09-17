@@ -8,13 +8,14 @@
 //! record IS the state.
 //!
 //! **Asked at moments, not per frame.** The Interface card renders on
-//! every tick the settings window is open, and `status()` is an XPC
-//! round-trip to the background-task daemon — one every couple of
+//! every tick the settings window is open, and the OS `status()` is an
+//! XPC round-trip to the background-task daemon — one every couple of
 //! seconds to answer a question that changes a few times a year. So the
 //! answer is cached and [`refresh`]ed exactly where it can have moved:
-//! at launch, when the settings window opens, and right after this app
-//! changes it. What that gives up is a change made in System Settings
-//! *while* the window sits open; it lands on the next open.
+//! at launch, when the settings window opens, when it becomes active
+//! again (coming back from Login Items), and right after this app
+//! changes it. A revoke made in System Settings *while* our window
+//! stays key still waits for the next activation.
 //!
 //! Every refresh logs the raw status when it differs from the last one,
 //! and that is the point of caching it in a shape we control. A user
@@ -25,9 +26,12 @@
 //! question is answerable the next time it is asked, since the state
 //! only exists on a machine that really did just boot.
 //!
-//! Only meaningful for the installed bundle. A bare `cargo run` binary
-//! has no .app for launchd to relaunch — registration fails, the error
-//! lands in the log, and the switch simply stays off.
+//! macOS's four states are not a boolean. [`Status::Enabled`] and
+//! [`Status::NotRegistered`] are a switch; [`Status::RequiresApproval`]
+//! (revoked in Login Items — `register` will not win) and
+//! [`Status::NotFound`] (no .app for launchd to relaunch, the usual
+//! `cargo run` case) are sentences, because painting a toggle there is
+//! a lie. Only the installed bundle can register.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -38,9 +42,9 @@ static STATUS: AtomicU8 = AtomicU8::new(UNREAD);
 /// Distinct from every real `SMAppServiceStatus` (0–3).
 const UNREAD: u8 = u8::MAX;
 
-/// macOS 13's four states. Only `Enabled` is on; the other three are
-/// three different reasons for off, which is why the raw value is what
-/// gets logged rather than the boolean the switch renders.
+/// macOS 13's four states. The log keeps the raw name; the Interface
+/// row branches on [`status`] so `requiresApproval` and `notFound` are
+/// not painted as an off switch.
 fn status_name(raw: u8) -> &'static str {
     match raw {
         0 => "notRegistered",
@@ -51,8 +55,20 @@ fn status_name(raw: u8) -> &'static str {
     }
 }
 
+/// What the Interface row can actually do. Only [`Enabled`] and
+/// [`NotRegistered`] are a switch; the other two are reasons the OS
+/// will not honour `register`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    NotRegistered,
+    Enabled,
+    RequiresApproval,
+    NotFound,
+}
+
 /// Ask the OS and remember the answer. Called at launch, on settings
-/// window open, and after [`set_enabled`].
+/// window open, when that window becomes active again, and after
+/// [`set_enabled`].
 #[cfg(target_os = "macos")]
 pub fn refresh() {
     use objc2_service_management::SMAppService;
@@ -71,17 +87,36 @@ pub fn refresh() {
 #[cfg(not(target_os = "macos"))]
 pub fn refresh() {}
 
-/// What the switch renders: the remembered status, `Enabled` alone.
+/// The remembered status, collapsed to what the Interface row can do.
 ///
-/// The three other states all read as off, which is honest for
-/// `notRegistered` and coarse for the other two — `requiresApproval`
-/// means the user revoked it in System Settings (registering again
-/// will not win), and `notFound` means the question could not be
-/// answered at all. Telling those apart on screen is a separate change;
-/// the log now carries what would be needed to write it.
-pub fn is_enabled() -> bool {
-    STATUS.load(Ordering::Relaxed) == 1
+/// `UNREAD` and any future raw value fall through to [`Status::NotRegistered`]:
+/// we have not been told that `register` would fail, so the switch is
+/// still the right control. [`is_enabled`] is `Enabled` alone.
+pub fn status() -> Status {
+    match STATUS.load(Ordering::Relaxed) {
+        1 => Status::Enabled,
+        2 => Status::RequiresApproval,
+        3 => Status::NotFound,
+        _ => Status::NotRegistered,
+    }
 }
+
+/// What a boolean switch would render: [`Status::Enabled`] alone.
+pub fn is_enabled() -> bool {
+    status() == Status::Enabled
+}
+
+/// Apple's own jump into System Settings → Login Items. The prompt
+/// `requiresApproval` is exactly the case this API is documented for;
+/// a guessed `x-apple.systempreferences:` URL would be a second map.
+#[cfg(target_os = "macos")]
+pub fn open_login_items() {
+    use objc2_service_management::SMAppService;
+    unsafe { SMAppService::openSystemSettingsLoginItems() };
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_login_items() {}
 
 #[cfg(target_os = "macos")]
 pub fn set_enabled(enabled: bool) {
@@ -112,17 +147,26 @@ pub fn set_enabled(_enabled: bool) {}
 mod tests {
     use super::*;
 
-    /// Only `Enabled` is on. The switch collapses the other three, but
-    /// the names exist so the log can tell them apart — that is the
-    /// whole reason the raw value is kept.
+    /// Only `Enabled` is on. `requiresApproval` and `notFound` are not a
+    /// switch that happens to be off — they are distinct, because
+    /// `register` cannot win them.
     #[test]
     fn only_the_enabled_status_reads_as_on() {
         STATUS.store(1, Ordering::Relaxed);
         assert!(is_enabled());
+        assert_eq!(status(), Status::Enabled);
         for off in [0, 2, 3, UNREAD] {
             STATUS.store(off, Ordering::Relaxed);
             assert!(!is_enabled(), "raw {off} must not read as on");
         }
+        STATUS.store(0, Ordering::Relaxed);
+        assert_eq!(status(), Status::NotRegistered);
+        STATUS.store(2, Ordering::Relaxed);
+        assert_eq!(status(), Status::RequiresApproval);
+        STATUS.store(3, Ordering::Relaxed);
+        assert_eq!(status(), Status::NotFound);
+        STATUS.store(UNREAD, Ordering::Relaxed);
+        assert_eq!(status(), Status::NotRegistered);
         assert_eq!(status_name(2), "requiresApproval");
         assert_eq!(status_name(3), "notFound");
         assert_eq!(status_name(UNREAD), "unknown");

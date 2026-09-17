@@ -20,7 +20,7 @@ use super::widgets;
 use crate::about;
 use crate::alerttpl;
 use crate::assets;
-use crate::autostart;
+use crate::autostart::{self, Status};
 use crate::bigfiles;
 use crate::cachepreset;
 use crate::cleanhints;
@@ -50,6 +50,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use zstats::CollectorConfig;
 use zstats::alerts::ActiveThresholds;
@@ -85,8 +86,8 @@ impl SettingsSection {
         }
     }
 
-    /// The nav row's icon. Settings2 deliberately matches the footer
-    /// gear that opens this window — same symbol, same meaning.
+    /// The nav row's icon. Settings2 on Config is the config.toml page;
+    /// the footer gear that opens this window is the same glyph.
     pub fn icon(self) -> Icon {
         match self {
             SettingsSection::Interface => Icon::new(IconName::Palette),
@@ -167,14 +168,38 @@ fn permissions_card() -> AnyElement {
         .into_any_element()
 }
 
-/// The probe: opening the TCC database itself requires Full Disk Access
-/// and — unlike probing user data — never shows a prompt. The failed
-/// attempt has a side effect we want: macOS registers this app in the
-/// Full Disk Access list, so the Settings pane offers a ready-made
-/// toggle instead of demanding a manual "+". Re-checked per render
-/// while the window is open (one failed open() per tick), so flipping
-/// the switch shows up live.
+/// Last Full Disk Access probe. Distinct from the real 0/1 so the first
+/// Permissions paint before [`refresh_full_disk_access`] still asks once
+/// rather than drawing "not granted" as a guess.
+const FDA_UNREAD: u8 = u8::MAX;
+static FDA: AtomicU8 = AtomicU8::new(FDA_UNREAD);
+
+/// Re-read Full Disk Access. Called when Permissions is selected and
+/// when the settings window becomes key while that page is showing —
+/// coming back from the system pane. Not per frame: `open(TCC.db)` is
+/// a permission check, and the settings window must not follow the
+/// collector tick.
+pub fn refresh_full_disk_access() {
+    let granted = probe_full_disk_access();
+    FDA.store(u8::from(granted), Ordering::Relaxed);
+}
+
 fn full_disk_access_granted() -> bool {
+    match FDA.load(Ordering::Relaxed) {
+        FDA_UNREAD => {
+            refresh_full_disk_access();
+            FDA.load(Ordering::Relaxed) == 1
+        }
+        n => n == 1,
+    }
+}
+
+/// Opening the TCC database itself requires Full Disk Access and —
+/// unlike probing user data — never shows a prompt. The failed attempt
+/// has a side effect we want: macOS registers this app in the Full Disk
+/// Access list, so the Settings pane offers a ready-made toggle instead
+/// of demanding a manual "+".
+fn probe_full_disk_access() -> bool {
     let Ok(home) = env::var("HOME") else {
         return false;
     };
@@ -994,15 +1019,17 @@ fn proxy_row(input: &Entity<InputState>, valid: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// Launch at login. A Switch rather than chips: the control follows the
-/// data — enums pick from chips, a boolean flips a switch, which is
-/// also the System Settings idiom. State is asked live from the OS
-/// record each repaint, so a change made in System Settings shows up
-/// here by itself.
+/// Launch at login. A Switch rather than chips when the OS will honour
+/// `register` / `unregister` — enums pick from chips, a boolean flips a
+/// switch, which is also the System Settings idiom. `requiresApproval`
+/// and `notFound` are not that boolean: the first is a revoke the
+/// switch cannot undo, the second is a run with no .app, so the row
+/// says so instead of painting a toggle that snaps back.
 fn autostart_row() -> AnyElement {
     h_flex()
         .items_center()
         .justify_between()
+        .gap(px(8.))
         .px(px(13.))
         .py(px(8.))
         .border_b(px(1.))
@@ -1011,6 +1038,8 @@ fn autostart_row() -> AnyElement {
             h_flex()
                 .items_center()
                 .gap(px(4.))
+                .flex_1()
+                .min_w_0()
                 .child(
                     div()
                         .text_size(px(11.))
@@ -1022,13 +1051,42 @@ fn autostart_row() -> AnyElement {
                     i18n::tr("config.autostart_tip"),
                 )),
         )
-        .child(
-            Switch::new("pref-autostart")
-                .small()
-                .checked(autostart::is_enabled())
-                .on_click(|checked, _window, cx| crate::set_autostart_pref(*checked, cx)),
-        )
+        .child(autostart_control())
         .into_any_element()
+}
+
+fn autostart_control() -> AnyElement {
+    match autostart::status() {
+        Status::Enabled | Status::NotRegistered => Switch::new("pref-autostart")
+            .small()
+            .checked(autostart::is_enabled())
+            .on_click(|checked, _window, cx| crate::set_autostart_pref(*checked, cx))
+            .into_any_element(),
+        // The sentence is the control: it opens Login Items, the only
+        // place approval can actually happen. Same chip chrome as the
+        // FDA "Open Settings" button — hover fill, not a fake switch.
+        Status::RequiresApproval => div()
+            .id("pref-autostart-approve")
+            .flex_none()
+            .rounded_full()
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::inset())
+            .px(px(10.))
+            .py(px(3.))
+            .text_size(px(11.))
+            .text_color(theme::text())
+            .hover(|d| d.bg(theme::surface_raised()))
+            .on_click(|_, _window, _cx| autostart::open_login_items())
+            .child(i18n::tr("config.autostart_needs_approval"))
+            .into_any_element(),
+        Status::NotFound => div()
+            .flex_none()
+            .text_size(px(11.))
+            .text_color(theme::text_dim())
+            .child(i18n::tr("config.autostart_not_found"))
+            .into_any_element(),
+    }
 }
 
 /// Panel wash. Chips write `app.toml` only — the painted value is

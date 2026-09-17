@@ -94,9 +94,6 @@ sha2 = "0.11"
 rust-i18n = "4.2.2"
 sys-locale = "0.3.2"
 toml = "1.1.6"
-# Desktop banners. Cross-platform; macOS uses NSUserNotification
-# (`set_application` + `wait_for_action` for the click that opens Alerts).
-notify-rust = "4.18"
 # Parallel directory walk for the Hardware tab's analyser (docs/
 # disk-analysis.md). Same engine diskonaut uses; pinned to a dedicated
 # 3-thread rayon pool at the call site so the resident collector's 2s
@@ -143,9 +140,10 @@ resvg = "0.46"
 libc = "0.2"
 objc2 = "0.6"
 # NSGeometry: NSPoint / NSRect for positioning the panel window.
-# NSUserNotification + NSString: notify.rs delivers banners through
-# NSUserNotificationCenter itself (fire-and-forget + resident delegate),
-# rather than notify-rust's blocking wait_for_action transport.
+# NSString and the bundle / file / URL types: notify.rs, Trash, boot-volume
+# capacity. Banner delivery itself is UNUserNotificationCenter (the crate
+# below), not NSUserNotificationCenter — that API is a silent no-op on
+# macOS 26.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
     "NSString",
@@ -223,6 +221,11 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "objc2-core-foundation",
 ] }
 
+# XDG banners. macOS delivery is UNUserNotificationCenter in notify.rs;
+# this crate is not compiled into that binary. The wait_for_action
+# transport is bounded on Linux because those banners auto-expire.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust = "4.18"
 
 [profile.release]
 codegen-units = 1

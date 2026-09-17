@@ -274,8 +274,9 @@ fn build_item(label: &'static str, face: TrayFace, faces: &Faces) -> Option<Item
 /// (`memory_needs_attention` / `disk_needs_attention`). When both are
 /// in trouble memory wins: macOS escalates memory (compressor, swap,
 /// jetsam) while a full disk stays full. Pinned modes ignore both
-/// signals. Auto switches back after the episode has looked recovered
-/// for five minutes, or immediately when the card is dismissed.
+/// signals. Auto switches memory back after five quiet minutes, disk
+/// as soon as this tick is under the event's own used-% bar, or
+/// immediately when the card is dismissed.
 ///
 /// This is the *primary* item's face. In Both that is memory: the
 /// second item lands to its left (see `TrayHandle::second`) and wears
