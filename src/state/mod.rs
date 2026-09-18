@@ -31,7 +31,6 @@ use crate::metrics;
 use crate::prefs;
 use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
-#[cfg(not(target_os = "linux"))]
 use crate::tray;
 use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
@@ -1394,7 +1393,6 @@ impl ZStatsAppState {
             }
             if tab == Tab::Alerts {
                 self.see_alerts();
-                #[cfg(not(target_os = "linux"))]
                 tray::sync(cx, self);
             }
             cx.notify();

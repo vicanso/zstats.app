@@ -9,7 +9,6 @@ use crate::notify;
 use crate::prefs;
 use crate::procscan;
 use crate::state::ZStatsGlobalStore;
-#[cfg(not(target_os = "linux"))]
 use crate::tray;
 use gpui::{App, Global};
 use std::sync::Arc;
@@ -318,7 +317,6 @@ pub fn start(cx: &mut App) {
                         // mode reads the episode list this tick just
                         // merged into, and a memory alert should turn
                         // the face on the sample that reported it.
-                        #[cfg(not(target_os = "linux"))]
                         tray::sync(cx, state);
                     });
             });

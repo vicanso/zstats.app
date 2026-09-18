@@ -36,6 +36,8 @@ mod fullscan;
 mod history;
 mod i18n;
 mod i18n_loader;
+#[cfg(target_os = "linux")]
+mod ipc;
 mod logger;
 mod metrics;
 mod notify;
@@ -48,7 +50,6 @@ mod spaceinfo;
 mod state;
 mod terminate;
 mod theme;
-#[cfg(not(target_os = "linux"))]
 mod tray;
 mod trend;
 mod updater;
@@ -115,14 +116,34 @@ const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.35 } else 
 /// bleeds through and fights the dark text. Legibility wins; the effect is
 /// conceded. Dark mode keeps it, where the contrast actually carries.
 const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
-/// Gap between the panel and the screen edges it is anchored to on
-/// Wayland. Small on purpose: the panel is a popover hanging off the
-/// corner, not a floating window, and the compositor already keeps it
-/// clear of any bar that reserves space (an exclusive zone of 0 — which
-/// is what not calling `set_exclusive_zone` means — asks to be moved out
-/// of other surfaces' way rather than to occlude them).
+/// Gap between the panel's right edge and the screen edge on Wayland.
+/// A surface flush against the bezel reads as clipped rather than
+/// placed, and macOS never puts one there either — `placement.rs`
+/// centres the window under its tray icon, which leaves the menu bar's
+/// own inset. 8 was reported as no gap at all on Omarchy next to a
+/// 358pt-wide panel; this is the value to move if the panel should sit
+/// on the same rhythm as the compositor's own window gaps (`gaps_out`
+/// in hyprland.conf), which is a per-desktop number nothing reports.
 #[cfg(target_os = "linux")]
-const PANEL_MARGIN: f32 = 8.;
+const PANEL_MARGIN_RIGHT: f32 = 10.;
+
+/// Gap between the panel's top edge and the bar above it: none, so the
+/// panel hangs off the bar the way the macOS popover hangs off the menu
+/// bar (there `TRAY_GAP`, 6pt below the *icon* — here the StatusNotifier
+/// protocol reports no icon rect, so the bar's own edge is the only line
+/// left to hang from).
+///
+/// Measured from what the bar left free, **not** from the top of the
+/// screen: an exclusive zone of 0 — which is what `exclusive_zone: None`
+/// means — asks the compositor to move the surface clear of every bar
+/// that reserves space, and it has already done that before this margin
+/// applies. A bar that reserves more than it paints therefore still
+/// leaves a visible gap here, and closing *that* one means opting out of
+/// the reservation entirely (`exclusive_zone: Some(px(-1.))`) and
+/// subtracting the bar's height by hand — a number no protocol reports,
+/// so it would have to be configured rather than measured.
+#[cfg(target_os = "linux")]
+const PANEL_MARGIN_TOP: f32 = 0.;
 
 /// Clicking the tray icon first takes focus away from the window, which
 /// auto-hides it, and only then delivers the click. A click landing inside
@@ -400,6 +421,16 @@ pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
     #[cfg(target_os = "macos")]
     apply_ns_appearance();
     apply_appearance(cx.window_appearance(), cx);
+    // After `apply_appearance`, which is what moves `theme::is_dark()`.
+    // Off macOS the tray glyph is inked from that (macOS templates ink
+    // themselves, so there is nothing to redo there) and the next tick
+    // would be up to five seconds of an icon in the wrong colour — or of
+    // no visible icon at all, if it just went dark-on-dark. The system's
+    // own appearance flips through `observe_window_appearance` instead
+    // and do ride the next tick: they are rare, and that observer only
+    // exists while the panel does.
+    let store = cx.global::<ZStatsGlobalStore>().clone();
+    store.update(cx, |state, cx| tray::sync(cx, state));
     repaint(cx);
 }
 
@@ -408,11 +439,8 @@ pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
 /// cadence that is five seconds of a chip that looks ignored.
 pub fn set_tray_pref(pref: prefs::TrayPref, cx: &mut App) {
     prefs::set_tray(pref);
-    #[cfg(not(target_os = "linux"))]
-    {
-        let store = cx.global::<ZStatsGlobalStore>().clone();
-        store.update(cx, |state, cx| tray::sync(cx, state));
-    }
+    let store = cx.global::<ZStatsGlobalStore>().clone();
+    store.update(cx, |state, cx| tray::sync(cx, state));
     repaint(cx);
 }
 
@@ -440,7 +468,6 @@ pub fn set_language_pref(pref: prefs::LanguagePref, cx: &mut App) {
     prefs::set_language(pref);
     i18n::init();
     install_menus(cx);
-    #[cfg(not(target_os = "linux"))]
     tray::rebuild_menu(cx);
     repaint(cx);
 }
@@ -1094,7 +1121,7 @@ fn panel_kind() -> gpui::WindowKind {
         exclusive_zone: None,
         exclusive_edge: None,
         // CSS order: top, right, bottom, left.
-        margin: Some((px(PANEL_MARGIN), px(PANEL_MARGIN), px(0.), px(0.))),
+        margin: Some((px(PANEL_MARGIN_TOP), px(PANEL_MARGIN_RIGHT), px(0.), px(0.))),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
     })
 }
@@ -1118,7 +1145,28 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
         None => saved.unwrap_or_else(|| Bounds::centered(None, default_size, cx)),
     };
 
-    let opened = cx.open_window(panel_options(bounds, true), build_panel);
+    // Wayland takes the size as a *request* and `window.bounds()` is the
+    // compositor's *answer*; carrying that answer into the next request is
+    // a loop with nothing holding it in place. Measured on Omarchy: a
+    // panel designed at 358×653 had reached 598×893 — +240 on both axes,
+    // a constant added over and over rather than anything proportional —
+    // and its right edge sat 30px past the screen, which is also what ate
+    // the margin on that side. Nothing is lost by refusing it: a
+    // layer-shell surface cannot be resized by the user, so there is no
+    // size worth remembering. Only the size is dropped, not the origin —
+    // the compositor ignores the origin for a layer surface, and the
+    // plain-window fallback below still wants it. macOS keeps the whole
+    // round-trip, where the window really is resizable and really is
+    // rebuilt from scratch on every tray click.
+    #[cfg(target_os = "linux")]
+    let bounds = Bounds {
+        origin: bounds.origin,
+        size: default_size,
+    };
+
+    let opened = cx.open_window(panel_options(bounds, true), |window, cx| {
+        build_panel(window, cx, true)
+    });
     // No wlr-layer-shell under this compositor (a GNOME session, say): a
     // plain window still shows every number, it just lands wherever the
     // compositor decides. Saying so once beats not opening at all.
@@ -1126,7 +1174,9 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     let opened = match opened {
         Err(e) => {
             tracing::warn!("layer-shell unavailable ({e}); opening a plain window");
-            cx.open_window(panel_options(bounds, false), build_panel)
+            cx.open_window(panel_options(bounds, false), |window, cx| {
+                build_panel(window, cx, false)
+            })
         }
         ok => ok,
     };
@@ -1192,8 +1242,11 @@ fn panel_options(bounds: Bounds<gpui::Pixels>, layer_shell: bool) -> WindowOptio
 }
 
 /// The panel's view tree. A plain function rather than the closure it used
-/// to be, so the Wayland fallback can build it a second time.
-fn build_panel(window: &mut Window, cx: &mut App) -> gpui::Entity<Root> {
+/// to be, so the Wayland fallback can build it a second time — and
+/// `layer_shell` is which of those two this is, because the frame around
+/// the content is not the same question for both.
+fn build_panel(window: &mut Window, cx: &mut App, layer_shell: bool) -> gpui::Entity<Root> {
+    let _ = layer_shell;
     // No `on_window_should_close` override: closing really closes, on
     // every platform. `QuitMode::Explicit` keeps the process and the
     // tray alive, and the next tray click rebuilds the window.
@@ -1210,6 +1263,34 @@ fn build_panel(window: &mut Window, cx: &mut App) -> gpui::Entity<Root> {
     let view = cx.new(|cx| ZStatsApp::new(window, cx));
     cx.new(|cx| {
         let root = Root::new(view, window, cx);
+        // A layer surface is placed by the compositor, has no title bar
+        // and cannot be resized, so gpui-component's client-side frame has
+        // nothing to decorate — and it is not free. `WindowBorder::render`
+        // calls `set_client_inset(20px)` on every frame, and gpui's
+        // Wayland backend adds that inset back into both the size it
+        // reports and the buffer it commits (`compute_outer_size`). The
+        // surface then paints 40px wider and taller than the box the
+        // compositor anchored: measured on Omarchy, the panel's right edge
+        // landed past the screen — which reads as "the margin is gone" —
+        // while a 20px band of shadow sat between the bar and the first
+        // pixel of content, which reads as "too much gap". The two
+        // complaints were one bug. `bordered(false)` is the knob
+        // gpui-component documents for exactly this surface; the settings
+        // and disk-space windows are real toplevels and keep their frame.
+        #[cfg(target_os = "linux")]
+        let root = if layer_shell {
+            // And say so to the rest of gpui-component, not just to the
+            // renderer. `window_paddings` / `window_content_insets` —
+            // which is how a dialog and a sheet decide where the window's
+            // content actually starts — read `client_inset()` and fall
+            // back to `SHADOW_SIZE` when it was never set. Leaving it
+            // unset would therefore inset the quit-confirmation sheet by
+            // a frame that is not being drawn.
+            window.set_client_inset(px(0.));
+            root.bordered(false)
+        } else {
+            root
+        };
         match WINDOW_BACKGROUND {
             WindowBackgroundAppearance::Opaque => root,
             // `Root::render` paints an opaque `theme.tokens.background`
@@ -1241,11 +1322,17 @@ fn live_panel_handle(cx: &mut App) -> Option<gpui::AnyWindowHandle> {
 ///     close it outright;
 ///   - the click deactivates it first → auto-hide already closed it, and
 ///     `TOGGLE_GRACE` stops this click from immediately reopening it.
-pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
+///
+/// `anchor` is `None` wherever the platform cannot say where its own icon
+/// is — every SNI click, and a macOS click that arrives before AppKit has
+/// laid the item out. Both then fall back to the path "Show Window"
+/// already used: last position on macOS, the compositor's own anchor on
+/// Wayland.
+pub fn toggle_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     // First click of the session: nothing to reveal yet.
     let Some(handle) = live_panel_handle(cx) else {
         cx.activate(true);
-        open_main_window(cx, Some(anchor));
+        open_main_window(cx, anchor);
         return;
     };
 
@@ -1268,7 +1355,7 @@ pub fn toggle_main_window(cx: &mut App, anchor: TrayAnchor) {
         if just_auto_hid {
             return;
         }
-        reveal_main_window(cx, handle, Some(anchor));
+        reveal_main_window(cx, handle, anchor);
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1379,10 +1466,9 @@ pub fn show_main_window(cx: &mut App) {
     // rather than remembering the last click, so it is also right after
     // the item moved (a face change resizes it, and the menu bar
     // re-lays out whenever anything beside us appears or leaves).
-    #[cfg(not(target_os = "linux"))]
+    // `None` on the SNI path, which reports no rect at all — the panel is
+    // anchored by the compositor there (`panel_kind`).
     let anchor = tray::anchor(cx);
-    #[cfg(target_os = "linux")]
-    let anchor = None;
     match live_panel_handle(cx) {
         #[cfg(target_os = "macos")]
         Some(handle) => reveal_main_window(cx, handle, anchor),
@@ -1399,10 +1485,37 @@ pub fn show_main_window(cx: &mut App) {
 }
 
 fn main() {
+    // Arguments before anything is initialised, because `--help`,
+    // `--version` and a refused flag all end the process right here and
+    // should touch nothing on the way: no log file opened, no socket
+    // taken. stdout rather than the log for the same reason — this is a
+    // person at a terminal asking the binary a question, and it is the
+    // one place in this app where stderr/stdout is the right answer
+    // instead of a line nobody will ever see.
+    #[cfg(target_os = "linux")]
+    let invocation = match ipc::Invocation::from_args() {
+        Ok(invocation) => invocation,
+        Err(message) => {
+            println!("{}", message.text);
+            std::process::exit(message.code);
+        }
+    };
+
     // First, before the collector thread exists to race it: the log
     // subscriber. The guard flushes the rolling file's worker; dropping
     // it at the end of main is what makes the last lines land.
     let _log_guard = logger::init();
+
+    // Then the single-instance socket, before the run loop and before the
+    // collector: a launch that turns out to be a keypress for the process
+    // already running must not build a second one of anything. Returning
+    // here drops the log guard, which is what flushes its one line.
+    #[cfg(target_os = "linux")]
+    let listener = match ipc::claim(invocation) {
+        ipc::Role::Delivered => return,
+        ipc::Role::Instance(listener) => Some(listener),
+        ipc::Role::Alone => None,
+    };
 
     // Before anything else, and specifically before gpui starts the run loop:
     // this neuters the `setActivationPolicy(Regular)` it would otherwise make
@@ -1414,7 +1527,9 @@ fn main() {
     // renders empty.
     let app = gpui_platform::application().with_assets(Assets);
 
-    app.run(|cx| {
+    // `move` for the single-instance listener and the invocation that
+    // decides whether to open the panel; nothing else crosses in.
+    app.run(move |cx| {
         // Still required: a `cargo run` binary has no `LSUIElement`, so
         // LaunchServices already made it `Regular` without going through the
         // swizzled setter.
@@ -1511,7 +1626,6 @@ fn main() {
         ]);
         install_menus(cx);
 
-        #[cfg(not(target_os = "linux"))]
         tray::init_tray(cx);
         notify::start(cx);
         // Before the collector, so the first slow-burn banner of the
@@ -1543,6 +1657,23 @@ fn main() {
         {
             cx.activate(true);
             open_main_window(cx, None);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(listener) = listener {
+                ipc::serve(listener, cx);
+            }
+            // The first press of the keybinding has nothing to toggle —
+            // the process it would have talked to is this one, starting.
+            // A key that silently starts a background app reads as a key
+            // that did nothing, so it opens the panel instead. Guarded on
+            // the handle rather than on `debug_assertions`, because the
+            // block above may already have opened it.
+            if invocation.opens_the_panel() && live_panel_handle(cx).is_none() {
+                cx.activate(true);
+                open_main_window(cx, None);
+            }
         }
     });
 }

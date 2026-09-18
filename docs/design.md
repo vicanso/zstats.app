@@ -348,8 +348,8 @@ debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；
 
   换图**不能**用 `TrayIcon::set_icon`：macOS 实现里它把 template 写死为 `false`，而我们的位图已被抹成纯黑只靠 alpha——换进去在深色菜单栏上就是一块黑。要用 `set_icon_with_as_template(icon, true)`，这正是 crate 为此准备的入口。一条 live `AlertEvent` 在 Alerts 页不在眼前时（面板藏着，或开着但停在别的 tab），主状态项换一张多了一颗角点的 **同一张 template**（多出来的是 alpha，跟字形同一套菜单栏墨色，深色栏上就是白点）；切到 Alerts，或窗口打开时已经停在 Alerts，点灭。不关 template，不改颜色。这是「你还没打开过那份列表」的显示，不是第二条阈值——引擎已经判了；从文件恢复的卡片（`live = false`）不算新的；已经看过的 episode 再跟进一次，人走开之后点会再亮，和横幅同一条节奏。Auto / Both 当时可能戴着内存条，所以两张脸都备了带点的 template；Both 的第二项不加，一条新闻不必两个点。
 
-  `tray-icon` **不支持 SVG**，只接受原始 RGBA（内部再编码成 PNG 交给 `NSImage`）。两个要点：macOS 会把图标缩放到 **18pt 高**，所以按 2x（36px）出图才不会在 Retina 上发虚；注册为 template image 后**只有 alpha 通道有效**，颜色由系统按明暗模式重新上色，因此渲染后把 RGB 抹成黑色。glyph 只占画布 78%——lucide 画到 24×24 viewBox 的边缘，1.0 的话图标会有整整 18pt 高，压过旁边约 12pt 的标题文字，系统图标都是自带留白的。另外 lucide 的 `stroke="currentColor"` 是 CSS 上下文关键字，usvg 解析不了，加载前需替换成具体颜色。有单测校验光栅化结果的覆盖率——解析失败会得到一张全透明位图，不报任何错，只表现为图标消失。
-- **托盘交互**：左键单击 toggle 窗口，右键弹出菜单（Show Window / Quit）。实现上是 `with_menu_on_left_click(false)` 关掉左键弹菜单，再监听 `TrayIconEvent::Click`；菜单里的 Show Window（以及横幅点击走的同一条路）同样锚在图标正下方——点击事件自带 rect，这条路没有，所以 `tray::anchor()` 现场去问状态项它此刻在哪，而不是记住上一次点击：面板本来就属于那个菜单栏图标，一个「在上次的位置重新出现」的窗口看起来像是和图标脱了钩，而记住上次点击又会在图标移动后指错地方（换脸会改变宽度，旁边任何图标出现或消失都会让菜单栏重新布局）。拿不到 rect 时退回上次位置，也就是这条路原来的行为。`MenuEvent` 和 `TrayIconEvent` 各用一个阻塞线程，汇入同一个 `smol::channel`。托盘标题显示当前那张脸的百分比（整机 CPU% 或内存 used%），取整到个位（菜单栏很挤，小数会让它每次采样都抖），并且标题和图标都是「和上次相同就不重设」（设标题会让菜单栏重新布局，换图标还要重建 `NSImage`）。
+  `tray-icon` **不支持 SVG**，只接受原始 RGBA（内部再编码成 PNG 交给 `NSImage`）。两个要点：macOS 会把图标缩放到 **18pt 高**，所以按 2x（36px）出图才不会在 Retina 上发虚；macOS 注册为 template image 后**只有 alpha 通道有效**，颜色由系统按明暗模式重新上色，所以那边 RGB 写什么都会被丢掉。**Linux（SNI）没有 template 这个概念**——`set_icon` 推过去的像素就是最终像素，而协议不报告 bar 是深是浅，所以渲染后统一把 RGB 抹成 `tray::ink()` 给的颜色：macOS 恒为黑（随即被丢弃），其它平台按面板**已解析的主题**取浅墨或深墨（深色主题 = 深色桌面 = 浅墨）。这是相关而不是读数，只有「浅色面板主题 + 深色 bar」这一种情况会错，出路是同一个控件（界面页的主题选择器同时管这两件事），所以刻意不为它单开一个偏好——图标消失时没人会想到去找第二个开关。主题切换时 `TrayHandle::ensure_ink` 整套重新光栅化并清掉两个状态项的「已经戴着这张脸」备忘，否则旧墨色会一直留到脸自己变动为止。glyph 只占画布 78%——lucide 画到 24×24 viewBox 的边缘，1.0 的话图标会有整整 18pt 高，压过旁边约 12pt 的标题文字，系统图标都是自带留白的。另外 lucide 的 `stroke="currentColor"` 是 CSS 上下文关键字，usvg 解析不了，加载前需替换成具体颜色。有单测校验光栅化结果的覆盖率——解析失败会得到一张全透明位图，不报任何错，只表现为图标消失。
+- **托盘交互**：左键单击 toggle 窗口，右键弹出菜单（Show Window / Quit）。实现上是 `with_menu_on_left_click(false)` 关掉左键弹菜单，再监听 `TrayIconEvent::Click`；菜单里的 Show Window（以及横幅点击走的同一条路）同样锚在图标正下方——点击事件自带 rect，这条路没有，所以 `tray::anchor()` 现场去问状态项它此刻在哪，而不是记住上一次点击：面板本来就属于那个菜单栏图标，一个「在上次的位置重新出现」的窗口看起来像是和图标脱了钩，而记住上次点击又会在图标移动后指错地方（换脸会改变宽度，旁边任何图标出现或消失都会让菜单栏重新布局）。拿不到 rect 时退回上次位置，也就是这条路原来的行为。`MenuEvent` 和 `TrayIconEvent` 各用一个阻塞线程，汇入同一个 `smol::channel`。**Linux 上右键不经过我们**：SNI 的上下文菜单由宿主自己用 `set_menu` 给的那份渲染，`secondary_activate` 映射到的是**中键**而不是右键；点击也不带 rect（`Rect::default()`，`TrayIcon::rect()` 更是硬编码 `None`），所以那条路上的锚点一律是 `None`，面板的位置由合成器按 layer-shell 的 anchor 决定。托盘标题显示当前那张脸的百分比（整机 CPU% 或内存 used%），取整到个位（菜单栏很挤，小数会让它每次采样都抖），并且标题和图标都是「和上次相同就不重设」（设标题会让菜单栏重新布局，换图标还要重建 `NSImage`）。
 
   **`tray-icon` 必须 ≥ 0.25.1，这是下限不是偏好。** 0.25 之前，菜单一建好就被永久挂在 `NSStatusItem` 上，左右键的区分靠在按钮上盖一层子视图拦截鼠标事件来做。macOS 27 起，状态项只要挂着菜单就不再把左键事件转发给那层子视图：菜单自己弹出来，`with_menu_on_left_click(false)` 形同虚设，`TrayIconEvent::Click` 根本不发出，于是左键点托盘不再是 toggle 窗口，而是弹出 Show Window / Quit 两项——面板唯一的入口就这么没了。0.25.1 改成只在**要弹的那一刻**临时 `setMenu`、弹完置空（tauri-apps/tray-icon#365）。这条路径没有测试能覆盖，只能在真机上点，所以版本号本身就是这个约束的唯一记录。
 - **无标题栏**：macOS 上 `WindowOptions.titlebar` 留 `None`，而且**必须显式写出来**——`WindowOptions::default().titlebar` 是 `Some(..)`，字段留空会装回一个默认的（不透明、带红绿灯的）标题栏。
@@ -416,13 +416,15 @@ release 构建、托盘常驻不开窗、cputime 差值 ÷ 墙钟实测：
 
 ## 已知问题 / TODO
 
-### Linux 暂不支持托盘
+### Linux 托盘：已接通（代码完成，待真机验收）
 
-`src/tray.rs` 整体被 `#[cfg(not(target_os = "linux"))]` 关掉，`tray-icon` 依赖也只声明在 `[target.'cfg(not(target_os = "linux"))'.dependencies]` 下。
+**曾经的理由已经过时了。** 旧的那条是：`tray-icon` 在 Linux 上通过 libappindicator / GTK 实现，菜单事件依赖一个 GTK main loop，和 gpui 自己的 Wayland 事件循环无法共存。这只对**默认 feature** 成立。`tray-icon` 0.25 起有第二个后端 `ksni`——StatusNotifierItem，走 D-Bus，没有 GTK 循环（`ksni::blocking` 自带线程，不需要外部 async runtime）。两个后端是互斥的两条路而不是叠加，所以 Linux 侧声明为 `default-features = false, features = ["ksni"]`，`src/tray.rs` 的 `cfg` 门禁整体撤掉。
 
-原因：`tray-icon` 在 Linux 上通过 libappindicator / GTK 实现，菜单事件依赖一个 GTK main loop，而 gpui 在 Linux 上跑的是自己的 X11 / Wayland 事件循环，两者无法直接共存。
+前提是会话总线上有 SNI 宿主。Omarchy 4 的 Quickshell 是（2026-09-18 实测 `IsStatusNotifierHostRegistered` → `b true`）；没有宿主时 `build_item` 只记一行日志并返回 `None`，面板照常工作，只是没有图标——这不是错误路径。
 
-后续可选方案（未验证）：独立线程跑 GTK main loop 只驱动托盘，通过 channel 与 gpui 主线程通信；或改用 StatusNotifierItem（D-Bus）的纯 Rust 实现绕开 GTK；或在 Linux 上放弃托盘退化成普通窗口应用。
+**三条必须承认的差别**，`tray.rs` 的模块文档里逐条写着：没有图标矩形（锚点一律 `None`，定位交给合成器）、没有右键事件（菜单由宿主渲染，`secondary_activate` 是中键）、没有 template 图标（字形必须自己上色，见上面 `ink()` 那段）。还有一条不是差别而是缺失：SNI 没有「菜单栏文字」，`set_title` 写进的是 SNI `Title` 属性和 tooltip 的 title，**图标旁边显不显示由宿主决定**，Quickshell 不显示（2026-09-18 实机）。macOS 上图标旁那个 CPU% / 剩余内存数字在 Linux 上因此只活在悬停提示里。**「把数字画进图标本身」试过并撤掉了**：合成一张宽位图确实能显示数字，但 Quickshell 把整张图塞进托盘槽位的宽度，图形被缩得极小——读到了数字，废掉了图标。协议里问不到宿主会怎么缩放，所以这只能真机试一次；详情与「不要再试第二次」的理由见 [`omarchy-port.md`](omarchy-port.md) 阶段 3。
+
+验收还没做——需要一台装着 Omarchy 的机器，条目见 [`omarchy-port.md`](omarchy-port.md) 阶段 3。
 
 ### 多显示器：gpui 的 display bounds 不可用
 

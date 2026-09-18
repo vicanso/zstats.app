@@ -6,7 +6,6 @@
 //! has one place to land.
 
 use crate::alertlog;
-#[cfg(not(target_os = "linux"))]
 use crate::tray;
 use crate::volflag;
 use gpui::Context;
@@ -822,12 +821,7 @@ impl ZStatsAppState {
     pub fn see_alerts_if_showing(&mut self, cx: &mut Context<Self>) {
         if self.tab == Tab::Alerts {
             self.see_alerts();
-            #[cfg(not(target_os = "linux"))]
             tray::sync(cx, self);
-            // No tray on Linux yet (docs/omarchy-port.md, phase 3), so
-            // there is nothing here for the context to do.
-            #[cfg(target_os = "linux")]
-            let _ = cx;
         }
     }
 

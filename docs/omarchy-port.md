@@ -32,7 +32,7 @@
 
 ## 需要先确认的环境事实
 
-1. **Omarchy 版本：4.0（Quattro）**，已确认。bar、通知、OSD、锁屏全部由一个 Quickshell 单进程 shell 提供，Waybar 和 mako 都不在了。**托盘宿主因此是 Quickshell**，它是否实现 StatusNotifier 宿主仍未确认，这是阶段 3 最大的未知；通知的 action 支持同理，影响阶段 5 的横幅点击。
+1. **Omarchy 版本：4.0（Quattro）**，已确认。bar、通知、OSD、锁屏全部由一个 Quickshell 单进程 shell 提供，Waybar 和 mako 都不在了。**托盘宿主因此是 Quickshell，并且确实能显示托盘项**（2026-09-18：先用 `IsStatusNotifierHostRegistered` → `b true` 判断，随后实机看到了图标）。那条 `busctl` 探针**比当初说的要弱**：ksni 自己的注释指出两个主流 watcher 实现都把这个属性硬编码成 true 且从不真正处理 `RegisterStatusNotifierHost`（`ksni-0.3.6/src/service.rs:106`），所以它证明的是「有 watcher」而不是「有宿主在画」。真正的证据是图标出现了。阶段 3 因此成立。通知的 action 支持仍未确认，影响阶段 5 的横幅点击。
 2. 因此**面板不把托盘当作唯一入口**：阶段 2 先做键位唤起，阶段 3 的托盘是增益而不是前提。
 3. 通知守护进程是否支持 action（mako 支持），决定横幅点击能不能落到告警页。
 
@@ -73,7 +73,12 @@
 
 **动手时发现的两件事**
 
-- **`exclusive_zone` 不设**就等于设 0，而 0 的语义是「不占位，但请把我挪开、别压住别人的占位区」——所以面板会自动落在 bar 下面，不需要我们去算 bar 有多高。margin 只留 8px 的边距。
+- **`exclusive_zone` 不设**就等于设 0，而 0 的语义是「不占位，但请把我挪开、别压住别人的占位区」——所以面板会自动落在 bar 下面，不需要我们去算 bar 有多高。
+- **两条边的 margin 要的是相反的东西，所以不能共用一个常量**（实机反馈，2026-09-18）：右边 8px 在 358pt 宽的面板旁边读不出来，看着就是贴着屏幕；顶部那 8px 则是多余的，面板应当像 macOS 的 popover 挂在菜单栏下沿一样挂在 bar 下沿。现在是 `PANEL_MARGIN_RIGHT = 10`、`PANEL_MARGIN_TOP = 0`。
+- **面板尺寸不能拿合成器的答复回喂**（实机测出来的，2026-09-18）。`ZStatsApp::render` 每帧把 `window.bounds()` 镜像进 store，`open_main_window` 下次又拿它当请求的尺寸——macOS 上这是必需的（窗口可缩放，每次点托盘都重建，尺寸只活在那里），Wayland 上是个没有不动点的回环。实测 `hyprctl layers` 给出 `1352 26 598 893`：设计值 358×653，两轴都正好大了 240，右边缘落在 1950 而屏幕只有 1920——**这也是当初「右边贴着屏幕没有缝」的真正原因，margin 一直都在，只是面板画出去了**。修法是 Linux 上只继承 origin、尺寸恒取 `DEFAULT_WINDOW_SIZE`：layer surface 用户根本没法缩放，没有尺寸值得记。每帧那个镜像保留不动，它还带着 `scale_factor`，只是 Linux 上不再有人消费它的尺寸。
+- **gpui-component 的 CSD 外框必须在 layer surface 上关掉**（实机测出来的，2026-09-18，两条症状其实是一个 bug）。`WindowBorder::render` 每帧调 `set_client_inset(20px)`（`gpui-component` 的 `SHADOW_SIZE`，Linux 上是 20，其它平台 0），而 gpui 的 Wayland 后端在 `compute_outer_size` 里把这个 inset **加回**它报告的尺寸和提交的 buffer。于是 surface 画得比合成器锚定的框每边大 20：右边缘越过屏幕（读起来是「margin 没了」），而 bar 和第一行内容之间多出一条 20px 的阴影带（读起来是「顶部空隙太大」）。`Root::bordered(false)` 是 gpui-component 自己文档里为这种 surface 准备的开关——layer surface 由合成器摆放、没有标题栏、拉不动，那个外框没有任何东西可装饰。设置窗口和磁盘空间窗口是真正的 toplevel，外框照旧。
+  - 顺带记一条死路：`WindowOptions::window_decorations = Server` **不管用**。layer surface 上没有 xdg-decoration 可协商，gpui 的 `request_decorations` 会回落成 `Client` 并打一行 log。
+- **顶部的 margin 不是从屏幕顶边量的**，是从 bar 占位之后剩下的可用区顶边量的——合成器先挪，margin 后加。所以 bar 若「占的比画的多」，`PANEL_MARGIN_TOP = 0` 也仍然会留一条缝，那条缝不归我们管。真要贴死，只能 `exclusive_zone: Some(px(-1.))` 整个退出占位避让，再用 margin 把 bar 的高度自己减回来——而 bar 有多高没有任何协议会告诉我们，那就成了一个要用户填的配置项，不是一个能测出来的数。先不做。
 - **快捷键原来在 Linux 上根本到不了面板。** gpui 把 `cmd-` 解析成*平台*修饰键，在 Linux 上是 Super，而 Omarchy 用 Super+数字切工作区，按键全被合成器吃掉。改用 gpui 自己的 `secondary-`（macOS 是 ⌘，其它平台是 Ctrl），页签提示里的符号也跟着按平台取。
 
 **验收**（需要在 Omarchy 上做，容器里没有合成器）：
@@ -88,24 +93,72 @@
 
 **这一阶段结束时 Linux 上还不能算「可用」**：release 构建失焦即收起，而把它叫回来的两条路（阶段 2 的键位、阶段 3 的托盘）都还没有。所以阶段 1 和阶段 2 之间不要打包任何东西给人用。
 
-## 阶段 2：唤起入口，不依赖托盘
+## 阶段 2：唤起入口，不依赖托盘（**代码完成**，待真机验收）
 
 **做什么**
 
 - 单实例 + `--toggle`：第二次启动不新起进程，而是通过 `$XDG_RUNTIME_DIR` 下的 unix socket 把「开合面板」发给已经在跑的那个。
-- Hyprland 侧一行 `bind = SUPER, M, exec, zstats --toggle`，写进 README 的 Linux 段。
+- Hyprland 侧一行 `bind = SUPER, M, exec, zstats --toggle`。
 
-**验收**：绑定的键位能开合面板；连续执行 `zstats --toggle` 不会产生第二个进程；面板关着时采集仍在跑（托盘常驻的那套节奏在这里同样适用）。
+**做完之后的样子**（2026-09-18，`src/ipc.rs`，整模块 `#[cfg(target_os = "linux")]`）：
 
-## 阶段 3：托盘（有宿主才有）
+- **握手顺序是先 bind 再 connect，不是反过来。** 「先 connect，失败就 unlink 再 bind」有一个窗口期，两个同时起的进程都会判定 socket 是陈留的，于是后一个把前一个的活 socket 删掉。现在只有在 connect 被拒（证明没人应答）之后才 unlink。
+- **`$XDG_RUNTIME_DIR` 没有时不退回 `/tmp`**，只记一行日志、退化成「没有单实例」。`/tmp` 是别的用户可以抢先 bind 的路径，一把陌生人能持有的单实例锁比没有锁更糟——那等于把你的每一次按键交给先到的人。
+- **裸启动和 `--toggle` 是两件事。** 裸启动在没有实例时**不开面板**（那是登录自启的路径，release 常驻托盘的行为不能倒退），有实例时转发 `show`；`--toggle` 在没有实例时**要开面板**——键按下去只是悄悄起了个后台进程，读起来就是这个键坏了。
+- **未知参数是硬错误**（退出码 2），不是忽略。`hyprland.conf` 里拼错一个 flag，否则会变成「每按一次就多起一个面板」，而症状（第一次之后键就不灵了）指向的地方离病因十万八千里。
+- 连上了但写失败**仍算送达**：既然连上了，实例就在，为了一次按键再起一个常驻采集器正是这个模块存在的意义所在要拒绝的交易。
+
+**关于 README**：计划原本写「写进 README 的 Linux 段」，**没做，是有意的**。README 现在的第一行是「macOS only · 已签名公证」，而 Linux 侧一个包都还没有（那是阶段 6）。在用户看的页面上写一行 Hyprland 键位绑定、却没有任何东西可安装，是在宣传不存在的东西。那一段跟着阶段 6 的打包一起进 README，两份 README 同步。
+
+**验收**（需要在 Omarchy 上做）：
+
+1. `zstats --help` 打出用法；`zstats --frobnicate` 拒绝并且 `echo $?` 是 2。
+2. `bind = SUPER, M, exec, zstats --toggle` 写进 `hyprland.conf`，按键能开、再按能合。
+3. 面板没开的时候按第一次，面板应当**出现**（而不是悄悄起个进程）。
+4. 连按十次 `zstats --toggle`，`pgrep -c zstats` 始终是 1。
+5. `ls -l $XDG_RUNTIME_DIR/zstats-app.sock` 能看到它；`kill -9` 掉进程之后 socket 文件还在，再启动应当正常接管（日志里有 `clearing a socket left by a previous run`）。
+6. 面板关着时采集仍在跑（托盘常驻的那套节奏在这里同样适用）——托盘的数字继续动就是证据。
+
+## 阶段 3：托盘（**代码完成**，待真机验收）
 
 **做什么**
 
 - `tray-icon` 的 ksni 后端：图标、菜单、左键 `activate` 触发 toggle。**`rect` 为空**，所以点击只负责开合，不参与定位——定位已经由阶段 1 的 anchor 决定。
-- **一个必须承认的降级**：SNI 没有「菜单栏文字」这种东西，Waybar / Quickshell 的托盘只画图标。macOS 上图标旁边那个 CPU% 或可用内存数字在 Linux 上没有对应物。两个选项：接受只有图标（脸的切换仍然有意义：CPU / 内存 / 磁盘三种图形），或者面板把当前数字写进一个状态文件，由 bar 的自定义模块去读——后者是 bar 的配置，不是本应用的功能。
+- **一个必须承认的降级**：SNI 没有「菜单栏文字」这种东西，`set_title` 写的 `Title` 属性 Quickshell 不渲染，托盘上只有图标。macOS 上图标旁边那个 CPU% / 剩余内存数字在 Linux 上没有对应物，只活在悬停提示里。
+
+  **「把数字画进图标本身」试过了，真机上输了，已经撤掉**（2026-09-18）。做法是把图形和数字合成一张宽位图（`ttf-parser` 取仓库自带 JetBrains Mono 的字形轮廓，等宽所以不需要 shaping，固定 4 格所以宽度恒定），动手前还渲染过预览图确认 26px bar 高度下可读。**赌的是宽高比，赌输了**：Quickshell 把整张宽位图塞进托盘槽位的宽度，于是图形被按比例缩得很小——数字是读到了，图标废了。协议里没有任何办法事先问宿主会怎么缩放，所以这件事只能这样试一次。代码全部删除（`traytext.rs`、`ttf-parser` 依赖、`Faces` 改回缓存成品 `Icon`），**不要再试第二次**；真想要数字，剩下的只有状态文件 + bar 自定义模块那条路，而那是 bar 的配置不是本应用的功能。
 - 托盘不可用时（宿主不存在）不报错、不重试，只在日志里说一次，唤起靠阶段 2。
 
-**验收**：托盘里出现图标；左键开合面板；右键出菜单（菜单由宿主渲染）；杀掉 bar 再拉起，图标能回来。
+**读过 tray-icon 0.25.1 的 ksni 后端之后，动手前先记下来的四件事**（`src/platform_impl/ksni/mod.rs`）：
+
+1. **feature 要 `default-features = false, features = ["ksni"]`**。默认那套是 `libappindicator` + `muda-gtk3`，正是当初把 Linux 门禁掉的那个 GTK 主循环——ksni 和它是互斥的两条路，不是叠加。
+2. **`secondary_activate` 发的是 `MouseButton::Middle`，不是右键。** 右键在 SNI 里不经过我们，宿主直接渲染 `set_menu` 给的菜单。所以 `tray.rs` 里按 `MouseButton::Right` 分支的逻辑在 Linux 上永远不会触发，要么接到中键上，要么承认这条路只走菜单。
+3. **`rect()` 硬编码返回 `None`**（不是「有时没有」），`emit_click` 也是 `Rect::default()`。`placement.rs` 那套锚定数学在这里彻底没有输入。
+4. **`set_title` 是存在的**，写进 SNI 的 `Title` 属性，同时进 tooltip 的 title。所以 CPU% 这个数字至少能在悬停时看到；**图标旁边显不显示是宿主的选择**，Waybar 不显示，Quickshell 未知——接通之后一看便知，不必现在假设。
+
+**还有一个 macOS 上不存在的新问题：Linux 没有 template 图标这个概念。**
+
+本仓库的托盘位图是「压平成黑色、只有 alpha 有意义」的蒙版（`tray.rs` 的 `rasterise_icon` / `stamp_hot_dot`），macOS 靠 `set_icon_with_as_template(…, true)` 让菜单栏自己上墨，白底黑字、黑底白字都不用我们管。SNI 没有这一层：`set_icon` 推过去的 ARGB 像素就是最终像素，**一个黑色字形在 Omarchy 的深色 bar 上等于看不见**，而 SNI 也不报告 bar 的明暗，没法照抄 macOS 那套「跟着菜单栏走」。
+
+所以阶段 3 要多做一件 macOS 不需要做的事：**给字形上色**。最省事且诚实的做法是跟随应用自己的主题偏好（`prefs` 的 Auto / Dark / Light）——Auto 在 Linux 上没有系统信号可跟，落到浅色墨（深色 bar 是 Omarchy 的默认）。未读告警那个角标同理：macOS 上它是「同一张 template 上多一点 alpha」，Linux 上得是实打实的一种颜色。
+
+**做完之后的样子**（2026-09-18）：`tray.rs` 的 `cfg` 门禁整体撤掉，`metrics.rs` / `state/mod.rs` / `state/alerts.rs` / `main.rs` 五处调用点的门禁一并撤掉；`toggle_main_window` 的锚点参数改成 `Option<TrayAnchor>`，SNI 那条路传 `None`（伪造一个 0,0 的矩形会把面板扔到屏幕角落，而不是让合成器摆放）；新增 `tray::ink()` 与 `TrayHandle::ensure_ink`，主题一动就整套重新光栅化。macOS 侧 `make lint` 干净、281 个测试全过、行为无变化。
+
+**实机跑起来之后发现的两件事**（2026-09-18，Omarchy 4，release 构建）：
+
+- **Omarchy 的托盘默认是收起的**，要点一下 bar 上的展开箭头才看得见图标。「一开始没显示」多半就是这个，不是注册失败——ksni 监听 watcher 的 `NameOwnerChanged` 并重新注册（`service.rs` 的 `service_loop`），`watcher_offline` 默认返回 true 保持服务活着，所以 bar 重启图标会自己回来，注册竞态不会留下一个永远空的托盘。
+- **图标旁边没有数字**，见验收第 6 条。
+
+**验收**（需要在 Omarchy 上做）：
+
+1. 托盘里出现图标（**记得先展开 Omarchy 收起的托盘区**）；`busctl --user list | grep -i StatusNotifier` 能看到我们注册的 item。
+2. 左键开合面板；右键出菜单（Show Window / Quit，由宿主渲染）。
+3. **深浅两种 bar 下图标都看得见**——尤其把界面主题切成浅色再看一次，那是 `ink()` 唯一会猜错的情况。
+4. 主题在设置里来回切，图标颜色**当场**跟着变（不是等下一个 tick）。
+5. 切到「两者」模式，两个图标都在；切回去，第二个消失。
+6. ~~`set_title` 的数字 Quickshell 是否显示在图标旁边~~ **已回答：不显示**（2026-09-18 实机）。把数字画进图标的方案也试过并撤掉了，理由见上——托盘就是一个图标，数字在 tooltip 里。
+7. 杀掉 bar 再拉起，图标能回来。
+8. 触发一次告警，未读角标出现在图标上；打开告警页后消失。
 
 ## 阶段 4：动作与观察器
 
@@ -149,7 +202,7 @@
 
 | 问题 | 影响 | 怎么问 |
 |---|---|---|
-| Omarchy 4 的 Quickshell 是否提供 SNI 宿主 | 阶段 3 是否成立 | 装一个已知带托盘图标的应用，看 bar 上有没有 |
+| ~~Omarchy 4 的 Quickshell 是否提供 SNI 宿主~~ **已回答：有**（2026-09-18） | 阶段 3 成立 | 实机看到图标。`busctl` 那条探针只能证明有 watcher——两个主流实现都把 `IsStatusNotifierHostRegistered` 硬编码成 true |
 | gpui 的 layer-shell 在 Hyprland 上的实际表现 | 阶段 1 | 最小示例：一个锚在右上的 overlay 窗口 |
 | 销毁重建的内存行为 | 阶段 1 的显隐策略 | 开合一百次，看 RSS |
 | 通知守护进程是否支持 action | 阶段 5 的横幅点击 | `notify-send` 带 action 试一次 |

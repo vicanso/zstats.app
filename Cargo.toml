@@ -122,7 +122,16 @@ tracing-subscriber = { version = "0.3", features = ["local-time"] }
 tracing-appender = "0.2"
 time = "0.3"
 
-# Tray. Linux is excluded on purpose — see "已知问题 / TODO" in README.md.
+# Rasterises the tray SVG at startup — tray-icon only accepts raw RGBA, on
+# every backend. Not under a target gate: the Linux tray is a
+# StatusNotifierItem and needs the same bitmap the menu bar does.
+# NOT the version gpui pulls in: it builds resvg 0.45, so the tree carries
+# both. Worth ~200 KB of duplicate SVG stack; aligning to 0.45 would drop
+# it, but only until gpui moves again.
+resvg = "0.46"
+
+# Tray, backend one of two: `NSStatusItem` on macOS, Shell_NotifyIcon on
+# Windows.
 #
 # 0.25.1 is a floor, not a preference: every earlier version attaches the
 # menu to the `NSStatusItem` for good and relies on a subview over the
@@ -133,11 +142,22 @@ time = "0.3"
 # while it is being presented (tauri-apps/tray-icon#365).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.25.1"
-# Rasterises the menu bar SVG at startup — tray-icon only accepts raw RGBA.
-# NOT the version gpui pulls in: it builds resvg 0.45, so the tree carries
-# both. Worth ~200 KB of duplicate SVG stack; aligning to 0.45 would drop
-# it, but only until gpui moves again.
-resvg = "0.46"
+
+# The same crate on Linux, on its other backend. `ksni` speaks
+# StatusNotifierItem over D-Bus and needs no GTK main loop — which is what
+# this module was excluded over, since the default features
+# (`libappindicator` + `muda-gtk3`) are that loop and it cannot coexist
+# with gpui's. The two backends are alternatives, not a stack, hence
+# `default-features = false`.
+#
+# Needs an SNI host on the session bus. Omarchy 4's Quickshell is one
+# (measured 2026-09-18, `docs/omarchy-port.md` 阶段 3 carries the probe);
+# without one the item simply never appears, which `tray.rs` degrades to
+# rather than treating as a failure.
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.25.1", default-features = false, features = [
+    "ksni",
+] }
 
 # Only for the menu bar's scale factor: the tray reports physical pixels and
 # gpui's `PlatformDisplay` doesn't expose a scale factor. Same versions gpui
