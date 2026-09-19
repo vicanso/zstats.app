@@ -64,6 +64,9 @@ const LATEST_URL: &str = "https://api.github.com/repos/vicanso/zstats.app/releas
 /// fails [`file_sha256`] exactly like a corrupted transfer would.
 /// Anonymous reads; the token in CI is for writing.
 const GITEE_API: &str = "https://gitee.com/api/v5/repos/vicanso/zstats.app";
+/// The mirror's web root. Downloads do not live under `/api`, and unlike
+/// the API they need no token — see [`gitee_download_url`].
+const GITEE_REPO_URL: &str = "https://gitee.com/vicanso/zstats.app";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The DMG for this build's architecture — half the bytes of the
 /// universal image (6.6 vs 13.3 MB measured on v0.1.1). `ARCH` is a
@@ -80,6 +83,19 @@ fn asset_name() -> &'static str {
 /// sha256sum-format digests the release workflow uploads beside it.
 const CHECKSUMS_NAME: &str = "SHA256SUMS";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long to spend *reaching* a host, as opposed to how long a
+/// transfer may take.
+///
+/// [`DOWNLOAD_TIMEOUT`] is five minutes because a 17 MB image over a
+/// slow link legitimately needs them — but that same budget also
+/// covered the GitHub attempt that must fail before the mirror is
+/// tried. So on exactly the networks the mirror exists for, a blocked
+/// GitHub could sit for five minutes per asset (ten across the DMG and
+/// its SHA256SUMS) behind a progress bar that never moved. Splitting
+/// the two means an unreachable host is abandoned in seconds while a
+/// slow one still gets the whole transfer window. Matches
+/// [`FETCH_TIMEOUT`], which is the same judgement about the same hosts.
+const REACH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Guards against a runaway body; the DMG is ~15 MB.
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 
@@ -110,9 +126,9 @@ fn fetch_text(agent: &ureq::Agent, url: &str, accept: Option<&str>) -> Result<St
 ///
 /// The order is deliberate: GitHub is the origin, the URL there needs no
 /// lookup, and a reachable network pays nothing for the mirror existing.
-/// A blocked one pays the request timeout once per asset before falling
-/// back — the check runs every couple of days and a download is a click,
-/// so that is cheaper than guessing which host to prefer and being wrong.
+/// A blocked one pays [`REACH_TIMEOUT`] once per asset before falling
+/// back — seconds, not the transfer budget — which is cheaper than
+/// guessing which host to prefer and being wrong.
 fn fetch_asset(
     agent: &ureq::Agent,
     tag: &str,
@@ -126,43 +142,34 @@ fn fetch_asset(
         Ok(response) => return Ok(response),
         Err(e) => e.to_string(),
     };
-    let Some(url) = gitee_asset_url(agent, tag, name) else {
-        return Err(direct);
-    };
     agent
-        .get(&url)
+        .get(&gitee_download_url(tag, name))
         .header("User-Agent", format!("zstats/{}", about::version()))
         .call()
         .map_err(|e| format!("{direct}; mirror: {e}"))
 }
 
-/// The mirror's URL for one attachment of `tag`, or `None` when the
-/// mirror has no such release or no such file.
+/// The mirror's URL for one attachment of `tag` — spelled, not looked up.
 ///
-/// Two requests, unlike GitHub's one: Gitee's attachment URLs carry the
-/// attachment's own id, so they cannot be spelled from the tag and the
-/// file name — they have to be read back from the release.
-fn gitee_asset_url(agent: &ureq::Agent, tag: &str, name: &str) -> Option<String> {
-    let release = fetch_text(agent, &format!("{GITEE_API}/releases/tags/{tag}"), None).ok()?;
-    let id = json_num_field(&release, "id")?;
-    let files = fetch_text(
-        agent,
-        &format!("{GITEE_API}/releases/{id}/attach_files?per_page=100"),
-        None,
-    )
-    .ok()?;
-    gitee_attachment_url(&files, name)
-}
-
-/// Pick `name`'s download URL out of Gitee's attachment array. One JSON
-/// object per attachment and file names cannot contain `{`, so splitting
-/// there isolates each entry — the same no-serde posture as
-/// [`json_str_field`], for the same reason: a handful of known keys in a
-/// machine-generated payload.
-fn gitee_attachment_url(json: &str, name: &str) -> Option<String> {
-    json.split('{')
-        .find(|entry| json_str_field(entry, "name").as_deref() == Some(name))
-        .and_then(|entry| json_str_field(entry, "browser_download_url"))
+/// This used to cost two API calls and a walk over the attachment array,
+/// on the premise that "Gitee's attachment URLs carry the attachment's
+/// own id, so they cannot be spelled from the tag and the file name".
+/// **That premise was wrong.** The id appears only in the *intermediate*
+/// redirect (`/attach_files/<id>/download/<name>`); the URL Gitee
+/// advertises as `browser_download_url`, and the one that works, is
+/// `/releases/download/<tag>/<name>` — the same shape GitHub uses, with
+/// no id in it (measured 2026-09-19 against the live mirror).
+///
+/// The walk was also broken, and silently so: it split the array on `{`
+/// believing there was one object per attachment, but every entry embeds
+/// an `uploader` object, so the fragment holding `"name"` and the
+/// fragment holding `"browser_download_url"` were never the same one and
+/// the lookup returned `None` every time. Its test passed throughout
+/// because the fixture had no nested object. Spelling the URL deletes
+/// the hand-rolled JSON walk that made that possible, and turns three
+/// requests into one.
+fn gitee_download_url(tag: &str, name: &str) -> String {
+    format!("{GITEE_REPO_URL}/releases/download/{tag}/{name}")
 }
 
 /// Download `tag`'s DMG and verify it. Returns the downloaded path,
@@ -172,6 +179,11 @@ fn gitee_attachment_url(json: &str, name: &str) -> Option<String> {
 pub fn download(tag: &str, mut on_progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(DOWNLOAD_TIMEOUT))
+        // Reaching a host and transferring from it are different
+        // questions with very different right answers — see
+        // [`REACH_TIMEOUT`].
+        .timeout_resolve(Some(REACH_TIMEOUT))
+        .timeout_connect(Some(REACH_TIMEOUT))
         .proxy(proxy::app_proxy())
         .build()
         .new_agent();
@@ -625,33 +637,6 @@ fn json_str_field(json: &str, key: &str) -> Option<String> {
     }
 }
 
-/// Pull one integer field out of the release JSON, same posture as
-/// [`json_str_field`]. Used for Gitee's release id, which it emits
-/// first in the object — before the nested `author`, whose own `id`
-/// would otherwise be the first match. A misread here cannot install
-/// the wrong thing: the next request 404s and the fallback reports the
-/// mirror as unavailable, and the checksum still decides what runs.
-fn json_num_field(json: &str, key: &str) -> Option<u64> {
-    let needle = format!("\"{key}\"");
-    let mut search = 0;
-    loop {
-        let rel = json[search..].find(&needle)?;
-        let after = search + rel + needle.len();
-        let rest = json[after..].trim_start();
-        if let Some(rest) = rest.strip_prefix(':') {
-            let digits: String = rest
-                .trim_start()
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            if !digits.is_empty() {
-                return digits.parse().ok();
-            }
-        }
-        search = after;
-    }
-}
-
 /// Walk a JSON string literal (the opening quote already consumed) and
 /// unescape it. The notes body is full of `\"` and `\n`; a naïve
 /// `find('"')` would cut it short.
@@ -864,6 +849,7 @@ fn is_newer(remote_tag: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::process;
 
     /// The sweep ejects volumes on the strength of this identifier —
@@ -1012,39 +998,32 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The mirror's attachment list is read the same no-serde way the
-    /// release JSON is, so it gets the same guard: the right entry, and
-    /// nothing at all for a file the mirror does not carry.
+    /// One spelling serves both hosts: everything after `/releases/` is
+    /// identical, which is the property that lets the mirror be a second
+    /// *address* rather than a second lookup.
+    ///
+    /// What this replaces is worth remembering. The old code read the
+    /// mirror's attachment array to find a URL, and its fixture here
+    /// carried two beliefs that the live API does not share — that an
+    /// attachment's download URL contains its id, and that an entry has
+    /// no nested objects. Both were wrong, the array walk therefore
+    /// never matched anything, and this test passed the whole time
+    /// because it was asking the fixture rather than Gitee. A test whose
+    /// sample is hand-written can only ever check the belief that wrote
+    /// it.
     #[test]
-    fn the_mirror_url_comes_from_the_matching_attachment() {
-        let json = r#"[{"id":1,"name":"zstats-x86_64.dmg","size":7,
-            "browser_download_url":"https://gitee.com/x/y/attach_files/1/download/zstats-x86_64.dmg"},
-            {"id":2,"name":"SHA256SUMS","size":3,
-            "browser_download_url":"https://gitee.com/x/y/attach_files/2/download/SHA256SUMS"}]"#;
+    fn the_mirror_url_is_spelled_the_same_way_githubs_is() {
+        let tag = "v0.3.2";
+        let name = "zstats-aarch64.dmg";
         assert_eq!(
-            gitee_attachment_url(json, "SHA256SUMS").as_deref(),
-            Some("https://gitee.com/x/y/attach_files/2/download/SHA256SUMS")
+            gitee_download_url(tag, name),
+            "https://gitee.com/vicanso/zstats.app/releases/download/v0.3.2/zstats-aarch64.dmg"
         );
+        let tail = |url: String| url.split_once("/releases/").map(|(_, t)| t.to_string());
         assert_eq!(
-            gitee_attachment_url(json, "zstats-aarch64.dmg"),
-            None,
-            "a release without this architecture's dmg has no url to offer"
-        );
-    }
-
-    /// Gitee puts the release's own id first; the author object carries
-    /// an `id` too, and taking that one would ask for another release's
-    /// attachments.
-    #[test]
-    fn the_release_id_is_read_before_the_author_id() {
-        let json = r#"{"id":593237,"tag_name":"v4.8.3","prerelease":false,
-            "author":{"id":1151004,"login":"someone"}}"#;
-        assert_eq!(json_num_field(json, "id"), Some(593237));
-        assert_eq!(json_num_field(json, "missing"), None);
-        assert_eq!(
-            json_num_field(r#"{"id":"not a number"}"#, "id"),
-            None,
-            "a string where a number was promised is no id"
+            tail(release_download_url(tag, name)),
+            tail(gitee_download_url(tag, name)),
+            "the two hosts differ only in their root"
         );
     }
 

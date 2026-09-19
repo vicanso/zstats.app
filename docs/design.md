@@ -273,11 +273,13 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 
 ### GitHub 打不开时的 Gitee 回退（`updater.rs`）
 
-发版流水线把每个 tag 的 release 原样镜像到 Gitee（`publish.yml` 的 `gitee` job），`updater` 因此有了第二个来源：检查版本先问 `api.github.com`，失败再问 `gitee.com/api/v5/.../releases/latest`；下载同理，GitHub 的直链失败后按 tag 查到 release id、再从附件列表里按文件名取 `browser_download_url`。两个来源的 JSON 都用 `tag_name` 和 `body` 两个字段，所以解析那一段不需要知道是谁回答的。
+发版流水线把每个 tag 的 release 原样镜像到 Gitee（`publish.yml` 的 `gitee` job），`updater` 因此有了第二个来源：检查版本先问 `api.github.com`，失败再问 `gitee.com/api/v5/.../releases/latest`；下载同理，GitHub 的直链失败后换 Gitee 的直链——**同样是直链,不查任何东西**：`gitee.com/<owner>/<repo>/releases/download/<tag>/<name>`，和 GitHub 那条除了根域名以外逐字相同。两个来源的 JSON 都用 `tag_name` 和 `body` 两个字段，所以解析那一段不需要知道是谁回答的。
 
 **镜像之所以安全，是因为它不是第二次构建。** 流水线上传的就是 GitHub release 上那几个文件本身，`SHA256SUMS` 也在其中，所以为下载背书的仍是同一行摘要——镜像端换掉文件的话，`file_sha256` 会像遇到损坏传输一样拒绝它。这也是为什么回退只加来源、不加信任假设。
 
-顺序是 GitHub 在前：它是源站，直链不需要额外查询，网络正常的用户不为「镜像存在」付任何代价；被墙的用户每个文件多付一次请求超时。检查两天才跑一次、下载是一次点击，这比猜错该优先问谁便宜。Gitee 的 release id 要从 JSON 里读一个数字（`json_num_field`），它把 release 自己的 `id` 放在 `author` 之前，所以取第一个匹配是对的；即使读错，下一次请求只会 404 并报告镜像不可用——决定装什么的始终是校验和。
+顺序是 GitHub 在前：它是源站，网络正常的用户不为「镜像存在」付任何代价；被墙的用户每个文件多付一次**连接**超时（`REACH_TIMEOUT`，10 秒），不是传输超时。这两个曾经是同一个预算：`timeout_global` 给了 5 分钟让 17 MB 的镜像下得完，而那 5 分钟也盖住了必须先失败的 GitHub 尝试——于是在镜像唯一为之存在的那种网络上，点一次下载可能是十分钟不动的进度条（DMG 和 SHA256SUMS 各一次）。「够不够得着」和「传得完传不完」是两个问题，现在分开问。
+
+**这条路曾经根本不通，而且测试一直是绿的**（2026-09-19 实测修正）。旧实现要两次 API 调用：按 tag 拿 release id，再从附件数组里按文件名找 `browser_download_url`。两个前提都是错的——附件的下载地址里**没有** id（带 id 的是中间那一跳 `/attach_files/<id>/download/<name>`，不是对外公布的那条），而数组解析按 `{` 切分、假定「一个附件一个对象」，可 Gitee 每个条目里都嵌着一个 `uploader` 对象，于是带 `"name"` 的片段和带 `browser_download_url` 的片段永远不是同一片，查找永远返回 `None`。它的单测用的是手写样本，样本里既没有嵌套对象、URL 也写成了 id 形式——**测试问的是写测试时的那个信念，不是 Gitee**。现在直接拼地址，那段手写 JSON 遍历连同 `json_num_field` 一起删掉了，三次请求变一次。决定装什么的始终是校验和，而校验和自己也走同一条 GitHub→Gitee 兜底，所以 GitHub 不通时摘要一样取得到。
 
 镜像覆盖不到的仍是三处 raw 文件请求：告警模板（`alerttpl.rs`，拉的是 zstats 仓库）、清理规则与缓存预设（`cleanhints.rs` / `cachepreset.rs`）。它们要么等代码也镜像过去，要么继续靠配置页的代理。
 

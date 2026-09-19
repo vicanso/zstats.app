@@ -585,17 +585,33 @@ jobs:
             rm -f "$body"
           }
 
-          # 404 here is the ordinary case — the release does not exist on
-          # the mirror until we make it — so this one lookup reads the
-          # status itself instead of going through `api`.
+          # "Not there yet" is the ordinary case — the release does not
+          # exist on the mirror until we make it — so this one lookup
+          # reads the status itself instead of going through `api`.
+          #
+          # **Gitee does not 404 for a release that is not there.** It
+          # answers `200` with a body of literally `null` (measured
+          # 2026-09-19 against this very repo), and `jq -r .id` on that
+          # prints the *string* `null`. That string became the release
+          # id, the script reported "reusing Gitee release null", and
+          # every later call went to `/releases/null/…` and came back 404
+          # with Gitee's HTML error page — a failure that reads like a
+          # missing repository, two steps away from its cause. So the
+          # body decides, not the status, and the id is checked for being
+          # a number before it is ever pasted into a path.
           rel="$(mktemp)"
           status="$(curl -sS -o "$rel" -w '%{http_code}' \
             --url-query "access_token=$GITEE_TOKEN" \
             "https://gitee.com/api/v5/repos/$GITEE_REPO/releases/tags/$tag")"
           case "$status" in
-            200) release_id="$(jq -r .id "$rel")" ;;
+            200) release_id="$(jq -r '.id? // empty' "$rel" 2>/dev/null || true)" ;;
             404) release_id="" ;;
             *) echo "gitee GET releases/tags/$tag -> $status" >&2; cat "$rel" >&2; exit 1 ;;
+          esac
+          # Anything that is not a plain number is "no release": null, an
+          # empty body, an HTML page jq could not read.
+          case "$release_id" in
+            "" | *[!0-9]*) release_id="" ;;
           esac
 
           if [ -z "$release_id" ]; then
@@ -617,8 +633,17 @@ jobs:
                 '{tag_name: $t, name: $t, body: $n, prerelease: false, target_commitish: $b}' \
               | api POST "/repos/$GITEE_REPO/releases" \
                   -H 'Content-Type: application/json' -d @- \
-              | jq -r .id
+              | jq -r '.id? // empty'
             )"
+            # Fail here rather than let an unusable id reach the upload
+            # URLs: that is exactly how the `null` above got four calls
+            # away from the thing that produced it.
+            case "$release_id" in
+              "" | *[!0-9]*)
+                echo "gitee accepted the create but returned no usable release id" >&2
+                exit 1
+                ;;
+            esac
             echo "created Gitee release $release_id for $tag on $branch"
           else
             echo "reusing Gitee release $release_id for $tag"
