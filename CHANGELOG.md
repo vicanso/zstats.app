@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.3](https://github.com/vicanso/zstats.app/compare/v0.3.2..v0.3.3) - 2026-09-19
+
+### ⛰️  Features
+
+- A compositor key can toggle the Linux panel, and the tray uses StatusNotifier - ([ebfbfed](https://github.com/vicanso/zstats.app/commit/ebfbfedb24f1b6e956c5cd29321f9d6ac9fdfc7c))
+
+### 🐛 Bug Fixes
+
+- The Gitee mirror takes a release, and the updater can download from it - ([ba25d68](https://github.com/vicanso/zstats.app/commit/ba25d6802e81f603387605b413f5df85fe8f65e7))
+
 ## [0.3.2](https://github.com/vicanso/zstats.app/compare/v0.3.0..v0.3.2) - 2026-09-17
 
 ### ⛰️  Features
