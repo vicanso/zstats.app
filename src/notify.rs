@@ -49,7 +49,7 @@ use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity};
 #[cfg(not(target_os = "macos"))]
 use crate::APP_NAME;
 #[cfg(not(target_os = "macos"))]
-use notify_rust::Notification;
+use notify_rust::{Hint, Notification};
 #[cfg(not(target_os = "macos"))]
 use std::sync::mpsc;
 #[cfg(not(target_os = "macos"))]
@@ -284,21 +284,112 @@ fn enqueue(banner: Banner) {
     }
 }
 
+/// The action key a freedesktop server reports when the *body* of a
+/// banner is activated, as opposed to a button on it. Servers that render
+/// buttons for declared actions conventionally leave this one unrendered.
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_ACTION: &str = "default";
+
+/// Whether the notification server says it handles actions at all.
+///
+/// Asked once, lazily, from the delivery thread: `get_capabilities` is a
+/// blocking D-Bus round trip and a session that never fires a banner has
+/// no reason to pay for it at launch.
+///
+/// This gate is the whole of the degradation the port plan asks for. A
+/// server that does not advertise `actions` never emits `ActionInvoked`,
+/// so declaring one would be decoration — the banner would look
+/// clickable and do nothing, which is worse than a banner that plainly
+/// is not. Said once in the log, and then never again.
+#[cfg(not(target_os = "macos"))]
+fn server_takes_actions() -> bool {
+    static TAKES: OnceLock<bool> = OnceLock::new();
+    *TAKES.get_or_init(|| match notify_rust::get_capabilities() {
+        Ok(caps) => {
+            let takes = caps.iter().any(|cap| cap == "actions");
+            tracing::info!(?caps, takes, "notification server capabilities");
+            takes
+        }
+        Err(e) => {
+            tracing::warn!("could not read notification server capabilities: {e}");
+            false
+        }
+    })
+}
+
+/// macOS puts the figure on its own `subtitle` line above the detail.
+/// XDG has no such field — notify-rust says as much in as many words
+/// ("Only useful on macOS. Not part of the XDG specification") and drops
+/// whatever is set there — so the same two lines become one body, in the
+/// same order and with the same break between them.
+#[cfg(not(target_os = "macos"))]
+fn xdg_body(banner: &Banner) -> String {
+    match (banner.subtitle.as_str(), banner.body.as_str()) {
+        ("", body) => body.to_string(),
+        (subtitle, "") => subtitle.to_string(),
+        (subtitle, body) => format!("{subtitle}\n{body}"),
+    }
+}
+
+/// The episode's stable id, as XDG's `replaces_id`.
+///
+/// Same job as the identifier macOS hands `UNNotificationRequest`: a
+/// follow-up for an episode already on screen must *replace* it rather
+/// than stack a second timestamp beside it. XDG's field is a `u32`
+/// rather than a string, so the id is hashed — FNV-1a written out here
+/// rather than `DefaultHasher`, whose output std explicitly declines to
+/// keep stable across releases, and stability is the entire point.
+///
+/// Never 0: the spec reads that value as "replace nothing", so an id
+/// that happened to hash to it would stack exactly like no id at all.
+#[cfg(not(target_os = "macos"))]
+fn xdg_id(id: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in id.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash.max(1)
+}
+
 /// Show one banner and block until the server resolves it. Serial on one
 /// long-lived thread — the thread-per-banner alternative left a thread per
 /// unattended banner during alert storms.
+///
+/// Shaped after the macOS path above, field for field: same title, the
+/// same two lines of text, the same "slow-burn findings arrive silently",
+/// and the same stable id so a follow-up replaces its predecessor. Where
+/// the two platforms differ they differ because XDG does, and each of
+/// those is noted at the line that makes the choice.
 #[cfg(not(target_os = "macos"))]
 fn deliver(banner: &Banner) {
     let mut n = Notification::new();
     n.appname(APP_NAME)
         .summary(&banner.title)
-        .subtitle(&banner.subtitle)
-        .body(&banner.body)
-        .sound_name(if banner.silent { "" } else { "default" });
+        .body(&xdg_body(banner))
+        .id(xdg_id(&banner.id));
+    // macOS *adds* a sound for a banner that is not silent and leaves
+    // silence as the default; XDG is the other way round — the server
+    // decides, and the only way to ask for quiet is to say so. So this
+    // sets a hint where macOS sets nothing, and sets nothing where macOS
+    // sets a sound.
+    if banner.silent {
+        n.hint(Hint::SuppressSound(true));
+    }
+    if server_takes_actions() {
+        // The label is rarely rendered for the default action, but a
+        // server that does render it should not show English to a
+        // Chinese reader. "Show Window" rather than a new string of its
+        // own: clicking really does show the window, and the tray menu
+        // already calls that exact act by that exact name.
+        n.action(DEFAULT_ACTION, &t!("common.show_window"));
+    }
 
     match n.show() {
         Ok(handle) => handle.wait_for_action(|action| {
-            // Banner click is `"default"`. Dismiss is `"__closed"`.
+            // Banner click is `"default"`. Dismiss and expiry are both
+            // `"__closed"` (`notify_rust`'s compatibility keyword for
+            // `NotificationClosed`), and neither is a request to look.
             if action != "__closed" {
                 signal_click();
             }
@@ -567,6 +658,51 @@ fn window_mins(window: Duration) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The two lines macOS shows as title-then-subtitle-then-body have
+    /// to survive the fold into one XDG body, in that order — and an
+    /// empty half must not leave a blank line behind.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_subtitle_folds_into_the_body_in_macos_order() {
+        let banner = |subtitle: &str, body: &str| Banner {
+            id: "zstats-x".into(),
+            title: "Chrome".into(),
+            subtitle: subtitle.into(),
+            body: body.into(),
+            silent: false,
+        };
+        assert_eq!(
+            xdg_body(&banner("CPU 87%", "pid 4120")),
+            "CPU 87%\npid 4120"
+        );
+        assert_eq!(xdg_body(&banner("", "pid 4120")), "pid 4120");
+        assert_eq!(xdg_body(&banner("CPU 87%", "")), "CPU 87%");
+        assert_eq!(xdg_body(&banner("", "")), "");
+    }
+
+    /// The id is what makes a follow-up replace its predecessor instead
+    /// of stacking beside it, so it has to be stable for one episode,
+    /// different between episodes, and never the one value the spec
+    /// reads as "replace nothing".
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_replace_id_is_stable_distinct_and_never_zero() {
+        assert_eq!(
+            xdg_id("zstats-sustained-4120"),
+            xdg_id("zstats-sustained-4120")
+        );
+        assert_ne!(
+            xdg_id("zstats-sustained-4120"),
+            xdg_id("zstats-sustained-4121")
+        );
+        assert_ne!(xdg_id("zstats-creep-Chrome"), xdg_id("zstats-creep-Safari"));
+        assert_ne!(xdg_id(""), 0, "0 means \"replace nothing\"");
+        // FNV-1a, spelled out so a refactor that swaps in a different
+        // hash is caught rather than silently changing which banners
+        // replace which.
+        assert_eq!(xdg_id("a"), 0xe40c_292c);
+    }
     use zstats::{AlertDetail, AlertEvent, AlertSubject};
 
     fn cpu_event(pid: u32) -> AlertEvent {

@@ -174,12 +174,29 @@
 
 **做什么**
 
-- **通知**：`notify-rust` 在 Linux 走 D-Bus，本来就在依赖里。要做的是 action 回调——点击横幅打开面板并切到告警页。守护进程不支持 action 时退化为「只显示，不可点」，并且**不要假装可点**。
+- ~~**通知**~~ **已完成**（2026-09-21，`notify.rs`）。原以为只差 action 回调，逐行对完 notify-rust 4.18 的源码后发现是**三个半缺口**，都属于「编得过、从没跑过」：
+
+  1. **副标题整条丢失。** notify-rust 的原话是 `subtitle` *"Only useful on macOS. Not part of the XDG specification."*，而三种横幅都往那儿放了实质内容。现在 `xdg_body` 把它折进 body，顺序和 macOS 的 title→subtitle→body 一致，空的一半不留空行。
+  2. **点击很可能根本不触发。** `wait_for_action` 等的是 `ActionInvoked`，而按规范守护进程只对**应用声明过的** action 发这个信号——我们从没调过 `.action()`。现在启动后第一条横幅时懒查一次 `get_capabilities()`，宿主advertise `actions` 才声明 `default` 动作，否则只显示、日志里说一次，**不假装可点**（这正是本条原本要求的降级）。
+  3. **静音横幅照样会响。** `sound_name("")` 设的是 `Hint::SoundName("")`，不是规范的静音方式。改成 `Hint::SuppressSound(true)`。方向和 macOS 相反是 XDG 本身决定的：macOS 默认静、要响才加声音；XDG 默认由守护进程决定、要静才得明说。
+  4. （半个）**同一 episode 的跟进会堆叠而不是替换。** `Banner::id` 在 Linux 上没人读——正是当初那批 dead-code 告警之一。XDG 的对应物是 `replaces_id`（`u32`），所以 `xdg_id` 用手写的 FNV-1a 把字符串 id 哈希过去；**不用 `DefaultHasher`**，std 明确不保证它跨版本稳定，而稳定正是这件事的全部意义。永不为 0——规范里 0 是「不替换任何东西」。
+
+  **验证方式**：`notify-rust` 的 XDG 后端默认走 zbus（纯 Rust，`default = ["z"]`），所以可以在 macOS 上用一个 scratch crate `cargo check --target x86_64-unknown-linux-gnu` **真编译**这条路——从真实源码里抽出函数、只替换 i18n 和 `Banner` 两处外部依赖，`--deny=warnings` 干净。FNV 常量另外用 Python 独立算过。`xdg_body` / `xdg_id` 两个纯函数在仓库里有非 macOS 门禁的单测，Linux CI 会跑。
+
+  **一处查完发现是虚惊**：`wait_for_action` 的闭包收的是 `&NotificationResponse` 还是 `&str`，曾怀疑会让横幅自然消失也误开告警页。`xdg/mod.rs:99` 保留了 `F: FnOnce(&str)` 的兼容签名并把 `Closed(_)` 映射成 `"__closed"`，原代码是对的。
 - **防休眠**：IOKit 的电源断言换成 logind 的 `Inhibit`（`what=idle`）。**这里有一个必须实测的未知**：hypridle 是否尊重 idle inhibitor。不尊重的话，这个开关在 Omarchy 上就是假的，那就应当在 Linux 上直接隐藏它，而不是留一个不起作用的开关。
 - **开机自启**：`SMAppService` 换成 `~/.config/autostart/zstats.desktop`。
 - **更新器**：Linux 上保留检查、去掉安装——DMG 与 Gatekeeper 都不适用。按钮改成「去发布页」，或者交给包管理之后整块隐藏。
 
-**验收**：触发一次真实告警，横幅出现并且点击落到告警页；开关打开后 `systemd-inhibit --list` 能看到我们；重启后面板自启；更新检查能报出新版本且不提供原地安装。
+**通知这一项的验收**（需要在 Omarchy 上做，Quickshell 支不支持 `actions` 是最后一个未知）：
+
+1. 触发一次真实告警，横幅出现，**两行文字都在**（macOS 上是副标题的那行现在是 body 的第一行）。
+2. 日志里有一行 `notification server capabilities`，看 `takes` 是 true 还是 false。
+3. `takes=true` 时点横幅应当打开面板并切到告警页；`takes=false` 时点了没反应是**正确行为**，不是 bug。
+4. 让同一个 episode 再报一次(或等一次跟进)，通知中心里应当是**替换**而不是两条并排。
+5. 持续负载/内存爬升那两种慢燃横幅应当**无声**,阈值告警有声。
+
+**其余各项的验收**：开关打开后 `systemd-inhibit --list` 能看到我们；重启后面板自启；更新检查能报出新版本且不提供原地安装。
 
 ## 阶段 6：能力驱动的界面与收尾
 
