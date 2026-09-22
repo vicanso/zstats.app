@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/vicanso/zstats.app/compare/v0.3.3..v0.3.4) - 2026-09-22
+
+### ⛰️  Features
+
+- Every release carries Linux tarballs, and a script verifies and installs one - ([f3d685b](https://github.com/vicanso/zstats.app/commit/f3d685b328ac86224df4e2c12584a6ec900238d0))
+- A Linux banner keeps both its lines, opens the alerts tab, and replaces its own follow-up - ([687e771](https://github.com/vicanso/zstats.app/commit/687e771aa5f717b2698b68b0f13aa64e5cc99988))
+
 ## [0.3.3](https://github.com/vicanso/zstats.app/compare/v0.3.2..v0.3.3) - 2026-09-19
 
 ### ⛰️  Features
