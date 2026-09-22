@@ -74,7 +74,7 @@
 **动手时发现的两件事**
 
 - **`exclusive_zone` 不设**就等于设 0，而 0 的语义是「不占位，但请把我挪开、别压住别人的占位区」——所以面板会自动落在 bar 下面，不需要我们去算 bar 有多高。
-- **两条边的 margin 要的是相反的东西，所以不能共用一个常量**（实机反馈，2026-09-18）：右边 8px 在 358pt 宽的面板旁边读不出来，看着就是贴着屏幕；顶部那 8px 则是多余的，面板应当像 macOS 的 popover 挂在菜单栏下沿一样挂在 bar 下沿。现在是 `PANEL_MARGIN_RIGHT = 10`、`PANEL_MARGIN_TOP = 0`。
+- **两条边的 margin 要的是相反的东西，所以不能共用一个常量**（实机反馈，2026-09-18）：右边 8px 在 358pt 宽的面板旁边读不出来，看着就是贴着屏幕；顶部那 8px 则是多余的，面板应当像 macOS 的 popover 挂在菜单栏下沿一样挂在 bar 下沿。现在两边都是 10(`PANEL_MARGIN_RIGHT` / `PANEL_MARGIN_TOP`)。**顶部曾经是 0,而那个 0 是在一个有布局 bug 的构建上量出来的**:gpui-component 的 CSD 外框当时把 surface 每边撑大 20px,内容第一行落在 bar 下方 20px 处、看着缝太大,0 正是让*那个*看起来对的值。inset 修掉之后 0 就是字面意义的贴死,又太紧。教训不在数字上——**在一个带布局 bug 的构建上调几何常量,调出来的是那个 bug**。
 - **面板尺寸不能拿合成器的答复回喂**（实机测出来的，2026-09-18）。`ZStatsApp::render` 每帧把 `window.bounds()` 镜像进 store，`open_main_window` 下次又拿它当请求的尺寸——macOS 上这是必需的（窗口可缩放，每次点托盘都重建，尺寸只活在那里），Wayland 上是个没有不动点的回环。实测 `hyprctl layers` 给出 `1352 26 598 893`：设计值 358×653，两轴都正好大了 240，右边缘落在 1950 而屏幕只有 1920——**这也是当初「右边贴着屏幕没有缝」的真正原因，margin 一直都在，只是面板画出去了**。修法是 Linux 上只继承 origin、尺寸恒取 `DEFAULT_WINDOW_SIZE`：layer surface 用户根本没法缩放，没有尺寸值得记。每帧那个镜像保留不动，它还带着 `scale_factor`，只是 Linux 上不再有人消费它的尺寸。
 - **gpui-component 的 CSD 外框必须在 layer surface 上关掉**（实机测出来的，2026-09-18，两条症状其实是一个 bug）。`WindowBorder::render` 每帧调 `set_client_inset(20px)`（`gpui-component` 的 `SHADOW_SIZE`，Linux 上是 20，其它平台 0），而 gpui 的 Wayland 后端在 `compute_outer_size` 里把这个 inset **加回**它报告的尺寸和提交的 buffer。于是 surface 画得比合成器锚定的框每边大 20：右边缘越过屏幕（读起来是「margin 没了」），而 bar 和第一行内容之间多出一条 20px 的阴影带（读起来是「顶部空隙太大」）。`Root::bordered(false)` 是 gpui-component 自己文档里为这种 surface 准备的开关——layer surface 由合成器摆放、没有标题栏、拉不动，那个外框没有任何东西可装饰。设置窗口和磁盘空间窗口是真正的 toplevel，外框照旧。
   - 顺带记一条死路：`WindowOptions::window_decorations = Server` **不管用**。layer surface 上没有 xdg-decoration 可协商，gpui 的 `request_decorations` 会回落成 `Client` 并打一行 log。
@@ -84,7 +84,7 @@
 **验收**（需要在 Omarchy 上做，容器里没有合成器）：
 
 1. `cargo build` 之前先装系统依赖：`pkgconf`、`libxkbcommon`、`libxkbcommon-x11`、`libxcb`、`fontconfig`、`freetype2`，运行还需要 `vulkan-icd-loader` 加显卡驱动。
-2. **用 `cargo run`（debug）验收**：release 构建会在失焦时自动收起，而托盘（阶段 3）和 `--toggle`（阶段 2）都还没有，收起之后没有任何入口能把它叫回来。debug 构建不自动收起，正好适合这一阶段。
+2. **光标进过面板再离开才收起**（debug 和 release 都是）。从托盘往下移、还没碰到面板时不能收：面板一 map 就把键盘抢走，光标还在 bar 和面板之间的空隙上时 Hyprland 会把键盘焦点还回去，于是 `wl_keyboard.leave` 比光标先到。这次 leave 在光标从未进入时忽略。真正的收起是 `wl_pointer.leave`（进过一次之后），点击仍落在底下的窗口上，不会被吃掉。钉住时不收。
 3. 面板应当贴在右上角、在 bar 下面、不被遮住也不遮住 bar。
 4. `hyprctl layers` 里能看到 namespace 为 `zstats` 的 overlay 层。
 5. Ctrl+1 到 Ctrl+7 切页签，进程页的过滤框能打字。
@@ -185,7 +185,9 @@
 
   **一处查完发现是虚惊**：`wait_for_action` 的闭包收的是 `&NotificationResponse` 还是 `&str`，曾怀疑会让横幅自然消失也误开告警页。`xdg/mod.rs:99` 保留了 `F: FnOnce(&str)` 的兼容签名并把 `Closed(_)` 映射成 `"__closed"`，原代码是对的。
 - **防休眠**：IOKit 的电源断言换成 logind 的 `Inhibit`（`what=idle`）。**这里有一个必须实测的未知**：hypridle 是否尊重 idle inhibitor。不尊重的话，这个开关在 Omarchy 上就是假的，那就应当在 Linux 上直接隐藏它，而不是留一个不起作用的开关。
-- **开机自启**：`SMAppService` 换成 `~/.config/autostart/zstats.desktop`。
+- **开机自启**：`SMAppService` 换成 `~/.config/autostart/zstats.desktop`。**能用,但机制不是 Hyprland**（2026-09-22 实测）：Hyprland 自己不读 XDG autostart，是 systemd 的 `systemd-xdg-autostart-generator` 把那个目录下的 `.desktop` 生成成 `app-*@autostart.service` 挂到 `xdg-desktop-autostart.target` 下。所以这是**会话的属性而不是合成器的**，换一套 session 就可能没有；装之前先 `systemctl --user status xdg-desktop-autostart.target` 确认它 active，没有就退回 hyprland.conf 的 `exec-once`。好处是这条路生成出来的本来就是一个真 unit，`systemctl --user status` 能查、能停，不必再手写一个。
+  三处条目内容上的讲究，都不是惯例而是这个程序的要求：`Exec` **不带参数**（裸启动在没有实例时刻意不开面板——那正是登录路径，`--toggle` 会开，不能用）；`Exec` 用**绝对路径**（generator 生成的 unit 不继承 shell 的 `PATH`）；`StartupNotify=false`（面板是 layer surface，不产生普通 toplevel 去满足启动通知，设 true 会让光标转圈到超时）。
+  改完要 `systemctl --user daemon-reload` 才会被 generator 看见，否则得等下次登录。
 - **更新器**：Linux 上保留检查、去掉安装——DMG 与 Gatekeeper 都不适用。按钮改成「去发布页」，或者交给包管理之后整块隐藏。
 
 **通知这一项的验收**（需要在 Omarchy 上做，Quickshell 支不支持 `actions` 是最后一个未知）：

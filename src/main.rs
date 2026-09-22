@@ -63,6 +63,8 @@ use crate::assets::Assets;
 use crate::placement::{DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 // Pointed at the empty `locales_stub/` so the macro embeds no translations.
 // Real files live in `assets/locales/` and inflate via `i18n_loader`.
@@ -127,11 +129,20 @@ const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else
 #[cfg(target_os = "linux")]
 const PANEL_MARGIN_RIGHT: f32 = 10.;
 
-/// Gap between the panel's top edge and the bar above it: none, so the
-/// panel hangs off the bar the way the macOS popover hangs off the menu
-/// bar (there `TRAY_GAP`, 6pt below the *icon* — here the StatusNotifier
-/// protocol reports no icon rect, so the bar's own edge is the only line
-/// left to hang from).
+/// Gap between the panel's top edge and the bar above it. Matches
+/// [`PANEL_MARGIN_RIGHT`]: a popover with the same inset on both edges
+/// it hangs off reads as placed, and the right edge is the one that
+/// already looks right.
+///
+/// This was 0 for a while, and the reason is worth keeping because it
+/// was a measurement taken through a bug. gpui-component's client-side
+/// frame was inflating the surface by 20px a side
+/// (`Root::bordered(false)` in `build_panel` is where that ends), so the
+/// first pixel of content sat 20px below the bar and the panel looked
+/// over-gapped; 0 was the value that made *that* look right. With the
+/// inflation gone, 0 is what it says — flush against the bar, and too
+/// tight. The lesson is not about the number: a geometry constant tuned
+/// against a build with a layout bug in it encodes the bug.
 ///
 /// Measured from what the bar left free, **not** from the top of the
 /// screen: an exclusive zone of 0 — which is what `exclusive_zone: None`
@@ -143,13 +154,49 @@ const PANEL_MARGIN_RIGHT: f32 = 10.;
 /// subtracting the bar's height by hand — a number no protocol reports,
 /// so it would have to be configured rather than measured.
 #[cfg(target_os = "linux")]
-const PANEL_MARGIN_TOP: f32 = 0.;
+const PANEL_MARGIN_TOP: f32 = 10.;
 
 /// Clicking the tray icon first takes focus away from the window, which
 /// auto-hides it, and only then delivers the click. A click landing inside
 /// this window of an auto-hide is read as "the user wanted it gone" and does
 /// not reopen — that's what makes the tray icon toggle.
 const TOGGLE_GRACE: Duration = Duration::from_millis(300);
+
+/// How long a freshly mapped layer surface is immune to both auto-hide
+/// paths.
+///
+/// A panel that has been on screen for a tenth of a second has not been
+/// looked away from, whatever the compositor just said. It exists
+/// because Wayland offers two dismissal signals and neither is
+/// trustworthy in the frames right after a map: keyboard focus can
+/// arrive and leave again on its own under focus-follows-mouse, and the
+/// pointer's first enter/leave pair can land before the user has moved
+/// at all. macOS needs none of it — an `NSWindow` that
+/// `activate_window` brought up stays active until something takes it.
+///
+/// Deliberately short: a floor under "the panel just opened", not a
+/// window in which it refuses to close. A real click away is produced
+/// by a human hand and arrives later than this at the very earliest.
+#[cfg(target_os = "linux")]
+const REVEAL_GRACE: Duration = Duration::from_millis(150);
+
+/// How long the pointer has to stay outside before that counts as a
+/// dismissal.
+///
+/// The panel maps flush under the bar, so a tray click whose cursor sat
+/// a few pixels above the panel's top edge puts the new surface *under*
+/// the pointer. Wayland then sends `wl_pointer.enter` for a panel the
+/// user has not reached, and the next small movement back into the bar
+/// is a `leave` — which used to close it on the spot. Whether that
+/// happened at all depended on where in the bar the click landed, which
+/// is exactly why it looked intermittent rather than broken.
+///
+/// Re-checking on the next frame, which this replaces, is microseconds
+/// and settles nothing. 400ms is longer than the gap between an
+/// accidental enter and the deliberate move that follows it, and short
+/// enough that a real look-away still reads as immediate.
+#[cfg(target_os = "linux")]
+const POINTER_LEAVE_GRACE: Duration = Duration::from_millis(400);
 
 /// Vertical padding inside an auxiliary window's scrolling body (both
 /// settings and disk-space use it). Named because `about_card`'s height
@@ -202,6 +249,21 @@ struct ZStatsApp {
     /// Repaints the panel when a collection tick lands. Without it the store
     /// would update and nothing on screen would move.
     _metrics: Subscription,
+    /// Linux only. The pointer has been inside this panel since it opened.
+    /// Leaving is what dismisses it — a click-catcher would eat that click,
+    /// and Hyprland does not send keyboard-leave for a click on the window
+    /// that was already focused. Stays false until the first enter, so a
+    /// panel opened from the tray (cursor still on the bar) does not
+    /// vanish on the first frame.
+    #[cfg(target_os = "linux")]
+    pointer_was_inside: bool,
+    /// Linux only. When this window mapped — see [`REVEAL_GRACE`].
+    #[cfg(target_os = "linux")]
+    opened_at: Instant,
+    /// Linux only. A pointer-leave re-check is already waiting out
+    /// [`POINTER_LEAVE_GRACE`]; a second one would just race it.
+    #[cfg(target_os = "linux")]
+    leave_pending: bool,
 }
 
 impl ZStatsApp {
@@ -214,13 +276,38 @@ impl ZStatsApp {
             if !this.was_active {
                 return;
             }
-            // Debug keeps the panel up so you can inspect it from the IDE
-            // or another window. Release still collapses to the tray,
-            // unless the footer pin is in — that is only auto-hide,
-            // the tray click still toggles.
-            if cfg!(debug_assertions) || prefs::pinned() {
+            // The footer pin is the only thing that keeps a focused-away
+            // panel up. macOS debug also stays up, so the panel can be
+            // inspected from the IDE. Linux does not get that exemption:
+            // a layer-shell popover that survives a click away is the
+            // bug, and the tray / `--toggle` can bring it back.
+            if prefs::pinned() || (cfg!(debug_assertions) && cfg!(target_os = "macos")) {
                 return;
             }
+            // The panel takes keyboard focus when it maps. On the way down
+            // from the tray the cursor is still over the bar, then over
+            // whatever window is in the gap, and Hyprland hands keyboard
+            // focus back — `wl_keyboard.leave` — before the pointer has
+            // ever entered the panel. That is not the user leaving.
+            // Pointer-leave (`dismiss_when_pointer_leaves`) is what
+            // dismisses once they have actually been inside, and it does
+            // not eat the click.
+            #[cfg(target_os = "linux")]
+            if this.opened_at.elapsed() < REVEAL_GRACE || !this.pointer_was_inside {
+                return;
+            }
+            // Which path took the panel down, and on what evidence.
+            // "It vanished before I could reach it" gets asked about the
+            // installed build, and all three ways out of here were
+            // silent — so the answer needed a rebuild to find, which is
+            // exactly the cost these lines exist to remove.
+            #[cfg(target_os = "linux")]
+            tracing::info!(
+                path = "keyboard-leave",
+                hovered = window.is_window_hovered(),
+                up_for_ms = this.opened_at.elapsed().as_millis(),
+                "panel auto-hidden"
+            );
             cx.global::<ZStatsGlobalStore>()
                 .clone()
                 .update(cx, |state, cx| {
@@ -247,9 +334,13 @@ impl ZStatsApp {
             // a layer surface is cheap to rebuild. The pace still has to
             // drop — the collector is resident either way, and without
             // this it would keep sampling at the visible cadence for a
-            // panel that is gone.
+            // panel that is gone. Pointer-leave is the other Linux path
+            // (`dismiss_when_pointer_leaves`); this one is alt-tab and
+            // any compositor that does send keyboard-leave.
             #[cfg(not(target_os = "macos"))]
             {
+                // State was already retired above, shared with the macOS
+                // path. Only the window itself is left.
                 cx.global::<metrics::CollectorPace>().hidden();
                 window.remove_window();
             }
@@ -285,7 +376,70 @@ impl ZStatsApp {
             _focus_restore: focus_restore,
             _appearance: appearance,
             _metrics: metrics,
+            #[cfg(target_os = "linux")]
+            pointer_was_inside: false,
+            #[cfg(target_os = "linux")]
+            opened_at: Instant::now(),
+            #[cfg(target_os = "linux")]
+            leave_pending: false,
         }
+    }
+
+    /// Hide when the pointer leaves, once it has been inside.
+    ///
+    /// `wl_pointer.leave` arrives before the click on the window the
+    /// cursor moved to, and that click is delivered to *that* window —
+    /// nothing of ours is under it. A transparent layer under the panel
+    /// was the other way to notice the click, and it swallowed the
+    /// press, so the first click on another app did nothing.
+    #[cfg(target_os = "linux")]
+    fn dismiss_when_pointer_leaves(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if prefs::pinned() {
+            return;
+        }
+        // Inside the reveal grace this deliberately does *not* latch.
+        // An enter that arrives within a frame or two of the map is the
+        // surface appearing under a stationary cursor, not the user
+        // arriving — and latching on it is what armed a dismissal the
+        // user never asked for.
+        if window.is_window_hovered() {
+            if self.opened_at.elapsed() >= REVEAL_GRACE {
+                self.pointer_was_inside = true;
+            }
+            return;
+        }
+        if !self.pointer_was_inside || self.opened_at.elapsed() < REVEAL_GRACE || self.leave_pending
+        {
+            return;
+        }
+        // Wait the grace out on a timer rather than on frames: with the
+        // pointer outside, nothing is generating input events, so the
+        // next frame is the next collection tick — seconds away, and at
+        // a cadence that has nothing to do with this question.
+        self.leave_pending = true;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(POINTER_LEAVE_GRACE).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.leave_pending = false;
+                if prefs::pinned() || window.is_window_hovered() {
+                    return;
+                }
+                tracing::info!(
+                    path = "pointer-leave",
+                    up_for_ms = this.opened_at.elapsed().as_millis(),
+                    "panel auto-hidden"
+                );
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| {
+                        state.mark_auto_hidden();
+                        state.reset_transient_views(window, cx);
+                    });
+                cx.global::<metrics::CollectorPace>().hidden();
+                window.remove_window();
+            });
+        })
+        .detach();
     }
 }
 
@@ -305,6 +459,8 @@ impl Render for ZStatsApp {
         store.update(cx, |state, cx| {
             state.set_window_metrics(bounds, scale_factor, cx)
         });
+        #[cfg(target_os = "linux")]
+        self.dismiss_when_pointer_leaves(window, cx);
 
         let tint = prefs::opacity().unwrap_or(if theme::is_dark() {
             BACKGROUND_OPACITY_DARK
@@ -1003,6 +1159,15 @@ fn aux_min_window_size() -> gpui::Size<gpui::Pixels> {
 /// really closes (the main window's own stance); the stored handle then
 /// fails its update and the next click builds a fresh window.
 pub fn open_settings_window(cx: &mut App) {
+    // The panel is an overlay on Wayland, so a settings window opened
+    // under it cannot be reached. Unpin keeps the panel; everything else
+    // dismisses it the way focus-loss does on macOS. Deferred: this is
+    // usually called from the panel's own click handler, and `update`
+    // on that window would fail while its handler is still on the stack.
+    #[cfg(target_os = "linux")]
+    if !prefs::pinned() {
+        cx.defer(|cx| close_panel_from_outside(cx));
+    }
     let existing = cx.global::<ZStatsGlobalStore>().read(cx).settings_window();
     if let Some(handle) = existing
         && handle
@@ -1049,6 +1214,12 @@ pub fn open_settings_window(cx: &mut App) {
 /// drag it wider, and macOS remembers nothing here on purpose — every open
 /// starts from the same known-good frame.
 pub fn open_storage_window(cx: &mut App) {
+    // Same reason as settings: an overlay panel would sit on top of this
+    // window. Deferred for the same reason too.
+    #[cfg(target_os = "linux")]
+    if !prefs::pinned() {
+        cx.defer(|cx| close_panel_from_outside(cx));
+    }
     let existing = cx.global::<ZStatsGlobalStore>().read(cx).storage_window();
     if let Some(handle) = existing
         && handle
@@ -1191,6 +1362,41 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     }
 }
 
+/// Bookkeeping shared by every way the panel leaves the screen off
+/// macOS: the collector drops to the hidden cadence, and yesterday's
+/// filter does not greet the next open.
+#[cfg(not(target_os = "macos"))]
+fn retire_panel_state(window: &mut Window, cx: &mut App) {
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, cx| {
+            state.mark_auto_hidden();
+            state.reset_transient_views(window, cx);
+        });
+    cx.global::<metrics::CollectorPace>().hidden();
+}
+
+/// Close the panel from a window that is not the panel (the tray, an
+/// auxiliary window opening). The activation callback cannot use this —
+/// it is already inside the panel's update.
+#[cfg(not(target_os = "macos"))]
+fn close_panel_from_outside(cx: &mut App) {
+    if let Some(handle) = live_panel_handle(cx) {
+        // Logged beside the two auto-hide paths because the symptom is
+        // the same: a tray host that delivers one activation as two
+        // clicks closes the panel here, milliseconds after opening it,
+        // and from the outside that is indistinguishable from the panel
+        // hiding itself.
+        tracing::info!("panel closed from outside");
+        let _ = handle.update(cx, |_, window, cx| {
+            retire_panel_state(window, cx);
+            window.remove_window();
+        });
+    } else {
+        cx.global::<metrics::CollectorPace>().hidden();
+    }
+}
+
 /// The panel's window options. `layer_shell` is consulted on Wayland only,
 /// where the first attempt asks for a layer surface and the fallback above
 /// asks for an ordinary window.
@@ -1237,6 +1443,15 @@ fn panel_options(bounds: Bounds<gpui::Pixels>, layer_shell: bool) -> WindowOptio
     #[cfg(target_os = "linux")]
     if layer_shell {
         options.kind = panel_kind();
+        // Say Client rather than leave it unset. gpui defaults an unset
+        // field to `Server` (`window.rs:1582`), and a layer surface has
+        // no xdg-decoration to negotiate, so every open logged
+        // "Server-side decorations requested, but the Wayland server
+        // does not support them" at INFO and fell back to Client
+        // anyway. Nothing behaved differently; the line just read like a
+        // fault on a path that has none. The ordinary fallback window
+        // below keeps the default, where the request is real.
+        options.window_decorations = Some(gpui::WindowDecorations::Client);
     }
     options
 }
@@ -1359,8 +1574,10 @@ pub fn toggle_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        cx.global::<metrics::CollectorPace>().hidden();
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        // `handle` is the panel; closing from here is outside its
+        // update, which is what `close_panel_from_outside` requires.
+        let _ = handle;
+        close_panel_from_outside(cx);
     }
 }
 

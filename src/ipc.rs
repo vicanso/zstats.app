@@ -219,7 +219,17 @@ fn claim_at(path: &Path, invocation: Invocation) -> Role {
 /// dead and starts cleanly.
 fn deliver(mut stream: UnixStream, invocation: Invocation) {
     match writeln!(stream, "{}", invocation.wire()) {
-        Ok(()) => tracing::info!(?invocation, "handed to the running instance"),
+        // Both sides of the handover name the build they are. A rebuild
+        // that is never run is the trap this module sets for whoever
+        // works on it: the new binary finds the old one's socket, hands
+        // its command over and exits, so the panel that opens is still
+        // the old code and nothing in the log said so. Two different
+        // commits across these two lines is that, spelled out.
+        Ok(()) => tracing::info!(
+            ?invocation,
+            this_build = crate::about::commit(),
+            "handed to the running instance"
+        ),
         Err(e) => tracing::warn!(
             ?invocation,
             "connected to the running instance but could not deliver: {e}"
@@ -251,7 +261,11 @@ pub fn serve(listener: UnixListener, cx: &mut App) {
         // Ends on its own: once the app shuts down this task stops being
         // polled and the sender thread's channel drops.
         while let Ok(invocation) = rx.recv().await {
-            tracing::info!(?invocation, "received from a second launch");
+            tracing::info!(
+                ?invocation,
+                this_build = crate::about::commit(),
+                "received from a second launch"
+            );
             cx.update(|cx| match invocation {
                 Invocation::Toggle => crate::toggle_main_window(cx, None),
                 Invocation::Launch => crate::show_main_window(cx),

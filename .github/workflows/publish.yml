@@ -371,6 +371,76 @@ jobs:
           gh release upload nightly \
             "release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg" --clobber
 
+  # Linux tarballs. No signing, no notarization, no bundle — so this job
+  # is the whole story: build, tar, upload. Two architectures because
+  # Omarchy runs on x86_64 while the development machine is aarch64
+  # (docs/omarchy-port.md), and the source is identical across them.
+  #
+  # `install-linux.sh` rides inside the tarball on purpose: the script
+  # installs whatever binary sits next to it, so unpacking and running it
+  # never touches the network. The same script downloads a release when
+  # it is run on its own.
+  linux:
+    needs: prepare_vars
+    if: needs.prepare_vars.outputs.should_build == 'true'
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v7
+      - name: system dependencies
+        # The same list test.yml installs, for the same reasons:
+        # xkbcommon links at build time (gpui turns the crate's default
+        # features off, so there is no dlopen shim) and gpui's x11
+        # backend pulls `xkbcommon-x11` and `xcb` in with it — a missing
+        # one of those surfaces at the *link* step, long after everything
+        # has compiled. fontconfig backs font-kit. Wayland and Vulkan are
+        # dlopened at runtime, so they are not needed to build.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-build-${{ matrix.arch }}
+      - name: build
+        run: cargo build --release
+      - name: stage the tarball
+        run: |
+          set -euo pipefail
+          stage="${{ env.APP_NAME }}-linux-${{ matrix.arch }}"
+          mkdir -p "$stage"
+          install -m755 "target/release/${{ env.APP_NAME }}" "$stage/${{ env.APP_NAME }}"
+          install -m644 "assets/${{ env.APP_NAME }}-icon.png" "$stage/${{ env.APP_NAME }}.png"
+          install -m755 scripts/install-linux.sh "$stage/install-linux.sh"
+          tar -czf "$stage.tar.gz" "$stage"
+          ls -l "$stage.tar.gz"
+      - name: upload asset (tag)
+        # Same shape as the macOS upload: prepare_vars created the
+        # release before this job started, so a plain upload is
+        # race-free and --clobber makes a re-run idempotent.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "${{ env.APP_NAME }}-linux-${{ matrix.arch }}.tar.gz" --clobber
+      - name: upload asset (nightly)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release upload nightly \
+            "${{ env.APP_NAME }}-linux-${{ matrix.arch }}.tar.gz" --clobber
+
   # One DMG that fits both chips, published as plain `zstats.dmg` so it
   # reads as the default download; the arch-suffixed DMGs stay for anyone
   # who wants the smaller file. Pulls the per-arch DMGs back off the
@@ -492,7 +562,7 @@ jobs:
   # artifacts between jobs — what gets hashed is exactly what users will
   # download.
   checksums:
-    needs: [macos, universal]
+    needs: [macos, universal, linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -500,8 +570,12 @@ jobs:
       - name: build and upload SHA256SUMS
         run: |
           set -euo pipefail
-          gh release download "$GITHUB_REF_NAME" --pattern '*.dmg' --dir assets
-          (cd assets && sha256sum *.dmg | sort -k2 > ../SHA256SUMS)
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern '*.dmg' --pattern '*.tar.gz' --dir assets
+          # Everything that was downloaded, whatever it is — the Linux
+          # installer verifies its tarball against this file, so a
+          # release asset missing from here is one nobody can check.
+          (cd assets && sha256sum -- * | sort -k2 > ../SHA256SUMS)
           echo "--- SHA256SUMS ---"; cat SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
 
@@ -511,7 +585,7 @@ jobs:
   # same names, land on a mirror that is reachable there.
   #
   # Last in the chain on purpose: it copies what the GitHub release
-  # actually carries (three DMGs plus SHA256SUMS) instead of building or
+  # actually carries (three DMGs, two Linux tarballs, SHA256SUMS) instead of building or
   # hashing anything of its own — the same what-users-download principle
   # the universal and checksums jobs follow. Nightly is deliberately not
   # mirrored: it is a rolling build, and re-uploading ~100 MB to Gitee

@@ -327,7 +327,7 @@ make release  # cargo build --release
 make bundle   # .app（需要 cargo install cargo-bundle）
 ```
 
-debug 构建启动时直接开窗，失焦也不收起，方便对着 IDE 看；release 构建只有托盘。
+debug 构建启动时直接开窗。macOS 上 debug 失焦不收起，方便对着 IDE 看；Linux 上 debug 也收起，但是在光标离开面板时，而不是靠一层把点击吃掉的透明遮罩（`docs/omarchy-port.md` 阶段 1）——底下的应用第一次点击必须有效。托盘和 `--toggle` 能叫回来。release 构建只有托盘。
 
 ## 托盘 popover 模型
 

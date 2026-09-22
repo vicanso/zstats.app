@@ -724,6 +724,12 @@ pub fn init_tray(cx: &mut App) {
                 let _ = rect;
                 None
             };
+            // Every click the host delivers, before anything is done with
+            // it. A tray host is free to turn one activation into two
+            // events, and from the panel's side that is indistinguishable
+            // from an auto-hide: it opens and is gone. Two of these lines
+            // milliseconds apart is the whole diagnosis.
+            tracing::info!("tray click received");
             if action_tx.send_blocking(TrayAction::Toggle(anchor)).is_err() {
                 return;
             }
