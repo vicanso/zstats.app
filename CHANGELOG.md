@@ -1,11 +1,21 @@
 # Changelog
 
+## [unreleased]
+
+### ⛰️  Features
+
+- The Linux build updates in place, keeps awake, starts at login, and finds, trashes and reveals files - ([51349d3](https://github.com/vicanso/zstats.app/commit/51349d3a69d057f7007371222d6820e2021af20b))
+
 ## [0.3.4](https://github.com/vicanso/zstats.app/compare/v0.3.3..v0.3.4) - 2026-09-22
 
 ### ⛰️  Features
 
 - Every release carries Linux tarballs, and a script verifies and installs one - ([f3d685b](https://github.com/vicanso/zstats.app/commit/f3d685b328ac86224df4e2c12584a6ec900238d0))
 - A Linux banner keeps both its lines, opens the alerts tab, and replaces its own follow-up - ([687e771](https://github.com/vicanso/zstats.app/commit/687e771aa5f717b2698b68b0f13aa64e5cc99988))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.4 - ([5e78f6b](https://github.com/vicanso/zstats.app/commit/5e78f6bb7a2557dc6dda17ea25b8c9ea0f6dd9cf))
 
 ## [0.3.3](https://github.com/vicanso/zstats.app/compare/v0.3.2..v0.3.3) - 2026-09-19
 
@@ -17,25 +27,25 @@
 
 - The Gitee mirror takes a release, and the updater can download from it - ([ba25d68](https://github.com/vicanso/zstats.app/commit/ba25d6802e81f603387605b413f5df85fe8f65e7))
 
-## [0.3.2](https://github.com/vicanso/zstats.app/compare/v0.3.0..v0.3.2) - 2026-09-17
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.3 - ([8edb79e](https://github.com/vicanso/zstats.app/commit/8edb79ef05e0c81605eafb1ac8b4941c49447829))
+
+## [0.3.2](https://github.com/vicanso/zstats.app/compare/v0.3.1..v0.3.2) - 2026-09-17
 
 ### ⛰️  Features
 
 - The Linux port builds and tests, and the panel anchors itself top-right on Wayland - ([b3258c5](https://github.com/vicanso/zstats.app/commit/b3258c5019258f2d9785a691fc5e155e88315199))
-- Every release mirrors to Gitee, and the updater falls back there when GitHub is unreachable - ([014af7a](https://github.com/vicanso/zstats.app/commit/014af7a61824ce3ed75a082cd305ddbe5c23b761))
-- A switch keeps the Mac awake, and the footer says so while it is held - ([a436fed](https://github.com/vicanso/zstats.app/commit/a436fedeba6c00b9c9aad15d2f9c8d7502604998))
 
 ### 🐛 Bug Fixes
 
 - Settings, launch-at-login, and the Auto tray stop painting a lie - ([d944cdf](https://github.com/vicanso/zstats.app/commit/d944cdfb0315176797259a103a0c10786127e636))
 - Processor watts sit beside the chip, and uptime hugs the right - ([3db570a](https://github.com/vicanso/zstats.app/commit/3db570a59e39c13f80ec84a63f19ce77f48c2e6e))
 - The Gitee mirror tells gh which repository it is, and can be run for a tag by hand - ([96221a1](https://github.com/vicanso/zstats.app/commit/96221a1fd376816c8241477cc51977b9ed8673d0))
-- Show Window opens the panel under the tray icon, not where it was last left - ([eb890fb](https://github.com/vicanso/zstats.app/commit/eb890fb04367f0ec965eb4ef7fc858f4e078c5aa))
 
 ### ⚙️ Miscellaneous Tasks
 
-- Version 0.3.1 - ([2346ec4](https://github.com/vicanso/zstats.app/commit/2346ec4a2316caebcf33cceb74930a54a5dba58e))
-- Update tray-icon (tauri-apps/tray-icon#365) - ([3da9a45](https://github.com/vicanso/zstats.app/commit/3da9a452d62953e0f2beceb25885d1c6702bf5c7))
+- Version 0.3.2 - ([f854a16](https://github.com/vicanso/zstats.app/commit/f854a16464c1dc6d558ba9f45af450855751e0d3))
 
 ## [0.3.1](https://github.com/vicanso/zstats.app/compare/v0.3.0..v0.3.1) - 2026-09-16
 
@@ -50,6 +60,7 @@
 
 ### ⚙️ Miscellaneous Tasks
 
+- Version 0.3.1 - ([2346ec4](https://github.com/vicanso/zstats.app/commit/2346ec4a2316caebcf33cceb74930a54a5dba58e))
 - Update tray-icon (tauri-apps/tray-icon#365) - ([3da9a45](https://github.com/vicanso/zstats.app/commit/3da9a452d62953e0f2beceb25885d1c6702bf5c7))
 
 ## [0.3.0](https://github.com/vicanso/zstats.app/compare/v0.2.3..v0.3.0) - 2026-09-15
@@ -58,12 +69,22 @@
 
 - A full disk turns the tray, the panel pins and keeps its tab, and cards and History rows jump to their subject - ([33edc2f](https://github.com/vicanso/zstats.app/commit/33edc2f61647f0614792c12ebfd1397e381f1fb0))
 
-## [0.2.3](https://github.com/vicanso/zstats.app/compare/v0.2.1..v0.2.3) - 2026-09-08
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.0 - ([df8bd62](https://github.com/vicanso/zstats.app/commit/df8bd624756ed4f83fb354f403a353aaa00dae9a))
+
+## [0.2.3](https://github.com/vicanso/zstats.app/compare/v0.2.2..v0.2.3) - 2026-09-08
 
 ### 🐛 Bug Fixes
 
 - A quiet stretch re-arms, quit checks the name, and a failed scan keeps its clock - ([20940cc](https://github.com/vicanso/zstats.app/commit/20940cca5ac65a4fc396b524d6edd44d605fd03e))
 - The same episode keeps one banner, and launch clears the stacked leftovers - ([968801a](https://github.com/vicanso/zstats.app/commit/968801a932a82006e8bcfc44c8b25d8b8c2aeb7c))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.2.3 - ([7c30b4d](https://github.com/vicanso/zstats.app/commit/7c30b4d804a60b80bd001bb8c015b3dd21180950))
+
+## [0.2.2](https://github.com/vicanso/zstats.app/compare/v0.2.1..v0.2.2) - 2026-09-04
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -81,6 +102,10 @@
 
 - The install stops re-verifying what the checksum already vouched for - ([8dfb9e6](https://github.com/vicanso/zstats.app/commit/8dfb9e696f4b1bad316fb0dec8ce308e37a4b5a1))
 
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.2.1 - ([8b04a15](https://github.com/vicanso/zstats.app/commit/8b04a154ff2be81fd56735be6811f0ae7f0c859c))
+
 ## [0.2.0](https://github.com/vicanso/zstats.app/compare/v0.1.18..v0.2.0) - 2026-08-28
 
 ### ⛰️  Features
@@ -97,6 +122,10 @@
 
 - Update readme - ([540e929](https://github.com/vicanso/zstats.app/commit/540e9292a98925cc82b2c5fdf9adcb18cf461e00))
 
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.2.0 - ([975a9d8](https://github.com/vicanso/zstats.app/commit/975a9d8272b21cd776aca2c89118c8ccc4c9f832))
+
 ## [0.1.18](https://github.com/vicanso/zstats.app/compare/v0.1.17..v0.1.18) - 2026-08-27
 
 ### ⛰️  Features
@@ -106,9 +135,10 @@
 
 ### ⚙️ Miscellaneous Tasks
 
+- Version 0.1.18 - ([d6f894e](https://github.com/vicanso/zstats.app/commit/d6f894e11b041a0cd1fbe97fcd9845c2ee64d0e7))
 - A hidden panel stays at 5s — load no longer pins the open cadence - ([eee054d](https://github.com/vicanso/zstats.app/commit/eee054d51ef328efb43f8e5c65461b64b357d834))
 
-## [0.1.17](https://github.com/vicanso/zstats.app/compare/v0.1.14..v0.1.17) - 2026-08-26
+## [0.1.17](https://github.com/vicanso/zstats.app/compare/v0.1.16..v0.1.17) - 2026-08-26
 
 ### ⛰️  Features
 
@@ -117,6 +147,15 @@
 - A whole-disk analysis scope, rooted at the data volume - ([54df1ca](https://github.com/vicanso/zstats.app/commit/54df1ca717f53213bb7bb0e48133c2f4cb97323d))
 - The menu bar waits for critical pressure, not the warning tier - ([a041786](https://github.com/vicanso/zstats.app/commit/a0417864e0fe30b637b9bababc57bc7a8623bfbe))
 - Hovering a History band reads its stretches out, one line each - ([798c8f0](https://github.com/vicanso/zstats.app/commit/798c8f044309f500be3a717ffdec4fcc299df007))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.1.17 - ([676dbd9](https://github.com/vicanso/zstats.app/commit/676dbd910ed0a350a0e73ca7b7965350262135b9))
+
+## [0.1.16](https://github.com/vicanso/zstats.app/compare/v0.1.15..v0.1.16) - 2026-08-25
+
+### ⛰️  Features
+
 - A slow-burn banner says when nobody has been using the app - ([9d1aaba](https://github.com/vicanso/zstats.app/commit/9d1aaba6e9e2a6f7b30065917d779c9d05b8115f))
 - A notifications master switch — banners off, the record untouched - ([d34bf39](https://github.com/vicanso/zstats.app/commit/d34bf393ba310c3d1487703d704b1b2f10d46fd4))
 
@@ -127,58 +166,29 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Version 0.1.16 - ([d266f31](https://github.com/vicanso/zstats.app/commit/d266f31979b2158d6973907444c199273091a48a))
-- Version 0.1.15 - ([3b85fe0](https://github.com/vicanso/zstats.app/commit/3b85fe07fcbde253c2f1c612352266255d70fe38))
-- Version 0.1.14 - ([d0104d5](https://github.com/vicanso/zstats.app/commit/d0104d527ad6fbe423c6e8c2b85e39e8f0c33a11))
 
-## [0.1.16](https://github.com/vicanso/zstats.app/compare/v0.1.14..v0.1.16) - 2026-08-25
-
-### ⛰️  Features
-
-- A slow-burn banner says when nobody has been using the app - ([9d1aaba](https://github.com/vicanso/zstats.app/commit/9d1aaba6e9e2a6f7b30065917d779c9d05b8115f))
-- A notifications master switch — banners off, the record untouched - ([d34bf39](https://github.com/vicanso/zstats.app/commit/d34bf393ba310c3d1487703d704b1b2f10d46fd4))
-
-### 🐛 Bug Fixes
-
-- The creep banner re-arms on the clock, never on a dip - ([131403b](https://github.com/vicanso/zstats.app/commit/131403bed371e65c0e5aba7feda70a24c504bb6f))
+## [0.1.15](https://github.com/vicanso/zstats.app/compare/v0.1.14..v0.1.15) - 2026-08-24
 
 ### ⚙️ Miscellaneous Tasks
 
 - Version 0.1.15 - ([3b85fe0](https://github.com/vicanso/zstats.app/commit/3b85fe07fcbde253c2f1c612352266255d70fe38))
 - Version 0.1.14 - ([d0104d5](https://github.com/vicanso/zstats.app/commit/d0104d527ad6fbe423c6e8c2b85e39e8f0c33a11))
 
-## [0.1.14](https://github.com/vicanso/zstats.app/compare/v0.1.11..v0.1.14) - 2026-08-24
-
-### ⛰️  Features
-
-- The memory face finds its own way back — five quiet minutes, or the ✕ - ([f8db833](https://github.com/vicanso/zstats.app/commit/f8db833938cc8993c489c11afc9ca9ed37820154))
+## [0.1.14](https://github.com/vicanso/zstats.app/compare/v0.1.13..v0.1.14) - 2026-08-24
 
 ### 🐛 Bug Fixes
 
 - The finished update's installer image is detached at the next launch - ([22fc11d](https://github.com/vicanso/zstats.app/commit/22fc11d4e4f5aaed329a21d0ce0a1a8a59a0c08e))
-- Banners come back from the dead — UNUserNotificationCenter, with both gates named - ([95cb4ba](https://github.com/vicanso/zstats.app/commit/95cb4ba9616793dd9fb56b6ba7fbabf5c2459198))
-- One left edge for the Alerts tab — loose text joins the card-content line - ([d9722eb](https://github.com/vicanso/zstats.app/commit/d9722eb70d48496fa58eec7822d5da61a3fb937a))
-- Real glass that owes the wallpaper nothing — a stock popover material carries the ground - ([af6cccd](https://github.com/vicanso/zstats.app/commit/af6cccd9a7ba787405b219bfe37dc7a85387d43d))
 
-### ⚙️ Miscellaneous Tasks
-
-- Version 0.1.13 - ([5352a6c](https://github.com/vicanso/zstats.app/commit/5352a6c357744ba66dcade268e0adfbe4a5583c9))
-- Version 0.1.12 - ([7550a05](https://github.com/vicanso/zstats.app/commit/7550a053a33e8e39ac77fa3e1b2075bbf4b915ea))
-
-## [0.1.13](https://github.com/vicanso/zstats.app/compare/v0.1.11..v0.1.13) - 2026-08-24
-
-### ⛰️  Features
-
-- The memory face finds its own way back — five quiet minutes, or the ✕ - ([f8db833](https://github.com/vicanso/zstats.app/commit/f8db833938cc8993c489c11afc9ca9ed37820154))
+## [0.1.13](https://github.com/vicanso/zstats.app/compare/v0.1.12..v0.1.13) - 2026-08-24
 
 ### 🐛 Bug Fixes
 
 - Banners come back from the dead — UNUserNotificationCenter, with both gates named - ([95cb4ba](https://github.com/vicanso/zstats.app/commit/95cb4ba9616793dd9fb56b6ba7fbabf5c2459198))
-- One left edge for the Alerts tab — loose text joins the card-content line - ([d9722eb](https://github.com/vicanso/zstats.app/commit/d9722eb70d48496fa58eec7822d5da61a3fb937a))
-- Real glass that owes the wallpaper nothing — a stock popover material carries the ground - ([af6cccd](https://github.com/vicanso/zstats.app/commit/af6cccd9a7ba787405b219bfe37dc7a85387d43d))
 
 ### ⚙️ Miscellaneous Tasks
 
-- Version 0.1.12 - ([7550a05](https://github.com/vicanso/zstats.app/commit/7550a053a33e8e39ac77fa3e1b2075bbf4b915ea))
+- Version 0.1.13 - ([5352a6c](https://github.com/vicanso/zstats.app/commit/5352a6c357744ba66dcade268e0adfbe4a5583c9))
 
 ## [0.1.12](https://github.com/vicanso/zstats.app/compare/v0.1.11..v0.1.12) - 2026-08-24
 
@@ -191,73 +201,33 @@
 - One left edge for the Alerts tab — loose text joins the card-content line - ([d9722eb](https://github.com/vicanso/zstats.app/commit/d9722eb70d48496fa58eec7822d5da61a3fb937a))
 - Real glass that owes the wallpaper nothing — a stock popover material carries the ground - ([af6cccd](https://github.com/vicanso/zstats.app/commit/af6cccd9a7ba787405b219bfe37dc7a85387d43d))
 
-## [0.1.11](https://github.com/vicanso/zstats.app/compare/v0.1.7..v0.1.11) - 2026-08-23
+### ⚙️ Miscellaneous Tasks
 
-### ⛰️  Features
+- Version 0.1.12 - ([7550a05](https://github.com/vicanso/zstats.app/commit/7550a053a33e8e39ac77fa3e1b2075bbf4b915ea))
 
-- An Overview row is a door — click lands on Apps with that tree open - ([925a04c](https://github.com/vicanso/zstats.app/commit/925a04ced948fb8ad608cb64fe862dac91bae074))
-- How long is "sustained" becomes the reader's call — hours and a divisor in app.toml - ([10982b6](https://github.com/vicanso/zstats.app/commit/10982b646f41e182edeb48b0e8f4b84dbb7ebbae))
-- The week's alerts stay readable — one file per day, a dismissed card still counts - ([c046c5c](https://github.com/vicanso/zstats.app/commit/c046c5c62f45384d7166d511d789c3eb661a3e03))
-- Memory that keeps climbing gets named — an hour on Overview, a day on History - ([ad59a7e](https://github.com/vicanso/zstats.app/commit/ad59a7e0e865962fe080ed0e7d75ad97d25d2016))
-- An app's tree names the job that burns it, and the memory face counts what is left - ([c5036a6](https://github.com/vicanso/zstats.app/commit/c5036a67af446218af6282a22a3be08965d990c6))
-- A bare tree wears its job — the kernel's process group, not a shell list or the hottest leaf - ([c7f6581](https://github.com/vicanso/zstats.app/commit/c7f6581a63165eb299116d491373974e3aee6504))
-- A login compile shows as rustc — the session name stays in the expansion - ([7adc080](https://github.com/vicanso/zstats.app/commit/7adc080c6ffea506226835d01073256d54a0eddb))
-- The tray wears a face — CPU at rest, memory when an alert says so, or both side by side - ([4eec774](https://github.com/vicanso/zstats.app/commit/4eec7744a97fe3b0bac83462267931efd5421a2b))
-- Add load average of 1/5/15 - ([6d7d580](https://github.com/vicanso/zstats.app/commit/6d7d580990c7833bf14b413b5945e4073499a706))
-- An Apps expansion takes a new photograph on reopen, and again every 15s - ([c076716](https://github.com/vicanso/zstats.app/commit/c0767161800ed44089902b8fe4e80af339046456))
-- The app keeps a diary — alerts with their verdicts, and stderr stops eating the evidence - ([be0c8f1](https://github.com/vicanso/zstats.app/commit/be0c8f1ee8608c728c5047168f7b0ea7e00d4b26))
-- Climbing still fills five rows, so the window does not go hollow - ([98a5f97](https://github.com/vicanso/zstats.app/commit/98a5f97912fadb65e469a4d6e1e92df6f087ebc1))
-- Battery says charging in the title, so the grid is three and three - ([5ca54a7](https://github.com/vicanso/zstats.app/commit/5ca54a7979cb6e4c4abde964f8e319c9e03b3665))
-
-### 🐛 Bug Fixes
-
-- Hide drops the question with the photograph — no more full-table scans tray-resident - ([f0b96df](https://github.com/vicanso/zstats.app/commit/f0b96dfed2a9a8d97d2f27c2a1cf2282dd01fc3f))
-- The tray picker's fourth chip is "Both" — four chips now fit one row at 320px - ([d6d967a](https://github.com/vicanso/zstats.app/commit/d6d967a0e541fd804f36be0a6fb8a72097c8499e))
-- Labels yield to their figures — and one-line pairs pack instead of pinning - ([21b649f](https://github.com/vicanso/zstats.app/commit/21b649fd645fccd87f8f69614f4e43f1bd5328ea))
+## [0.1.11](https://github.com/vicanso/zstats.app/compare/v0.1.10..v0.1.11) - 2026-08-23
 
 ### ⚙️ Miscellaneous Tasks
 
+- Version 0.1.11 - ([e7d098c](https://github.com/vicanso/zstats.app/commit/e7d098c3bbe3995f3a7345f34e5d4e9f59d8e9c2))
 - Zstats 0.5.6 — the process boost bar becomes 30% of the machine - ([afcd10d](https://github.com/vicanso/zstats.app/commit/afcd10d55ace6e11608acd757cd99468fea04b14))
-- Version 0.1.10 - ([41f0521](https://github.com/vicanso/zstats.app/commit/41f0521de6cd8341b60b9b0efb004e474132e03d))
-- Version 0.1.9 - ([34f7e61](https://github.com/vicanso/zstats.app/commit/34f7e614a27526eb62c51d19073bdbeab49bb2da))
-- Version 0.1.8 - ([580175b](https://github.com/vicanso/zstats.app/commit/580175b7db6bf0ef089976456e3112ffe8c5f831))
-- Fmt the line CI caught, and write the fmt-then-lint rule down - ([7d59079](https://github.com/vicanso/zstats.app/commit/7d590798077363bb2601403d62d193b1538ff8a0))
-- Chunks become typed — 1.98's clippy asks, as_chunks answers - ([dc62134](https://github.com/vicanso/zstats.app/commit/dc62134048fdad8f91387904ff2237f79f8513e3))
-- Update rust to 1.98.0 - ([3d2cee7](https://github.com/vicanso/zstats.app/commit/3d2cee74000f864648b4e582db0cd5133b74f682))
 
-## [0.1.10](https://github.com/vicanso/zstats.app/compare/v0.1.7..v0.1.10) - 2026-08-23
+## [0.1.10](https://github.com/vicanso/zstats.app/compare/v0.1.9..v0.1.10) - 2026-08-23
 
 ### ⛰️  Features
 
 - An Overview row is a door — click lands on Apps with that tree open - ([925a04c](https://github.com/vicanso/zstats.app/commit/925a04ced948fb8ad608cb64fe862dac91bae074))
-- How long is "sustained" becomes the reader's call — hours and a divisor in app.toml - ([10982b6](https://github.com/vicanso/zstats.app/commit/10982b646f41e182edeb48b0e8f4b84dbb7ebbae))
-- The week's alerts stay readable — one file per day, a dismissed card still counts - ([c046c5c](https://github.com/vicanso/zstats.app/commit/c046c5c62f45384d7166d511d789c3eb661a3e03))
-- Memory that keeps climbing gets named — an hour on Overview, a day on History - ([ad59a7e](https://github.com/vicanso/zstats.app/commit/ad59a7e0e865962fe080ed0e7d75ad97d25d2016))
-- An app's tree names the job that burns it, and the memory face counts what is left - ([c5036a6](https://github.com/vicanso/zstats.app/commit/c5036a67af446218af6282a22a3be08965d990c6))
-- A bare tree wears its job — the kernel's process group, not a shell list or the hottest leaf - ([c7f6581](https://github.com/vicanso/zstats.app/commit/c7f6581a63165eb299116d491373974e3aee6504))
-- A login compile shows as rustc — the session name stays in the expansion - ([7adc080](https://github.com/vicanso/zstats.app/commit/7adc080c6ffea506226835d01073256d54a0eddb))
-- The tray wears a face — CPU at rest, memory when an alert says so, or both side by side - ([4eec774](https://github.com/vicanso/zstats.app/commit/4eec7744a97fe3b0bac83462267931efd5421a2b))
-- Add load average of 1/5/15 - ([6d7d580](https://github.com/vicanso/zstats.app/commit/6d7d580990c7833bf14b413b5945e4073499a706))
-- An Apps expansion takes a new photograph on reopen, and again every 15s - ([c076716](https://github.com/vicanso/zstats.app/commit/c0767161800ed44089902b8fe4e80af339046456))
-- The app keeps a diary — alerts with their verdicts, and stderr stops eating the evidence - ([be0c8f1](https://github.com/vicanso/zstats.app/commit/be0c8f1ee8608c728c5047168f7b0ea7e00d4b26))
-- Climbing still fills five rows, so the window does not go hollow - ([98a5f97](https://github.com/vicanso/zstats.app/commit/98a5f97912fadb65e469a4d6e1e92df6f087ebc1))
-- Battery says charging in the title, so the grid is three and three - ([5ca54a7](https://github.com/vicanso/zstats.app/commit/5ca54a7979cb6e4c4abde964f8e319c9e03b3665))
 
 ### 🐛 Bug Fixes
 
 - Hide drops the question with the photograph — no more full-table scans tray-resident - ([f0b96df](https://github.com/vicanso/zstats.app/commit/f0b96dfed2a9a8d97d2f27c2a1cf2282dd01fc3f))
 - The tray picker's fourth chip is "Both" — four chips now fit one row at 320px - ([d6d967a](https://github.com/vicanso/zstats.app/commit/d6d967a0e541fd804f36be0a6fb8a72097c8499e))
-- Labels yield to their figures — and one-line pairs pack instead of pinning - ([21b649f](https://github.com/vicanso/zstats.app/commit/21b649fd645fccd87f8f69614f4e43f1bd5328ea))
 
 ### ⚙️ Miscellaneous Tasks
 
-- Version 0.1.9 - ([34f7e61](https://github.com/vicanso/zstats.app/commit/34f7e614a27526eb62c51d19073bdbeab49bb2da))
-- Version 0.1.8 - ([580175b](https://github.com/vicanso/zstats.app/commit/580175b7db6bf0ef089976456e3112ffe8c5f831))
-- Fmt the line CI caught, and write the fmt-then-lint rule down - ([7d59079](https://github.com/vicanso/zstats.app/commit/7d590798077363bb2601403d62d193b1538ff8a0))
-- Chunks become typed — 1.98's clippy asks, as_chunks answers - ([dc62134](https://github.com/vicanso/zstats.app/commit/dc62134048fdad8f91387904ff2237f79f8513e3))
-- Update rust to 1.98.0 - ([3d2cee7](https://github.com/vicanso/zstats.app/commit/3d2cee74000f864648b4e582db0cd5133b74f682))
+- Version 0.1.10 - ([41f0521](https://github.com/vicanso/zstats.app/commit/41f0521de6cd8341b60b9b0efb004e474132e03d))
 
-## [0.1.9](https://github.com/vicanso/zstats.app/compare/v0.1.7..v0.1.9) - 2026-08-23
+## [0.1.9](https://github.com/vicanso/zstats.app/compare/v0.1.8..v0.1.9) - 2026-08-23
 
 ### ⛰️  Features
 
@@ -269,21 +239,10 @@
 - A login compile shows as rustc — the session name stays in the expansion - ([7adc080](https://github.com/vicanso/zstats.app/commit/7adc080c6ffea506226835d01073256d54a0eddb))
 - The tray wears a face — CPU at rest, memory when an alert says so, or both side by side - ([4eec774](https://github.com/vicanso/zstats.app/commit/4eec7744a97fe3b0bac83462267931efd5421a2b))
 - Add load average of 1/5/15 - ([6d7d580](https://github.com/vicanso/zstats.app/commit/6d7d580990c7833bf14b413b5945e4073499a706))
-- An Apps expansion takes a new photograph on reopen, and again every 15s - ([c076716](https://github.com/vicanso/zstats.app/commit/c0767161800ed44089902b8fe4e80af339046456))
-- The app keeps a diary — alerts with their verdicts, and stderr stops eating the evidence - ([be0c8f1](https://github.com/vicanso/zstats.app/commit/be0c8f1ee8608c728c5047168f7b0ea7e00d4b26))
-- Climbing still fills five rows, so the window does not go hollow - ([98a5f97](https://github.com/vicanso/zstats.app/commit/98a5f97912fadb65e469a4d6e1e92df6f087ebc1))
-- Battery says charging in the title, so the grid is three and three - ([5ca54a7](https://github.com/vicanso/zstats.app/commit/5ca54a7979cb6e4c4abde964f8e319c9e03b3665))
-
-### 🐛 Bug Fixes
-
-- Labels yield to their figures — and one-line pairs pack instead of pinning - ([21b649f](https://github.com/vicanso/zstats.app/commit/21b649fd645fccd87f8f69614f4e43f1bd5328ea))
 
 ### ⚙️ Miscellaneous Tasks
 
-- Version 0.1.8 - ([580175b](https://github.com/vicanso/zstats.app/commit/580175b7db6bf0ef089976456e3112ffe8c5f831))
-- Fmt the line CI caught, and write the fmt-then-lint rule down - ([7d59079](https://github.com/vicanso/zstats.app/commit/7d590798077363bb2601403d62d193b1538ff8a0))
-- Chunks become typed — 1.98's clippy asks, as_chunks answers - ([dc62134](https://github.com/vicanso/zstats.app/commit/dc62134048fdad8f91387904ff2237f79f8513e3))
-- Update rust to 1.98.0 - ([3d2cee7](https://github.com/vicanso/zstats.app/commit/3d2cee74000f864648b4e582db0cd5133b74f682))
+- Version 0.1.9 - ([34f7e61](https://github.com/vicanso/zstats.app/commit/34f7e614a27526eb62c51d19073bdbeab49bb2da))
 
 ## [0.1.8](https://github.com/vicanso/zstats.app/compare/v0.1.7..v0.1.8) - 2026-08-22
 
@@ -300,11 +259,12 @@
 
 ### ⚙️ Miscellaneous Tasks
 
+- Version 0.1.8 - ([580175b](https://github.com/vicanso/zstats.app/commit/580175b7db6bf0ef089976456e3112ffe8c5f831))
 - Fmt the line CI caught, and write the fmt-then-lint rule down - ([7d59079](https://github.com/vicanso/zstats.app/commit/7d590798077363bb2601403d62d193b1538ff8a0))
 - Chunks become typed — 1.98's clippy asks, as_chunks answers - ([dc62134](https://github.com/vicanso/zstats.app/commit/dc62134048fdad8f91387904ff2237f79f8513e3))
 - Update rust to 1.98.0 - ([3d2cee7](https://github.com/vicanso/zstats.app/commit/3d2cee74000f864648b4e582db0cd5133b74f682))
 
-## [0.1.7](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.7) - 2026-08-21
+## [0.1.7](https://github.com/vicanso/zstats.app/compare/v0.1.6..v0.1.7) - 2026-08-21
 
 ### ⛰️  Features
 
@@ -316,42 +276,17 @@
 - Overview names the program, Apps sits next, and lasted means lasted - ([738b112](https://github.com/vicanso/zstats.app/commit/738b1126983de4b979a702a681bd9c02c0a1593b))
 - Watching lists each rule on its own line - ([3cfb016](https://github.com/vicanso/zstats.app/commit/3cfb0162c229324ea0a6585858f8889e3b35b64b))
 - Expanding an app names the whole tree, not just the hot handful - ([ba8c865](https://github.com/vicanso/zstats.app/commit/ba8c8651cf816db62e7d861766526afd66dd7134))
-- Alerts leads with what still needs you — the hold ranks by when it was noticed - ([37c6229](https://github.com/vicanso/zstats.app/commit/37c622992e1b22b013e5627b913a31cb1d231570))
-- The alert table catches up — validated before it lands, never written for nothing - ([592a930](https://github.com/vicanso/zstats.app/commit/592a9309e96cb89e0c1aaf2d6fe0710785717f1b))
-- History names its shape, and one core is finally colour - ([9a3eff0](https://github.com/vicanso/zstats.app/commit/9a3eff0a031468166b1c4c6344123626e5d242ac))
-- A second dimension for Apps, and a clearer answer everywhere else - ([358fdb1](https://github.com/vicanso/zstats.app/commit/358fdb162302494039ba56ff9747363d20d9fab8))
-- Tell the analysis what to leave out — pruned, counted, never silent - ([7fa5c55](https://github.com/vicanso/zstats.app/commit/7fa5c554288829bb40674235fcbd8ee18d9368bb))
-- Large files remember the last listing, and can be put away again - ([625d06d](https://github.com/vicanso/zstats.app/commit/625d06d49bc63702594de23fc2abbbf446018c98))
-- A scope you can get back to — Home, and why / is not offered - ([038c1b9](https://github.com/vicanso/zstats.app/commit/038c1b98b2a69d1807820abf6fa6a5e2563926e9))
-- Disk space gets a window — rows open in place, no re-rooting - ([75da7ec](https://github.com/vicanso/zstats.app/commit/75da7ec288cb869d31c239dbf2798a110cd72815))
-- One program, one number — Apps memory moves to footprint, an ⓘ for the CPU - ([fcdb017](https://github.com/vicanso/zstats.app/commit/fcdb0177e0c6ec38d8e374b5ebf3ffd6f0735548))
-- The update trail — a dot into About, a button that fills, notes that fit - ([1207dba](https://github.com/vicanso/zstats.app/commit/1207dba6db2bff2025758edcffa4e5552a9e0422))
-- Two banners is enough — a flapping subject goes quiet - ([994a12c](https://github.com/vicanso/zstats.app/commit/994a12c7673fdea714467b66c00e34bb7bb91ef6))
-- Today's alerts outlive the app - ([2ede1ed](https://github.com/vicanso/zstats.app/commit/2ede1ed57b961f31b6c3a4959d9d656262d5c3cd))
-- Updates announce themselves — a dot, a skip, and no busywork - ([f147e0f](https://github.com/vicanso/zstats.app/commit/f147e0fb26301b7ff7cf6b6add40b7ff13a48b8a))
-- Scope grows up — own row, named in captions, restored at launch - ([053edaa](https://github.com/vicanso/zstats.app/commit/053edaad1c76e8cd6ec7678b7c694654f342d19f))
 
 ### 🐛 Bug Fixes
 
 - *(collector)* Derive per-process CPU from accumulated time — an idle process reads zero - ([2cb1d3d](https://github.com/vicanso/zstats.app/commit/2cb1d3d9a9f2fe295d7faa44a7c1cce8302c2db8))
-- Fix fmt - ([9044d3b](https://github.com/vicanso/zstats.app/commit/9044d3b6ee3081def3c4da7ce8189e2e2725712f))
-- An ejected volume leaves with the drive, not the cadence - ([8bd0d64](https://github.com/vicanso/zstats.app/commit/8bd0d6428f2f5e4fa93f3ea3b69ce0ddbed51a89))
-- Stale cards, silent resets, and a checksum that only looked like one - ([934ee21](https://github.com/vicanso/zstats.app/commit/934ee21174b63d9473495329cf157236beaaf638))
-- Reap our zombies, and a fistful of paper cuts - ([76c2b25](https://github.com/vicanso/zstats.app/commit/76c2b250d7a4da0d407a0fa8a270de2de2945d69))
-
-### 🚜 Refactor
-
-- A pass over every tab — one ranking per list, one fact per row - ([3e9f1a5](https://github.com/vicanso/zstats.app/commit/3e9f1a55a85e9220875e69c85759101adf884da4))
 
 ### ⚙️ Miscellaneous Tasks
 
+- Version 0.1.7 - ([7067daf](https://github.com/vicanso/zstats.app/commit/7067dafaec4b3cb13a4ac6b493a1983e324353ec))
 - Update dependencies - ([abf6ae5](https://github.com/vicanso/zstats.app/commit/abf6ae59d91e5c7b7286461fe3fd2dde08c65729))
-- Version 0.1.6 - ([6b3b71d](https://github.com/vicanso/zstats.app/commit/6b3b71dd24427cedeff04fecb629fc2479592786))
-- Version 0.1.5 - ([6b64ed5](https://github.com/vicanso/zstats.app/commit/6b64ed573f1aecf3145008fdb30d223b11eb8218))
-- Version 0.1.4 - ([8697678](https://github.com/vicanso/zstats.app/commit/869767844b83917406c3ebbd798b362593dd7a93))
-- Version 0.1.3 - ([1c675e5](https://github.com/vicanso/zstats.app/commit/1c675e59cc906892de43f679162329d0b507ee5b))
 
-## [0.1.6](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.6) - 2026-08-20
+## [0.1.6](https://github.com/vicanso/zstats.app/compare/v0.1.5..v0.1.6) - 2026-08-20
 
 ### ⛰️  Features
 
@@ -359,23 +294,22 @@
 - The alert table catches up — validated before it lands, never written for nothing - ([592a930](https://github.com/vicanso/zstats.app/commit/592a9309e96cb89e0c1aaf2d6fe0710785717f1b))
 - History names its shape, and one core is finally colour - ([9a3eff0](https://github.com/vicanso/zstats.app/commit/9a3eff0a031468166b1c4c6344123626e5d242ac))
 - A second dimension for Apps, and a clearer answer everywhere else - ([358fdb1](https://github.com/vicanso/zstats.app/commit/358fdb162302494039ba56ff9747363d20d9fab8))
-- Tell the analysis what to leave out — pruned, counted, never silent - ([7fa5c55](https://github.com/vicanso/zstats.app/commit/7fa5c554288829bb40674235fcbd8ee18d9368bb))
-- Large files remember the last listing, and can be put away again - ([625d06d](https://github.com/vicanso/zstats.app/commit/625d06d49bc63702594de23fc2abbbf446018c98))
-- A scope you can get back to — Home, and why / is not offered - ([038c1b9](https://github.com/vicanso/zstats.app/commit/038c1b98b2a69d1807820abf6fa6a5e2563926e9))
-- Disk space gets a window — rows open in place, no re-rooting - ([75da7ec](https://github.com/vicanso/zstats.app/commit/75da7ec288cb869d31c239dbf2798a110cd72815))
-- One program, one number — Apps memory moves to footprint, an ⓘ for the CPU - ([fcdb017](https://github.com/vicanso/zstats.app/commit/fcdb0177e0c6ec38d8e374b5ebf3ffd6f0735548))
-- The update trail — a dot into About, a button that fills, notes that fit - ([1207dba](https://github.com/vicanso/zstats.app/commit/1207dba6db2bff2025758edcffa4e5552a9e0422))
-- Two banners is enough — a flapping subject goes quiet - ([994a12c](https://github.com/vicanso/zstats.app/commit/994a12c7673fdea714467b66c00e34bb7bb91ef6))
-- Today's alerts outlive the app - ([2ede1ed](https://github.com/vicanso/zstats.app/commit/2ede1ed57b961f31b6c3a4959d9d656262d5c3cd))
-- Updates announce themselves — a dot, a skip, and no busywork - ([f147e0f](https://github.com/vicanso/zstats.app/commit/f147e0fb26301b7ff7cf6b6add40b7ff13a48b8a))
-- Scope grows up — own row, named in captions, restored at launch - ([053edaa](https://github.com/vicanso/zstats.app/commit/053edaad1c76e8cd6ec7678b7c694654f342d19f))
 
 ### 🐛 Bug Fixes
 
 - Fix fmt - ([9044d3b](https://github.com/vicanso/zstats.app/commit/9044d3b6ee3081def3c4da7ce8189e2e2725712f))
-- An ejected volume leaves with the drive, not the cadence - ([8bd0d64](https://github.com/vicanso/zstats.app/commit/8bd0d6428f2f5e4fa93f3ea3b69ce0ddbed51a89))
-- Stale cards, silent resets, and a checksum that only looked like one - ([934ee21](https://github.com/vicanso/zstats.app/commit/934ee21174b63d9473495329cf157236beaaf638))
-- Reap our zombies, and a fistful of paper cuts - ([76c2b25](https://github.com/vicanso/zstats.app/commit/76c2b250d7a4da0d407a0fa8a270de2de2945d69))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.1.6 - ([6b3b71d](https://github.com/vicanso/zstats.app/commit/6b3b71dd24427cedeff04fecb629fc2479592786))
+
+## [0.1.5](https://github.com/vicanso/zstats.app/compare/v0.1.4..v0.1.5) - 2026-08-19
+
+### ⛰️  Features
+
+- Tell the analysis what to leave out — pruned, counted, never silent - ([7fa5c55](https://github.com/vicanso/zstats.app/commit/7fa5c554288829bb40674235fcbd8ee18d9368bb))
+- Large files remember the last listing, and can be put away again - ([625d06d](https://github.com/vicanso/zstats.app/commit/625d06d49bc63702594de23fc2abbbf446018c98))
+- A scope you can get back to — Home, and why / is not offered - ([038c1b9](https://github.com/vicanso/zstats.app/commit/038c1b98b2a69d1807820abf6fa6a5e2563926e9))
 
 ### 🚜 Refactor
 
@@ -384,40 +318,8 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Version 0.1.5 - ([6b64ed5](https://github.com/vicanso/zstats.app/commit/6b64ed573f1aecf3145008fdb30d223b11eb8218))
-- Version 0.1.4 - ([8697678](https://github.com/vicanso/zstats.app/commit/869767844b83917406c3ebbd798b362593dd7a93))
-- Version 0.1.3 - ([1c675e5](https://github.com/vicanso/zstats.app/commit/1c675e59cc906892de43f679162329d0b507ee5b))
 
-## [0.1.5](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.5) - 2026-08-19
-
-### ⛰️  Features
-
-- Tell the analysis what to leave out — pruned, counted, never silent - ([7fa5c55](https://github.com/vicanso/zstats.app/commit/7fa5c554288829bb40674235fcbd8ee18d9368bb))
-- Large files remember the last listing, and can be put away again - ([625d06d](https://github.com/vicanso/zstats.app/commit/625d06d49bc63702594de23fc2abbbf446018c98))
-- A scope you can get back to — Home, and why / is not offered - ([038c1b9](https://github.com/vicanso/zstats.app/commit/038c1b98b2a69d1807820abf6fa6a5e2563926e9))
-- Disk space gets a window — rows open in place, no re-rooting - ([75da7ec](https://github.com/vicanso/zstats.app/commit/75da7ec288cb869d31c239dbf2798a110cd72815))
-- One program, one number — Apps memory moves to footprint, an ⓘ for the CPU - ([fcdb017](https://github.com/vicanso/zstats.app/commit/fcdb0177e0c6ec38d8e374b5ebf3ffd6f0735548))
-- The update trail — a dot into About, a button that fills, notes that fit - ([1207dba](https://github.com/vicanso/zstats.app/commit/1207dba6db2bff2025758edcffa4e5552a9e0422))
-- Two banners is enough — a flapping subject goes quiet - ([994a12c](https://github.com/vicanso/zstats.app/commit/994a12c7673fdea714467b66c00e34bb7bb91ef6))
-- Today's alerts outlive the app - ([2ede1ed](https://github.com/vicanso/zstats.app/commit/2ede1ed57b961f31b6c3a4959d9d656262d5c3cd))
-- Updates announce themselves — a dot, a skip, and no busywork - ([f147e0f](https://github.com/vicanso/zstats.app/commit/f147e0fb26301b7ff7cf6b6add40b7ff13a48b8a))
-- Scope grows up — own row, named in captions, restored at launch - ([053edaa](https://github.com/vicanso/zstats.app/commit/053edaad1c76e8cd6ec7678b7c694654f342d19f))
-
-### 🐛 Bug Fixes
-
-- An ejected volume leaves with the drive, not the cadence - ([8bd0d64](https://github.com/vicanso/zstats.app/commit/8bd0d6428f2f5e4fa93f3ea3b69ce0ddbed51a89))
-- Stale cards, silent resets, and a checksum that only looked like one - ([934ee21](https://github.com/vicanso/zstats.app/commit/934ee21174b63d9473495329cf157236beaaf638))
-- Reap our zombies, and a fistful of paper cuts - ([76c2b25](https://github.com/vicanso/zstats.app/commit/76c2b250d7a4da0d407a0fa8a270de2de2945d69))
-
-### 🚜 Refactor
-
-- A pass over every tab — one ranking per list, one fact per row - ([3e9f1a5](https://github.com/vicanso/zstats.app/commit/3e9f1a55a85e9220875e69c85759101adf884da4))
-
-### ⚙️ Miscellaneous Tasks
-
-- Version 0.1.4 - ([8697678](https://github.com/vicanso/zstats.app/commit/869767844b83917406c3ebbd798b362593dd7a93))
-- Version 0.1.3 - ([1c675e5](https://github.com/vicanso/zstats.app/commit/1c675e59cc906892de43f679162329d0b507ee5b))
-
-## [0.1.4](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.4) - 2026-08-18
+## [0.1.4](https://github.com/vicanso/zstats.app/compare/v0.1.3..v0.1.4) - 2026-08-18
 
 ### ⛰️  Features
 
@@ -425,19 +327,14 @@
 - One program, one number — Apps memory moves to footprint, an ⓘ for the CPU - ([fcdb017](https://github.com/vicanso/zstats.app/commit/fcdb0177e0c6ec38d8e374b5ebf3ffd6f0735548))
 - The update trail — a dot into About, a button that fills, notes that fit - ([1207dba](https://github.com/vicanso/zstats.app/commit/1207dba6db2bff2025758edcffa4e5552a9e0422))
 - Two banners is enough — a flapping subject goes quiet - ([994a12c](https://github.com/vicanso/zstats.app/commit/994a12c7673fdea714467b66c00e34bb7bb91ef6))
-- Today's alerts outlive the app - ([2ede1ed](https://github.com/vicanso/zstats.app/commit/2ede1ed57b961f31b6c3a4959d9d656262d5c3cd))
-- Updates announce themselves — a dot, a skip, and no busywork - ([f147e0f](https://github.com/vicanso/zstats.app/commit/f147e0fb26301b7ff7cf6b6add40b7ff13a48b8a))
-- Scope grows up — own row, named in captions, restored at launch - ([053edaa](https://github.com/vicanso/zstats.app/commit/053edaad1c76e8cd6ec7678b7c694654f342d19f))
 
 ### 🐛 Bug Fixes
 
 - An ejected volume leaves with the drive, not the cadence - ([8bd0d64](https://github.com/vicanso/zstats.app/commit/8bd0d6428f2f5e4fa93f3ea3b69ce0ddbed51a89))
-- Stale cards, silent resets, and a checksum that only looked like one - ([934ee21](https://github.com/vicanso/zstats.app/commit/934ee21174b63d9473495329cf157236beaaf638))
-- Reap our zombies, and a fistful of paper cuts - ([76c2b25](https://github.com/vicanso/zstats.app/commit/76c2b250d7a4da0d407a0fa8a270de2de2945d69))
 
 ### ⚙️ Miscellaneous Tasks
 
-- Version 0.1.3 - ([1c675e5](https://github.com/vicanso/zstats.app/commit/1c675e59cc906892de43f679162329d0b507ee5b))
+- Version 0.1.4 - ([8697678](https://github.com/vicanso/zstats.app/commit/869767844b83917406c3ebbd798b362593dd7a93))
 
 ## [0.1.3](https://github.com/vicanso/zstats.app/compare/v0.1.2..v0.1.3) - 2026-08-17
 
@@ -451,6 +348,10 @@
 
 - Stale cards, silent resets, and a checksum that only looked like one - ([934ee21](https://github.com/vicanso/zstats.app/commit/934ee21174b63d9473495329cf157236beaaf638))
 - Reap our zombies, and a fistful of paper cuts - ([76c2b25](https://github.com/vicanso/zstats.app/commit/76c2b250d7a4da0d407a0fa8a270de2de2945d69))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.1.3 - ([1c675e5](https://github.com/vicanso/zstats.app/commit/1c675e59cc906892de43f679162329d0b507ee5b))
 
 ## [0.1.2](https://github.com/vicanso/zstats.app/compare/v0.1.1..v0.1.2) - 2026-08-16
 
@@ -468,6 +369,7 @@
 
 ### ⚙️ Miscellaneous Tasks
 
+- Version 0.1.2 - ([8bc9af3](https://github.com/vicanso/zstats.app/commit/8bc9af3f9e369e14fd43d14ab8e9d5bf1132c325))
 - Release notes come from git-cliff, and the changelog tells the truth - ([a63b7a7](https://github.com/vicanso/zstats.app/commit/a63b7a77ea32c4322d218446e314e0747c4572f8))
 
 ## [0.1.1](https://github.com/vicanso/zstats.app/compare/v0.1.0..v0.1.1) - 2026-08-16
