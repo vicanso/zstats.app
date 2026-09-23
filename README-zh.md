@@ -8,7 +8,7 @@ macOS 菜单栏系统监控，围绕「按应用定规则」构建：托盘实�
 
 托盘实时显示 CPU，点一下弹出面板，看别处就收起。采集、告警、历史全部由进程内的 [zstats](https://crates.io/crates/zstats) 引擎驱动。
 
-> 仅 macOS · Apple Silicon 与 Intel · Universal，已签名公证
+> macOS · Apple Silicon 与 Intel · Universal，已签名公证——另有 Linux 预览版，见「安装」
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/42259bb0-acb7-4675-9c3c-6ad791cca455" autoplay loop muted playsinline width="100%"></video>
@@ -73,6 +73,24 @@ make bundle          # 或从源码构建（需要 cargo-bundle）
 ```
 
 语言、主题、托盘显示项、面板透明度、持续负载的两个门槛都在设置窗口。界面完整中英双语，深浅色走原生毛玻璃。
+
+### Linux（预览版）
+
+仅 Wayland：托盘是 StatusNotifier 项，面板是由合成器锚在右上角的 layer-shell 表面。在 Omarchy（Hyprland）上开发和验证；其它合成器与桌面未经测试。每次发版都带 `zstats-linux-x86_64.tar.gz` 和 `zstats-linux-aarch64.tar.gz`，列在同一份 `SHA256SUMS` 里，同样镜像到 Gitee。
+
+```bash
+tar -xzf zstats-linux-x86_64.tar.gz
+sh zstats-linux-x86_64/install-linux.sh
+```
+
+这会把二进制放到 `~/.local/bin`、加一个启动器条目，并在**会话确实会读** `~/.config/autostart` 时开启开机自启（脚本会先探测，读不到时改为打印该加进合成器配置的那行 `exec-once`）。单独运行时脚本会下载最新 release，并拒绝安装任何 `SHA256SUMS` 没有担保的文件；`--uninstall` 只移除它自己装下的东西。然后，Hyprland 加两行：
+
+```conf
+bind = SUPER, M, exec, ~/.local/bin/zstats --toggle
+layerrule = blur, zstats
+```
+
+Linux 版不做的事：没有内存压力与 P/E 核的数字（内核不像 macOS 那样上报），没有 Time Machine 与可清除空间那两行，托盘只有图形、旁边没有数字——StatusNotifier 没有文字。应用内更新器会原地安装 tarball 并重启；由包管理器安装的二进制留给包管理器处理。
 
 ## 开发
 

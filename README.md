@@ -8,7 +8,7 @@ A macOS menu-bar system monitor built around per-app rules: live CPU in the tray
 
 The tray shows live CPU. Click for the panel — it tucks away when you look elsewhere. Collection, alerts and history run in-process on the [zstats](https://crates.io/crates/zstats) engine.
 
-> macOS only · Apple Silicon and Intel · Universal, signed and notarized
+> macOS · Apple Silicon and Intel · Universal, signed and notarized — and a Linux preview, see Install
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/42259bb0-acb7-4675-9c3c-6ad791cca455" autoplay loop muted playsinline width="100%"></video>
@@ -73,6 +73,24 @@ make bundle          # or build from source (needs cargo-bundle)
 ```
 
 Language, theme, the tray's face, panel opacity and the sustained-load knobs live in a settings window. The UI is fully bilingual; dark and light modes use native vibrancy.
+
+### Linux (preview)
+
+Wayland only: the tray is a StatusNotifier item, the panel a layer-shell surface anchored top-right by the compositor. Developed and checked against Omarchy (Hyprland); other compositors and desktops are untested. Every release carries `zstats-linux-x86_64.tar.gz` and `zstats-linux-aarch64.tar.gz`, listed in the same `SHA256SUMS` and mirrored to Gitee.
+
+```bash
+tar -xzf zstats-linux-x86_64.tar.gz
+sh zstats-linux-x86_64/install-linux.sh
+```
+
+That puts the binary in `~/.local/bin`, adds a launcher entry, and enables launch-at-login where the session actually reads `~/.config/autostart` (it checks, and prints the `exec-once` line to add instead when nothing does). Run on its own the script downloads the latest release and refuses to install anything `SHA256SUMS` does not vouch for; `--uninstall` removes exactly what it added. Then, for Hyprland:
+
+```conf
+bind = SUPER, M, exec, ~/.local/bin/zstats --toggle
+layerrule = blur, zstats
+```
+
+What the Linux build does not do: no memory-pressure or P/E-core figures (the kernel reports neither the way macOS does), no Time Machine or purgeable-space lines, and the tray wears a glyph with no number beside it — StatusNotifier has no text. The in-app updater installs the tarball in place and restarts; a binary owned by a package manager is left to that package manager.
 
 ## Develop
 

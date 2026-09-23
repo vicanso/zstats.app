@@ -19,6 +19,9 @@
 use super::widgets;
 use crate::about;
 use crate::alerttpl;
+// Only the Permissions nav icon rides `CustomIconName`, and that page is
+// macOS.
+#[cfg(target_os = "macos")]
 use crate::assets;
 use crate::autostart::{self, Status};
 use crate::bigfiles;
@@ -47,9 +50,15 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Icon, IconName, Sizable, h_flex, v_flex};
 use rust_i18n::t;
 use std::collections::BTreeMap;
+// The next four serve the Full Disk Access probe alone, which is a
+// TCC question and does not exist off macOS.
+#[cfg(target_os = "macos")]
 use std::env;
+#[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use zstats::CollectorConfig;
@@ -64,16 +73,37 @@ pub enum SettingsSection {
     Interface,
     Config,
     /// Full Disk Access: live status plus a deep link into System
-    /// Settings. Status only — granting stays a user act there.
+    /// Settings. Status only — granting stays a user act there. macOS
+    /// only, and the variant itself is gated rather than merely left
+    /// out of [`Self::ALL`]: a page nothing can navigate to should not
+    /// exist as a value either. See `ALL` for why there is no Linux
+    /// counterpart.
+    #[cfg(target_os = "macos")]
     Permissions,
     About,
 }
 
 impl SettingsSection {
+    /// The pages, in nav order.
+    ///
+    /// Permissions is macOS only. Full Disk Access is a TCC concept: one
+    /// switch that pre-empts every per-app data prompt the disk analysis
+    /// could trigger. A Linux session has no such switch to offer — a
+    /// directory the user cannot read is simply unreadable, and the
+    /// analysis already counts those as skipped — so a page whose only
+    /// control opens `x-apple.systempreferences:` would be a page about
+    /// another operating system.
+    #[cfg(target_os = "macos")]
     pub const ALL: [SettingsSection; 4] = [
         SettingsSection::Interface,
         SettingsSection::Config,
         SettingsSection::Permissions,
+        SettingsSection::About,
+    ];
+    #[cfg(not(target_os = "macos"))]
+    pub const ALL: [SettingsSection; 3] = [
+        SettingsSection::Interface,
+        SettingsSection::Config,
         SettingsSection::About,
     ];
 
@@ -81,6 +111,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Interface => "config.nav_interface",
             SettingsSection::Config => "config.nav_config",
+            #[cfg(target_os = "macos")]
             SettingsSection::Permissions => "config.nav_permissions",
             SettingsSection::About => "config.nav_about",
         }
@@ -93,6 +124,7 @@ impl SettingsSection {
             SettingsSection::Interface => Icon::new(IconName::Palette),
             SettingsSection::Config => Icon::new(IconName::Settings2),
             // gpui-kit ships no shield; ours rides CustomIconName.
+            #[cfg(target_os = "macos")]
             SettingsSection::Permissions => assets::CustomIconName::Shield.into(),
             SettingsSection::About => Icon::new(IconName::Info),
         }
@@ -112,6 +144,7 @@ pub fn render(
     match section {
         SettingsSection::Interface => vec![interface_card(state, proxy_input, proxy_valid)],
         SettingsSection::Config => render_config(state),
+        #[cfg(target_os = "macos")]
         SettingsSection::Permissions => vec![permissions_card()],
         SettingsSection::About => vec![about_card(state, body_height)],
     }
@@ -120,6 +153,7 @@ pub fn render(
 /// Full Disk Access, the one switch that covers every prompt the disk
 /// analysis can trigger. Shows live status and deep-links to the pane;
 /// the app never touches the permission itself.
+#[cfg(target_os = "macos")]
 fn permissions_card() -> AnyElement {
     let granted = full_disk_access_granted();
     let status = div()
@@ -171,7 +205,9 @@ fn permissions_card() -> AnyElement {
 /// Last Full Disk Access probe. Distinct from the real 0/1 so the first
 /// Permissions paint before [`refresh_full_disk_access`] still asks once
 /// rather than drawing "not granted" as a guess.
+#[cfg(target_os = "macos")]
 const FDA_UNREAD: u8 = u8::MAX;
+#[cfg(target_os = "macos")]
 static FDA: AtomicU8 = AtomicU8::new(FDA_UNREAD);
 
 /// Re-read Full Disk Access. Called when Permissions is selected and
@@ -179,11 +215,13 @@ static FDA: AtomicU8 = AtomicU8::new(FDA_UNREAD);
 /// coming back from the system pane. Not per frame: `open(TCC.db)` is
 /// a permission check, and the settings window must not follow the
 /// collector tick.
+#[cfg(target_os = "macos")]
 pub fn refresh_full_disk_access() {
     let granted = probe_full_disk_access();
     FDA.store(u8::from(granted), Ordering::Relaxed);
 }
 
+#[cfg(target_os = "macos")]
 fn full_disk_access_granted() -> bool {
     match FDA.load(Ordering::Relaxed) {
         FDA_UNREAD => {
@@ -199,6 +237,7 @@ fn full_disk_access_granted() -> bool {
 /// has a side effect we want: macOS registers this app in the Full Disk
 /// Access list, so the Settings pane offers a ready-made toggle instead
 /// of demanding a manual "+".
+#[cfg(target_os = "macos")]
 fn probe_full_disk_access() -> bool {
     let Ok(home) = env::var("HOME") else {
         return false;
@@ -792,7 +831,13 @@ fn file_note(id: &'static str, name: &'static str) -> AnyElement {
         .text_size(px(10.))
         .text_color(theme::text_dim())
         .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
-        .tooltip(widgets::wrap_tooltip(i18n::tr("config.file_reveal_tip")))
+        .tooltip(widgets::wrap_tooltip(i18n::tr(
+            if cfg!(target_os = "macos") {
+                "config.file_reveal_tip"
+            } else {
+                "config.file_reveal_tip_linux"
+            },
+        )))
         .on_click(move |_, _window, cx| {
             cx.stop_propagation();
             let path = zstats::settings::default_dir().join(name);
@@ -964,11 +1009,22 @@ fn keep_awake_row() -> AnyElement {
                     div()
                         .text_size(px(11.))
                         .text_color(theme::ink())
-                        .child(i18n::tr("config.keep_awake")),
+                        // "the Mac" on macOS; the machine has no such
+                        // name elsewhere, and the mechanism the tip
+                        // describes is a different one.
+                        .child(i18n::tr(if cfg!(target_os = "macos") {
+                            "config.keep_awake"
+                        } else {
+                            "config.keep_awake_linux"
+                        })),
                 )
                 .child(widgets::info_icon(
                     "pref-keep-awake-info",
-                    i18n::tr("config.keep_awake_tip"),
+                    i18n::tr(if cfg!(target_os = "macos") {
+                        "config.keep_awake_tip"
+                    } else {
+                        "config.keep_awake_tip_linux"
+                    }),
                 )),
         )
         .child(
@@ -1048,7 +1104,15 @@ fn autostart_row() -> AnyElement {
                 )
                 .child(widgets::info_icon(
                     "pref-autostart-info",
-                    i18n::tr("config.autostart_tip"),
+                    // Two mechanisms, two descriptions: the switch does
+                    // the same job on both, but "Login Items" and
+                    // "~/.config/autostart" are not the same place to
+                    // go and revoke it.
+                    i18n::tr(if cfg!(target_os = "macos") {
+                        "config.autostart_tip"
+                    } else {
+                        "config.autostart_tip_linux"
+                    }),
                 )),
         )
         .child(autostart_control())
@@ -1080,11 +1144,18 @@ fn autostart_control() -> AnyElement {
             .on_click(|_, _window, _cx| autostart::open_login_items())
             .child(i18n::tr("config.autostart_needs_approval"))
             .into_any_element(),
+        // `NotFound` is "the mechanism is absent" on both platforms, but
+        // the absence has a different name: no installed .app for
+        // launchd, or no session component reading the directory.
         Status::NotFound => div()
             .flex_none()
             .text_size(px(11.))
             .text_color(theme::text_dim())
-            .child(i18n::tr("config.autostart_not_found"))
+            .child(i18n::tr(if cfg!(target_os = "macos") {
+                "config.autostart_not_found"
+            } else {
+                "config.autostart_no_reader"
+            }))
             .into_any_element(),
     }
 }

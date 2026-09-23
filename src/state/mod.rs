@@ -1666,6 +1666,7 @@ impl ZStatsAppState {
                 let notes = state.update_notes_in_flight();
                 state.update_status = Some(match delivered {
                     Ok(updater::Delivery::Replaced) => UpdateStatus::Installed { manual: false },
+                    #[cfg(target_os = "macos")]
                     Ok(updater::Delivery::OpenedForDrag) => {
                         UpdateStatus::Installed { manual: true }
                     }

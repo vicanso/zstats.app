@@ -19,6 +19,18 @@
 //! The assertion carries the app's name, so `pmset -g assertions` names
 //! us when someone asks the machine why it will not sleep — the same
 //! reason both transitions are logged at INFO.
+//!
+//! **Linux is one logind idle inhibitor**, the one `systemd-inhibit
+//! --what=idle` takes, and it has the same shape for the same reason:
+//! logind hands back a file descriptor and holds the inhibit exactly as
+//! long as that descriptor is open, so the kernel ends it when the
+//! process does, crash included, and nothing has to release it on quit.
+//! `idle` only — blocking a *requested* suspend (lid, menu) would be the
+//! overreach an assertion that outranked the lid would be. Whether the
+//! idle daemon honours it is that daemon's rule: hypridle does unless
+//! told not to (`ignore_systemd_inhibit`), swayidle does, and
+//! `systemd-inhibit --list` names zstats as the holder either way.
+//! `elogind` speaks the same interface where there is no systemd.
 
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -46,8 +58,75 @@ pub fn apply(on: bool) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn apply(on: bool) {
+    if on {
+        logind::hold();
+    } else {
+        logind::release();
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn apply(_on: bool) {}
+
+#[cfg(target_os = "linux")]
+mod logind {
+    use std::sync::Mutex;
+    use zbus::blocking::{Connection, Proxy};
+    use zbus::zvariant::OwnedFd;
+
+    /// The descriptor logind gave us, or `None` while the switch is off.
+    /// Dropping it is the release — there is no call to make.
+    static HELD: Mutex<Option<OwnedFd>> = Mutex::new(None);
+
+    /// Idempotent like the macOS `hold`: a second `apply(true)` must not
+    /// take a second inhibitor, which logind would happily grant.
+    pub fn hold() {
+        let mut held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if held.is_some() {
+            return;
+        }
+        match inhibit() {
+            Ok(fd) => {
+                *held = Some(fd);
+                tracing::info!("keep awake on: logind idle inhibitor held");
+            }
+            Err(e) => tracing::warn!("could not take the logind idle inhibitor: {e}"),
+        }
+    }
+
+    pub fn release() {
+        let mut held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if held.take().is_some() {
+            tracing::info!("keep awake off: logind idle inhibitor released");
+        }
+    }
+
+    /// `Inhibit(what, who, why, mode)` on the system bus. `block` rather
+    /// than `delay`: a delay inhibitor only postpones sleep by a bounded
+    /// few seconds, which is not what the switch promises. The
+    /// connection itself is dropped on return — the inhibit lives in
+    /// the descriptor, not the connection.
+    fn inhibit() -> zbus::Result<OwnedFd> {
+        let connection = Connection::system()?;
+        let manager = Proxy::new(
+            &connection,
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )?;
+        manager.call(
+            "Inhibit",
+            &(
+                "idle",
+                crate::APP_NAME,
+                "Keep awake is on in zstats",
+                "block",
+            ),
+        )
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn hold() {

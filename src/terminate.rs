@@ -39,6 +39,10 @@ use objc2_app_kit::NSRunningApplication;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum QuitMethod {
     /// A LaunchServices application: gets the ⌘Q-equivalent request.
+    /// macOS only — nothing else has a refusable application-level quit
+    /// to offer, so elsewhere the enum has one variant and the sheet has
+    /// one sentence.
+    #[cfg(target_os = "macos")]
     App,
     /// A bare process: gets SIGTERM.
     Term,
@@ -154,8 +158,17 @@ fn running_application(pid: u32) -> Option<objc2::rc::Retained<NSRunningApplicat
 /// means, and a `login` tree heading the list is a session, not an
 /// app — SIGTERM on that root would take every shell with it. Same
 /// self/init refusal as [`can_term`].
+#[cfg(target_os = "macos")]
 pub fn can_quit_app(pid: u32) -> bool {
     can_term(pid) && can_quit(pid) && matches!(method_for(pid), QuitMethod::App)
+}
+
+/// Always false: there is no application tier to offer, so the Apps
+/// expansion grows no Quit button — see the module doc. The Processes
+/// tab's SIGTERM control is unaffected.
+#[cfg(not(target_os = "macos"))]
+pub fn can_quit_app(_pid: u32) -> bool {
+    false
 }
 
 /// Whether the process page should offer a Quit for `pid` at all.

@@ -565,6 +565,7 @@ fn analysis_preset_chips(state: &ZStatsAppState) -> Vec<AnyElement> {
 /// the whole category — the standard, proportionate ask for a disk
 /// scanner. Tied to `skipped_denied` only: the TCC deny-list skips are
 /// deliberate zero-touch and no permission would change them.
+#[cfg(target_os = "macos")]
 fn fda_hint(state: &ZStatsAppState) -> Option<AnyElement> {
     let DiskAnalysis::Ready(result) = state.disk_analysis() else {
         return None;
@@ -591,6 +592,26 @@ fn fda_hint(state: &ZStatsAppState) -> Option<AnyElement> {
             .into_any_element(),
     )
 }
+
+/// Off macOS a directory the user cannot read is simply unreadable —
+/// there is no one switch that would open it, so there is nothing to
+/// offer. The "N unreadable skipped" chip on the result row is the
+/// whole of the truth here.
+#[cfg(not(target_os = "macos"))]
+fn fda_hint(_state: &ZStatsAppState) -> Option<AnyElement> {
+    None
+}
+
+/// "Reveal in Finder" on macOS; the file manager has no one name on
+/// Linux, and the sentence should not promise Finder.
+fn reveal_tip() -> String {
+    i18n::tr(if cfg!(target_os = "macos") {
+        "disk.big_reveal"
+    } else {
+        "disk.big_reveal_linux"
+    })
+}
+
 /// Results older than this get a "consider re-analyzing" nudge appended
 /// to the caption. Display only, like every threshold in views/ —
 /// nothing refreshes itself: a minutes-long walk must never
@@ -1312,7 +1333,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                         .icon(IconName::Folder)
                         .ghost()
                         .xsmall()
-                        .tooltip(i18n::tr("disk.big_reveal"))
+                        .tooltip(reveal_tip())
                         .on_click(move |_, _window, cx| {
                             // The row itself opens; the button must not.
                             cx.stop_propagation();
@@ -1702,7 +1723,7 @@ fn big_file_row(
                 .icon(IconName::Folder)
                 .ghost()
                 .xsmall()
-                .tooltip(i18n::tr("disk.big_reveal"))
+                .tooltip(reveal_tip())
                 .on_click({
                     let path = file.path.clone();
                     move |_, _window, _cx| bigfiles::reveal(&path)

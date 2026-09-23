@@ -565,17 +565,27 @@ jobs:
     needs: [macos, universal, linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    env:
+      # No checkout, for the gitee job's reason: this hashes release
+      # assets, not source. It used to check out, and the repo's own
+      # `assets/` (fonts, icons, locales) was exactly where the downloads
+      # landed. `sha256sum *.dmg` never noticed; the moment the glob
+      # widened to take the Linux tarballs, the repo's directories were
+      # hashed and the job failed (v0.3.4) — and had they been plain
+      # files instead, they would have been *published* in SHA256SUMS.
+      # Without a checkout `gh` needs the repository named.
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v7
       - name: build and upload SHA256SUMS
         run: |
           set -euo pipefail
+          # A directory nothing else in this job could have made.
           gh release download "$GITHUB_REF_NAME" \
-            --pattern '*.dmg' --pattern '*.tar.gz' --dir assets
-          # Everything that was downloaded, whatever it is — the Linux
+            --pattern '*.dmg' --pattern '*.tar.gz' --dir downloaded
+          # Everything that was downloaded and nothing else — the Linux
           # installer verifies its tarball against this file, so a
           # release asset missing from here is one nobody can check.
-          (cd assets && sha256sum -- * | sort -k2 > ../SHA256SUMS)
+          (cd downloaded && sha256sum -- * | sort -k2 > ../SHA256SUMS)
           echo "--- SHA256SUMS ---"; cat SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
 

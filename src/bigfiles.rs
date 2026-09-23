@@ -19,9 +19,20 @@
 //! move-to-Trash, recoverable until the Trash is emptied — never a direct
 //! unlink. Same posture as `terminate.rs`: the panel delivers refusable,
 //! reversible requests; it does not destroy.
+//!
+//! **Linux has no index to ask**, so `find` walks `$HOME` instead:
+//! seconds rather than milliseconds, and it sees the dot-directories
+//! Spotlight never indexes (`~/.cache`, `~/.local/share`) — which on
+//! this platform is where the forgotten gigabytes usually sit. The
+//! Trash itself is pruned from the walk: a file already there is not a
+//! finding, and "move to Trash" on it would be an action that does
+//! nothing. Trashing is `gio trash`, GLib's own implementation of the
+//! freedesktop Trash spec — it handles the per-volume `.Trash-$uid`
+//! directories a hand-rolled rename would get wrong. Reveal is the file
+//! manager's `ShowItems` over D-Bus, the one call that *selects* the
+//! file the way `open -R` does, with `xdg-open` on the parent directory
+//! as the fallback when no file manager answers.
 
-// Only `reveal` needs it, and that is Finder's.
-#[cfg(target_os = "macos")]
 use crate::opener;
 use crate::prefs;
 use std::cmp::Reverse;
@@ -217,9 +228,12 @@ fn save_baseline_at(path: &Path, scan: &BigFilesScan) {
     }
 }
 
+#[derive(Debug)]
 pub enum ScanError {
     /// Spotlight indexing is off — the query cannot work at all, and
-    /// saying so beats showing a false "no big files".
+    /// saying so beats showing a false "no big files". macOS only: a
+    /// walk has no index to be missing.
+    #[cfg(target_os = "macos")]
     IndexingOff,
     Other(String),
 }
@@ -228,6 +242,7 @@ pub enum ScanError {
 /// a stat per hit) — callers run it on the background executor.
 pub fn scan() -> Result<BigFilesScan, ScanError> {
     let home = env::var("HOME").map_err(|e| ScanError::Other(e.to_string()))?;
+    #[cfg(target_os = "macos")]
     if !indexing_enabled() {
         return Err(ScanError::IndexingOff);
     }
@@ -301,10 +316,35 @@ pub fn trash(path: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Never-run stub — see "Platform reality" in CLAUDE.md.
-#[cfg(not(target_os = "macos"))]
+/// Move a file to the Trash through `gio trash` — GLib's implementation
+/// of the freedesktop Trash spec, and the same thing the desktop's file
+/// manager does. Recoverable from the Trash until it is emptied; never a
+/// direct unlink. A machine without `gio` (no GLib at all — rare on a
+/// desktop) gets an error that names it, and the row stays.
+#[cfg(target_os = "linux")]
+pub fn trash(path: &Path) -> Result<(), String> {
+    let out = Command::new("gio")
+        .arg("trash")
+        .arg("--")
+        .arg(path.as_os_str())
+        .output()
+        .map_err(|e| {
+            format!("gio trash: {e} — GLib's `gio` is what moves files to the Trash here")
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "gio trash: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // Same audit line as the macOS delivery point, for the same reason.
+    tracing::info!(path = %path.display(), "moved to Trash");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn trash(_path: &Path) -> Result<(), String> {
-    Err("trash is macOS-only".into())
+    Err("trash is not implemented on this platform".into())
 }
 
 /// Show the file in Finder, selected (`open -R`). Navigation rather than
@@ -316,10 +356,60 @@ pub fn reveal(path: &Path) {
     }
 }
 
-/// Never-run stub — see "Platform reality" in CLAUDE.md.
-#[cfg(not(target_os = "macos"))]
+/// Show the file in the file manager, selected — `ShowItems` on
+/// `org.freedesktop.FileManager1`, which Nautilus, Dolphin, Thunar and
+/// Nemo all implement; `xdg-open` on the parent directory when nothing
+/// answers. Off the UI thread: the D-Bus call may have to *activate*
+/// the file manager, and a second of that on the main thread is a
+/// frozen panel.
+#[cfg(target_os = "linux")]
+pub fn reveal(path: &Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        if let Err(e) = show_in_file_manager(&path) {
+            tracing::debug!("FileManager1.ShowItems: {e}; opening the folder instead");
+            let parent = path.parent().unwrap_or(&path);
+            if let Err(e) = opener::open([parent.as_os_str()]) {
+                tracing::warn!("reveal {}: {e}", path.display());
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn show_in_file_manager(path: &Path) -> zbus::Result<()> {
+    let connection = zbus::blocking::Connection::session()?;
+    let manager = zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.FileManager1",
+        "/org/freedesktop/FileManager1",
+        "org.freedesktop.FileManager1",
+    )?;
+    manager.call("ShowItems", &(vec![file_uri(path)], ""))
+}
+
+/// `file://` plus the path, percent-encoded byte by byte — a path is
+/// bytes on Linux, not UTF-8, and the spec's unreserved set is the only
+/// thing that passes through bare.
+#[cfg(target_os = "linux")]
+fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(byte as char);
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn reveal(_path: &Path) {}
 
+#[cfg(target_os = "macos")]
 fn query(root: &str, threshold: u64) -> Result<Vec<PathBuf>, ScanError> {
     let out = Command::new("mdfind")
         .arg("-onlyin")
@@ -337,7 +427,52 @@ fn query(root: &str, threshold: u64) -> Result<Vec<PathBuf>, ScanError> {
     Ok(split_null(&out.stdout))
 }
 
-/// `mdfind -0` terminates every path with NUL, the last one included.
+/// The walk. `-xdev` keeps it to the filesystem `$HOME` is on — a drive
+/// mounted under it is the disk analyser's business, not a "big file
+/// in your home". `-size +Nc` is strictly greater, hence the floor one
+/// below the bar (and `collect` re-checks the bar against a fresh stat
+/// anyway, as it does on macOS).
+///
+/// A non-zero exit is *not* a failure here: `find` reports one for every
+/// directory it could not enter and prints every hit regardless. An
+/// index that silently returns nothing is the lie `IndexingOff` guards
+/// against on macOS; a walk that says which directories it skipped is
+/// telling the truth, so stderr goes to the log and stdout is the
+/// answer.
+#[cfg(target_os = "linux")]
+fn query(root: &str, threshold: u64) -> Result<Vec<PathBuf>, ScanError> {
+    let root = root.trim_end_matches('/');
+    let floor = threshold.saturating_sub(1);
+    let out = Command::new("find")
+        .arg(root)
+        .arg("-xdev")
+        .arg("-path")
+        .arg(format!("{root}/.local/share/Trash"))
+        .arg("-prune")
+        .arg("-o")
+        .args(["-type", "f", "-size"])
+        .arg(format!("+{floor}c"))
+        .arg("-print0")
+        .output()
+        .map_err(|e| ScanError::Other(format!("find: {e}")))?;
+    if !out.status.success() {
+        tracing::debug!(
+            "find left some directories unread: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(split_null(&out.stdout))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn query(_root: &str, _threshold: u64) -> Result<Vec<PathBuf>, ScanError> {
+    Err(ScanError::Other(
+        "large-file query is not implemented on this platform".into(),
+    ))
+}
+
+/// `mdfind -0` / `find -print0` terminate every path with NUL, the last
+/// one included.
 fn split_null(bytes: &[u8]) -> Vec<PathBuf> {
     bytes
         .split(|b| *b == 0)
@@ -373,6 +508,7 @@ fn physical_size(meta: &fs::Metadata) -> u64 {
 /// unindexed volume returns an empty result set with a zero exit code —
 /// indistinguishable from "no big files", which is exactly the lie this
 /// check exists to prevent.
+#[cfg(target_os = "macos")]
 fn indexing_enabled() -> bool {
     Command::new("mdutil")
         .arg("-s")
@@ -386,6 +522,51 @@ fn indexing_enabled() -> bool {
 mod tests {
     use super::*;
     use std::process;
+
+    /// The walk against a fixture: only the file over the bar comes back,
+    /// and a file sitting in the Trash — however large — is not a
+    /// finding. Sparse files, so the "600 MB" costs no disk. Real `find`,
+    /// because the flag set is the whole of what this depends on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_walk_finds_files_over_the_bar_and_skips_the_trash() {
+        let dir = env::temp_dir().join(format!("zstats-bigfiles-walk-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let trash = dir.join(".local/share/Trash/files");
+        fs::create_dir_all(&trash).unwrap();
+        let big = dir.join("big.bin");
+        fs::File::create(&big)
+            .unwrap()
+            .set_len(600 * 1024 * 1024)
+            .unwrap();
+        fs::File::create(dir.join("small.bin"))
+            .unwrap()
+            .set_len(1024 * 1024)
+            .unwrap();
+        fs::File::create(trash.join("old.bin"))
+            .unwrap()
+            .set_len(700 * 1024 * 1024)
+            .unwrap();
+
+        let found = query(dir.to_str().unwrap(), 500 * 1024 * 1024).expect("walk");
+
+        assert_eq!(found, vec![big]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Paths are bytes; the URI the file manager gets must survive a
+    /// space, a non-ASCII name and a `%` without ambiguity.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_path_becomes_a_file_uri_byte_for_byte() {
+        assert_eq!(file_uri(Path::new("/home/x/a b")), "file:///home/x/a%20b");
+        assert_eq!(file_uri(Path::new("/tmp/50%")), "file:///tmp/50%25");
+        assert_eq!(file_uri(Path::new("/tmp/é")), "file:///tmp/%C3%A9");
+        assert_eq!(
+            file_uri(Path::new("/tmp/a-b.c_d~e")),
+            "file:///tmp/a-b.c_d~e"
+        );
+    }
 
     fn file(path: &str, size: u64) -> BigFile {
         BigFile {

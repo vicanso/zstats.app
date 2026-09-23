@@ -253,7 +253,11 @@ fn keep_awake_chip() -> Option<AnyElement> {
     if !prefs::keep_awake() {
         return None;
     }
-    let tip = i18n::tr("common.keep_awake_on");
+    let tip = i18n::tr(if cfg!(target_os = "macos") {
+        "common.keep_awake_on"
+    } else {
+        "common.keep_awake_on_linux"
+    });
     Some(
         div()
             .id("keep-awake")

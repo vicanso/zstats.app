@@ -283,6 +283,8 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 
 镜像覆盖不到的仍是三处 raw 文件请求：告警模板（`alerttpl.rs`，拉的是 zstats 仓库）、清理规则与缓存预设（`cleanhints.rs` / `cachepreset.rs`）。它们要么等代码也镜像过去，要么继续靠配置页的代理。
 
+**Linux 的安装是同一条流水线的另一个终点**（2026-09-23）。下载与校验完全共用；不同的是校验缺席时的态度——macOS 上没有 `SHA256SUMS` 可以「不验照装」，因为 DMG 签了名、Gatekeeper 装时还会验；Linux 上摘要是字节和 `exec` 之间唯一的东西，所以缺席即拒绝。安装本身是 `tar` 解包、复制到运行中二进制旁边、`rename` 覆盖：原子，且 Linux 只解除**名字**，进程保留自己映射的 inode。由此有一个只在 Linux 出现的坑：替换之后 `/proc/self/exe` 读作 `<path> (deleted)`，`current_exe()` 给的就是这个带后缀的路径——所以目标路径在动手前先记下（`INSTALLED_AT`），重启时不再问。macOS 相反，`current_exe` 在原地安装后指向新副本。
+
 ### 与设计稿有意的偏差
 
 - **毛玻璃**：设计稿是实心 `#09090b`，这里保留 vibrancy，观感更通透。**白色壁纸曾把整个暗色面板打穿**（55% wash 放 45% 亮度进来，近白正文压在浅灰玻璃上，有实测截图），根因在 gpui：它给 `Blurred` 垫的 `NSVisualEffectView` 子类钉死 `Selection` 材质、并在每次 `updateLayer` 把 layer 背景剥掉（自称 colorless）——剩下**纯 blur**，材质本该有的亮度钳制衬底根本留不住，`setMaterial: Popover` 设上去也会被剥。所以 `use_popover_material`（main.rs，建窗后首帧调用）在 gpui 的 blur 视图**之上**、Metal 内容层**之下**插一个**原生未子类化的** `NSVisualEffectView`（`.popover` 材质、`.behindWindow`、`.active`，autoresize 跟窗，重入时以 `isMemberOfClass` 认出自己直接返回）：popover 材质的亮度钳制正是系统菜单在任何壁纸上都保持暗底的机制——但对纯白只能压到中灰，所以暗色 wash 从 55% 降到 35% 而不是归零：白底下弱化文字仍可读，彩色壁纸的色相则清楚地透进玻璃（实测 20% 在白底会把说明文字洗掉，HUDWindow 材质在新系统上反而更透，都试过）。曾经试过反方向——把卡片涂到 94% 实心——白壁纸是修好了，玻璃也没了，黑底下卡片还和框架撞色；已回退，卡片仍是玻璃上的微提亮（暗 `0xffffff12`、浅 `0xfffffff2`）。那次弯路留下的一件对的东西保住了：卡片描边（`widgets::outline`，零布局 inset shadow，`theme::border()` 选墨色）从浅色专属改为两个主题都画——不欠壁纸任何东西的分隔。

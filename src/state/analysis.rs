@@ -540,6 +540,7 @@ impl ZStatsAppState {
                         bigfiles::save_baseline(&scan);
                         BigFiles::Ready { scan, added, since }
                     }
+                    #[cfg(target_os = "macos")]
                     Err(bigfiles::ScanError::IndexingOff) => {
                         BigFiles::Failed { indexing_off: true }
                     }

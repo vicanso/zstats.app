@@ -806,6 +806,21 @@ struct SettingsWindow {
 }
 
 impl SettingsWindow {
+    /// Re-probe Full Disk Access when this window comes back to the
+    /// front *while showing the Permissions page* — the user may have
+    /// just flipped the switch in System Settings. A method rather than
+    /// an inline check so the activation closure reads the same on both
+    /// platforms; off macOS there is no page and nothing to probe.
+    #[cfg(target_os = "macos")]
+    fn refresh_permissions_probe(&self) {
+        if self.section == views::config::SettingsSection::Permissions {
+            views::config::refresh_full_disk_access();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn refresh_permissions_probe(&self) {}
+
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Cached status; this is the moment it can have moved without
         // us (System Settings → Login Items). Activation below covers
@@ -814,9 +829,7 @@ impl SettingsWindow {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 autostart::refresh();
-                if this.section == views::config::SettingsSection::Permissions {
-                    views::config::refresh_full_disk_access();
-                }
+                this.refresh_permissions_probe();
                 cx.notify();
             }
         });
@@ -975,6 +988,7 @@ fn settings_nav(
                             if this.section != item {
                                 this.section = item;
                                 this.scroll = ScrollHandle::new();
+                                #[cfg(target_os = "macos")]
                                 if item == views::config::SettingsSection::Permissions {
                                     views::config::refresh_full_disk_access();
                                 }

@@ -18,18 +18,12 @@
 use super::widgets::{self, card};
 use crate::alertlog::{self, DayLog};
 use crate::assets;
-// The sheet belongs to the app-level quit, which is macOS-only
-// (`terminate`); the process-level one lives on the Processes tab.
-#[cfg(target_os = "macos")]
 use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs;
 use crate::state::{MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
-// Every user of it sits behind the app-level quit, which only macOS has
-// (`terminate::method_for`); the Processes tab keeps the process-level one.
-#[cfg(target_os = "macos")]
 use crate::terminate;
 use crate::theme;
 use crate::trend;
@@ -990,10 +984,7 @@ fn subject_label(subject: &AlertSubject) -> String {
 /// that eviction from an alert card would be premature. The decision that
 /// something is over the line stays zstats' (this consumes its event);
 /// the click, the confirm sheet and the delivery are `terminate`'s.
-#[cfg(target_os = "macos")]
 fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
-    use crate::terminate;
-
     // A restored card's pid may belong to something else entirely by
     // now — see [`SeenAlert::live`]. No button rather than a button
     // that could hit the wrong target.
@@ -1049,9 +1040,8 @@ fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
 /// head and the pressure card's consumer rows. Callers gate on
 /// `terminate::can_term` and `can_quit` first. `display` is the sheet;
 /// `identity` is what delivery matches against the live `p_comm`.
-#[cfg(target_os = "macos")]
 fn quit_request_button(id: gpui::ElementId, pid: u32, display: String, identity: String) -> Button {
-    use crate::terminate::{self, QuitMethod};
+    use crate::terminate::QuitMethod;
 
     Button::new(id)
         // Log-out, not the footer's power glyph: that one quits *this*
@@ -1067,7 +1057,10 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, display: String, identity:
             // Resolved at click time, not render time: whether the pid
             // still counts as an application can change in between, and
             // the sheet must describe what will actually be sent.
+            // On Linux there is only the signal tier, and the sheet says
+            // so — the same button, one sentence fewer.
             let body = match terminate::method_for(pid) {
+                #[cfg(target_os = "macos")]
                 QuitMethod::App => t!("alerts.quit_body_app", name = display.clone()),
                 QuitMethod::Term => t!("alerts.quit_body_term", name = display.clone()),
             }
@@ -1087,12 +1080,6 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, display: String, identity:
                 },
             );
         })
-}
-
-/// Never-run stub — see "Platform reality" in CLAUDE.md.
-#[cfg(not(target_os = "macos"))]
-fn quit_button(_index: usize, _seen: &SeenAlert) -> Option<Button> {
-    None
 }
 
 /// The engine's answer to "who is holding the RAM" when pressure fires,
@@ -1148,7 +1135,6 @@ fn consumer_rows(index: usize, event: &AlertEvent, live: bool) -> Option<AnyElem
     )
 }
 
-#[cfg(target_os = "macos")]
 fn consumer_quit(index: usize, row: usize, c: &zstats::alerts::MemoryConsumer) -> Option<Button> {
     if !terminate::can_term(c.pid) || !terminate::can_quit(c.pid) {
         return None;
@@ -1160,16 +1146,6 @@ fn consumer_quit(index: usize, row: usize, c: &zstats::alerts::MemoryConsumer) -
         display,
         c.name.clone(),
     ))
-}
-
-/// Never-run stub — see "Platform reality" in CLAUDE.md.
-#[cfg(not(target_os = "macos"))]
-fn consumer_quit(
-    _index: usize,
-    _row: usize,
-    _c: &zstats::alerts::MemoryConsumer,
-) -> Option<Button> {
-    None
 }
 
 /// The `[alerts]` key + override name this event writes when the user

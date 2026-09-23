@@ -36,6 +36,7 @@
 //! [`GITEE_API`] for why a mirror does not weaken the checksum story.
 
 use crate::about;
+#[cfg(target_os = "macos")]
 use crate::opener;
 use crate::proxy;
 use sha2::{Digest, Sha256};
@@ -46,6 +47,7 @@ use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{self, Command};
+#[cfg(target_os = "macos")]
 use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -73,12 +75,30 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// compile-time constant: a universal install runs its native slice,
 /// so this picks the machine's real architecture. Unknown arch falls
 /// back to the universal image, which fits everything.
-fn asset_name() -> &'static str {
-    match env::consts::ARCH {
+#[cfg(target_os = "macos")]
+fn asset_name() -> Option<&'static str> {
+    Some(match env::consts::ARCH {
         "aarch64" => "zstats-aarch64.dmg",
         "x86_64" => "zstats-x86_64.dmg",
         _ => "zstats.dmg",
+    })
+}
+
+/// The tarball publish.yml stages for this architecture. No universal
+/// fallback exists here, so an architecture without a build gets `None`
+/// and an honest refusal rather than a 404 dressed up as a download.
+#[cfg(target_os = "linux")]
+fn asset_name() -> Option<&'static str> {
+    match env::consts::ARCH {
+        "x86_64" => Some("zstats-linux-x86_64.tar.gz"),
+        "aarch64" => Some("zstats-linux-aarch64.tar.gz"),
+        _ => None,
     }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn asset_name() -> Option<&'static str> {
+    None
 }
 /// sha256sum-format digests the release workflow uploads beside it.
 const CHECKSUMS_NAME: &str = "SHA256SUMS";
@@ -172,10 +192,10 @@ fn gitee_download_url(tag: &str, name: &str) -> String {
     format!("{GITEE_REPO_URL}/releases/download/{tag}/{name}")
 }
 
-/// Download `tag`'s DMG and verify it. Returns the downloaded path,
-/// ready for [`install`]. Blocking (up to minutes) — background
-/// executor only. `on_progress(received, total)`; `total` is 0 while
-/// unknown.
+/// Download `tag`'s asset for this build and verify it. Returns the
+/// downloaded path, ready for [`install`]. Blocking (up to minutes) —
+/// background executor only. `on_progress(received, total)`; `total` is
+/// 0 while unknown.
 pub fn download(tag: &str, mut on_progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(DOWNLOAD_TIMEOUT))
@@ -187,7 +207,12 @@ pub fn download(tag: &str, mut on_progress: impl FnMut(u64, u64)) -> Result<Path
         .proxy(proxy::app_proxy())
         .build()
         .new_agent();
-    let asset = asset_name();
+    let Some(asset) = asset_name() else {
+        return Err(format!(
+            "no release build for {} on this platform",
+            env::consts::ARCH
+        ));
+    };
     let response = fetch_asset(&agent, tag, asset)?;
     let total = response
         .headers()
@@ -223,15 +248,28 @@ pub fn download(tag: &str, mut on_progress: impl FnMut(u64, u64)) -> Result<Path
     // story and must not take the same exit: "we meant to verify and
     // could not" is a failure, not a pass. Handing over bytes we
     // intended to check and didn't would make the check decorative.
-    if let Some(expected) = fetch_checksum(&agent, tag, asset) {
-        let Some(got) = file_sha256(&path) else {
-            let _ = fs::remove_file(&path);
-            return Err("could not verify the download (could not hash it)".into());
-        };
-        if !got.eq_ignore_ascii_case(&expected) {
-            let _ = fs::remove_file(&path);
-            return Err(format!("checksum mismatch: expected {expected}, got {got}"));
+    match fetch_checksum(&agent, tag, asset) {
+        Some(expected) => {
+            let Some(got) = file_sha256(&path) else {
+                let _ = fs::remove_file(&path);
+                return Err("could not verify the download (could not hash it)".into());
+            };
+            if !got.eq_ignore_ascii_case(&expected) {
+                let _ = fs::remove_file(&path);
+                return Err(format!("checksum mismatch: expected {expected}, got {got}"));
+            }
         }
+        // Off macOS nothing else stands between these bytes and `exec`:
+        // no signature, no Gatekeeper. The digest is the whole check, so
+        // its absence is a refusal, not a shrug — the same rule
+        // `install-linux.sh` applies to the same file.
+        None if cfg!(not(target_os = "macos")) => {
+            let _ = fs::remove_file(&path);
+            return Err(
+                "the release carries no SHA256SUMS; not installing unverified bytes".into(),
+            );
+        }
+        None => {}
     }
 
     Ok(path)
@@ -279,13 +317,16 @@ fn file_sha256(path: &Path) -> Option<String> {
 
 // ---- in-place install --------------------------------------------------
 
-/// What [`install`] did with the verified image.
+/// What [`install`] did with the verified download.
 pub enum Delivery {
-    /// The fresh bundle was copied over the running one; a relaunch
+    /// The fresh build was put in place of the running one; a relaunch
     /// completes the update.
     Replaced,
     /// The image was handed to the OS for the classic drag — no bundle
-    /// to replace, or the in-place copy could not proceed.
+    /// to replace, or the in-place copy could not proceed. macOS only:
+    /// Linux has no drag to fall back to, so there a blocked install is
+    /// an error that names the file it left behind.
+    #[cfg(target_os = "macos")]
     OpenedForDrag,
 }
 
@@ -297,6 +338,7 @@ pub enum Delivery {
 /// line saying why, rather than failing — an `Err` here means even
 /// `open` refused. Blocking (hdiutil and ditto take seconds) —
 /// background executor only.
+#[cfg(target_os = "macos")]
 pub fn install(dmg: &Path) -> Result<Delivery, String> {
     match running_bundle() {
         Some(target) => match install_over(&target, dmg) {
@@ -319,11 +361,13 @@ pub fn install(dmg: &Path) -> Result<Delivery, String> {
 /// the path recorded at exec time, so after an in-place install it
 /// names the *new* copy at the same location — exactly what a relaunch
 /// wants, and why [`replace_bundle`] may move the file it points at.
+#[cfg(target_os = "macos")]
 fn running_bundle() -> Option<PathBuf> {
     bundle_root_of(&env::current_exe().ok()?)
 }
 
 /// `…/Foo.app/Contents/MacOS/foo` → `…/Foo.app`.
+#[cfg(target_os = "macos")]
 fn bundle_root_of(exe: &Path) -> Option<PathBuf> {
     let root = exe.parent()?.parent()?.parent()?;
     (root.extension().is_some_and(|ext| ext == "app")).then(|| root.to_path_buf())
@@ -332,6 +376,7 @@ fn bundle_root_of(exe: &Path) -> Option<PathBuf> {
 /// Mount, replace `target`, detach. The volume is detached on every
 /// exit — a failed copy must not leave the image mounted on top of the
 /// failure it just reported.
+#[cfg(target_os = "macos")]
 fn install_over(target: &Path, dmg: &Path) -> Result<(), String> {
     let volume = attach(dmg)?;
     let result = replace_bundle(target, &volume);
@@ -349,6 +394,7 @@ fn install_over(target: &Path, dmg: &Path) -> Result<(), String> {
 /// the data volume, so the rename only crosses filesystems in setups
 /// unusual enough to deserve the manual flow). A failed copy renames
 /// the old bundle straight back.
+#[cfg(target_os = "macos")]
 fn replace_bundle(target: &Path, volume: &Path) -> Result<(), String> {
     let fresh = volume.join(BUNDLE_NAME);
     if bundle_plist_value(&fresh, "CFBundleIdentifier").as_deref() != Some(BUNDLE_ID) {
@@ -385,6 +431,7 @@ fn replace_bundle(target: &Path, volume: &Path) -> Result<(), String> {
 /// pass re-reads the entire image to answer the same question — 2.5s
 /// vs 0.3s measured on a 16 MB DMG, most of what the user waits
 /// through as "installing".
+#[cfg(target_os = "macos")]
 fn attach(dmg: &Path) -> Result<PathBuf, String> {
     let out = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-noverify", "-plist"])
@@ -405,6 +452,7 @@ fn attach(dmg: &Path) -> Result<PathBuf, String> {
 /// value needed, scanned in the same no-serde spirit as
 /// [`json_str_field`]. The volume name is ours and ASCII ("zstats
 /// Installer"), so XML entity escapes cannot occur in the value.
+#[cfg(target_os = "macos")]
 fn mount_point_from_plist(xml: &str) -> Option<PathBuf> {
     let after = xml.split("<key>mount-point</key>").nth(1)?;
     let start = after.find("<string>")? + "<string>".len();
@@ -417,6 +465,7 @@ fn mount_point_from_plist(xml: &str) -> Option<PathBuf> {
 /// mount. A volume that stays stuck is left with a warning: the launch
 /// sweep detaches it next start (by then the installed version equals
 /// the running one, so the "not newer" gate passes).
+#[cfg(target_os = "macos")]
 fn detach(volume: &Path) {
     for attempt in 0..2 {
         if attempt > 0 {
@@ -440,6 +489,7 @@ fn detach(volume: &Path) {
 /// quoting happens inside the script. The caller quits right after;
 /// the shell outlives us as launchd's orphan, so it is never a zombie
 /// of ours.
+#[cfg(target_os = "macos")]
 pub fn relaunch() {
     let Some(bundle) = running_bundle() else {
         return;
@@ -461,21 +511,215 @@ pub fn relaunch() {
     }
 }
 
+// ---- Linux: tarball over the running binary ----------------------------
+
+/// Where the Linux install put the new binary, for [`relaunch`].
+///
+/// Needed because Linux reports `/proc/self/exe` as `<path> (deleted)`
+/// the moment the file the process started from is unlinked — which is
+/// exactly what replacing it does (the rename retires the old name; the
+/// process keeps its mapped inode). `current_exe()` after an install
+/// therefore names a file that no longer exists under that name; macOS
+/// has the opposite behaviour (`running_bundle` above). So the path is
+/// recorded at install time, once, before anything moves.
+#[cfg(target_os = "linux")]
+static INSTALLED_AT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// The temp directory an install unpacks into. A prefix rather than a
+/// fixed name so a crashed install's leftovers are recognisable to the
+/// launch sweep.
+#[cfg(target_os = "linux")]
+const UNPACK_PREFIX: &str = "zstats-update-";
+
+/// Install the verified tarball over this process's own binary. Blocking
+/// (`tar` plus a copy) — background executor only. There is no
+/// drag-window fallback here: a target that cannot be replaced — one a
+/// package manager owns, typically — is an error that says so, and the
+/// verified tarball stays in temp for whoever wants to finish by hand.
+#[cfg(target_os = "linux")]
+pub fn install(tarball: &Path) -> Result<Delivery, String> {
+    let target = env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let target = without_deleted_suffix(&target);
+    install_into(tarball, &target)?;
+    *INSTALLED_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(target);
+    Ok(Delivery::Replaced)
+}
+
+/// The install proper, with the target named — so the whole path can be
+/// exercised against a fixture tarball and a temp file, which is the
+/// only way this ever gets tested on a machine that is not upgrading.
+#[cfg(target_os = "linux")]
+fn install_into(tarball: &Path, target: &Path) -> Result<(), String> {
+    let unpack = env::temp_dir().join(format!("{UNPACK_PREFIX}{}", process::id()));
+    let _ = fs::remove_dir_all(&unpack);
+    fs::create_dir_all(&unpack)
+        .map_err(|e| format!("could not create {}: {e}", unpack.display()))?;
+    let result = unpack_and_replace(tarball, &unpack, target);
+    let _ = fs::remove_dir_all(&unpack);
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn unpack_and_replace(tarball: &Path, unpack: &Path, target: &Path) -> Result<(), String> {
+    let out = Command::new("tar")
+        .arg("-xzf")
+        .arg(tarball.as_os_str())
+        .arg("-C")
+        .arg(unpack.as_os_str())
+        .output()
+        .map_err(|e| format!("tar: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "tar -xzf: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let member = tarball_member_dir().ok_or("no release build for this architecture")?;
+    let fresh = unpack.join(member).join(crate::APP_NAME);
+    if !fresh.is_file() {
+        return Err(format!(
+            "the tarball has no {}/{} in it",
+            member,
+            crate::APP_NAME
+        ));
+    }
+    replace_binary(target, &fresh)
+}
+
+/// The directory at the tarball's root: the asset's name without its
+/// extension, which is how publish.yml stages it.
+#[cfg(target_os = "linux")]
+fn tarball_member_dir() -> Option<&'static str> {
+    asset_name()?.strip_suffix(".tar.gz")
+}
+
+/// Copy beside, then rename over. The rename is atomic on one
+/// filesystem, and Linux unlinks the *name*, so the running process
+/// keeps the inode it was mapped from — the same "never pull the
+/// ground out from under the running copy" the macOS path gets by
+/// renaming the old bundle aside. Copying first is what makes an
+/// unwritable directory fail before anything has moved.
+#[cfg(target_os = "linux")]
+fn replace_binary(target: &Path, fresh: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("the running binary has no file name")?;
+    let staged = target.with_file_name(format!("{name}.new"));
+    fs::copy(fresh, &staged).map_err(|e| {
+        format!(
+            "could not stage the new binary beside {}: {e} — installed by a package manager? \
+             update it there",
+            target.display()
+        )
+    })?;
+    if let Err(e) = fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("could not mark the new binary executable: {e}"));
+    }
+    if let Err(e) = fs::rename(&staged, target) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("could not replace {}: {e}", target.display()));
+    }
+    tracing::info!(target = %target.display(), "update installed in place");
+    Ok(())
+}
+
+/// `/proc/self/exe` with the ` (deleted)` the kernel appends once the
+/// file has been unlinked — see [`INSTALLED_AT`].
+#[cfg(target_os = "linux")]
+fn without_deleted_suffix(exe: &Path) -> PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(clean) => PathBuf::from(clean),
+        None => exe.to_path_buf(),
+    }
+}
+
+/// Quit-and-restart, the Linux shape of the macOS one above: a detached
+/// `sh` waits for this pid to exit and then `exec`s the binary — the
+/// path rides in `$0`, so nothing is quoted inside the script. Our
+/// environment (the Wayland display, `XDG_RUNTIME_DIR`) is inherited,
+/// and the single-instance socket the old process leaves behind is
+/// exactly the stale one `ipc::claim` clears.
+#[cfg(target_os = "linux")]
+pub fn relaunch() {
+    let recorded = INSTALLED_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let Some(exe) =
+        recorded.or_else(|| env::current_exe().ok().map(|e| without_deleted_suffix(&e)))
+    else {
+        return;
+    };
+    let script = format!(
+        "while kill -0 {pid} 2>/dev/null; do sleep 0.1; done; exec \"$0\"",
+        pid = process::id()
+    );
+    match Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .arg(exe.as_os_str())
+        .spawn()
+    {
+        Ok(_) => tracing::info!(exe = %exe.display(), "restart requested to finish the update"),
+        Err(e) => tracing::warn!(error = %e, "could not spawn the relauncher"),
+    }
+}
+
+/// The Linux counterpart of the mount sweep: no image to detach, but an
+/// install that died mid-way leaves its unpack directory in temp.
+/// Nothing is installing at launch, so every one of them is stale.
+#[cfg(target_os = "linux")]
+pub fn sweep_installer_mounts() {
+    let Ok(entries) = fs::read_dir(env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(UNPACK_PREFIX));
+        if stale && fs::remove_dir_all(entry.path()).is_ok() {
+            tracing::info!(dir = %entry.path().display(), "stale update unpack directory removed");
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn install(_asset: &Path) -> Result<Delivery, String> {
+    Err("in-place install is not implemented on this platform".into())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn relaunch() {}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn sweep_installer_mounts() {}
+
 // ---- installer-image sweep (once, at launch) ---------------------------
 
 /// The identity notifications are granted to — must match
 /// `[package.metadata.bundle] identifier` in Cargo.toml (a test guards
 /// the pair, same as notify.rs guards the delivery side).
+#[cfg(target_os = "macos")]
 const BUNDLE_ID: &str = "com.github.vicanso.zstats";
 
 /// The bundle's name, on the image and on disk.
+#[cfg(target_os = "macos")]
 const BUNDLE_NAME: &str = "zstats.app";
 
 /// The volume name the release workflow gives the DMG. Finder mounts
 /// repeats as "zstats Installer 1", "… 2" — hence a prefix match.
+#[cfg(target_os = "macos")]
 const INSTALLER_VOLUME_PREFIX: &str = "zstats Installer";
 
 /// LaunchServices' registration tool; no public API does this.
+#[cfg(target_os = "macos")]
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
 /// Detach the installer image an update left mounted.
@@ -501,6 +745,7 @@ const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Fram
 /// progress whose drag window must stay. A busy detach is left alone
 /// with a warning; the next launch retries. Blocking child processes
 /// (hdiutil takes a second or two) — background executor only.
+#[cfg(target_os = "macos")]
 pub fn sweep_installer_mounts() {
     let running = env::current_exe().ok();
     let Ok(volumes) = fs::read_dir("/Volumes") else {
@@ -549,6 +794,7 @@ pub fn sweep_installer_mounts() {
 /// (which handles both the XML cargo-bundle writes and a binary
 /// conversion something else may have made). `None` for a missing
 /// bundle, key, or a failed spawn — every caller treats those alike.
+#[cfg(target_os = "macos")]
 fn bundle_plist_value(app: &Path, key: &str) -> Option<String> {
     let out = Command::new("defaults")
         .arg("read")
@@ -856,12 +1102,14 @@ mod tests {
     /// if the bundle id ever moves, the const must move with it or the
     /// sweep goes blind (it would never *mis*-eject: a mismatch only
     /// makes it skip).
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_sweep_identifier_matches_the_manifest() {
         let manifest = include_str!("../Cargo.toml");
         assert!(manifest.contains(&format!("identifier = \"{BUNDLE_ID}\"")));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn mount_point_comes_out_of_hdiutil_plist_output() {
         // Trimmed real output: the disk entity has no mount-point key,
@@ -886,6 +1134,7 @@ mod tests {
         assert_eq!(mount_point_from_plist("<plist></plist>"), None);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn bundle_root_is_the_app_directory_or_nothing() {
         assert_eq!(
@@ -896,6 +1145,94 @@ mod tests {
         assert_eq!(
             bundle_root_of(Path::new("/Users/x/proj/target/debug/zstats")),
             None
+        );
+    }
+
+    /// The Linux install end to end against a fixture: a tarball laid
+    /// out the way publish.yml stages it, a target file to replace, and
+    /// afterwards the target carries the new bytes, is executable, and
+    /// no `.new` staging file is left beside it. Real `tar` — a second
+    /// at most, and the one tool the path depends on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_verified_tarball_replaces_the_binary_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = env::temp_dir().join(format!("zstats-linux-install-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let member = tarball_member_dir().expect("this architecture has a build");
+        let payload = dir.join("payload").join(member);
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(payload.join(crate::APP_NAME), b"new build").unwrap();
+        let tarball = dir.join("release.tar.gz");
+        let tar = Command::new("tar")
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(dir.join("payload"))
+            .arg(member)
+            .status()
+            .unwrap();
+        assert!(tar.success());
+        let target = dir.join("bin").join("zstats");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"old build").unwrap();
+
+        install_into(&tarball, &target).expect("install");
+
+        assert_eq!(fs::read(&target).unwrap(), b"new build");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the replacement is executable"
+        );
+        assert!(
+            !target.with_file_name("zstats.new").exists(),
+            "no staging file is left beside the binary"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A target nobody may write to — a package-managed /usr/bin — has
+    /// to fail before anything moves, and say what the reader should do
+    /// instead. The old binary must be untouched afterwards.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unwritable_target_fails_before_anything_moves() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = env::temp_dir().join(format!("zstats-linux-ro-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let target = bin.join("zstats");
+        fs::write(&target, b"old build").unwrap();
+        let fresh = dir.join("fresh");
+        fs::write(&fresh, b"new build").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = replace_binary(&target, &fresh).expect_err("read-only directory");
+
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.contains("package manager"), "{err}");
+        assert_eq!(fs::read(&target).unwrap(), b"old build", "nothing moved");
+        assert!(!bin.join("zstats.new").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What `/proc/self/exe` reads as after the file was replaced.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_deleted_suffix_the_kernel_appends_is_stripped() {
+        assert_eq!(
+            without_deleted_suffix(Path::new("/opt/zstats/zstats (deleted)")),
+            PathBuf::from("/opt/zstats/zstats")
+        );
+        assert_eq!(
+            without_deleted_suffix(Path::new("/opt/zstats/zstats")),
+            PathBuf::from("/opt/zstats/zstats")
+        );
+        assert_eq!(
+            tarball_member_dir().map(|m| m.starts_with("zstats-linux-")),
+            Some(true)
         );
     }
 

@@ -160,9 +160,11 @@
 7. 杀掉 bar 再拉起，图标能回来。
 8. 触发一次告警，未读角标出现在图标上；打开告警页后消失。
 
-## 阶段 4：动作与观察器
+## 阶段 4：动作与观察器（**代码完成**，2026-09-23）
 
-**做什么**
+`procscan` 与 `volflag` 在阶段 0 就已落地。这一轮补的是 `terminate`：告警卡上的退出按钮原来在非 macOS 整个返回 `None`，现在恢复了 SIGTERM 那一档——`request_quit` 本来就是跨平台的（应用层那一档在函数体内门禁），只是 `views/alerts.rs` 把整个控件门禁掉了。`QuitMethod::App` 变体本身现在是 macOS 专属，确认弹窗在 Linux 上只有 SIGTERM 那一句。`can_quit_app` 拆成两个平台版本——原来的单一实现用了 `QuitMethod::App`，变体一门禁它就编不过了，这是交换检查抓到的。
+
+**做什么**（原计划，留作记录）
 
 - `procscan`：`sysctl(KERN_PROC_ALL)` 换成读 `/proc/*/stat` 的进程状态（zombie / stopped），接口和字段保持不变，上层不需要知道换了实现。
 - `terminate`：只保留 `request_term`（SIGTERM），删掉应用层那一档——Linux 上没有 `NSRunningApplication` 那种「可拒绝的 ⌘Q」。告警卡上的退出按钮因此在 Linux 上只对进程生效，文案要跟着改。
@@ -184,11 +186,11 @@
   **验证方式**：`notify-rust` 的 XDG 后端默认走 zbus（纯 Rust，`default = ["z"]`），所以可以在 macOS 上用一个 scratch crate `cargo check --target x86_64-unknown-linux-gnu` **真编译**这条路——从真实源码里抽出函数、只替换 i18n 和 `Banner` 两处外部依赖，`--deny=warnings` 干净。FNV 常量另外用 Python 独立算过。`xdg_body` / `xdg_id` 两个纯函数在仓库里有非 macOS 门禁的单测，Linux CI 会跑。
 
   **一处查完发现是虚惊**：`wait_for_action` 的闭包收的是 `&NotificationResponse` 还是 `&str`，曾怀疑会让横幅自然消失也误开告警页。`xdg/mod.rs:99` 保留了 `F: FnOnce(&str)` 的兼容签名并把 `Closed(_)` 映射成 `"__closed"`，原代码是对的。
-- **防休眠**：IOKit 的电源断言换成 logind 的 `Inhibit`（`what=idle`）。**这里有一个必须实测的未知**：hypridle 是否尊重 idle inhibitor。不尊重的话，这个开关在 Omarchy 上就是假的，那就应当在 Linux 上直接隐藏它，而不是留一个不起作用的开关。
-- **开机自启**：`SMAppService` 换成 `~/.config/autostart/zstats.desktop`。**能用,但机制不是 Hyprland**（2026-09-22 实测）：Hyprland 自己不读 XDG autostart，是 systemd 的 `systemd-xdg-autostart-generator` 把那个目录下的 `.desktop` 生成成 `app-*@autostart.service` 挂到 `xdg-desktop-autostart.target` 下。所以这是**会话的属性而不是合成器的**，换一套 session 就可能没有；装之前先 `systemctl --user status xdg-desktop-autostart.target` 确认它 active，没有就退回 hyprland.conf 的 `exec-once`。好处是这条路生成出来的本来就是一个真 unit，`systemctl --user status` 能查、能停，不必再手写一个。
+- ~~**防休眠**~~ **已完成**（2026-09-23，`awake.rs`）：logind 的 `Inhibit("idle", …, "block")`，走 zbus 的 blocking API 到系统总线，拿回的文件描述符就是抑制器本身——描述符关掉即释放，进程崩溃时内核会关，和 macOS 断言「不可能活过进程」的性质一致。`zbus` 因此成了 Linux 侧的直接依赖（本来就在树里，notify-rust 和 ksni 都用它）。**hypridle 尊不尊重仍要实测**：它的配置项 `ignore_systemd_inhibit` 默认 false，即默认尊重，但要用 `systemd-inhibit --what=idle sleep 600` 验一次；界面页的提示文案（`keep_awake_tip_linux`）已把这条依赖写明。
+- ~~**开机自启**~~ **已完成**（2026-09-23，`autostart.rs` 的 `xdg` 子模块）：界面页的开关在 Linux 上写/删 `~/.config/autostart/zstats.desktop`，内容和 `install-linux.sh` 写的一样（无参数、绝对路径、`StartupNotify=false`），改完 `systemctl --user daemon-reload`；`status()` 读文件在不在；会话没有任何东西读那个目录时复用 `NotFound` 状态，行里显示一句话而不是开关（`autostart_no_reader`）。原计划的这条记录保留：`SMAppService` 换成 `~/.config/autostart/zstats.desktop`。**能用,但机制不是 Hyprland**（2026-09-22 实测）：Hyprland 自己不读 XDG autostart，是 systemd 的 `systemd-xdg-autostart-generator` 把那个目录下的 `.desktop` 生成成 `app-*@autostart.service` 挂到 `xdg-desktop-autostart.target` 下。所以这是**会话的属性而不是合成器的**，换一套 session 就可能没有；装之前先 `systemctl --user status xdg-desktop-autostart.target` 确认它 active，没有就退回 hyprland.conf 的 `exec-once`。好处是这条路生成出来的本来就是一个真 unit，`systemctl --user status` 能查、能停，不必再手写一个。
   三处条目内容上的讲究，都不是惯例而是这个程序的要求：`Exec` **不带参数**（裸启动在没有实例时刻意不开面板——那正是登录路径，`--toggle` 会开，不能用）；`Exec` 用**绝对路径**（generator 生成的 unit 不继承 shell 的 `PATH`）；`StartupNotify=false`（面板是 layer surface，不产生普通 toplevel 去满足启动通知，设 true 会让光标转圈到超时）。
   改完要 `systemctl --user daemon-reload` 才会被 generator 看见，否则得等下次登录。
-- **更新器**：Linux 上保留检查、去掉安装——DMG 与 Gatekeeper 都不适用。按钮改成「去发布页」，或者交给包管理之后整块隐藏。
+- ~~**更新器**~~ **已完成，而且比原计划多**（2026-09-23，`updater.rs`）：release 现在有 Linux tarball，所以不是「去掉安装」而是真的原地安装——`asset_name()` 按架构挑 tarball（没有对应构建就 `None`，诚实拒绝而不是 404）；`install()` 用 `tar` 解包、把新二进制复制到运行中的二进制旁边再 `rename` 覆盖（原子，且 Linux 只解除名字、进程保留自己映射的 inode，不会抽掉脚下的地）；不可写的目标（包管理器装的）在任何东西移动之前失败并说明。**没有 SHA256SUMS 在 Linux 上是拒绝而不是照装**——macOS 还有签名和 Gatekeeper 兜底，Linux 上摘要就是全部的校验。`relaunch()` 用 `sh` 等 pid 退出后 `exec` 新二进制。一个只有 Linux 才有的坑记在 `INSTALLED_AT` 的注释里：文件被替换后 `/proc/self/exe` 读出来是 `<path> (deleted)`，所以安装时先把目标路径记下来，`relaunch` 不再问 `current_exe()`。三个 Linux 测试（tarball 原地替换、只读目录拒装、`(deleted)` 后缀）通过交换门禁**在 macOS 上真跑过**——bsdtar 认同样的 `-xzf`。
 
 **通知这一项的验收**（需要在 Omarchy 上做，Quickshell 支不支持 `actions` 是最后一个未知）：
 
@@ -204,10 +206,10 @@
 
 **做什么**
 
-- 读 `zstats::Capabilities`，不要猜平台：Linux 上 `memory_pressure` 和 `cpu_perf_levels` 都是假。概览的压力卡与 P/E 核卡片说「本平台不报告」而不是显示 `—`；托盘 Auto 的内存脸去掉内核压力那条触发，只留进程与应用两类。这正是 `cross-platform.md` 第一节的做法，照搬即可。
-- 砍掉的功能给出诚实空态：可清除空间、系统资源包说明、DMG 安装。
-- 打包：两个架构各出一个 tar.gz（二进制、`.desktop`、图标），接进 `publish.yml` 现有的发布与 `SHA256SUMS` 流程，Gitee 镜像同样带上；Arch 侧可以再给一个 PKGBUILD。两份 README 各补一段 Linux 安装与 Hyprland 配置片段（`layerrule` 与 `bind` 两行）。
-- 更新器在 Linux 上按架构挑的是 tar.gz 而不是 DMG，两个架构的命名要和 macOS 那套保持同一个形状。
+- ~~读 `zstats::Capabilities`~~ **审计时发现已经在做**：`views/overview.rs` 按 `caps.memory_pressure` 决定压力卡，P/E 核在 `perf_levels` 为 `None` 时整块不画。托盘 Auto 的内存脸不用改——Linux 上没有压力事件进来，`turns_the_face` 那条门禁自然不触发。
+- ~~砍掉的功能给出诚实空态~~ **已完成**（2026-09-23）。逐项：**权限页**整个从导航去掉（`SettingsSection::Permissions` 变体本身 macOS 专属——Full Disk Access 是 TCC 概念，Linux 上读不了的目录就是读不了，磁盘分析已按「跳过 N 个」计数）；磁盘空间窗口的 FDA 提示按钮在 Linux 上不渲染；**大文件**从 Spotlight 改成 `find $HOME -xdev -type f -size +Nc`（秒级而非毫秒级，但能看到 Spotlight 从不索引的 `~/.cache`、`~/.local/share`；`~/.local/share/Trash` 剪掉；`find` 的非零退出不算失败，只是有目录进不去）；**回收站**走 `gio trash`（GLib 的 freedesktop Trash 实现，处理跨卷的 `.Trash-$uid`）；**在文件管理器中显示**走 D-Bus `org.freedesktop.FileManager1.ShowItems`（Nautilus/Dolphin/Thunar/Nemo 都实现，能真正选中文件），失败退回 `xdg-open` 父目录，整个在线程上跑（D-Bus 可能要激活文件管理器，那一秒不能卡主线程）；**弹出可移动卷**从裸 `umount` 改成 `findmnt` 取设备 + `udisksctl unmount` + 尽力 `power-off`（普通用户对 udisks 挂的 U 盘 `umount` 会被拒），没有 udisks 才退回 `umount`。可清除空间和系统资源包本来就不渲染。
+- ~~打包~~ **已完成**（2026-09-22/23）：`publish.yml` 的 `linux` job 出两个架构的 tar.gz（二进制、图标、`install-linux.sh`），纳入 `SHA256SUMS`，Gitee 镜像自动带上——v0.3.4 是第一次真跑，`linux-*` 两个 job 一次通过（`checksums` 因 `assets/` 撞名失败过一次，已修）。两份 README 各补了 Linux 段（`layerrule` 与 `bind` 两行都在）。PKGBUILD 没做。
+- ~~更新器按架构挑 tar.gz~~ 已随阶段 5 的更新器一起完成。
 
 **验收**：在 Omarchy 上完整走一遍——开面板、翻六个页、触发一次告警、收一次横幅、退出一个进程、清一次可再生缓存目录、切换主题与语言、重启后自启并保持上次标签页。
 
@@ -226,3 +228,17 @@
 | 销毁重建的内存行为 | 阶段 1 的显隐策略 | 开合一百次，看 RSS |
 | 通知守护进程是否支持 action | 阶段 5 的横幅点击 | `notify-send` 带 action 试一次 |
 | hypridle 是否尊重 idle inhibitor | 防休眠开关在 Linux 上是否该存在 | `systemd-inhibit --what=idle sleep 600` 后等待息屏 |
+
+## 2026-09-23 兼容性审计：还剩什么
+
+过了一遍 23 个文件里的全部平台门禁和每个页面在 Linux 上实际画出什么。上面各阶段里划掉的都是这轮做掉的。**还开着的**：
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| `assets/cleanhints-linux.toml`、`caches-linux.toml` | 未做，是内容工作 | 仓库规矩是条目只能来自各工具自己的文档，不是代码能生成的；Linux 上现在没有任何清理提示与缓存预设，对应测试全是 macOS 门禁 |
+| `active.rs` 前台应用表 | 未做 | Hyprland 有 IPC（socket2 的 `activewindow` 事件，事件驱动，和 NSWorkspace 同形），但那是合成器专属；没有它 `unused_clause` 永远沉默，慢燃横幅少一句「已 N 小时未使用」 |
+| 主题「跟随系统」的默认值 | 要实测 | gpui 走 xdg-desktop-portal 的 color-scheme，`NoPreference → Light`；Omarchy 若没上报 prefer-dark，面板默认浅色、托盘墨色跟着变深，深色 bar 上图标消失 |
+| hypridle 尊不尊重 logind idle inhibitor | 要实测 | `systemd-inhibit --what=idle sleep 600` 看会不会息屏 |
+| 代理 | 接受 | Linux 只认环境变量，不读 GNOME/KDE 的系统代理，这是平台惯例 |
+
+**这一轮怎么验证的，值得记下来当方法**：Linux 门禁里的代码 macOS 的 clippy 一行都不编，而 `wayland-backend` 的 build script 又让整体交叉检查在 macOS 上跑不起来。办法是**临时把文件里的 `macos`/`linux` 门禁对调**（用占位符做三步替换，避免翻转后的锚点和未翻转的撞上），在 macOS 上 `make lint` + `cargo test`，再从备份还原并 diff 确认逐字一致。这样 Linux 分支不但被编译，纯 POSIX 的测试还能**真跑**（`tar`、`find`、unix socket 都在）。用了 zbus 的函数在 macOS 构建里没有这个 crate，改用 scratch crate 把函数原文抽出来 `cargo check --target x86_64-unknown-linux-gnu`（zbus 是纯 Rust，交叉 check 能过）。这套方法这一轮抓到了四个真会让 Linux 编不过的 bug：`SystemTime` 的 import 被误门禁、`can_quit_app` 用了已门禁的变体、`Permissions` 变体在 Linux 永远不构造、激活回调里的 `this` 未使用——每一个在 CI 的 Linux job 上都是一次失败的推送。

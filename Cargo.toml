@@ -30,18 +30,18 @@ short_description = "A menu bar metrics panel written in Rust and GPUI."
 # crate names the source uses (`gpui::`, `gpui_platform::`) and must stay on
 # the exact family gpui-kit's own manifest pins, or two GPUIs end up in the
 # tree — `cargo tree -i gpui-pre` must show one.
-gpui = { package = "gpui-pre", version = "0.3.5" }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.5", features = [
+gpui = { package = "gpui-pre", version = "0.3.6" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.6", features = [
     "font-kit",
     "x11",
     "wayland",
     "runtime_shaders",
 ] }
-gpui_macros = { package = "gpui-pre-macros", version = "0.3.5" }
+gpui_macros = { package = "gpui-pre-macros", version = "0.3.6" }
 # gpui-kit bundles gpui-base + gpui-component (`gpui_kit::component::*`) and
 # the component icon assets (`gpui_kit::assets::Assets`). No `tree-sitter`:
 # that feature is LanguageConfig / the highlighter, which nothing here uses.
-gpui-kit = "0.6.1"
+gpui-kit = "0.6.6"
 # tinyvec 1.13.0 (crates.io, 2026-09-03) does not compile on rustc 1.98:
 # `use alloc::vec::{self, Vec}` shadows the `vec!` macro (Lokathor/tinyvec#225).
 # 1.13.1 restored `vec!`; keep a floor so `cargo update` cannot pick 1.13.0.
@@ -158,6 +158,12 @@ tray-icon = "0.25.1"
 tray-icon = { version = "0.25.1", default-features = false, features = [
     "ksni",
 ] }
+# logind's idle inhibitor behind the keep-awake switch (`awake.rs`).
+# Already in the tree under notify-rust and ksni, so nothing new builds;
+# declared because `awake.rs` speaks to `org.freedesktop.login1` itself.
+# The blocking API is the right one for two calls made from the UI
+# thread when a switch is flipped.
+zbus = "5.19"
 
 # Only for the menu bar's scale factor: the tray reports physical pixels and
 # gpui's `PlatformDisplay` doesn't expose a scale factor. Same versions gpui

@@ -1439,19 +1439,31 @@ fn cmd_headline(cmd: &str) -> &str {
     bundle_name(cmd).unwrap_or(cmd)
 }
 
-fn well_known_name(pid: u32) -> Option<&'static str> {
-    match pid {
-        0 => Some(if cfg!(target_os = "macos") {
-            "kernel_task"
-        } else {
-            "kernel"
-        }),
-        1 => Some(if cfg!(target_os = "macos") {
-            "launchd"
-        } else {
-            "init"
-        }),
-        _ => None,
+/// The parent's name when the process table cannot supply it — the two
+/// pids that are never *in* the table.
+///
+/// macOS has one init and one kernel task, so the names are fixed.
+/// Linux's pid 1 is whichever init the distribution ships — `systemd`
+/// on most, `init`, `runit`, `openrc-init` elsewhere — and
+/// `/proc/1/comm` says which, so it is read rather than guessed (a
+/// file read, once per paint of one row). pid 0 is the kernel's own
+/// parent and has no comm to read.
+fn well_known_name(pid: u32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        match pid {
+            0 => Some("kernel_task".into()),
+            1 => Some("launchd".into()),
+            _ => None,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        match pid {
+            0 => Some("kernel".into()),
+            1 => procscan::comm(1).or_else(|| Some("init".into())),
+            _ => None,
+        }
     }
 }
 
@@ -1459,7 +1471,12 @@ fn parent_display(ppid: Option<u32>, name: Option<&str>) -> String {
     let Some(ppid) = ppid else {
         return format::PLACEHOLDER.to_string();
     };
-    match name.or_else(|| well_known_name(ppid)) {
+    let known = if name.is_none() {
+        well_known_name(ppid)
+    } else {
+        None
+    };
+    match name.or(known.as_deref()) {
         Some(name) => format!("{name} · {ppid}"),
         None => ppid.to_string(),
     }
@@ -1481,11 +1498,12 @@ fn show_user(user_id: Option<&str>, current: Option<&str>) -> bool {
 }
 
 fn current_user_id() -> Option<String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
+        // SAFETY: `getuid` takes nothing and cannot fail.
         Some(unsafe { libc::getuid() }.to_string())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     {
         None
     }
@@ -1542,6 +1560,14 @@ mod tests {
         {
             assert_eq!(parent_display(Some(1), None), "launchd · 1");
             assert_eq!(parent_display(Some(0), None), "kernel_task · 0");
+        }
+        // pid 1's name is whatever this machine's init calls itself; the
+        // point is that it is *named*, not left as a bare number.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let init = parent_display(Some(1), None);
+            assert!(init.ends_with(" · 1") && init != "1", "{init}");
+            assert_eq!(parent_display(Some(0), None), "kernel · 0");
         }
     }
 

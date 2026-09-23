@@ -10,6 +10,7 @@ use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
+#[cfg(target_os = "macos")]
 use crate::opener;
 use crate::state::{ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
@@ -249,6 +250,7 @@ fn space_line(state: &ZStatsAppState) -> Option<AnyElement> {
 
 /// Deep-link into System Settings → Privacy & Security → Full Disk
 /// Access. Navigation only — granting stays a user act in the system UI.
+#[cfg(target_os = "macos")]
 pub(super) fn open_full_disk_access() {
     let _ =
         opener::open(["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]);
@@ -346,27 +348,71 @@ fn eject(mount: &str, cx: &mut gpui::App) {
 /// reported success — a failed eject must not shorten the wait for a
 /// sample that would show the volume still mounted.
 fn run_eject(mount: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    let result = process::Command::new("diskutil")
-        .args(["eject", mount])
-        .output();
-    #[cfg(not(target_os = "macos"))]
-    let result = process::Command::new("umount").arg(mount).output();
-
-    match result {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            tracing::warn!(
-                "eject {mount} failed ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            false
-        }
+    match eject_command(mount) {
+        Ok(()) => true,
         Err(e) => {
             tracing::warn!("eject {mount}: {e}");
             false
         }
+    }
+}
+
+/// `diskutil eject`: unmount and power the drive down in one step.
+#[cfg(target_os = "macos")]
+fn eject_command(mount: &str) -> Result<(), String> {
+    run_tool("diskutil", &["eject", mount])
+}
+
+/// udisks, the desktop's own path — it lets the user who plugged the
+/// drive in unmount it without root, which plain `umount` does not (that
+/// wants `CAP_SYS_ADMIN` unless fstab says `user`, and a removable drive
+/// a desktop auto-mounted under `/run/media` is never in fstab). So the
+/// mount point is resolved to its device with `findmnt`, unmounted
+/// through `udisksctl`, and the drive then powered off the way "safely
+/// remove" does — that last step best-effort, because a drive with a
+/// second partition still mounted refuses it and that is not a failed
+/// eject of *this* volume. Without udisks (a headless box) it falls back
+/// to `umount` and whatever permissions the user has.
+#[cfg(not(target_os = "macos"))]
+fn eject_command(mount: &str) -> Result<(), String> {
+    if !tool_exists("udisksctl") {
+        return run_tool("umount", &[mount]);
+    }
+    let out = process::Command::new("findmnt")
+        .args(["-rn", "-o", "SOURCE", "--mountpoint", mount])
+        .output()
+        .map_err(|e| format!("findmnt: {e}"))?;
+    let device = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || device.is_empty() {
+        return Err(format!("findmnt: no device is mounted at {mount}"));
+    }
+    run_tool("udisksctl", &["unmount", "-b", &device])?;
+    if let Err(e) = run_tool("udisksctl", &["power-off", "-b", &device]) {
+        tracing::debug!("power-off after unmount: {e}");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tool_exists(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+}
+
+/// Run a tool and turn a non-zero exit into its stderr.
+fn run_tool(tool: &str, args: &[&str]) -> Result<(), String> {
+    let out = process::Command::new(tool)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{tool}: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{tool} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 }
 
