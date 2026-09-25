@@ -212,6 +212,29 @@ pub fn rate(bytes_per_sec: Option<u64>) -> String {
     }
 }
 
+/// Operations per second, for a drive's IOPS: `1,204/s`. `None` means no
+/// baseline yet — the first read after the drive channel came on.
+pub fn ops(per_sec: Option<u64>) -> String {
+    match per_sec {
+        Some(n) => format!("{}/s", thousands(n as usize)),
+        None => PLACEHOLDER.to_string(),
+    }
+}
+
+/// Average time per operation. SSD service times live well under a
+/// millisecond, so the precision follows the magnitude: `0.08 ms`,
+/// `2.4 ms`, `31 ms` — two decimals on a 31 would be noise, none on a
+/// 0.08 would be `0`. `None` is a window with no operations of that
+/// kind, where zstats makes no claim.
+pub fn millis(ms: Option<f32>) -> String {
+    match ms {
+        Some(v) if v < 1.0 => format!("{v:.2} ms"),
+        Some(v) if v < 10.0 => format!("{v:.1} ms"),
+        Some(v) => format!("{v:.0} ms"),
+        None => PLACEHOLDER.to_string(),
+    }
+}
+
 /// Uptime, at most two units: "3d 4h", "4h 12m", "9m". A zero second
 /// unit is omitted — "2h", not "2h 00m": on a round figure the trailing
 /// zeros read as a glitch, and the precision they claim ("exactly on
@@ -327,6 +350,17 @@ pub fn span(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drive_figures_keep_their_precision_where_it_means_something() {
+        assert_eq!(ops(Some(1204)), "1,204/s");
+        assert_eq!(ops(Some(0)), "0/s");
+        assert_eq!(ops(None), PLACEHOLDER);
+        assert_eq!(millis(Some(0.083)), "0.08 ms");
+        assert_eq!(millis(Some(2.44)), "2.4 ms");
+        assert_eq!(millis(Some(31.4)), "31 ms");
+        assert_eq!(millis(None), PLACEHOLDER);
+    }
 
     #[test]
     fn clock_reads_the_local_hour_and_minute() {

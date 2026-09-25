@@ -1385,6 +1385,12 @@ impl ZStatsAppState {
         if self.tab != tab {
             self.tab = tab;
             prefs::set_last_tab_key(tab.pref_key());
+            // Hidden or not: the collector reads this beside visibility,
+            // so a banner switching a hidden panel to Alerts must not
+            // leave a stale Hardware behind for the next reveal.
+            if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
+                pace.tab_selected(tab);
+            }
             // A hidden switch (a banner click about to reveal Alerts)
             // leaves the entry work to `enter_shown_tab`, which the
             // reveal runs — doing it here too would read twice.

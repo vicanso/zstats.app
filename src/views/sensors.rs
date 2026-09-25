@@ -2,22 +2,21 @@
 //! the lower half of the Hardware tab, after the disk cards.
 
 use super::widgets::{self, card};
-use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::state::{ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, div, px,
+    AnyElement, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    div, px,
 };
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 
 /// A sensor reads as hot at this fraction of its own ceiling — the same
-/// `celsius / meter_scale` the bar paints, so red always means "bar
-/// nearly full". Only a display rule, like every threshold in `views/`.
+/// `celsius / ceiling` the list sorts by, so the red readings are always
+/// the top rows. Only a display rule, like every threshold in `views/`.
 ///
 /// A fraction, not degrees, because a flat line cannot rank hardware
 /// with different ceilings. The old absolute 80 °C did two things wrong
@@ -28,7 +27,7 @@ use rust_i18n::t;
 /// firmware's own number colours the one that is actually near its
 /// line and lets the merely-warm stay quiet.
 const HOT_FRACTION: f32 = 0.9;
-/// Bar scale when a sensor reports no critical point of its own. With
+/// Ceiling assumed when a sensor reports no critical point of its own. With
 /// [`HOT_FRACTION`] this puts the no-crit colour line at 99 °C — far
 /// above the old 80, deliberately: for hardware whose ceiling we do not
 /// know, "hot" was a guess, and a CPU genuinely at 99 °C is past any
@@ -42,14 +41,11 @@ const ASSUMED_MAX_CELSIUS: f32 = 110.0;
 /// colour key are the same fraction, the hot rows are always a prefix the
 /// truncation cannot reach into.
 ///
-/// Four, not three, because this card is what fills the tab: with one
-/// volume and a battery at the default window height, three rows left a
-/// row's worth of empty panel under the last card, and this is the only
-/// card here that can honestly grow into it. It is a floor, not a fit —
-/// a second mounted volume or a taller battery card takes that room
-/// back and the tab scrolls, which is the recoverable direction. A
-/// height-derived count would need to know how many volume cards
-/// `disk::render` produced, which this module cannot see.
+/// Four: two rows of the grid. It was chosen to fill the tab when each
+/// sensor had its own row and a meter, and this card was the only one
+/// that could grow; the drive and GPU cards now sit above it on macOS,
+/// so four is simply the few nearest their limits — a floor, with "show
+/// more" for the rest.
 const SENSOR_PREVIEW: usize = 4;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
@@ -69,17 +65,15 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             i18n::tr("sensors.nothing_body"),
         ),
         Some(temps) => {
-            // Closest to its own limit first — the fraction the bar
-            // paints, not raw degrees. Raw degrees cannot rank hardware
-            // with different ceilings: an 84 °C core with crit 110 has
-            // a quarter of its range left, a 55 °C battery cell with
-            // crit 60 has five degrees. Sorting by the bar's own
-            // fraction puts the second one on top where it belongs,
-            // and makes the bars a descending staircase — the order
-            // explains itself. It also makes "hot rows are a prefix"
-            // structural: sort key and colour key are the same number,
-            // where the old absolute sort could push a near-its-limit
-            // sensor below the preview cut and hide it.
+            // Closest to its own limit first — not raw degrees, which
+            // cannot rank hardware with different ceilings: an 84 °C core
+            // with crit 110 has a quarter of its range left, a 55 °C
+            // battery cell with crit 60 has five degrees. Sorting by that
+            // fraction puts the second one on top where it belongs. It
+            // also makes "hot rows are a prefix" structural: sort key and
+            // colour key are the same number, where the old absolute sort
+            // could push a near-its-limit sensor below the preview cut and
+            // hide it.
             let mut sorted: Vec<_> = temps.iter().collect();
             sorted.sort_by(|a, b| crit_fraction(b).total_cmp(&crit_fraction(a)));
             let show_all = state.show_all_sensors();
@@ -94,95 +88,14 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             if !show_all {
                 sorted.truncate(SENSOR_PREVIEW.max(hot));
             }
-            widgets::list_shell()
-                .child(widgets::list_header(
+            // Same card and the same two-up cells as the Battery card
+            // under it, so the two read as one kind of block.
+            card()
+                .child(widgets::card_header(
                     i18n::tr("sensors.title"),
                     Some(more_chip(hideable, show_all)),
                 ))
-                .children({
-                    // No separator under the last row — it would land on the
-                    // container's own edge and read as a stray line.
-                    let total = sorted.len();
-                    sorted.into_iter().enumerate().map(move |(i, t)| {
-                        let hot = sensor_hot(t.celsius, t.critical_celsius);
-                        v_flex()
-                            .px(px(13.))
-                            // 9, not 10: the tab has to end above the footer
-                            // with room to spare, and trading single pixels
-                            // against a total that shifts with the volume
-                            // count is a game with no end. Still the loosest
-                            // row in the panel — a process row is 7 — which
-                            // this one earns by carrying a meter under a
-                            // two-part label.
-                            .py(px(9.))
-                            .when(i + 1 != total, |d| {
-                                d.border_b(px(1.)).border_color(theme::border_subtle())
-                            })
-                            .child(
-                                h_flex()
-                                    .items_baseline()
-                                    .justify_between()
-                                    .gap(px(8.))
-                                    .child(
-                                        // Label and limits on one line. The
-                                        // limits used to sit under the meter,
-                                        // costing a third line per sensor — and
-                                        // "51.8 °C" only means something beside
-                                        // the "max 52" it is being read against,
-                                        // so the two belong on the same line
-                                        // anyway.
-                                        h_flex()
-                                            .items_baseline()
-                                            .gap(px(6.))
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .text_size(px(11.))
-                                                    .text_color(theme::text_muted())
-                                                    .truncate()
-                                                    // Raw firmware labels;
-                                                    // deliberately not prettified,
-                                                    // so they match other tools.
-                                                    .child(t.label.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(("sensor-limit", i))
-                                                    .flex_none()
-                                                    .text_size(px(10.))
-                                                    .text_color(theme::text_faint())
-                                                    .tooltip(widgets::wrap_tooltip(i18n::tr(
-                                                        "sensors.limit_tip",
-                                                    )))
-                                                    .child(limits_label(t)),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .font_family(font::MONO)
-                                            .text_size(px(13.))
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(theme::text_for(hot))
-                                            .child(format!("{:.1} °C", t.celsius)),
-                                    ),
-                            )
-                            // 4, matching the meter's own height: it binds
-                            // the bar to the label above it while giving the
-                            // tab back exactly what the bottom gutter took
-                            // (four rows × 1pt = the 4 that `BODY_BOTTOM_PAD`
-                            // grew by, which is what put this tab back over
-                            // the fold).
-                            .child(div().mt(px(4.)).child(widgets::meter(
-                                crit_fraction(t),
-                                Hsla::from(theme::fill_for(hot)),
-                                4.,
-                            )))
-                    })
-                })
-                .pb_3()
+                .child(sensor_grid(&sorted))
                 .into_any_element()
         }
     };
@@ -190,12 +103,65 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     with_battery_card(temps_card, tick)
 }
 
+/// The readings two to a row, in rank order read left to right: the two
+/// nearest their limits share the first row. Row-major, where the Battery
+/// grid below splits its list into a left and a right column, because
+/// this list is a ranking and a ranking reads across first.
+///
+/// Two columns cost the inline "peak 52" — a label, a limit and a reading
+/// do not fit in half of 320px — so each cell carries them on hover, with
+/// the full label, which the narrower cell now truncates sooner. The
+/// order and the colour still say what the limit meant on the page.
+fn sensor_grid(sorted: &[&zstats::snapshot::TemperatureSnapshot]) -> AnyElement {
+    let rows = sorted.len().div_ceil(2);
+    v_flex()
+        .mt(px(10.))
+        .children(sorted.chunks(2).enumerate().map(|(r, pair)| {
+            // No separator under the last row — it would land on the
+            // card's own edge and read as a stray line.
+            let last = r + 1 == rows;
+            h_flex()
+                .gap(px(14.))
+                .children(
+                    pair.iter()
+                        .enumerate()
+                        .map(|(c, t)| sensor_cell(r * 2 + c, t, last)),
+                )
+                // An odd count leaves the right half empty rather than
+                // stretching the last reading across the row.
+                .when(pair.len() == 1, |row| row.child(div().flex_1()))
+        }))
+        .into_any_element()
+}
+
+fn sensor_cell(index: usize, t: &zstats::snapshot::TemperatureSnapshot, last: bool) -> AnyElement {
+    let hot = sensor_hot(t.celsius, t.critical_celsius);
+    div()
+        .id(("sensor", index))
+        .flex_1()
+        .min_w_0()
+        .tooltip(widgets::wrap_tooltip_lines(vec![
+            // Raw firmware labels; deliberately not prettified, so they
+            // match other tools.
+            t.label.clone().into(),
+            limits_label(t).into(),
+            i18n::tr("sensors.limit_tip").into(),
+        ]))
+        .child(widgets::kv_row(
+            t.label.clone(),
+            format!("{:.1} °C", t.celsius),
+            last,
+            hot,
+        ))
+        .into_any_element()
+}
+
 /// What the firmware reports beside the reading.
 ///
 /// zstats' `max_celsius` is the **highest reading observed**, not a
 /// thermal limit — painting "max 52" next to 51.8 °C read as "at the
 /// ceiling" when the bar (drawn against 110 °C / crit) was only half
-/// full. The label now says *peak*. The bar uses [`meter_scale`].
+/// full. The label now says *peak*. Colour and order use [`ceiling`].
 fn limits_label(t: &zstats::snapshot::TemperatureSnapshot) -> String {
     match (t.max_celsius, t.critical_celsius) {
         (Some(m), Some(c)) => t!(
@@ -210,22 +176,21 @@ fn limits_label(t: &zstats::snapshot::TemperatureSnapshot) -> String {
     }
 }
 
-/// The number the meter is drawn against.
+/// The number a reading is measured against, for both order and colour.
 ///
 /// Critical when the firmware reports one — that *is* a ceiling.
 /// Otherwise [`ASSUMED_MAX_CELSIUS`], never the observed peak: the
-/// hottest sensor on the page *is* the peak, so a bar scaled to it
-/// would be full by construction.
-fn meter_scale(crit: Option<f32>) -> f32 {
+/// hottest sensor on the page *is* the peak, so against it the top row
+/// would be at its limit by construction.
+fn ceiling(crit: Option<f32>) -> f32 {
     crit.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0)
 }
 
-/// How much of its own range this sensor has used — the bar's fill, the
-/// list's sort key, and (against [`HOT_FRACTION`]) the colour's input.
-/// One definition so the three can never disagree: the row with the
-/// longest bar is the top row is the first to turn red.
+/// How much of its own range this sensor has used — the list's sort key
+/// and (against [`HOT_FRACTION`]) the colour's input. One definition so
+/// the two can never disagree: the top row is the first to turn red.
 fn crit_fraction(t: &zstats::snapshot::TemperatureSnapshot) -> f32 {
-    t.celsius / meter_scale(t.critical_celsius)
+    t.celsius / ceiling(t.critical_celsius)
 }
 
 /// Colour turns at [`HOT_FRACTION`] of the sensor's own ceiling — never
@@ -233,7 +198,7 @@ fn crit_fraction(t: &zstats::snapshot::TemperatureSnapshot) -> f32 {
 /// against a flat degree count, which cannot tell a core five degrees
 /// into its range from a battery cell five degrees from its limit.
 fn sensor_hot(celsius: f32, crit: Option<f32>) -> bool {
-    celsius / meter_scale(crit) >= HOT_FRACTION
+    celsius / ceiling(crit) >= HOT_FRACTION
 }
 
 /// The expand/collapse control in the header, borrowed from the Network
@@ -392,12 +357,12 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_is_not_scaled_to_the_observed_peak() {
-        // The hottest sensor *is* the peak. Scaling to it would paint a
-        // full bar by construction — which is what "max 52" next to
-        // 51.8 °C looked like, even though 51.8 / 110 is half a trough.
-        assert_eq!(meter_scale(None), ASSUMED_MAX_CELSIUS);
-        assert_eq!(meter_scale(Some(100.0)), 100.0);
+    fn the_ceiling_is_never_the_observed_peak() {
+        // The hottest sensor *is* the peak. Measured against it, the top
+        // row would sit at its limit by construction — which is what
+        // "max 52" next to 51.8 °C looked like, when 51.8 / 110 is half.
+        assert_eq!(ceiling(None), ASSUMED_MAX_CELSIUS);
+        assert_eq!(ceiling(Some(100.0)), 100.0);
     }
 
     fn temp(celsius: f32, crit: Option<f32>) -> zstats::snapshot::TemperatureSnapshot {

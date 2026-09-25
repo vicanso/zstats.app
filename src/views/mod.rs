@@ -26,6 +26,8 @@ mod apps;
 // Public: rendered by the settings window (main.rs), not by a tab.
 pub mod config;
 mod disk;
+mod drives;
+mod gpu;
 mod history;
 mod net;
 mod overview;
@@ -208,11 +210,16 @@ fn content(state: &ZStatsAppState) -> AnyElement {
         Tab::Overview => overview::render(state),
         Tab::Apps => apps::render(state),
         Tab::Processes => processes::render(state),
-        // One tab for the machine's physical substrate: volumes, then
-        // temperatures, then the battery. Both renderers return card
-        // stacks, so merging is concatenation — no layout marriage.
+        // One tab for the machine's physical substrate: volumes, the
+        // physical drives under them, the GPU, then temperatures and the
+        // battery. Volumes answer "is it full" and drives "is it slow" —
+        // two cards side by side, never a joined table, because APFS puts
+        // several volumes on one drive. Every renderer returns a card
+        // stack, so merging is concatenation — no layout marriage.
         Tab::Hardware => {
             let mut cards = disk::render(state);
+            cards.extend(drives::render(state));
+            cards.extend(gpu::render(state));
             cards.extend(sensors::render(state));
             cards
         }

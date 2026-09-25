@@ -149,6 +149,10 @@ fn collect_once(config: CollectorConfig) -> Result<(SystemSnapshot, Duration), C
 /// resident collector's tick, and disk capacity alone costs ~18ms a refresh.
 /// Per-process disk rates ride this same two-pass: without them the All
 /// listing's IO sort is a wall of `—`.
+///
+/// GPU and drives have to be named here, not left to `..Default::default()`:
+/// zstats defaults both to on, and each is an `ioreg` child process costing
+/// ~45 ms of CPU. A listing nobody asked GPUs of would pay ~90 ms per click.
 fn process_config() -> CollectorConfig {
     CollectorConfig {
         collect_processes: true,
@@ -160,6 +164,8 @@ fn process_config() -> CollectorConfig {
         collect_networks: false,
         collect_battery: false,
         collect_temperatures: false,
+        collect_gpu: false,
+        collect_drives: false,
         ..Default::default()
     }
 }
@@ -178,6 +184,8 @@ fn group_config() -> CollectorConfig {
         collect_networks: false,
         collect_battery: false,
         collect_temperatures: false,
+        collect_gpu: false,
+        collect_drives: false,
         ..Default::default()
     }
 }
@@ -185,6 +193,18 @@ fn group_config() -> CollectorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both listings are process tables. zstats turns the two `ioreg`
+    /// channels on by default, so they are only off because these configs
+    /// say so, and a default that grows another child-process channel
+    /// would reach these one-shot collectors the same way.
+    #[test]
+    fn listings_never_spawn_the_registry_reads() {
+        for config in [process_config(), group_config()] {
+            assert!(!config.collect_gpu);
+            assert!(!config.collect_drives);
+        }
+    }
 
     /// The two-pass shape is the whole contract: sysinfo needs a baseline
     /// before it can report per-process CPU at all, so a one-pass scan would

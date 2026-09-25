@@ -4,11 +4,21 @@
 //! any window. `Monitor` accumulates the previous-sample baselines that disk,
 //! network and per-process IO rates are diffed against, so tearing it down
 //! with the popover would reset every rate to "unknown" on each reopen.
+//!
+//! GPUs and physical drives are the exception to "collect for the life of
+//! the process". zstats reads both through an `ioreg` child process, and at
+//! this app's cadence one read costs ~45 ms of CPU (both ~66 ms, measured
+//! 2026-09-25 on an M4 Pro): at zstats' 10s default that is ~0.66% of a
+//! core, about what the whole app costs with the panel hidden. Nothing reads
+//! those figures while the panel is hidden, so the collector thread switches
+//! both channels on only while the panel is on screen *and* showing a tab
+//! that displays them ([`tab_reads_registry`]), through zstats' runtime
+//! switch — a rebuild would reset every other channel's rate baseline.
 
 use crate::notify;
 use crate::prefs;
 use crate::procscan;
-use crate::state::ZStatsGlobalStore;
+use crate::state::{Tab, ZStatsGlobalStore};
 use crate::tray;
 use gpui::{App, Global};
 use std::sync::Arc;
@@ -18,8 +28,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
-use zstats::Monitor;
 use zstats::settings::FileConfig;
+use zstats::{CollectorConfig, Monitor};
 
 /// Set by the Alerts tab after it writes `[alerts]` overrides. The
 /// collector thread consumes it on the next loop so windows and
@@ -50,9 +60,28 @@ pub(crate) const PANEL_PROCESS_INTERVAL: Duration = Duration::from_secs(15);
 pub(crate) const PANEL_DISK_IO_INTERVAL: Duration = Duration::from_secs(15);
 pub(crate) const PANEL_NETWORK_INTERVAL: Duration = Duration::from_secs(15);
 
+/// GPU and drive cadence. Those channels run only while a tab showing
+/// them is on screen ([`registry_channels`]), so this is a live view's
+/// cadence — zstats' own foreground view reads both every beat — not the
+/// daemon's 10s the file's default is written for. At 5s the GPU gauge
+/// stays within a few seconds of true, and drive rates reach the screen
+/// one refresh after the tab opens (the switch restarts their baseline;
+/// at the visible 2s tick that is ~6s, where 10s left the tab showing
+/// `—` for ten). Cost while someone is looking: one ~66 ms pair of
+/// `ioreg` reads per refresh, ~1.1% of a core. Applied over whatever the
+/// file says, unlike the other cadences — the file's value here is
+/// zstats' non-zero default, indistinguishable from a deliberate one.
+pub(crate) const PANEL_REGISTRY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Sensors, per-core CPU, battery, process groups and process-disk-io
 /// have no off switch. CPU% and memory are already unconditional in
 /// zstats. A zero cadence in the file is this app's 15s default.
+///
+/// GPU and drives keep the file's on/off: the collector thread switches
+/// them per pass ([`registry_channels`]), and the file's value is the
+/// ceiling it reads from `Monitor::settings`. A `collect-gpu false`
+/// written with the CLI must stay off here too. Their cadence is ours
+/// ([`PANEL_REGISTRY_INTERVAL`]).
 fn with_always_on(mut settings: FileConfig) -> FileConfig {
     let mut collector = settings.collector.unwrap_or_default();
     collector.collect_temperatures = true;
@@ -69,6 +98,8 @@ fn with_always_on(mut settings: FileConfig) -> FileConfig {
         panel_interval(collector.disk_io_refresh_interval, PANEL_DISK_IO_INTERVAL);
     collector.network_refresh_interval =
         panel_interval(collector.network_refresh_interval, PANEL_NETWORK_INTERVAL);
+    collector.gpu_refresh_interval = PANEL_REGISTRY_INTERVAL;
+    collector.drive_refresh_interval = PANEL_REGISTRY_INTERVAL;
     settings.collector = Some(collector);
     settings
 }
@@ -110,6 +141,11 @@ const ABNORMAL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct CollectorPace {
     visible: Arc<AtomicBool>,
+    /// The selected tab displays GPU or drive figures. Kept apart from
+    /// `visible` so the seven hide paths need not know about it: the
+    /// collector reads the two together, and a hidden panel wants
+    /// nothing whatever its tab.
+    registry_tab: Arc<AtomicBool>,
     wake: mpsc::Sender<()>,
 }
 
@@ -145,6 +181,37 @@ impl CollectorPace {
     pub fn wake(&self) {
         let _ = self.wake.send(());
     }
+
+    /// The selected tab changed. Switching *to* a tab that shows GPUs or
+    /// drives while the panel is up wakes the collector, so the GPU gauge
+    /// is there on the first paint rather than a visible tick later.
+    pub fn tab_selected(&self, tab: Tab) {
+        let reads = tab_reads_registry(tab);
+        let was = self.registry_tab.swap(reads, Ordering::Relaxed);
+        if reads && !was && self.is_visible() {
+            let _ = self.wake.send(());
+        }
+    }
+}
+
+/// The tabs that display GPU or drive figures — the one place that
+/// decides when `ioreg` runs, so adding those figures to another tab is
+/// a change here and nowhere else.
+pub(crate) fn tab_reads_registry(tab: Tab) -> bool {
+    tab == Tab::Hardware
+}
+
+/// What the two `ioreg` channels should do this pass: (gpu, drives).
+///
+/// On only while the panel is on screen at a tab that shows them, and
+/// never past the file's own `collect-gpu` / `collect-drives`. zstats'
+/// switch is a no-op on a repeat, so applying this every pass costs two
+/// comparisons; turning drives on restarts their rates from no baseline,
+/// which is the honest answer after a stretch nobody was sampling.
+fn registry_channels(on_screen: bool, file: Option<&CollectorConfig>) -> (bool, bool) {
+    let gpu = file.is_none_or(|c| c.collect_gpu);
+    let drives = file.is_none_or(|c| c.collect_drives);
+    (on_screen && gpu, on_screen && drives)
 }
 
 /// Spawn the collector and the task that folds its output into the store.
@@ -168,9 +235,15 @@ pub fn start(cx: &mut App) {
     }
 
     let visible = Arc::new(AtomicBool::new(false));
+    // Seeded from the store: the session's tab was restored before this
+    // global existed, so `tab_selected` never saw it.
+    let registry_tab = Arc::new(AtomicBool::new(tab_reads_registry(
+        cx.global::<ZStatsGlobalStore>().read(cx).tab(),
+    )));
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
     cx.set_global(CollectorPace {
         visible: visible.clone(),
+        registry_tab: registry_tab.clone(),
         wake: wake_tx,
     });
 
@@ -214,6 +287,12 @@ pub fn start(cx: &mut App) {
             {
                 tracing::error!("reload_settings failed: {e}");
             }
+            // Every pass, and after the rebuild above: a fresh Monitor
+            // comes up with the file's flags, which are on by default.
+            let on_screen = visible.load(Ordering::Relaxed) && registry_tab.load(Ordering::Relaxed);
+            let (gpu, drives) = registry_channels(on_screen, monitor.settings().collector.as_ref());
+            monitor.set_collect_gpu(gpu);
+            monitor.set_collect_drives(drives);
             match monitor.tick() {
                 Ok(tick) => {
                     if tx.send_blocking(tick).is_err() {
@@ -359,7 +438,82 @@ fn spawn_abnormal_scan(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zstats::CollectorConfig;
+
+    #[test]
+    fn the_registry_reads_run_only_on_screen_and_never_past_the_file() {
+        let off = CollectorConfig {
+            collect_gpu: false,
+            collect_drives: false,
+            ..CollectorConfig::default()
+        };
+        let gpu_only = CollectorConfig {
+            collect_drives: false,
+            ..CollectorConfig::default()
+        };
+        // Hidden, or on a tab that shows neither: nothing, whatever the file
+        assert_eq!(registry_channels(false, None), (false, false));
+        assert_eq!(
+            registry_channels(false, Some(&CollectorConfig::default())),
+            (false, false)
+        );
+        // On screen: zstats' defaults, or the file's own ceiling
+        assert_eq!(registry_channels(true, None), (true, true));
+        assert_eq!(
+            registry_channels(true, Some(&CollectorConfig::default())),
+            (true, true)
+        );
+        assert_eq!(registry_channels(true, Some(&gpu_only)), (true, false));
+        assert_eq!(registry_channels(true, Some(&off)), (false, false));
+    }
+
+    #[test]
+    fn the_file_ceiling_for_gpu_and_drives_survives_the_always_on_pass() {
+        let file = with_always_on(FileConfig {
+            collector: Some(CollectorConfig {
+                collect_gpu: false,
+                collect_drives: false,
+                ..CollectorConfig::default()
+            }),
+            ..FileConfig::default()
+        });
+        let c = file.collector.unwrap();
+        assert!(!c.collect_gpu, "a CLI `collect-gpu false` must stay off");
+        assert!(!c.collect_drives);
+        // And the default stays zstats' on, for the per-pass switch to
+        // bring down while nobody is looking
+        let c = with_always_on(FileConfig::default()).collector.unwrap();
+        assert!(c.collect_gpu && c.collect_drives);
+    }
+
+    #[test]
+    fn only_hardware_reads_the_registry() {
+        for tab in Tab::ALL {
+            assert_eq!(tab_reads_registry(tab), tab == Tab::Hardware, "{tab:?}");
+        }
+    }
+
+    #[test]
+    fn selecting_a_registry_tab_wakes_the_collector_only_when_it_matters() {
+        let (wake, woken) = mpsc::channel();
+        let pace = CollectorPace {
+            visible: Arc::new(AtomicBool::new(false)),
+            registry_tab: Arc::new(AtomicBool::new(false)),
+            wake,
+        };
+        // Hidden: remembered, but nobody is waiting on a sample
+        pace.tab_selected(Tab::Hardware);
+        assert!(pace.registry_tab.load(Ordering::Relaxed));
+        assert!(woken.try_recv().is_err());
+
+        pace.tab_selected(Tab::Overview);
+        assert!(!pace.registry_tab.load(Ordering::Relaxed));
+        pace.visible.store(true, Ordering::Relaxed);
+        pace.tab_selected(Tab::Hardware);
+        assert!(woken.try_recv().is_ok(), "on screen: the gauge is due now");
+        // Already there: no second wake for the same state
+        pace.tab_selected(Tab::Hardware);
+        assert!(woken.try_recv().is_err());
+    }
 
     #[test]
     fn zero_cadence_in_the_file_becomes_the_panel_default() {
@@ -368,6 +522,8 @@ mod tests {
         assert_eq!(c.process_refresh_interval, PANEL_PROCESS_INTERVAL);
         assert_eq!(c.disk_io_refresh_interval, PANEL_DISK_IO_INTERVAL);
         assert_eq!(c.network_refresh_interval, PANEL_NETWORK_INTERVAL);
+        assert_eq!(c.gpu_refresh_interval, PANEL_REGISTRY_INTERVAL);
+        assert_eq!(c.drive_refresh_interval, PANEL_REGISTRY_INTERVAL);
         assert!(c.collect_processes);
         assert!(c.collect_process_groups);
         assert!(c.collect_process_disk_io);

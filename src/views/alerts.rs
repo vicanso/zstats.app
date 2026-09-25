@@ -15,6 +15,7 @@
 //! through `zstats::settings::apply_add` so they match the CLI, then the
 //! collector reloads `[alerts]` in place.
 
+use super::overview;
 use super::widgets::{self, card};
 use crate::alertlog::{self, DayLog};
 use crate::assets;
@@ -919,6 +920,8 @@ fn alert_sentence(event: &AlertEvent) -> String {
             swap_used_bytes,
             swap_total_bytes,
             compressed_bytes,
+            swap_ins_per_sec,
+            swap_outs_per_sec,
             ..
         } => {
             // The kernel's own word for the level, the same one the
@@ -937,6 +940,22 @@ fn alert_sentence(event: &AlertEvent) -> String {
                 text.push_str(" · ");
                 text.push_str(
                     t!("alerts.msg_compressed", size = format::memory(*compressed)).as_ref(),
+                );
+            }
+            // zstats' own summary gained this clause in 0.5.7; this card
+            // builds from the fields, so it arrives only if we add it.
+            // What it tells the reader: the level says tight, the rate
+            // says whether the machine is still fighting when this fired.
+            if let Some((outs, ins)) = overview::swap_moving(*swap_ins_per_sec, *swap_outs_per_sec)
+            {
+                text.push_str(" · ");
+                text.push_str(
+                    t!(
+                        "alerts.msg_swapping",
+                        outs = format::thousands(outs as usize),
+                        ins = format::thousands(ins as usize)
+                    )
+                    .as_ref(),
                 );
             }
             text
@@ -1610,6 +1629,8 @@ mod tests {
                 swap_used_bytes: 0,
                 swap_total_bytes: 0,
                 compressed_bytes: None,
+                swap_ins_per_sec: None,
+                swap_outs_per_sec: None,
                 top_consumers: Vec::new(),
             },
             repeat_after: None,

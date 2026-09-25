@@ -544,6 +544,80 @@ fn mem_climb_strip(climbers: &[MemoryCreep], total_bytes: u64) -> Option<AnyElem
     )
 }
 
+/// The kernel's available percent for the pressure badge — only beside a
+/// verdict. Without a level the badge reads `—` or "not measured", and a
+/// percentage hung on either would be a figure with nothing to explain.
+fn badge_available(level: Option<u32>, kernel_available: Option<u32>) -> Option<u32> {
+    level.and(kernel_available)
+}
+
+/// Compressor segments moved per second, as (out, in) — `None` while both
+/// are still, not yet measured (the first sample), or not measurable (off
+/// macOS). A settled machine gets no clause rather than a pair of zeros:
+/// zstats' own pressure line makes the same call, and it is what lets the
+/// memory card and the pressure alert's sentence grow only when there is
+/// something to read.
+pub(crate) fn swap_moving(ins: Option<u64>, outs: Option<u64>) -> Option<(u64, u64)> {
+    match (outs, ins) {
+        (Some(outs), Some(ins)) if outs > 0 || ins > 0 => Some((outs, ins)),
+        _ => None,
+    }
+}
+
+/// One line under Swap / Compressed while the compressor is swapping:
+/// `Swapping  out 120/s · in 40/s`. The badge says memory is tight; this
+/// says how hard macOS is working to stay there — a warning with nothing
+/// moving is a machine that has settled, one at hundreds a second is
+/// still fighting. Absent otherwise, like the climb strip below it, so a
+/// quiet machine pays no height.
+///
+/// Segments are the kernel's unit — bundles of compressed pages, no fixed
+/// size — so they are shown as activity and never converted to bytes.
+/// `swap_thrashing` is the kernel's own detector (segments written out
+/// only to be read straight back): a verdict, so it recolours the lead
+/// in accent and is never compared to anything here.
+fn swap_activity_strip(mem: &MemorySnapshot) -> Option<AnyElement> {
+    let thrashing = mem.swap_thrashing == Some(true);
+    let moving = swap_moving(mem.swap_ins_per_sec, mem.swap_outs_per_sec);
+    if !thrashing && moving.is_none() {
+        return None;
+    }
+    let (outs, ins) = moving.unwrap_or((0, 0));
+    let (lead, lead_color) = if thrashing {
+        (i18n::tr("overview.swap_thrashing"), theme::accent())
+    } else {
+        (i18n::tr("overview.swap_activity_lead"), theme::text_dim())
+    };
+    Some(
+        h_flex()
+            .id("mem-swapping")
+            .items_baseline()
+            .gap(px(6.))
+            .mt(px(8.))
+            .min_w_0()
+            .text_size(px(10.))
+            .tooltip(widgets::wrap_tooltip(i18n::tr(
+                "overview.swap_activity_tip",
+            )))
+            .child(div().flex_none().text_color(lead_color).child(lead))
+            .child(
+                font::mono_unless_cjk(div())
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme::text_muted())
+                    .child(
+                        t!(
+                            "overview.swap_activity",
+                            outs = format::thousands(outs as usize),
+                            ins = format::thousands(ins as usize)
+                        )
+                        .to_string(),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
 /// `caps` decides how an absent figure reads: this build cannot measure
 /// it, or it can and has not yet. On macOS every capability is true, so
 /// every branch here resolves exactly as it did before 0.5.2.
@@ -599,6 +673,19 @@ fn memory(
             Hsla::from(theme::inset()),
             Hsla::from(theme::border()),
         ),
+    };
+    // The figure the verdict is derived from (`kern.memorystatus_level`),
+    // printed in the badge beside the verdict — "Normal · 62% available" —
+    // not as a row next to Used, where a lower "available" would read as a
+    // contradiction rather than as the kernel's narrower definition. The
+    // word stays in the badge: a bare "62%" beside a memory card reads as
+    // used. The tooltip says why it differs from free GB. macOS only.
+    let (label, tip) = match badge_available(mem.pressure_level, mem.kernel_available_percent) {
+        Some(pct) => (
+            t!("overview.pressure_badge", level = label, pct = pct).to_string(),
+            format!("{tip} {}", t!("overview.pressure_tip_kernel", pct = pct)),
+        ),
+        None => (label, tip),
     };
 
     let total = mem.total_bytes.max(1) as f32;
@@ -711,6 +798,7 @@ fn memory(
         )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
         .child(widgets::kv_packed(rows))
+        .children(swap_activity_strip(mem))
         .children(mem_climb_strip(&climbers, mem.total_bytes))
         .child(io_strip(io))
         .into_any_element()
@@ -790,6 +878,25 @@ fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kernel_percent_rides_the_badge_only_beside_a_verdict() {
+        assert_eq!(badge_available(Some(1), Some(62)), Some(62));
+        assert_eq!(badge_available(Some(4), Some(8)), Some(8));
+        // Waiting for a first sample, or a platform with neither figure
+        assert_eq!(badge_available(None, Some(62)), None);
+        assert_eq!(badge_available(Some(1), None), None);
+    }
+
+    #[test]
+    fn swap_activity_is_news_only_while_something_moves() {
+        assert_eq!(swap_moving(Some(40), Some(120)), Some((120, 40)));
+        assert_eq!(swap_moving(Some(0), Some(3)), Some((3, 0)));
+        // Settled, first sample, off macOS: no clause at all
+        assert_eq!(swap_moving(Some(0), Some(0)), None);
+        assert_eq!(swap_moving(None, None), None);
+        assert_eq!(swap_moving(Some(5), None), None);
+    }
 
     fn group(pid: u32, name: &str, cpu: f32) -> ProcessGroupSnapshot {
         ProcessGroupSnapshot {
