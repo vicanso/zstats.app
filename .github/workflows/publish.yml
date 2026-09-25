@@ -612,6 +612,12 @@ jobs:
         || inputs.mirror_tag != ''
       )
     runs-on: ubuntu-latest
+    # Uploads from a GitHub runner to Gitee run at ~11 KB/s per file
+    # (measured on v0.3.3: 8.5 MB in 13m52s, 17.3 MB in 24m15s), so a
+    # release of ~63 MB is an hour and a half sequential. Three hours
+    # covers a slow day with retries; past that something is wrong
+    # rather than slow.
+    timeout-minutes: 180
     env:
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       # owner/repo on Gitee. The dot is part of the repo path there.
@@ -649,19 +655,35 @@ jobs:
           ls -l assets
 
           # Gitee takes the token as a query parameter (`access_token`);
-          # Actions masks it in the log either way. Every call goes
+          # Actions masks it in the log either way. Every JSON call goes
           # through here so a 4xx prints what Gitee said — a silent 403
           # would otherwise look exactly like a finished mirror.
+          #
+          # Bounded, because the link to Gitee stalls: on v0.3.5 three
+          # of these calls took five minutes and an upload hung sixteen
+          # before the kernel gave up on it. Retried only when the call
+          # is idempotent — a POST whose response was lost may already
+          # have created what a retry would create a second time.
           api() {
             local method="$1" path="$2"; shift 2
             local body status
+            local retry=()
+            case "$method" in
+              GET | DELETE) retry=(--retry 3 --retry-delay 10 --retry-all-errors) ;;
+            esac
             body="$(mktemp)"
-            status="$(curl -sS -X "$method" -o "$body" -w '%{http_code}' \
+            if ! status="$(curl -sS ${retry[@]+"${retry[@]}"} --connect-timeout 30 --max-time 180 \
+              -X "$method" -o "$body" -w '%{http_code}' \
               --url-query "access_token=$GITEE_TOKEN" \
-              "https://gitee.com/api/v5$path" "$@")"
+              "https://gitee.com/api/v5$path" "$@")"; then
+              echo "gitee $method $path -> no answer" >&2
+              rm -f "$body"
+              return 1
+            fi
             if [ "$status" -ge 400 ]; then
               echo "gitee $method $path -> $status" >&2
               cat "$body" >&2
+              echo >&2
               rm -f "$body"
               return 1
             fi
@@ -684,7 +706,8 @@ jobs:
           # body decides, not the status, and the id is checked for being
           # a number before it is ever pasted into a path.
           rel="$(mktemp)"
-          status="$(curl -sS -o "$rel" -w '%{http_code}' \
+          status="$(curl -sS --retry 3 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 30 --max-time 180 -o "$rel" -w '%{http_code}' \
             --url-query "access_token=$GITEE_TOKEN" \
             "https://gitee.com/api/v5/repos/$GITEE_REPO/releases/tags/$tag")"
           case "$status" in
@@ -698,6 +721,33 @@ jobs:
             "" | *[!0-9]*) release_id="" ;;
           esac
 
+          # The GitHub release's notes, so both pages say the same thing.
+          # `body` is required on create and on update, and must not be
+          # empty, hence the fallback for a release whose notes are blank.
+          notes="$(gh release view "$tag" --json body -q .body)"
+          if [ -z "$notes" ]; then
+            notes="$tag — https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
+          fi
+
+          # The release is a prerelease for as long as its attachments
+          # are incomplete, and is published only once every file is
+          # there at its exact size. The app's updater asks Gitee for
+          # `releases/latest` and then spells each download URL: v0.3.5's
+          # half mirror (SHA256SUMS and nothing else) was offered as an
+          # update to everyone who cannot reach GitHub, and every
+          # download 404'd. Whether Gitee's `latest` actually skips a
+          # prerelease is not documented — its own description is "the
+          # most recently updated release" — so the step below measures
+          # it and says so in the log. Either answer leaves this no worse
+          # than publishing up front.
+          set_prerelease() {
+            jq -nc --arg t "$tag" --arg n "$notes" --argjson p "$1" \
+              '{tag_name: $t, name: $t, body: $n, prerelease: $p}' \
+            | api PATCH "/repos/$GITEE_REPO/releases/$release_id" \
+                -H 'Content-Type: application/json' -d @- \
+            | jq -r '.prerelease'
+          }
+
           if [ -z "$release_id" ]; then
             # `target_commitish` is required by the API. Read the mirror's
             # own default branch rather than assuming main or master: on
@@ -705,16 +755,9 @@ jobs:
             # a wrong branch name fails the create with a 404 that reads
             # like a missing repo.
             branch="$(api GET "/repos/$GITEE_REPO" | jq -r .default_branch)"
-            # The GitHub release's notes, so both pages say the same
-            # thing. `body` is required and must not be empty, hence the
-            # fallback for a release whose notes are blank.
-            notes="$(gh release view "$tag" --json body -q .body)"
-            if [ -z "$notes" ]; then
-              notes="$tag — https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
-            fi
             release_id="$(
               jq -nc --arg t "$tag" --arg n "$notes" --arg b "$branch" \
-                '{tag_name: $t, name: $t, body: $n, prerelease: false, target_commitish: $b}' \
+                '{tag_name: $t, name: $t, body: $n, prerelease: true, target_commitish: $b}' \
               | api POST "/repos/$GITEE_REPO/releases" \
                   -H 'Content-Type: application/json' -d @- \
               | jq -r '.id? // empty'
@@ -728,39 +771,144 @@ jobs:
                 exit 1
                 ;;
             esac
-            echo "created Gitee release $release_id for $tag on $branch"
+            echo "created Gitee release $release_id for $tag on $branch as a prerelease"
+            hidden="true"
           else
-            echo "reusing Gitee release $release_id for $tag"
+            # A re-run over a release that is already public: hide it for
+            # the length of the upload too. Best effort — failing to hide
+            # is no reason not to finish the mirror.
+            hidden=""
+            if hidden="$(set_prerelease true)" && [ "$hidden" = "true" ]; then
+              echo "reusing Gitee release $release_id for $tag, marked prerelease while uploading"
+            else
+              echo "reusing Gitee release $release_id for $tag (could not mark it prerelease: ${hidden:-no answer})" >&2
+            fi
+          fi
+          # The measurement the prerelease step depends on; only meaningful
+          # while the release really is one.
+          if [ "$hidden" = "true" ] \
+            && latest="$(api GET "/repos/$GITEE_REPO/releases/latest" | jq -r '.tag_name // "none"')"; then
+            echo "Gitee releases/latest while $tag is a prerelease: $latest"
           fi
 
-          # Gitee has no --clobber: an attachment of the same name would
-          # sit beside the old one and the download page would offer two
-          # files with one name. Delete first, so a re-run replaces.
-          existing="$(api GET "/repos/$GITEE_REPO/releases/$release_id/attach_files?per_page=100")"
-          for file in assets/*; do
-            name="$(basename "$file")"
-            for old in $(printf '%s' "$existing" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
-              api DELETE "/repos/$GITEE_REPO/releases/$release_id/attach_files/$old" >/dev/null
-              echo "removed previous $name ($old)"
+          # Every copy of one file name, removed and confirmed gone. Gitee
+          # has no --clobber: an attachment of the same name would sit
+          # beside the old one and the download page would offer two
+          # files with one name. The confirm is what makes it safe to run
+          # again after a failed attempt — a DELETE whose response was
+          # lost is retried into a 404, and the listing is the only
+          # answer that means anything.
+          clear_attachment() {
+            local name="$1" list old
+            list="$(api GET "/repos/$GITEE_REPO/releases/$release_id/attach_files?per_page=100")" || return 1
+            for old in $(printf '%s' "$list" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id'); do
+              if api DELETE "/repos/$GITEE_REPO/releases/$release_id/attach_files/$old" >/dev/null; then
+                echo "removed previous $name ($old)"
+              fi
             done
-            api POST "/repos/$GITEE_REPO/releases/$release_id/attach_files" \
-              -F "file=@$file" >/dev/null
-            echo "uploaded $name"
+            list="$(api GET "/repos/$GITEE_REPO/releases/$release_id/attach_files?per_page=100")" || return 1
+            printf '%s' "$list" | jq -e --arg n "$name" 'all(.[]; .name != $n)' >/dev/null
+          }
+
+          # One file, up to three attempts. No `--max-time`: at 11 KB/s a
+          # 17 MB file legitimately takes twenty-five minutes. The stall
+          # guard is what replaces it — under 256 B/s for three minutes
+          # is a dead connection, not a slow one (the v0.3.5 upload sat
+          # at zero for sixteen minutes before the kernel's own timeout),
+          # and the bar is low enough that five uploads sharing one
+          # throttled link still clear it. Each attempt clears the name
+          # first, because the attempt before it may have landed a copy
+          # whose response never arrived.
+          upload_one() {
+            local file="$1" name attempt status body
+            name="$(basename "$file")"
+            body="$(mktemp)"
+            for attempt in 1 2 3; do
+              if [ "$attempt" -gt 1 ]; then
+                sleep $((attempt * 20))
+              fi
+              if ! clear_attachment "$name"; then
+                echo "$name: attempt $attempt could not clear earlier copies" >&2
+                continue
+              fi
+              status=""
+              if status="$(curl -sS --connect-timeout 30 --speed-limit 256 --speed-time 180 \
+                -X POST -o "$body" -w '%{http_code}' \
+                --url-query "access_token=$GITEE_TOKEN" \
+                "https://gitee.com/api/v5/repos/$GITEE_REPO/releases/$release_id/attach_files" \
+                -F "file=@$file")" && [ "$status" -lt 400 ]; then
+                echo "uploaded $name (attempt $attempt)"
+                rm -f "$body"
+                return 0
+              fi
+              echo "$name: attempt $attempt failed (http ${status:-none})" >&2
+              cat "$body" >&2 || true
+              echo >&2
+            done
+            rm -f "$body"
+            return 1
+          }
+
+          # All files at once. Each upload has sat at the same ~11 KB/s
+          # on its own, which reads like a per-connection limit; if it is
+          # per address instead, five in parallel take as long as five in
+          # a row and nothing is lost.
+          pids=()
+          for file in assets/*; do
+            upload_one "$file" &
+            pids+=("$!")
+          done
+          failed=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || failed=1
           done
 
-          # Say what the mirror ends up carrying, and fail if anything
-          # this release ships is missing from it: a partial mirror that
-          # reports success is a download link that 404s for the people
-          # it exists for.
+          # Say what the mirror ends up carrying, and check it against the
+          # files themselves — name and byte count, exactly one of each. A
+          # partial mirror that reports success is a download link that
+          # 404s for the people it exists for, and a truncated one is a
+          # checksum failure for them instead. A surplus copy (an attempt
+          # that landed after the next one had cleared the name) is
+          # removed rather than failed: its bytes are the right ones.
           uploaded="$(api GET "/repos/$GITEE_REPO/releases/$release_id/attach_files?per_page=100")"
           echo "--- gitee attachments ---"
           printf '%s' "$uploaded" | jq -r '.[] | "\(.name)\t\(.size)\t\(.browser_download_url)"'
           missing=0
           for file in assets/*; do
             name="$(basename "$file")"
-            if ! printf '%s' "$uploaded" | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null; then
-              echo "missing on Gitee: $name" >&2
+            size="$(wc -c < "$file" | tr -d ' ')"
+            ids="$(printf '%s' "$uploaded" | jq -r --arg n "$name" --argjson s "$size" \
+              '.[] | select(.name == $n and .size == $s) | .id')"
+            if [ -z "$ids" ]; then
+              echo "missing on Gitee: $name ($size bytes)" >&2
+              missing=1
+              continue
+            fi
+            for extra in $(printf '%s\n' "$ids" | tail -n +2); do
+              if api DELETE "/repos/$GITEE_REPO/releases/$release_id/attach_files/$extra" >/dev/null; then
+                echo "removed surplus copy of $name ($extra)"
+              else
+                echo "could not remove surplus copy of $name ($extra)" >&2
+                missing=1
+              fi
+            done
+            if printf '%s' "$uploaded" | jq -e --arg n "$name" --argjson s "$size" \
+              'any(.[]; .name == $n and .size != $s)' >/dev/null; then
+              echo "a copy of $name on Gitee has the wrong size" >&2
               missing=1
             fi
           done
-          [ "$missing" -eq 0 ]
+          if [ "$failed" -ne 0 ] || [ "$missing" -ne 0 ]; then
+            echo "$tag stays a prerelease on Gitee; re-run this job to finish it" >&2
+            exit 1
+          fi
+
+          published=""
+          if ! published="$(set_prerelease false)" || [ "$published" != "false" ]; then
+            echo "every file is on Gitee but $tag could not be published (prerelease: ${published:-no answer})" >&2
+            exit 1
+          fi
+          echo "published $tag on Gitee"
+          if latest="$(api GET "/repos/$GITEE_REPO/releases/latest" | jq -r '.tag_name // "none"')"; then
+            echo "Gitee releases/latest now: $latest"
+          fi
