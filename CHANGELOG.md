@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.8](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.8) - 2026-09-27
+
+### ⛰️  Features
+
+- The Network tab opens on who is listening, and a quiet interface list folds to one line - ([90489c3](https://github.com/vicanso/zstats.app/commit/90489c3d0706c9891ce4828cbdff08ef9188b181))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.7 - ([902f216](https://github.com/vicanso/zstats.app/commit/902f216e9723f8d25f904b5a44513445d6caed16))
+
 ## [0.3.7](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.7) - 2026-09-27
 
 ## [0.3.6](https://github.com/vicanso/zstats.app/compare/v0.3.5..v0.3.6) - 2026-09-27
