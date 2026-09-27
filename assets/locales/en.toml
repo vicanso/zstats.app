@@ -327,6 +327,7 @@ show_udp = "Show UDP"
 filter_tip = "Search by program, pid, port or address"
 filter_placeholder = "Program, pid, port or address"
 no_match = "Nothing listening matches “%{query}”."
+quit_body = "Send SIGTERM to %{name} (pid %{pid}). It is listening on %{endpoints}."
 hide = "Hide"
 
 [sensors]

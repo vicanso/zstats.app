@@ -34,17 +34,19 @@
 //! process rows.
 
 use super::widgets;
+use crate::confirm;
 use crate::font;
 use crate::i18n;
 use crate::state::{ListenerView, ZStatsAppState, ZStatsGlobalStore};
+use crate::terminate;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px, relative,
+    StatefulInteractiveElement, Styled, div, px,
 };
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex};
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -204,6 +206,9 @@ fn note_line(text: String) -> AnyElement {
         .into_any_element()
 }
 
+/// Two lines: who (name, pid or `×N`, and Quit where it can act), then
+/// where (the endpoints, given the row's full width — on one line they
+/// shared it with the name and both truncated).
 fn row_element(index: usize, row: &Row, last: bool) -> AnyElement {
     let endpoints: Vec<String> = row.endpoints.iter().map(|(e, _)| e.label()).collect();
     // Several processes under one name: the tooltip is where each endpoint
@@ -221,41 +226,46 @@ fn row_element(index: usize, row: &Row, last: bool) -> AnyElement {
             }
         })
         .collect();
-    h_flex()
-        .items_baseline()
-        .justify_between()
-        .gap(px(8.))
+    let quit =
+        quit_target(row).map(|(pid, name)| quit_button(index, pid, name, endpoints.join(", ")));
+    v_flex()
         .px(px(13.))
-        .py(px(6.))
+        .py(px(7.))
         .when(!last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
         })
         .child(
             h_flex()
-                .items_baseline()
-                .gap(px(6.))
-                .flex_1()
-                .min_w_0()
-                .child(widgets::truncating_name(
-                    ("listen-owner", index),
-                    row.owner_label(),
-                    11.,
-                    gpui::FontWeight::NORMAL,
-                    theme::text().into(),
-                ))
-                .children(row.pid_label().map(|label| {
-                    div()
-                        .flex_none()
-                        .text_size(px(10.))
-                        .text_color(theme::text_dim())
-                        .child(label)
-                })),
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    h_flex()
+                        .items_baseline()
+                        .gap(px(6.))
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::truncating_name(
+                            ("listen-owner", index),
+                            row.owner_label(),
+                            11.,
+                            gpui::FontWeight::NORMAL,
+                            theme::text().into(),
+                        ))
+                        .children(row.pid_label().map(|label| {
+                            div()
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(theme::text_dim())
+                                .child(label)
+                        })),
+                )
+                .children(quit),
         )
         .child(
             font::mono_unless_cjk(div())
                 .id(("listen-endpoints", index))
-                .flex_none()
-                .max_w(relative(0.62))
+                .mt(px(3.))
                 .min_w_0()
                 .truncate()
                 .text_size(px(10.))
@@ -266,6 +276,83 @@ fn row_element(index: usize, row: &Row, last: bool) -> AnyElement {
                 })
                 .tooltip(widgets::wrap_tooltip_lines(tip))
                 .child(endpoints.join("  ")),
+        )
+        .into_any_element()
+}
+
+/// The one process a row's Quit would act on, if it may be offered at all.
+///
+/// Only a row that stands for exactly one named process. `×17` is
+/// seventeen processes, and one click ending all of them would act on more
+/// than a row names — the rule the process page keeps for its own Quit.
+/// A search narrows `×N` to the holders of what matched, which is how one
+/// of them gets its button. A pid with no name is never offered: the name
+/// is what the delivering end checks the pid against. Then the two gates
+/// the process page uses, plus the kernel's own permission check, so a
+/// root-owned listener (`mDNSResponder`) shows no control that could
+/// only fail.
+fn quit_target(row: &Row) -> Option<(u32, String)> {
+    let Owner::Name(name) = &row.owner else {
+        return None;
+    };
+    if row.pids.len() != 1 {
+        return None;
+    }
+    let pid = *row.pids.first()?;
+    (terminate::can_term(pid) && terminate::can_quit(pid)).then(|| (pid, name.clone()))
+}
+
+/// The process page's Quit, sized for a row's first line. SIGTERM behind
+/// the confirm sheet; the sheet names the endpoints too, so it says what
+/// will stop answering, not just which process.
+fn quit_button(index: usize, pid: u32, name: String, endpoints: String) -> AnyElement {
+    div()
+        .id(("listen-quit", index))
+        .flex_none()
+        .h(px(18.))
+        .px(px(7.))
+        .rounded(px(5.))
+        .border_1()
+        .border_color(theme::accent_wash(45))
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|d| d.bg(theme::accent_wash(10)))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            let name = name.clone();
+            confirm::ask(
+                window,
+                cx,
+                i18n::tr("processes.kill_title"),
+                t!(
+                    "listen.quit_body",
+                    name = name.clone(),
+                    pid = pid,
+                    endpoints = endpoints.clone()
+                )
+                .to_string(),
+                i18n::tr("processes.kill_ok"),
+                move |cx| {
+                    // Checked against the name it was shown under: this
+                    // list can be 15s old, and the pid may belong to
+                    // something else by now.
+                    if terminate::request_term_named(pid, &name) {
+                        // Re-read on the next tick rather than 15s on, so
+                        // the row goes once the process has.
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, _| state.expire_listeners());
+                    }
+                },
+            );
+        })
+        .child(
+            div()
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::accent_light())
+                .child(i18n::tr("processes.kill_ok")),
         )
         .into_any_element()
 }
@@ -658,6 +745,38 @@ mod tests {
         assert_eq!(names(&matching(all(), "17302")), ["redis-server"]);
         // A partial pid is not a pid match (and no label contains it)
         assert!(matching(all(), "1730").is_empty());
+    }
+
+    #[test]
+    fn quit_is_offered_only_for_one_named_process_this_user_may_signal() {
+        let row = |owner, pids: &[u32]| Row {
+            owner,
+            pids: pids.iter().copied().collect(),
+            endpoints: Vec::new(),
+        };
+        // The test runner: alive, ours to signal, and never actually
+        // signalled here — this only asks whether the button would exist
+        let runner = std::os::unix::process::parent_id();
+        let named = |n: &str| Owner::Name(n.to_string());
+        assert_eq!(
+            quit_target(&row(named("runner"), &[runner])),
+            Some((runner, "runner".to_string()))
+        );
+        assert_eq!(
+            quit_target(&row(named("redis-server"), &[runner, runner + 1])),
+            None,
+            "×2 is two processes, not one row's worth"
+        );
+        assert_eq!(
+            quit_target(&row(Owner::Pid(runner), &[runner])),
+            None,
+            "no name for the delivering end to check the pid against"
+        );
+        assert_eq!(
+            quit_target(&row(named("self"), &[std::process::id()])),
+            None
+        );
+        assert_eq!(quit_target(&row(named("launchd"), &[1])), None);
     }
 
     #[test]

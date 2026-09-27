@@ -1,9 +1,10 @@
 //! Asking a process to quit — the panel's one way of acting on a process.
 //!
-//! Three callers, all behind a confirm sheet and never automatic: the quit
+//! Four callers, all behind a confirm sheet and never automatic: the quit
 //! button on a memory alert card ([`request_quit`]), the Quit control on
-//! a process row ([`request_term`]), and the Apps expansion's Quit
-//! ([`can_quit_app`] → [`request_quit`]). An unattended kill can take
+//! a process row ([`request_term`]), the Apps expansion's Quit
+//! ([`can_quit_app`] → [`request_quit`]), and the Quit on a listening row
+//! ([`request_term_named`]). An unattended kill can take
 //! unsaved work with it, so the app's posture stays "notify and offer",
 //! with the user's click as the trigger. *When* something is over the
 //! line remains zstats' call (the alert button consumes its
@@ -87,21 +88,8 @@ pub fn request_quit(pid: u32, expected_name: &str) -> bool {
         tracing::warn!(pid, "refusing to quit");
         return false;
     }
-    match crate::procscan::comm(pid) {
-        Some(live) if names_match(expected_name, &live) => {}
-        Some(live) => {
-            tracing::warn!(
-                pid,
-                expected = expected_name,
-                live,
-                "pid is no longer that process"
-            );
-            return false;
-        }
-        None => {
-            tracing::warn!(pid, expected = expected_name, "could not read process name");
-            return false;
-        }
+    if !still_named(pid, expected_name) {
+        return false;
     }
     // The audit line for the app's rarest act: asking something to die.
     // Logged at the delivery point so every caller (alert card, Apps
@@ -181,6 +169,45 @@ pub fn can_term(pid: u32) -> bool {
     pid > 1 && pid != std::process::id()
 }
 
+/// Whether `pid` still names the process the caller saw. A pid the caller
+/// read a while ago can have been handed to something else since — after
+/// a reboot, or in a busy build — and signalling that would act on a
+/// program nobody chose. An unreadable name refuses too.
+fn still_named(pid: u32, expected_name: &str) -> bool {
+    match crate::procscan::comm(pid) {
+        Some(live) if names_match(expected_name, &live) => true,
+        Some(live) => {
+            tracing::warn!(
+                pid,
+                expected = expected_name,
+                live,
+                "pid is no longer that process"
+            );
+            false
+        }
+        None => {
+            tracing::warn!(pid, expected = expected_name, "could not read process name");
+            false
+        }
+    }
+}
+
+/// [`request_term`] for a caller whose pid is older than a tick: the
+/// listening card's list is re-read every 15s, so its pid is checked
+/// against the name it was shown under before anything is sent. SIGTERM
+/// only, for the process row's reason — a listener row names a process,
+/// not an application.
+pub fn request_term_named(pid: u32, expected_name: &str) -> bool {
+    if !can_term(pid) {
+        tracing::warn!(pid, "refusing to signal");
+        return false;
+    }
+    if !still_named(pid, expected_name) {
+        return false;
+    }
+    request_term(pid)
+}
+
 /// SIGTERM, and nothing above it — the process page's Quit.
 ///
 /// Re-checks [`can_term`] rather than trusting the caller: this is the
@@ -204,6 +231,16 @@ pub fn request_term(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pid_that_now_names_something_else_is_not_signalled() {
+        // A live pid under a name it does not carry: the recycled-pid case.
+        // Our own pid is refused earlier by `can_term`, so use the parent —
+        // the test runner — which is alive and certainly not called this.
+        let parent = std::os::unix::process::parent_id();
+        assert!(!request_term_named(parent, "definitely-not-the-runner"));
+        assert!(!request_term_named(1, "launchd"), "never pid 1");
+    }
 
     #[test]
     fn will_not_signal_init_or_self() {

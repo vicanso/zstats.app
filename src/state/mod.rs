@@ -1063,6 +1063,14 @@ impl ZStatsAppState {
         self.listeners.as_ref()
     }
 
+    /// Make the next tick re-read the listening sockets instead of waiting
+    /// out [`LISTENERS_REFRESH`] — after a Quit from the card, so the row
+    /// goes once its process has. The current answer stays on screen
+    /// until the new one lands.
+    pub fn expire_listeners(&mut self) {
+        self.listeners_at = None;
+    }
+
     pub fn show_all_listeners(&self) -> bool {
         self.show_all_listeners
     }
