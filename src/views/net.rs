@@ -65,11 +65,28 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .iter()
         .filter(|n| show_all || state.net_is_recent(&n.interface))
         .collect();
+    // Nothing recent: the card keeps its header and its chip, with one
+    // line under them. It sits under the listener list now, so a
+    // full-size empty card was height spent saying nothing — and the chip
+    // is the only way to see the idle interfaces, which the old empty card
+    // left no way to reach.
     if rows.is_empty() {
-        return vec![widgets::empty_card(
-            i18n::tr("net.idle_title"),
-            i18n::tr("net.idle_body"),
-        )];
+        return vec![
+            widgets::list_shell()
+                .child(widgets::list_header(
+                    i18n::tr("net.title"),
+                    Some(more_chip(hideable, show_all)),
+                ))
+                .child(
+                    div()
+                        .px(px(13.))
+                        .pb(px(11.))
+                        .text_size(px(11.))
+                        .text_color(theme::text_dim())
+                        .child(i18n::tr("net.idle_body")),
+                )
+                .into_any_element(),
+        ];
     }
     rows.sort_by(|a, b| {
         (b.received_bytes_per_sec + b.transmitted_bytes_per_sec)

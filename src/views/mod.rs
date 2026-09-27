@@ -224,11 +224,16 @@ fn content(state: &ZStatsAppState) -> AnyElement {
             cards.extend(sensors::render(state));
             cards
         }
-        // Interfaces, then who is listening on them. Same concatenation
-        // as Hardware: each renderer returns its own card stack.
+        // Who is listening first, then the interfaces. The listener list
+        // is the one thing on this tab nothing else in the panel shows,
+        // and it always has rows; the interface card is a per-link split
+        // of the throughput Overview's IO strip already carries, and on a
+        // quiet machine it is an empty state — which used to be the first
+        // thing the tab said. Same concatenation as Hardware: each
+        // renderer returns its own card stack.
         Tab::Net => {
-            let mut cards = net::render(state);
-            cards.extend(listening::render(state));
+            let mut cards = listening::render(state);
+            cards.extend(net::render(state));
             cards
         }
         Tab::Alerts => alerts::render(state),

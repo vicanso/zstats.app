@@ -301,7 +301,6 @@ big_trash_title = "移到废纸篓？"
 big_trash_body = "%{name} 将移到废纸篓——清空前可恢复，清空后才真正释放空间。"
 big_trash_ok = "移到废纸篓"
 [net]
-idle_title = "暂无活动接口"
 idle_body = "过去 30 分钟内没有接口收发过数据。有流量时会自动出现。"
 title = "网络"
 off = "网络 — 已关闭"

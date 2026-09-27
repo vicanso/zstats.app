@@ -301,7 +301,6 @@ big_trash_title = "Move to Trash?"
 big_trash_body = "%{name} goes to the Trash — recoverable until you empty it, and the space frees only then."
 big_trash_ok = "Move to Trash"
 [net]
-idle_title = "No active interfaces"
 idle_body = "Nothing has carried traffic in the last 30 minutes. Interfaces reappear as soon as they do."
 title = "Network"
 off = "Network — off"
