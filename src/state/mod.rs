@@ -501,6 +501,34 @@ pub struct MemoryCreep {
     pub now_bytes: u64,
 }
 
+/// What the Network tab's listening card shows: the outcome of the last
+/// `zstats::listeners()` call, made while that tab was on screen.
+///
+/// A panel-owned query, like the purgeable-space probe and the one-shot
+/// listings — not a Monitor metric: a listener list has no baseline to
+/// keep and changes rarely, so zstats serves it as a function outside the
+/// snapshot, and this app asks only while someone is looking.
+pub enum ListenerView {
+    Ready(zstats::Listeners),
+    /// macOS answered with this process's own sockets only. It names every
+    /// owner only to a process with an app-bundle identity, so this is a
+    /// bare-executable build (`cargo run`); the installed zstats.app sees
+    /// them all. Its own state rather than an error, because a list of
+    /// our own two sockets would read as "nothing else is listening".
+    Restricted,
+    /// The table could not be read or, on macOS, its layout moved under
+    /// an OS update and zstats refused to guess. The message is zstats'.
+    Failed(String),
+}
+
+/// How often the listening card is re-read while the Network tab stays
+/// on screen — the panel's network cadence
+/// ([`metrics::PANEL_NETWORK_INTERVAL`]), so the card and the interface
+/// rows above it age together. A listener list changes when a server
+/// starts or stops, and the visit itself always reads fresh; this only
+/// covers someone watching the tab while they start one.
+const LISTENERS_REFRESH: Duration = Duration::from_secs(15);
+
 /// The resident tick only keeps `max-processes`, so a group's
 /// `process_count` can be 37 while the live table names four of them.
 ///
@@ -584,6 +612,24 @@ pub struct ZStatsAppState {
     show_unused_nets: bool,
     /// UI filter: reveal every temperature sensor, not just the preview.
     show_all_sensors: bool,
+    /// UI filter: every listening process, UDP included, not just the
+    /// preview of TCP servers.
+    show_all_listeners: bool,
+    /// The listening card's last answer, read while the Network tab was on
+    /// screen. Dropped on hide with the other query-like state.
+    listeners: Option<ListenerView>,
+    listeners_at: Option<Instant>,
+    listeners_inflight: bool,
+    /// The listening card's search input, created on first open (an
+    /// [`InputState`] needs a `Window`) and kept, like the process filter.
+    listen_filter: Option<Entity<InputState>>,
+    /// Whether the search row is on screen. Closing clears the text, for
+    /// the process filter's reason: a hidden query that kept filtering
+    /// would read as listeners vanishing.
+    listen_filter_open: bool,
+    /// The query, lowercased and trimmed, mirrored out of the entity on
+    /// every change so the view can read it as plain state.
+    listen_filter_text: String,
     /// Directory analyser + large-file query. Survives hide for the
     /// analyser (see [`DiskAnalysis`]); the listing is query-like and
     /// reset on hide.
@@ -733,6 +779,13 @@ impl Default for ZStatsAppState {
             only_abnormal: false,
             show_unused_nets: false,
             show_all_sensors: false,
+            show_all_listeners: false,
+            listeners: None,
+            listeners_at: None,
+            listeners_inflight: false,
+            listen_filter: None,
+            listen_filter_open: false,
+            listen_filter_text: String::new(),
             analysis: Analysis::default(),
             space: None,
             space_at: None,
@@ -915,6 +968,11 @@ impl ZStatsAppState {
         if self.tab == Tab::Hardware && panel_visible(cx) {
             self.ensure_space_info(cx);
         }
+        // Same gate for the listening card: on screen, not merely
+        // selected — the tab survives hide and a restart.
+        if self.tab == Tab::Net && panel_visible(cx) {
+            self.ensure_listeners(cx);
+        }
         self.prune_stale_alerts();
         self.maybe_auto_check_update(cx);
         // Views cannot start work. Hide drops the table. A still-open
@@ -950,6 +1008,119 @@ impl ZStatsAppState {
             });
         })
         .detach();
+    }
+
+    /// Read the listening sockets when the card has nothing, or has held
+    /// the same answer for [`LISTENERS_REFRESH`]. Single-flight, and off
+    /// the main thread: `zstats::listeners` reads the kernel's socket
+    /// tables and a few process entries.
+    fn ensure_listeners(&mut self, cx: &mut Context<Self>) {
+        if self.listeners_inflight
+            || self
+                .listeners_at
+                .is_some_and(|at| at.elapsed() < LISTENERS_REFRESH)
+        {
+            return;
+        }
+        self.listeners_inflight = true;
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async { zstats::listeners() })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.listeners_inflight = false;
+                // Hidden while the tables were being read: the hide
+                // already dropped the card, and a late answer must not
+                // bring it back for a panel nobody is looking at.
+                if !(state.tab == Tab::Net && panel_visible(cx)) {
+                    return;
+                }
+                let view = match outcome {
+                    Ok(listeners) => ListenerView::Ready(listeners),
+                    Err(zstats::CollectError::Restricted { .. }) => ListenerView::Restricted,
+                    Err(e) => {
+                        let message = e.to_string();
+                        // Once per distinct failure, not every 15s
+                        if !matches!(&state.listeners, Some(ListenerView::Failed(m)) if *m == message)
+                        {
+                            tracing::warn!(error = %message, "listening sockets unavailable");
+                        }
+                        ListenerView::Failed(message)
+                    }
+                };
+                state.listeners = Some(view);
+                state.listeners_at = Some(Instant::now());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The listening card's last answer; `None` before the first read of
+    /// this visit.
+    pub fn listeners(&self) -> Option<&ListenerView> {
+        self.listeners.as_ref()
+    }
+
+    pub fn show_all_listeners(&self) -> bool {
+        self.show_all_listeners
+    }
+
+    pub fn toggle_all_listeners(&mut self, cx: &mut Context<Self>) {
+        self.show_all_listeners = !self.show_all_listeners;
+        cx.notify();
+    }
+
+    pub fn listen_filter_open(&self) -> bool {
+        self.listen_filter_open
+    }
+
+    pub fn listen_filter_input(&self) -> Option<&Entity<InputState>> {
+        self.listen_filter.as_ref()
+    }
+
+    /// The lowercased, trimmed search; empty while the search is closed.
+    pub fn listen_filter_text(&self) -> &str {
+        &self.listen_filter_text
+    }
+
+    /// Show or hide the listening card's search, creating the input on
+    /// first use — the process filter's shape, without its full-scan
+    /// rebuild: this list is recomputed from the answer on every paint.
+    pub fn toggle_listen_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.listen_filter_open {
+            self.listen_filter_open = false;
+            // `set_value` emits no Change event, so the mirror is cleared
+            // by hand.
+            if let Some(input) = &self.listen_filter {
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            self.listen_filter_text.clear();
+        } else {
+            self.listen_filter_open = true;
+            if self.listen_filter.is_none() {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(i18n::tr("listen.filter_placeholder"))
+                        // Esc clears, through the path that emits Change.
+                        .clean_on_escape()
+                });
+                cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.listen_filter_text = input.read(cx).value().trim().to_lowercase();
+                        cx.notify();
+                    }
+                })
+                .detach();
+                self.listen_filter = Some(input);
+            }
+            // Focus so typing can start without a second click.
+            if let Some(input) = &self.listen_filter {
+                input.read(cx).focus_handle(cx).focus(window, cx);
+            }
+        }
+        cx.notify();
     }
 
     pub fn space_info(&self) -> Option<&SpaceInfo> {
@@ -1355,6 +1526,9 @@ impl ZStatsAppState {
             // the full-scan cuts in one place.
             self.toggle_proc_filter(window, cx);
         }
+        if self.listen_filter_open {
+            self.toggle_listen_filter(window, cx);
+        }
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
         self.member_table = MemberTable::Off;
@@ -1366,6 +1540,11 @@ impl ZStatsAppState {
         // screen, which is how tray-resident CPU more than doubled.
         // Collapse still keeps the selection; hide is the reset.
         self.selected_app = None;
+        // A photograph of who was listening, taken for a visit. The next
+        // visit reads its own, so there is nothing to keep — and an
+        // hours-old list shown for a frame reads as current.
+        self.listeners = None;
+        self.listeners_at = None;
         cx.notify();
     }
 
@@ -1426,6 +1605,11 @@ impl ZStatsAppState {
         let tab = self.tab;
         if tab == Tab::Hardware {
             self.ensure_space_info(cx);
+        }
+        // A visit is what pays for the socket tables, and it reads them at
+        // once rather than a tick later.
+        if tab == Tab::Net {
+            self.ensure_listeners(cx);
         }
         // Opening History is what pays for reading it. Re-read on every
         // visit rather than caching: the file grows a line a minute, and

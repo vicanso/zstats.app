@@ -26,8 +26,8 @@ Most menu-bar monitors paint pretty numbers, nag you, or both — and they treat
 - Overview: P/E cores, uptime and live power draw, memory and compression, kernel memory pressure, disk and network throughput
 - Apps aggregated by process tree — one row for a browser and all its helpers
 - Processes ranked by a 60-second average, by memory, or by disk IO, with a name filter and a one-click full-table scan
-- Hardware: volumes, hottest sensors first, battery health
-- Network: per-interface rates, packets per second on hover, and error rates only while an interface is actually erroring
+- Hardware: volumes, each physical drive's IOPS, latency and queue depth, the GPU, hottest sensors first, battery health — the drive and GPU reads run only while this tab is open
+- Network: per-interface rates, packets per second on hover, and error rates only while an interface is actually erroring; which program is listening on which port, the ones open to other machines first — read only while the tab is open, and in the installed app (macOS shows a development build only its own sockets)
 - History: what actually burned CPU *today*, ranked by accumulated time, not a spike; click a row to open that app or process
 
 ## Alert

@@ -313,6 +313,23 @@ idle_compact = "Idle · %{names}"
 errors = "err ↓ %{rx}/s · ↑ %{tx}/s"
 packets_tip = "↓ %{rx} pkt/s · ↑ %{tx} pkt/s"
 
+[listen]
+title = "Listening"
+tip = "Programs waiting for connections, one row per process. *:port is open on every network interface — other machines can reach it; localhost:port only this Mac. Rows that reach beyond this Mac come first, in the brighter ink. The preview lists TCP servers; Show more adds UDP (mDNS alone opens 5353 in most apps). Read when this tab opens and every 15 seconds while it stays open."
+tip_partial = "Other users’ processes cannot be named without extra privileges; their rows show the user id instead."
+reading = "Reading the socket tables…"
+restricted = "Needs the installed zstats.app: macOS names the owners of listening sockets only to an app, and shows a development build just its own."
+failed = "Could not read the socket tables: %{error}"
+none = "Nothing is listening."
+other_user = "uid %{uid}"
+unknown_owner = "unknown"
+show_more = "Show more · %{count}"
+show_udp = "Show UDP"
+filter_tip = "Search by program, pid, port or address"
+filter_placeholder = "Program, pid, port or address"
+no_match = "Nothing listening matches “%{query}”."
+hide = "Hide"
+
 [sensors]
 title = "Sensors"
 off = "Sensors — off"

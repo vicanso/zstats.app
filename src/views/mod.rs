@@ -29,6 +29,7 @@ mod disk;
 mod drives;
 mod gpu;
 mod history;
+mod listening;
 mod net;
 mod overview;
 mod processes;
@@ -223,7 +224,13 @@ fn content(state: &ZStatsAppState) -> AnyElement {
             cards.extend(sensors::render(state));
             cards
         }
-        Tab::Net => net::render(state),
+        // Interfaces, then who is listening on them. Same concatenation
+        // as Hardware: each renderer returns its own card stack.
+        Tab::Net => {
+            let mut cards = net::render(state);
+            cards.extend(listening::render(state));
+            cards
+        }
         Tab::Alerts => alerts::render(state),
         Tab::History => history::render(state),
     };

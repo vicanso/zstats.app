@@ -313,6 +313,23 @@ idle_compact = "空闲 · %{names}"
 errors = "错包 ↓ %{rx}/s · ↑ %{tx}/s"
 packets_tip = "↓ %{rx} 包/s · ↑ %{tx} 包/s"
 
+[listen]
+title = "监听端口"
+tip = "正在等待连接的程序，每个进程一行。*:端口 表示在所有网卡上开放，其他机器也能连上；localhost:端口 只有本机能连。对外开放的排在前面、颜色更亮。默认只列 TCP 服务，展开后加上 UDP（仅 mDNS 就会在多数应用里占用 5353）。打开这一页时读取，停留期间每 15 秒刷新。"
+tip_partial = "没有额外权限时无法得知其他用户的进程名，这些行显示用户 id。"
+reading = "正在读取套接字表…"
+restricted = "需要安装版的 zstats.app：macOS 只向应用程序提供监听端口的所属进程，开发构建只能看到自己的。"
+failed = "无法读取套接字表：%{error}"
+none = "没有程序在监听。"
+other_user = "uid %{uid}"
+unknown_owner = "未知"
+show_more = "显示更多 · %{count}"
+show_udp = "显示 UDP"
+filter_tip = "按程序、pid、端口或地址搜索"
+filter_placeholder = "程序、pid、端口或地址"
+no_match = "没有匹配「%{query}」的监听。"
+hide = "收起"
+
 [sensors]
 title = "传感器"
 off = "传感器 — 已关闭"
