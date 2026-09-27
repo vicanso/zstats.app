@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.9](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.9) - 2026-09-27
+
+### ⛰️  Features
+
+- Listeners carry their owner's run time, read from the same process entry as the name - ([97ec143](https://github.com/vicanso/zstats.app/commit/97ec1433c6411c756eca23da5314e4956043840c))
+- The Network tab opens on who is listening, and a quiet interface list folds to one line - ([90489c3](https://github.com/vicanso/zstats.app/commit/90489c3d0706c9891ce4828cbdff08ef9188b181))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.8 - ([16a6cd3](https://github.com/vicanso/zstats.app/commit/16a6cd32126dd2c77e881110f163c69f21638fd7))
+- Version 0.3.7 - ([902f216](https://github.com/vicanso/zstats.app/commit/902f216e9723f8d25f904b5a44513445d6caed16))
+
 ## [0.3.8](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.8) - 2026-09-27
 
 ### ⛰️  Features
