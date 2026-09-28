@@ -78,6 +78,15 @@ pub fn register(cx: &App) {
 ///
 /// `Theme::change` rebuilds Theme from stock defaults (Menlo on macOS), so
 /// this has to run *after* every theme switch.
+///
+/// Through `Theme::update`, not `global_mut`: since gpui-kit 0.7 the Base
+/// layer keeps its own projection of the theme, mono family included
+/// (`tokens.mono`), and a `global_mut` edit leaves that projection on the
+/// old family until someone rebuilds it. `update` rebuilds it and
+/// refreshes the windows. Its font resolution leaves a non-default family
+/// alone, so the bundled face is not swapped for an "installed" stand-in.
 pub fn apply(cx: &mut App) {
-    Theme::global_mut(cx).mono_font_family = SharedString::from(MONO);
+    Theme::update(cx, |theme| {
+        theme.mono_font_family = SharedString::from(MONO);
+    });
 }

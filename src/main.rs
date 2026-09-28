@@ -136,8 +136,8 @@ const PANEL_MARGIN_RIGHT: f32 = 10.;
 ///
 /// This was 0 for a while, and the reason is worth keeping because it
 /// was a measurement taken through a bug. gpui-component's client-side
-/// frame was inflating the surface by 20px a side
-/// (`Root::bordered(false)` in `build_panel` is where that ends), so the
+/// frame was inflating the surface by 20px a side (`build_panel` says
+/// how that ended, and why gpui-kit 0.7 brought it back), so the
 /// first pixel of content sat 20px below the bar and the panel looked
 /// over-gapped; 0 was the value that made *that* look right. With the
 /// inflation gone, 0 is what it says — flush against the bar, and too
@@ -455,8 +455,9 @@ impl ZStatsApp {
 
 impl Render for ZStatsApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
+        // Dialogs and notifications need no layer here: since gpui-kit 0.7
+        // the Root hosts them on every window by itself (`confirm::ask`
+        // opens through `WindowExt` and lands there).
 
         // Mirror the window geometry into the global state on *every* frame,
         // including the first: reopening from the tray builds a brand-new
@@ -496,8 +497,6 @@ impl Render for ZStatsApp {
             .bg(cx.theme().background.opacity(tint))
             .text_color(cx.theme().foreground)
             .child(views::root(cx))
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 
@@ -890,10 +889,8 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The confirm sheet (config reset) needs the dialog layer, same
-        // as the main window's root.
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
+        // The confirm sheet (config reset) is hosted by the Root itself
+        // since gpui-kit 0.7; nothing to mount here.
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
@@ -944,8 +941,6 @@ impl Render for SettingsWindow {
                             .child(body),
                     ),
             )
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 
@@ -1129,11 +1124,9 @@ impl StorageWindow {
 }
 
 impl Render for StorageWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Every trash control in here raises `confirm::ask`, which needs
-        // the dialog layer mounted on the window it is raised from.
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Every trash control in here raises `confirm::ask`; since gpui-kit
+        // 0.7 the Root hosts the sheet on this window by itself.
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
@@ -1164,8 +1157,6 @@ impl Render for StorageWindow {
                     .py(px(AUX_BODY_PAD))
                     .child(body),
             )
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 
@@ -1483,7 +1474,9 @@ fn panel_options(bounds: Bounds<gpui::Pixels>, layer_shell: bool) -> WindowOptio
 /// The panel's view tree. A plain function rather than the closure it used
 /// to be, so the Wayland fallback can build it a second time — and
 /// `layer_shell` is which of those two this is, because the frame around
-/// the content is not the same question for both.
+/// the content is not the same question for both. Nothing reads it while
+/// gpui-kit 0.7 offers no way to answer that question (the regression
+/// note below); it stays so the opt-out has somewhere to go.
 fn build_panel(window: &mut Window, cx: &mut App, layer_shell: bool) -> gpui::Entity<Root> {
     let _ = layer_shell;
     // No `on_window_should_close` override: closing really closes, on
@@ -1502,34 +1495,26 @@ fn build_panel(window: &mut Window, cx: &mut App, layer_shell: bool) -> gpui::En
     let view = cx.new(|cx| ZStatsApp::new(window, cx));
     cx.new(|cx| {
         let root = Root::new(view, window, cx);
-        // A layer surface is placed by the compositor, has no title bar
-        // and cannot be resized, so gpui-component's client-side frame has
-        // nothing to decorate — and it is not free. `WindowBorder::render`
-        // calls `set_client_inset(20px)` on every frame, and gpui's
-        // Wayland backend adds that inset back into both the size it
-        // reports and the buffer it commits (`compute_outer_size`). The
-        // surface then paints 40px wider and taller than the box the
-        // compositor anchored: measured on Omarchy, the panel's right edge
-        // landed past the screen — which reads as "the margin is gone" —
-        // while a 20px band of shadow sat between the bar and the first
-        // pixel of content, which reads as "too much gap". The two
-        // complaints were one bug. `bordered(false)` is the knob
-        // gpui-component documents for exactly this surface; the settings
-        // and disk-space windows are real toplevels and keep their frame.
-        #[cfg(target_os = "linux")]
-        let root = if layer_shell {
-            // And say so to the rest of gpui-component, not just to the
-            // renderer. `window_paddings` / `window_content_insets` —
-            // which is how a dialog and a sheet decide where the window's
-            // content actually starts — read `client_inset()` and fall
-            // back to `SHADOW_SIZE` when it was never set. Leaving it
-            // unset would therefore inset the quit-confirmation sheet by
-            // a frame that is not being drawn.
-            window.set_client_inset(px(0.));
-            root.bordered(false)
-        } else {
-            root
-        };
+        // KNOWN LINUX REGRESSION since gpui-kit 0.7.0. A layer surface is
+        // placed by the compositor, has no title bar and cannot be
+        // resized, so gpui-component's client-side frame has nothing to
+        // decorate — and it is not free: `WindowBorder::render` calls
+        // `set_client_inset(20px)` on every frame, and gpui's Wayland
+        // backend adds that inset back into the buffer it commits
+        // (`compute_outer_size`), so the surface paints 40px past the box
+        // the compositor anchored, with a 20px shadow band inside it
+        // (measured on Omarchy: the right edge past the screen, a band
+        // under the bar). Up to 0.6 this was `root.bordered(false)` plus
+        // `set_client_inset(px(0.))` — the option gpui-kit added for
+        // layer-shell windows (longbridge/gpui-kit#2466). 0.7's Root
+        // rewrite (#3152) removed it: every window now gets the frame from
+        // gpui-component's own Root plugin, whose `decorate` wraps
+        // unconditionally, and gpui reports a layer surface as client-
+        // decorated whatever is requested (`request_decorations` has no
+        // xdg-decoration to negotiate). There is no per-window opt-out to
+        // call, so this needs one upstream; resetting the inset from here
+        // would lose to the frame's next render, and would not remove the
+        // shadow padding it draws anyway.
         match WINDOW_BACKGROUND {
             WindowBackgroundAppearance::Opaque => root,
             // `Root::render` paints an opaque `theme.tokens.background`
