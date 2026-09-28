@@ -340,9 +340,19 @@ impl ZStatsApp {
             #[cfg(not(target_os = "macos"))]
             {
                 // State was already retired above, shared with the macOS
-                // path. Only the window itself is left.
+                // path. Only the window itself is left — and not from in
+                // here: this is gpui's activation callback, and gpui goes
+                // on touching the window it is delivering to after the
+                // observer returns. Removed in place, every keyboard-leave
+                // hide logged `window not found` twice (Omarchy log,
+                // 2026-09-28); pointer-leave, which removes from a task of
+                // its own, never did. The same shape here: the removal
+                // runs once this event is done with the window.
                 cx.global::<metrics::CollectorPace>().hidden();
-                window.remove_window();
+                cx.spawn_in(window, async move |_, cx| {
+                    let _ = cx.update(|window, _| window.remove_window());
+                })
+                .detach();
             }
         });
         let appearance = cx.observe_window_appearance(window, |_this, window, cx| {

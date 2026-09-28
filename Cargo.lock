@@ -10029,9 +10029,9 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstats"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a2e34f33e11dcc47613fab35d47a6aec344b4c16d8b499680620caf5301be83"
+checksum = "140ef925abdf9f8afe001c5699ceb9deee7ae6f782358f11b15bce329b5c6314"
 dependencies = [
  "jiff",
  "libproc",

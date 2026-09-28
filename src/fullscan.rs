@@ -24,7 +24,7 @@
 //! actually pays for is one extra pair of sysinfo refreshes, off the UI
 //! thread, and only when clicked.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -71,25 +71,50 @@ pub fn list_processes() -> Result<Arc<Vec<ProcessSnapshot>>, CollectError> {
 ///
 /// The chain has to be intact in *this* table: a missing intermediate
 /// is not guessed, because that would pin idle helpers on the wrong
-/// tree. Same walk zstats uses to build `ProcessGroupSnapshot`.
+/// tree. Same walk zstats uses to build `ProcessGroupSnapshot`, and it
+/// stops where zstats' does — at init, and at a service manager (see
+/// [`is_service_manager`]) — or expanding the manager's own row would
+/// list every application it launched as its members.
 pub fn tree_members(root: u32, processes: &[ProcessSnapshot]) -> Vec<&ProcessSnapshot> {
     let by_pid: HashMap<u32, u32> = processes
         .iter()
         .filter_map(|p| p.parent_pid.map(|pp| (p.pid, pp)))
         .collect();
+    let managers: HashSet<u32> = processes
+        .iter()
+        .filter(|p| is_service_manager(p))
+        .map(|p| p.pid)
+        .collect();
     processes
         .iter()
-        .filter(|p| belongs_to(p.pid, root, &by_pid))
+        .filter(|p| belongs_to(p.pid, root, &by_pid, &managers))
         .collect()
 }
 
-fn belongs_to(mut pid: u32, root: u32, parent_of: &HashMap<u32, u32>) -> bool {
+/// zstats' tree boundary besides init: on Linux the per-user `systemd
+/// --user`, whose children are applications in their own right (zstats
+/// ≥ 0.6.1, `is_service_manager` in its collector). Mirrored rather than
+/// read because a `ProcessSnapshot` does not say which processes bound a
+/// tree — and the two must agree, or a row and its expansion disagree
+/// about what the row is.
+fn is_service_manager(process: &ProcessSnapshot) -> bool {
+    cfg!(target_os = "linux") && process.name == "systemd"
+}
+
+fn belongs_to(
+    mut pid: u32,
+    root: u32,
+    parent_of: &HashMap<u32, u32>,
+    managers: &HashSet<u32>,
+) -> bool {
     for _ in 0..64 {
         if pid == root {
             return true;
         }
         match parent_of.get(&pid) {
-            Some(&pp) if pp != 0 && pp != 1 && pp != pid => pid = pp,
+            // Stepping onto a manager means `pid` was a root of its own:
+            // it belongs to `root` only by being it, checked above.
+            Some(&pp) if pp != 0 && pp != 1 && pp != pid && !managers.contains(&pp) => pid = pp,
             _ => return false,
         }
     }
@@ -326,5 +351,28 @@ mod tests {
         assert!(!names.contains(&"zsh"), "broken chain is not guessed");
         assert!(!names.contains(&"Finder"));
         assert_eq!(tree_members(99, &table).len(), 1);
+    }
+
+    /// The `systemd --user` boundary zstats draws its trees at: a terminal
+    /// the session launched is its own tree, and the manager's row holds
+    /// only the manager.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_service_manager_is_not_the_tree_of_what_it_launched() {
+        let table = vec![
+            proc(889, Some(1), "systemd"),
+            proc(900, Some(889), "foot"),
+            proc(901, Some(900), "zsh"),
+            proc(910, Some(889), "firefox"),
+        ];
+        let names = |root| -> Vec<&str> {
+            tree_members(root, &table)
+                .into_iter()
+                .map(|p| p.name.as_str())
+                .collect()
+        };
+        assert_eq!(names(889), ["systemd"]);
+        assert_eq!(names(900), ["foot", "zsh"]);
+        assert_eq!(names(910), ["firefox"]);
     }
 }

@@ -328,6 +328,10 @@ filter_tip = "Search by program, pid, port or address"
 filter_placeholder = "Program, pid, port or address"
 no_match = "Nothing listening matches “%{query}”."
 quit_body = "Send SIGTERM to %{name} (pid %{pid}). It is listening on %{endpoints}."
+up = "up %{time}"
+up_range = "up %{newest}–%{oldest}"
+up_tip = "How long this process has been running."
+up_range_tip = "How long the newest and the oldest of these %{count} processes have been running."
 hide = "Hide"
 
 [sensors]

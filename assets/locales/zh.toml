@@ -328,6 +328,10 @@ filter_tip = "按程序、pid、端口或地址搜索"
 filter_placeholder = "程序、pid、端口或地址"
 no_match = "没有匹配「%{query}」的监听。"
 quit_body = "将向 %{name}（pid %{pid}）发送 SIGTERM。它正在监听 %{endpoints}。"
+up = "已运行 %{time}"
+up_range = "已运行 %{newest}–%{oldest}"
+up_tip = "这个进程已经运行了多久。"
+up_range_tip = "这 %{count} 个进程中最新和最早启动的，各自已经运行了多久。"
 hide = "收起"
 
 [sensors]

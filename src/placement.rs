@@ -16,7 +16,17 @@ use std::env;
 /// Menu-bar panel: 320px matches Control Center / Stats combined popovers
 /// and lets the icon tab strip breathe. Height covers the icon strip,
 /// Processor + Top CPU + Memory, and the footer without clipping.
+#[cfg(not(target_os = "linux"))]
 pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 653.);
+/// Linux: 53 shorter, for the same fit. Overview's cards measured 543 tall
+/// on macOS and 489 on Omarchy (2026-09-28, the same build): the gap is the
+/// Processor card's P/E cluster rows, which zstats reports on macOS only
+/// (`perf_levels`). At 653 that left 57 of empty panel under Memory, where
+/// macOS keeps 4; 600 keeps the same 4. The other tabs scroll either way.
+/// Revisit when zstats grows Linux perf levels (hybrid Intel parts have
+/// them in sysfs) — the rows come back and so do the 53.
+#[cfg(target_os = "linux")]
+pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 600.);
 /// Fixed width — the layout is built for exactly this and nothing reflows.
 pub const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
 /// Gap between the tray icon and the top of the window.

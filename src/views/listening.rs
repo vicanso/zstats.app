@@ -36,6 +36,7 @@
 use super::widgets;
 use crate::confirm;
 use crate::font;
+use crate::format;
 use crate::i18n;
 use crate::state::{ListenerView, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
@@ -206,9 +207,9 @@ fn note_line(text: String) -> AnyElement {
         .into_any_element()
 }
 
-/// Two lines: who (name, pid or `×N`, and Quit where it can act), then
-/// where (the endpoints, given the row's full width — on one line they
-/// shared it with the name and both truncated).
+/// Two lines: who (name, pid or `×N`, and how long it has been up), then
+/// where (the endpoints, with Quit at the end where it can act). On one line the endpoints
+/// shared the width with the name and both truncated.
 fn row_element(index: usize, row: &Row, last: bool) -> AnyElement {
     let endpoints: Vec<String> = row.endpoints.iter().map(|(e, _)| e.label()).collect();
     // Several processes under one name: the tooltip is where each endpoint
@@ -260,25 +261,55 @@ fn row_element(index: usize, row: &Row, last: bool) -> AnyElement {
                                 .child(label)
                         })),
                 )
-                .children(quit),
+                .children(row.age_label().map(|label| {
+                    let tip = if several {
+                        t!("listen.up_range_tip", count = row.pids.len()).to_string()
+                    } else {
+                        i18n::tr("listen.up_tip")
+                    };
+                    div()
+                        .id(("listen-age", index))
+                        .flex_none()
+                        .text_size(px(10.))
+                        .text_color(theme::text_dim())
+                        .tooltip(widgets::wrap_tooltip(tip))
+                        .child(label)
+                })),
         )
         .child(
-            font::mono_unless_cjk(div())
-                .id(("listen-endpoints", index))
+            // Quit sits at the end of the endpoints line: what the button
+            // would silence, then the button. Every second line is held to
+            // the button's height, so a row without one is not shorter
+            // than its neighbours.
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
                 .mt(px(3.))
-                .min_w_0()
-                .truncate()
-                .text_size(px(10.))
-                .text_color(if row.exposed() {
-                    theme::text()
-                } else {
-                    theme::text_dim()
-                })
-                .tooltip(widgets::wrap_tooltip_lines(tip))
-                .child(endpoints.join("  ")),
+                .min_h(px(QUIT_HEIGHT))
+                .child(
+                    font::mono_unless_cjk(div())
+                        .id(("listen-endpoints", index))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(10.))
+                        .text_color(if row.exposed() {
+                            theme::text()
+                        } else {
+                            theme::text_dim()
+                        })
+                        .tooltip(widgets::wrap_tooltip_lines(tip))
+                        .child(endpoints.join("  ")),
+                )
+                .children(quit),
         )
         .into_any_element()
 }
+
+/// The Quit button's height, and so every row's second line — 16 keeps it
+/// a control without making each row a line taller than its text.
+const QUIT_HEIGHT: f32 = 16.;
 
 /// The one process a row's Quit would act on, if it may be offered at all.
 ///
@@ -309,7 +340,7 @@ fn quit_button(index: usize, pid: u32, name: String, endpoints: String) -> AnyEl
     div()
         .id(("listen-quit", index))
         .flex_none()
-        .h(px(18.))
+        .h(px(QUIT_HEIGHT))
         .px(px(7.))
         .rounded(px(5.))
         .border_1()
@@ -483,6 +514,9 @@ struct Row {
     /// Sorted: exposed first, then port, TCP before UDP — each with the
     /// pids holding it
     endpoints: Vec<(Endpoint, BTreeSet<u32>)>,
+    /// How long each of `pids` had been running when the list was read —
+    /// zstats' figure, from the entry the name came from
+    ages: BTreeMap<u32, u64>,
 }
 
 impl Row {
@@ -498,6 +532,24 @@ impl Row {
             1 => self.pids.first().map(u32::to_string),
             n => Some(format!("×{n}")),
         }
+    }
+
+    /// `up 3d` for one process — the largest unit only, as Overview's
+    /// uptime reads: a row is glanced at, and "11d" answers "how long has
+    /// this been up" as well as "11d 10h" does in half the width. For a
+    /// name that stands for several, the newest and the oldest —
+    /// `up 5m–12d`: twenty servers started at
+    /// twenty different times have no single age, and the youngest is the
+    /// one that just restarted. `None` when zstats knew no age (no pid, or
+    /// the process was gone before its entry was read).
+    fn age_label(&self) -> Option<String> {
+        let newest = format::uptime_short(*self.ages.values().min()?);
+        let oldest = format::uptime_short(*self.ages.values().max()?);
+        Some(if newest == oldest {
+            t!("listen.up", time = newest).to_string()
+        } else {
+            t!("listen.up_range", newest = newest, oldest = oldest).to_string()
+        })
     }
 
     fn owner_label(&self) -> String {
@@ -522,7 +574,8 @@ impl Row {
 /// drops with them.
 fn rows(listeners: &Listeners, udp: bool) -> Vec<Row> {
     type Holders = BTreeMap<Endpoint, BTreeSet<u32>>;
-    let mut grouped: HashMap<Owner, (BTreeSet<u32>, Holders)> = HashMap::new();
+    type Ages = BTreeMap<u32, u64>;
+    let mut grouped: HashMap<Owner, (BTreeSet<u32>, Holders, Ages)> = HashMap::new();
     for socket in &listeners.sockets {
         let is_udp = socket.protocol == Protocol::Udp;
         if is_udp && !udp {
@@ -533,7 +586,7 @@ fn rows(listeners: &Listeners, udp: bool) -> Vec<Row> {
             (None, Some(pid)) => Owner::Pid(pid),
             (None, None) => Owner::User(socket.uid),
         };
-        let (pids, holders) = grouped.entry(owner).or_default();
+        let (pids, holders, ages) = grouped.entry(owner).or_default();
         let endpoint = Endpoint {
             scope: Scope::of(socket.address),
             port: socket.port,
@@ -543,14 +596,18 @@ fn rows(listeners: &Listeners, udp: bool) -> Vec<Row> {
         if let Some(pid) = socket.pid {
             pids.insert(pid);
             held.insert(pid);
+            if let Some(secs) = socket.run_time_secs {
+                ages.insert(pid, secs);
+            }
         }
     }
     let mut rows: Vec<Row> = grouped
         .into_iter()
-        .map(|(owner, (pids, holders))| Row {
+        .map(|(owner, (pids, holders, ages))| Row {
             owner,
             pids,
             endpoints: holders.into_iter().collect(),
+            ages,
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -589,6 +646,8 @@ fn matching(rows: Vec<Row>, query: &str) -> Vec<Row> {
                 .iter()
                 .flat_map(|(_, pids)| pids.iter().copied())
                 .collect();
+            let kept = &row.pids;
+            row.ages.retain(|pid, _| kept.contains(pid));
             Some(row)
         })
         .collect()
@@ -613,6 +672,9 @@ mod tests {
             port,
             pid,
             process: pid.map(|_| name.to_string()),
+            // A day and a bit, distinct per pid: enough to tell a range
+            // from a single age in the tests below
+            run_time_secs: pid.map(|pid| 90_000 + u64::from(pid)),
             uid: Some(501),
         }
     }
@@ -753,6 +815,7 @@ mod tests {
             owner,
             pids: pids.iter().copied().collect(),
             endpoints: Vec::new(),
+            ages: BTreeMap::new(),
         };
         // The test runner: alive, ours to signal, and never actually
         // signalled here — this only asks whether the button would exist
@@ -777,6 +840,43 @@ mod tests {
             None
         );
         assert_eq!(quit_target(&row(named("launchd"), &[1])), None);
+    }
+
+    #[test]
+    fn a_row_is_as_old_as_its_process_and_a_name_spans_its_processes() {
+        let one = rows(
+            &table(vec![socket(
+                Protocol::Tcp,
+                LO4,
+                4226,
+                Some(15482),
+                "sccache",
+            )]),
+            false,
+        );
+        assert_eq!(one[0].ages.values().copied().collect::<Vec<_>>(), [105_482]);
+        // 1d 5h 18m: the largest unit only
+        let label = one[0].age_label().unwrap();
+        assert!(label.contains("1d") && !label.contains("5h"), "{label}");
+
+        let redis = |rows: &[Row]| {
+            rows.iter()
+                .find(|r| r.owner_label() == "redis-server")
+                .map(|r| r.ages.keys().copied().collect::<Vec<_>>())
+                .unwrap()
+        };
+        assert_eq!(
+            redis(&rows(&fleet(), true)),
+            [17302, 59358],
+            "one age per process"
+        );
+        // A search that finds one of them narrows the ages with the pids
+        assert_eq!(redis(&matching(rows(&fleet(), true), "36379")), [17302]);
+
+        let mut ageless = socket(Protocol::Tcp, ANY4, 22, None, "");
+        ageless.uid = Some(0);
+        let rows = rows(&table(vec![ageless]), false);
+        assert_eq!(rows[0].age_label(), None, "no pid, no age to claim");
     }
 
     #[test]

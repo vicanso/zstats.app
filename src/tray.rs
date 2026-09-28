@@ -638,12 +638,28 @@ fn build_menu() -> Menu {
 /// Must be called on the main thread (macOS creates an `NSStatusItem`), which
 /// is where `Application::run`'s callback already runs.
 ///
-/// Without a tray host — no SNI host on the session bus, most of a
-/// desktop that simply has no tray — `build_item` logs and returns `None`
-/// and this returns early. That is not an error path: the panel still
+/// Without a tray host — no SNI host on the session bus — `build_item`
+/// logs and returns `None`. That is not an error path: the panel still
 /// works, it just has no icon, and on Linux the way back to it is the
-/// keybinding (`docs/omarchy-port.md` 阶段 2).
+/// keybinding (`docs/omarchy-port.md` 阶段 2). On Linux it is also often
+/// not the final answer: a login launch can beat the bar that hosts the
+/// tray, so the tray is built again when a host appears ([`sni`]).
 pub fn init_tray(cx: &mut App) {
+    let built = try_build_tray(cx);
+    // Elsewhere a failed build is the answer: an `NSStatusItem` has no
+    // host to wait for.
+    #[cfg(target_os = "linux")]
+    if !built {
+        sni::build_when_a_host_appears(cx);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = built;
+}
+
+/// Build the tray and wire its events; `false` when the primary item could
+/// not be created, having changed nothing — so it can simply be called
+/// again.
+fn try_build_tray(cx: &mut App) -> bool {
     // Rasterised up front so a later swap is cheap.
     let faces = build_faces();
     // The store is empty here, so the face is the preference's resting
@@ -651,7 +667,7 @@ pub fn init_tray(cx: &mut App) {
     // its face instead of flipping on the first sample.
     let pref = prefs::tray();
     let Some(primary) = build_item("primary", face_for(pref, false, false), &faces) else {
-        return;
+        return false;
     };
     // Both's second item is built here too rather than left to the first
     // `sync`: a launch in that mode should not show one item and grow
@@ -748,6 +764,96 @@ pub fn init_tray(cx: &mut App) {
         }
     })
     .detach();
+    true
+}
+
+/// Building the tray once a StatusNotifier host is on the session bus.
+///
+/// A login launch races the bar. On Omarchy (2026-09-28) the XDG autostart
+/// started zstats at 08:30:16 and the tray failed at once — `failed to
+/// register to the StatusNotifierWatcher: ServiceUnknown: The name is not
+/// activatable` — because quickshell, which owns
+/// `org.kde.StatusNotifierWatcher`, was not up yet. Nothing tried again,
+/// so the session ran without an icon; a manual launch after the desktop
+/// was up had never met the race, which is why it only appeared once
+/// launch-at-login existed.
+///
+/// Only the *first* registration is the problem. Once spawned, ksni
+/// follows the watcher's name itself and re-registers when a new owner
+/// appears (its `service.rs`), so a bar restart is survived — the same
+/// session's quickshell restarted at 08:50. But tray-icon spawns without
+/// ksni's `assume_sni_available`, so a missing watcher at spawn time is a
+/// hard error, and this is where it is caught.
+///
+/// Event-driven, like `active.rs`: a thread parked on the bus's
+/// `NameOwnerChanged` for the watcher's name costs nothing while it waits,
+/// and a desktop that never grows a tray host just keeps one idle thread.
+#[cfg(target_os = "linux")]
+mod sni {
+    use super::try_build_tray;
+    use gpui::App;
+    use std::thread;
+    use std::time::Duration;
+
+    const WATCHER: &str = "org.kde.StatusNotifierWatcher";
+
+    /// Tries after each appearance of a host: at once, then twice more in
+    /// case the host took its name a moment before it took calls. Past
+    /// that the tray waits for the host's next appearance (a bar restart)
+    /// rather than spinning against one that keeps refusing.
+    const RETRY_AFTER: [Duration; 3] = [
+        Duration::ZERO,
+        Duration::from_secs(2),
+        Duration::from_secs(10),
+    ];
+
+    pub(super) fn build_when_a_host_appears(cx: &mut App) {
+        let (tx, rx) = smol::channel::unbounded::<()>();
+        thread::spawn(move || {
+            if let Err(e) = watch(&tx) {
+                tracing::warn!(error = %e, "cannot watch the session bus for a tray host");
+            }
+        });
+        tracing::info!("no tray host yet; the tray is built when one appears");
+        cx.spawn(async move |cx| {
+            while rx.recv().await.is_ok() {
+                for delay in RETRY_AFTER {
+                    if !delay.is_zero() {
+                        cx.background_executor().timer(delay).await;
+                    }
+                    if cx.update(try_build_tray) {
+                        tracing::info!("tray built after a tray host appeared");
+                        // Dropping `rx` ends the watcher thread at the
+                        // next name change it sees.
+                        return;
+                    }
+                }
+                tracing::warn!("a tray host is on the bus but the tray still failed");
+            }
+        })
+        .detach();
+    }
+
+    /// One message per appearance of a watcher: now, if one is already
+    /// there, then on every new owner. Subscribes before it asks, or a
+    /// host that took the name between the failed build and this call
+    /// would never be heard of. Blocks for as long as the bus lives.
+    fn watch(tx: &smol::channel::Sender<()>) -> zbus::Result<()> {
+        let conn = zbus::blocking::Connection::session()?;
+        let dbus = zbus::blocking::fdo::DBusProxy::new(&conn)?;
+        let changes = dbus.receive_name_owner_changed_with_args(&[(0, WATCHER)])?;
+        let name = zbus::names::BusName::try_from(WATCHER)?;
+        if dbus.name_has_owner(name)? && tx.send_blocking(()).is_err() {
+            return Ok(());
+        }
+        for change in changes {
+            let args = change.args()?;
+            if args.new_owner.is_some() && tx.send_blocking(()).is_err() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
