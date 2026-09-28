@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.10](https://github.com/vicanso/zstats.app/compare/v0.3.9..v0.3.10) - 2026-09-28
+
+### ⛰️  Features
+
+- A listening row shows how long its process has been up, on zstats 0.6.1 - ([70a930f](https://github.com/vicanso/zstats.app/commit/70a930f5303c54400a04d797e7a3e9e0f763884e))
+
+### ⚙️ Miscellaneous Tasks
+
+- Move to gpui-kit 0.7, where Root hosts dialogs and notifications itself and the mono font is set through Theme::update; the Linux panel's lost frame opt-out is recorded as a known regression - ([6e5437c](https://github.com/vicanso/zstats.app/commit/6e5437c25066b42efa448378510769d5bcf9e38b))
+
 ## [0.3.9](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.9) - 2026-09-27
 
 ### ⛰️  Features

@@ -1,7 +1,8 @@
 # Release version — Cargo.toml is the single source of truth.
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 
-.PHONY: dev debug run fmt lint test check release bundle bloat udeps clean version linux-check linux-clean
+.PHONY: dev debug run fmt lint test check release bundle bloat udeps clean linux-check linux-clean \
+	version version-patch version-minor version-major tag changelog
 
 # --- develop ---------------------------------------------------------------
 
@@ -117,9 +118,52 @@ udeps:
 clean:
 	cargo clean
 
+# --- version ---------------------------------------------------------------
+
+# Release flow: `make version-patch` (bump + changelog), review the diff,
+# commit it as `chore: version X.Y.Z`, then `make tag` and
+# `git push origin vX.Y.Z` — publish.yml fires on the tag and builds the DMG,
+# the Linux tarballs and SHA256SUMS. Nothing here commits or pushes: those
+# stay deliberate. Cargo.toml is the only place the number lives —
+# cargo-bundle reads it into Info.plist and every published asset is named
+# from the tag, so there is no second file to keep in step.
+#
+# The tag is not optional bookkeeping: `git cliff --unreleased` bounds its
+# range by the latest tag, so a release that never gets tagged makes the
+# NEXT changelog repeat everything since the last one under the new number.
+# The reverse is guarded too: once v$(VERSION) exists, `version` refuses,
+# because re-running it would prepend a second section under the same number.
+
+# Prepend the changelog section for the version currently in Cargo.toml.
 version:
-	@echo $(VERSION)
+	@git describe --tags --abbrev=0 >/dev/null 2>&1 || { \
+		echo "no release tag exists — git cliff would treat the ENTIRE history as"; \
+		echo "unreleased and repeat it under v$(VERSION). Tag the previous release"; \
+		echo "first: git tag -a vX.Y.Z <commit>"; exit 1; }
+	@! git rev-parse -q --verify "refs/tags/v$(VERSION)" >/dev/null || { \
+		echo "v$(VERSION) is already tagged — this would add a second $(VERSION)"; \
+		echo "section to CHANGELOG.md. Bump first: make version-patch"; exit 1; }
 	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
+
+# Bump Cargo.toml (+ Cargo.lock) via cargo-edit, then run `version` in a
+# fresh make invocation — VERSION is expanded at parse time, so the
+# recursive $(MAKE) is what picks up the just-bumped number.
+version-patch:
+	cargo set-version --bump patch
+	$(MAKE) version
+
+version-minor:
+	cargo set-version --bump minor
+	$(MAKE) version
+
+version-major:
+	cargo set-version --bump major
+	$(MAKE) version
+
+# Tag the version currently in Cargo.toml (push separately).
+tag:
+	git tag -a v$(VERSION) -m "version $(VERSION)"
+	@echo "created v$(VERSION) — push it with: git push origin v$(VERSION)"
 
 # Regenerate CHANGELOG.md from conventional commits (git-cliff, cliff.toml).
 # Run it in the version-bump commit, before tagging — CI does not write

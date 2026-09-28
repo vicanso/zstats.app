@@ -10033,7 +10033,7 @@ dependencies = [
 
 [[package]]
 name = "zstats-app"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
