@@ -1,5 +1,7 @@
 # Changelog
 
+## [0.3.11](https://github.com/vicanso/zstats.app/compare/v0.3.10..v0.3.11) - 2026-09-29
+
 ## [0.3.10](https://github.com/vicanso/zstats.app/compare/v0.3.9..v0.3.10) - 2026-09-28
 
 ### ⛰️  Features
