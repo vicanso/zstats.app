@@ -263,3 +263,18 @@ codegen-units = 1
 lto = true
 strip = true
 panic = "abort"
+
+# gpui's Wayland backend, with one fix: a layer surface reports server
+# decorations and no client inset (`patches/gpui-pre-linux`, grep
+# "zstats-app patch"). gpui-kit 0.7 frames every window through
+# gpui-component's Root plugin unless the platform says Server, and
+# gpui told it Client for the panel's layer surface — the 20px CSD
+# inset then went into a buffer the compositor had anchored by the
+# un-inflated size (measured on Omarchy: a 358×600 panel committed as
+# 398×640, 30px past the right edge of the screen, 20px low). Only the
+# Linux build compiles this crate. Must track the gpui-pre version
+# above: after a bump, re-vendor the new release and re-apply the two
+# hunks, or drop this once gpui reports layer surfaces as undecorated
+# itself — `cargo tree -i gpui-pre-linux` must show the path source.
+[patch.crates-io]
+gpui-pre-linux = { path = "patches/gpui-pre-linux" }

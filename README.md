@@ -78,12 +78,21 @@ Language, theme, the tray's face, panel opacity and the sustained-load knobs liv
 
 Wayland only: the tray is a StatusNotifier item, the panel a layer-shell surface anchored top-right by the compositor. Developed and checked against Omarchy (Hyprland); other compositors and desktops are untested. Every release carries `zstats-linux-x86_64.tar.gz` and `zstats-linux-aarch64.tar.gz`, listed in the same `SHA256SUMS` and mirrored to Gitee.
 
+The quickest route is the install script on its own: it downloads the latest release for this machine's architecture — GitHub first, then the Gitee mirror — and refuses to install anything `SHA256SUMS` does not vouch for.
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/vicanso/zstats.app/main/scripts/install-linux.sh
+sh install-linux.sh              # --tag vX.Y.Z pins a release · --no-autostart · --uninstall
+```
+
+Download it and run it rather than piping it into `sh`: it stops a running zstats and writes under `~/.local` and `~/.config`, which is worth a read first. Where `raw.githubusercontent.com` is out of reach, take the tarball from the Gitee mirror instead — the script inside installs the binary next to it and needs no network:
+
 ```bash
 tar -xzf zstats-linux-x86_64.tar.gz
 sh zstats-linux-x86_64/install-linux.sh
 ```
 
-That puts the binary in `~/.local/bin`, adds a launcher entry, and enables launch-at-login where the session actually reads `~/.config/autostart` (it checks, and prints the `exec-once` line to add instead when nothing does). Run on its own the script downloads the latest release and refuses to install anything `SHA256SUMS` does not vouch for; `--uninstall` removes exactly what it added. Then, for Hyprland:
+Either way that puts the binary in `~/.local/bin`, adds a launcher entry, and enables launch-at-login where the session actually reads `~/.config/autostart` (it checks, and prints the `exec-once` line to add instead when nothing does); `--uninstall` removes exactly what it added. Then, for Hyprland:
 
 ```conf
 bind = SUPER, M, exec, ~/.local/bin/zstats --toggle

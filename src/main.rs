@@ -137,7 +137,7 @@ const PANEL_MARGIN_RIGHT: f32 = 10.;
 /// This was 0 for a while, and the reason is worth keeping because it
 /// was a measurement taken through a bug. gpui-component's client-side
 /// frame was inflating the surface by 20px a side (`build_panel` says
-/// how that ended, and why gpui-kit 0.7 brought it back), so the
+/// how that ended, twice), so the
 /// first pixel of content sat 20px below the bar and the panel looked
 /// over-gapped; 0 was the value that made *that* look right. With the
 /// inflation gone, 0 is what it says — flush against the bar, and too
@@ -1474,9 +1474,9 @@ fn panel_options(bounds: Bounds<gpui::Pixels>, layer_shell: bool) -> WindowOptio
 /// The panel's view tree. A plain function rather than the closure it used
 /// to be, so the Wayland fallback can build it a second time — and
 /// `layer_shell` is which of those two this is, because the frame around
-/// the content is not the same question for both. Nothing reads it while
-/// gpui-kit 0.7 offers no way to answer that question (the regression
-/// note below); it stays so the opt-out has somewhere to go.
+/// the content is not the same question for both. Nothing reads it since
+/// gpui-kit 0.7: the platform answers that question now (the note below),
+/// so both builds take the same path.
 fn build_panel(window: &mut Window, cx: &mut App, layer_shell: bool) -> gpui::Entity<Root> {
     let _ = layer_shell;
     // No `on_window_should_close` override: closing really closes, on
@@ -1495,26 +1495,22 @@ fn build_panel(window: &mut Window, cx: &mut App, layer_shell: bool) -> gpui::En
     let view = cx.new(|cx| ZStatsApp::new(window, cx));
     cx.new(|cx| {
         let root = Root::new(view, window, cx);
-        // KNOWN LINUX REGRESSION since gpui-kit 0.7.0. A layer surface is
-        // placed by the compositor, has no title bar and cannot be
-        // resized, so gpui-component's client-side frame has nothing to
-        // decorate — and it is not free: `WindowBorder::render` calls
-        // `set_client_inset(20px)` on every frame, and gpui's Wayland
-        // backend adds that inset back into the buffer it commits
-        // (`compute_outer_size`), so the surface paints 40px past the box
-        // the compositor anchored, with a 20px shadow band inside it
-        // (measured on Omarchy: the right edge past the screen, a band
-        // under the bar). Up to 0.6 this was `root.bordered(false)` plus
-        // `set_client_inset(px(0.))` — the option gpui-kit added for
-        // layer-shell windows (longbridge/gpui-kit#2466). 0.7's Root
-        // rewrite (#3152) removed it: every window now gets the frame from
-        // gpui-component's own Root plugin, whose `decorate` wraps
-        // unconditionally, and gpui reports a layer surface as client-
-        // decorated whatever is requested (`request_decorations` has no
-        // xdg-decoration to negotiate). There is no per-window opt-out to
-        // call, so this needs one upstream; resetting the inset from here
-        // would lose to the frame's next render, and would not remove the
-        // shadow padding it draws anyway.
+        // No frame on a layer surface, and nothing here asks for that: the
+        // answer comes from gpui. A layer surface is placed by the
+        // compositor, has no title bar and cannot be resized, so
+        // gpui-component's client-side frame has nothing to decorate — and
+        // it is not free: `WindowBorder::render` calls
+        // `set_client_inset(20px)` and gpui's Wayland backend adds that back
+        // into the buffer it commits (`compute_outer_size`), so the surface
+        // paints 40px past the box the compositor anchored (measured on
+        // Omarchy: 398×640 for a 358×600 panel, 30px past the screen's right
+        // edge, content 20px low). Up to gpui-kit 0.6 this was
+        // `root.bordered(false)` here; 0.7 (longbridge/gpui-kit#3152) wraps
+        // every window from gpui-component's Root plugin unless the platform
+        // reports `Decorations::Server`, with no per-window opt-out, so the
+        // fix moved to where that report is made — `patches/gpui-pre-linux`
+        // (see `[patch.crates-io]` in Cargo.toml) has a layer surface report
+        // Server and no inset, and the frame passes the content through.
         match WINDOW_BACKGROUND {
             WindowBackgroundAppearance::Opaque => root,
             // `Root::render` paints an opaque `theme.tokens.background`

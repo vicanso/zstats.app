@@ -78,12 +78,21 @@ make bundle          # 或从源码构建（需要 cargo-bundle）
 
 仅 Wayland：托盘是 StatusNotifier 项，面板是由合成器锚在右上角的 layer-shell 表面。在 Omarchy（Hyprland）上开发和验证；其它合成器与桌面未经测试。每次发版都带 `zstats-linux-x86_64.tar.gz` 和 `zstats-linux-aarch64.tar.gz`，列在同一份 `SHA256SUMS` 里，同样镜像到 Gitee。
 
+最省事的是单独运行安装脚本：它按本机架构下载最新 release（先 GitHub，连不上再走 Gitee 镜像），并拒绝安装任何 `SHA256SUMS` 没有担保的文件。
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/vicanso/zstats.app/main/scripts/install-linux.sh
+sh install-linux.sh              # --tag vX.Y.Z 指定版本 · --no-autostart 不开机自启 · --uninstall 卸载
+```
+
+先下载再运行，而不是直接 `curl … | sh`：脚本会停掉正在运行的 zstats，并写入 `~/.local` 和 `~/.config`，值得先看一眼。`raw.githubusercontent.com` 打不开的话，就从 Gitee 镜像下载 tarball——包里的脚本直接安装旁边的二进制，不需要联网：
+
 ```bash
 tar -xzf zstats-linux-x86_64.tar.gz
 sh zstats-linux-x86_64/install-linux.sh
 ```
 
-这会把二进制放到 `~/.local/bin`、加一个启动器条目，并在**会话确实会读** `~/.config/autostart` 时开启开机自启（脚本会先探测，读不到时改为打印该加进合成器配置的那行 `exec-once`）。单独运行时脚本会下载最新 release，并拒绝安装任何 `SHA256SUMS` 没有担保的文件；`--uninstall` 只移除它自己装下的东西。然后，Hyprland 加两行：
+两种方式都会把二进制放到 `~/.local/bin`、加一个启动器条目，并在**会话确实会读** `~/.config/autostart` 时开启开机自启（脚本会先探测，读不到时改为打印该加进合成器配置的那行 `exec-once`）；`--uninstall` 只移除它自己装下的东西。然后，Hyprland 加两行：
 
 ```conf
 bind = SUPER, M, exec, ~/.local/bin/zstats --toggle
