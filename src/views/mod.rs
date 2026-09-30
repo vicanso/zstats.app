@@ -146,8 +146,15 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
     let cell = |tab: Tab| {
         let on = tab == active;
         let alerting = tab == Tab::Alerts && alert_count > 0;
+        // Golden's selected tab is the site's champagne, solid, so the
+        // mark on the panel is rgb(217 185 140). The icon uses the dark
+        // on-accent. An alerting Alerts tab keeps the red chip: that
+        // colour is the alarm, and it has to win over the theme.
+        let gold_tab = on && theme::is_golden() && !alerting;
         let color = if alerting {
             theme::accent_light()
+        } else if gold_tab {
+            theme::on_gold()
         } else if on {
             theme::text()
         } else {
@@ -166,8 +173,15 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
             .flex_1()
             .h(px(28.))
             .rounded(px(7.))
-            .when(on, |d| d.bg(theme::chip()))
-            .hover(|d| d.bg(theme::chip()))
+            .when(gold_tab, |d| d.bg(theme::gold()))
+            .when(on && !gold_tab, |d| d.bg(theme::chip()))
+            .hover(|d| {
+                if gold_tab {
+                    d.bg(theme::gold())
+                } else {
+                    d.bg(theme::chip())
+                }
+            })
             .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
             .child(
                 div()

@@ -887,10 +887,11 @@ fn interface_card(
                 (i18n::tr("config.follow_system"), ThemePref::System),
                 (i18n::tr("config.theme_light"), ThemePref::Light),
                 (i18n::tr("config.theme_dark"), ThemePref::Dark),
+                (i18n::tr("config.theme_golden"), ThemePref::Golden),
             ],
             prefs::theme(),
             crate::set_theme_pref,
-            None,
+            Some(i18n::tr("config.theme_tip")),
         ))
         .child(pref_row(
             "pref-tray",
@@ -1206,26 +1207,14 @@ fn opacity_row() -> AnyElement {
                         .flex_none()
                         .rounded_full()
                         .border_1()
-                        .border_color(if on {
-                            theme::accent_wash(45)
-                        } else {
-                            theme::border()
-                        })
-                        .bg(if on {
-                            theme::accent_wash(10)
-                        } else {
-                            theme::inset()
-                        })
+                        .border_color(theme::choice_line(on))
+                        .bg(theme::choice_fill(on))
                         .px(px(8.))
                         .py(px(2.))
                         .text_size(px(10.))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if on {
-                            theme::accent_light()
-                        } else {
-                            theme::text()
-                        })
-                        .hover(|d| d.bg(theme::surface_raised()))
+                        .text_color(theme::choice_ink(on))
+                        .hover(|d| d.bg(theme::choice_hover(on)))
                         .on_click(move |_, _window, cx| crate::set_opacity_pref(value, cx))
                         .child(text)
                 })),
@@ -1278,26 +1267,14 @@ fn pref_row<T: Copy + PartialEq + 'static>(
                         .flex_none()
                         .rounded_full()
                         .border_1()
-                        .border_color(if on {
-                            theme::accent_wash(45)
-                        } else {
-                            theme::border()
-                        })
-                        .bg(if on {
-                            theme::accent_wash(10)
-                        } else {
-                            theme::inset()
-                        })
+                        .border_color(theme::choice_line(on))
+                        .bg(theme::choice_fill(on))
                         .px(px(8.))
                         .py(px(2.))
                         .text_size(px(10.))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if on {
-                            theme::accent_light()
-                        } else {
-                            theme::text()
-                        })
-                        .hover(|d| d.bg(theme::surface_raised()))
+                        .text_color(theme::choice_ink(on))
+                        .hover(|d| d.bg(theme::choice_hover(on)))
                         .on_click(move |_, _window, cx| apply(value, cx))
                         .child(text)
                 })),
@@ -2249,26 +2226,14 @@ fn setting_chips(
                 .flex_none()
                 .rounded_full()
                 .border_1()
-                .border_color(if on {
-                    theme::accent_wash(45)
-                } else {
-                    theme::border()
-                })
-                .bg(if on {
-                    theme::accent_wash(10)
-                } else {
-                    theme::inset()
-                })
+                .border_color(theme::choice_line(on))
+                .bg(theme::choice_fill(on))
                 .px(px(7.))
                 .py(px(1.))
                 .text_size(px(10.))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(if on {
-                    theme::accent_light()
-                } else {
-                    theme::text()
-                })
-                .hover(|d| d.bg(theme::surface_raised()))
+                .text_color(theme::choice_ink(on))
+                .hover(|d| d.bg(theme::choice_hover(on)))
                 .on_click(move |_, _window, cx| apply(key, value, cx))
                 .child(label)
         }))

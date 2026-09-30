@@ -78,7 +78,9 @@ use gpui::{
     Subscription, TitlebarOptions, Window, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
-use gpui_kit::component::{ActiveTheme, Icon, Root, Sizable, Size, Theme, ThemeMode};
+use gpui_kit::component::{
+    ActiveTheme, Icon, Root, Sizable, Size, Theme, ThemeMode, ThemeRegistry,
+};
 
 /// Shown in the app menu, the tray tooltip, the task switcher and the Linux
 /// title bar.
@@ -514,14 +516,69 @@ fn theme_mode_for_appearance(appearance: WindowAppearance) -> ThemeMode {
 /// mono family, so [`font::apply`] has to run every time. `appearance` is
 /// what the OS reports; a pinned theme preference wins over it.
 fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
+    let golden = prefs::theme() == prefs::ThemePref::Golden;
     let mode = match prefs::theme() {
-        prefs::ThemePref::System => theme_mode_for_appearance(appearance),
         prefs::ThemePref::Light => ThemeMode::Light,
         prefs::ThemePref::Dark => ThemeMode::Dark,
+        // Golden is a palette, not a third appearance: which of its two
+        // files is live still follows the Mac, the way System does.
+        prefs::ThemePref::System | prefs::ThemePref::Golden => {
+            theme_mode_for_appearance(appearance)
+        }
     };
+    install_palette(golden, mode, cx);
+}
+
+/// Point gpui-kit at one pair of theme files, then repaint our own tokens
+/// to match. `Theme::change` reloads whichever file is installed for
+/// `mode`, so the pair has to be in place first; it also resets the mono
+/// family, which is why [`font::apply`] runs after it.
+fn install_palette(golden: bool, mode: ThemeMode, cx: &mut App) {
+    if golden
+        && !ThemeRegistry::global(cx)
+            .themes()
+            .contains_key("Golden Light")
+        && let Err(err) = ThemeRegistry::global_mut(cx).load_themes_from_str(theme::GOLDEN_JSON)
+    {
+        tracing::error!("golden theme: {err}");
+    }
+    // `None` when Golden was not asked for, or the file did not yield both
+    // names — either way the classic pair is what gets installed.
+    let golden_pair = golden
+        .then(|| {
+            let registry = ThemeRegistry::global(cx);
+            registry
+                .themes()
+                .get("Golden Light")
+                .cloned()
+                .zip(registry.themes().get("Golden Dark").cloned())
+        })
+        .flatten();
+    if golden && golden_pair.is_none() {
+        tracing::error!("golden theme: Golden Light / Golden Dark missing after load");
+    }
+    let applied = golden_pair.is_some();
+    let (light, dark) = match golden_pair {
+        Some(pair) => pair,
+        None => {
+            let registry = ThemeRegistry::global(cx);
+            (
+                registry.default_light_theme().clone(),
+                registry.default_dark_theme().clone(),
+            )
+        }
+    };
+    Theme::update(cx, |theme| {
+        theme.light_theme = light;
+        theme.dark_theme = dark;
+    });
     Theme::change(mode, None, cx);
     font::apply(cx);
-    theme::set_dark(matches!(mode, ThemeMode::Dark));
+    if applied {
+        theme::set_golden(mode.is_dark());
+    } else {
+        theme::set_dark(mode.is_dark());
+    }
 }
 
 /// Pin (or release) AppKit's own appearance to match the theme preference.
@@ -542,7 +599,9 @@ fn apply_ns_appearance() {
     };
     let app = NSApplication::sharedApplication(mtm);
     let appearance = match prefs::theme() {
-        prefs::ThemePref::System => None,
+        // Golden follows the Mac, so the material has to as well. Pinning
+        // Aqua here would freeze the cream variant on a dark desktop.
+        prefs::ThemePref::System | prefs::ThemePref::Golden => None,
         // SAFETY: reading AppKit's exported appearance-name constants.
         prefs::ThemePref::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
         prefs::ThemePref::Dark => {

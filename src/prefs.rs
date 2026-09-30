@@ -38,6 +38,9 @@ pub enum ThemePref {
     System,
     Light,
     Dark,
+    /// Notchclip's warm palette (`themes/golden.json`). Light or dark
+    /// still follows the Mac; this only swaps which pair is painted.
+    Golden,
 }
 
 /// What the menu bar shows. `Auto` is the default and the only mode that
@@ -89,6 +92,7 @@ impl ThemePref {
             ThemePref::System => None,
             ThemePref::Light => Some("light"),
             ThemePref::Dark => Some("dark"),
+            ThemePref::Golden => Some("golden"),
         }
     }
 
@@ -96,6 +100,7 @@ impl ThemePref {
         match key {
             "light" => ThemePref::Light,
             "dark" => ThemePref::Dark,
+            "golden" => ThemePref::Golden,
             _ => ThemePref::System,
         }
     }
@@ -203,6 +208,7 @@ fn encode_theme(pref: ThemePref) -> u8 {
         ThemePref::System => 0,
         ThemePref::Light => 1,
         ThemePref::Dark => 2,
+        ThemePref::Golden => 3,
     }
 }
 
@@ -210,6 +216,7 @@ fn decode_theme(raw: u8) -> ThemePref {
     match raw {
         1 => ThemePref::Light,
         2 => ThemePref::Dark,
+        3 => ThemePref::Golden,
         _ => ThemePref::System,
     }
 }
@@ -956,6 +963,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(&dir), system);
+
+        fs::write(file_path(&dir), "theme = \"golden\"\n").unwrap();
+        assert_eq!(read(&dir).theme, ThemePref::Golden);
 
         let _ = fs::remove_dir_all(&dir);
     }

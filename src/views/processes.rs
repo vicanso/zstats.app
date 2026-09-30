@@ -968,25 +968,13 @@ fn threshold_row(
                             .flex_none()
                             .rounded_full()
                             .border_1()
-                            .border_color(if on {
-                                Hsla::from(theme::accent_wash(45))
-                            } else {
-                                Hsla::from(theme::border())
-                            })
-                            .bg(if on {
-                                Hsla::from(theme::accent_wash(10))
-                            } else {
-                                Hsla::from(theme::inset())
-                            })
+                            .border_color(theme::choice_line(on))
+                            .bg(theme::choice_fill(on))
                             .px(px(6.))
                             .text_size(px(9.5))
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(if on {
-                                theme::accent_light()
-                            } else {
-                                theme::text()
-                            })
-                            .hover(|d| d.bg(theme::surface_raised()))
+                            .text_color(theme::choice_ink(on))
+                            .hover(|d| d.bg(theme::choice_hover(on)))
                             .on_click(move |_, _window, cx| {
                                 // The row is inside a clickable row that
                                 // toggles the expansion; without this a
