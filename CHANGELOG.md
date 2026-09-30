@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.12](https://github.com/vicanso/zstats.app/compare/v0.3.11..v0.3.12) - 2026-09-30
+
+### ⛰️  Features
+
+- Settings offers Golden, warm bone with the site's champagne gold - ([9d690f5](https://github.com/vicanso/zstats.app/commit/9d690f5c57bc71d348a326c250d94063aa902676))
+
 ## [0.3.11](https://github.com/vicanso/zstats.app/compare/v0.3.10..v0.3.11) - 2026-09-29
 
 ## [0.3.10](https://github.com/vicanso/zstats.app/compare/v0.3.9..v0.3.10) - 2026-09-28

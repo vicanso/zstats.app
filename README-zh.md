@@ -8,6 +8,8 @@ macOS 菜单栏系统监控，围绕「按应用定规则」构建：托盘实�
 
 托盘实时显示 CPU，点一下弹出面板，看别处就收起。采集、告警、历史全部由进程内的 [zstats](https://crates.io/crates/zstats) 引擎驱动。
 
+收在菜单栏、面板合上时，CPU 占用很低。安装版一次实测：连续运行 14 小时 37 分，CPU 时间 5 分 38 秒，平均只占一颗核的 **0.64%**。
+
 > macOS · Apple Silicon 与 Intel · Universal，已签名公证——另有 Linux 预览版，见「安装」
 
 <p align="center">

@@ -8,6 +8,8 @@ A macOS menu-bar system monitor built around per-app rules: live CPU in the tray
 
 The tray shows live CPU. Click for the panel — it tucks away when you look elsewhere. Collection, alerts and history run in-process on the [zstats](https://crates.io/crates/zstats) engine.
 
+In the menu bar, panel tucked away, the CPU cost stays low. One measured run of the installed app: up for 14 hours 37 minutes, 5 minutes 38 seconds of CPU time, **0.64% of one core**.
+
 > macOS · Apple Silicon and Intel · Universal, signed and notarized — and a Linux preview, see Install
 
 <p align="center">
