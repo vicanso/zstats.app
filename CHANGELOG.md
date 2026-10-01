@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.13](https://github.com/vicanso/zstats.app/compare/v0.3.12..v0.3.13) - 2026-10-01
+
+### ⛰️  Features
+
+- The Network tab ranks programs by the bytes they just moved - ([75e22c6](https://github.com/vicanso/zstats.app/commit/75e22c6b9d424aafbccfd14655e4a97aa150516c))
+
 ## [0.3.12](https://github.com/vicanso/zstats.app/compare/v0.3.11..v0.3.12) - 2026-09-30
 
 ### ⛰️  Features
