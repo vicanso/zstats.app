@@ -1,18 +1,18 @@
 //! Who is moving bytes, on the Network tab above the listener list.
 //!
 //! The numbers are `zstats::process_traffic()`, diffed in [`crate::traffic`]
-//! while this tab is on screen. Nothing here asks for the read; views
-//! only format. A row is a program, ranked by ↓+↑, and a program that
-//! moved nothing is not a row — a machine has dozens of processes
-//! holding an idle socket, and listing them is how the two that matter
-//! get buried. The same shape as the interface card (rates, then a
-//! shared bar) so the two cards read as one page.
+//! and kept for ten minutes. Nothing here asks for the read; views only
+//! format. A row is a program, ranked by ↓+↑, and a program that moved
+//! nothing is not a row — a machine has dozens of processes holding an
+//! idle socket, and listing them is how the two that matter get buried.
 //!
-//! The bar's floor is the interface card's: 64 KiB/s is where traffic
-//! starts being worth a full track, and a few kB/s of housekeeping must
-//! not paint one. There is no threshold on this card, so nothing here
-//! turns accent — accent is a crossed line, and a fast download is not
-//! one.
+//! Under the numbers, one line of ↓+↑. Its height is that row's own
+//! peak, but never below 64 KiB/s: a few hundred bytes a second must
+//! not paint a shape, and a busy program must not be flattened by a
+//! neighbour. The width is the card's real span — the same axis on
+//! every row, labeled with how long it actually covers. There is no
+//! threshold on this card, so the line stays ink. Accent is a crossed
+//! line, and a fast download is not one.
 
 use super::widgets;
 use crate::font;
@@ -20,14 +20,15 @@ use crate::format;
 use crate::i18n;
 use crate::state::{TrafficReady, TrafficView, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
-use crate::traffic::ProgramRate;
+use crate::traffic::{self, CurvePoint, ProgramRate};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
-    div, px, relative,
+    AnyElement, Bounds, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels,
+    StatefulInteractiveElement, Styled, Window, div, point, px,
 };
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
+use std::time::{Duration, Instant};
 use zstats::OwnerCoverage;
 use zstats::snapshot::Capabilities;
 
@@ -36,9 +37,20 @@ use zstats::snapshot::Capabilities;
 /// programs are not in this list.
 const PREVIEW_ROWS: usize = 6;
 
-/// Floor for the bar scale. Same value as the interface card, for the
-/// same reason: below it the busiest row must not get to define "full".
+/// Floor for a row's curve. Same value as the interface card's bars:
+/// below 64 KiB/s the line stays on the axis, and a few kB/s of
+/// housekeeping must not get to define "full" for itself.
 const SCALE_FLOOR_BYTES: f32 = 64.0 * 1024.0;
+
+/// Height of the curve slot. Reserved on every row, including one that
+/// does not have two points yet, so the list does not jump as a line
+/// appears. It replaces the 4px bars; a third block under them would
+/// have pushed the listener card off the panel.
+const CURVE_H: f32 = 22.;
+
+/// Thin enough to read as a trace, thick enough to survive the panel's
+/// scale. The slot insets by a pixel so the stroke is not clipped.
+const CURVE_STROKE: f32 = 1.5;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // No such counters on this platform: no card, rather than an
@@ -87,29 +99,51 @@ fn ready_card(state: &ZStatsAppState, ready: &TrafficReady) -> AnyElement {
     // The chip stays a toggle once expanded, including the sample where
     // the extras have gone quiet and `hidden` drops to zero.
     let chip = (hidden > 0 || show_all).then(|| more_chip(hidden, show_all));
-    // Scale against the rows on screen. A hidden faster row would pin
-    // every visible bar to a track the reader cannot see.
-    let scale = scale_for(shown);
+    // One `now` for every row, so a point sits on the same x in each.
+    let now = Instant::now();
+    let span = state.traffic_span(now);
     let last = shown.len() - 1;
     widgets::list_shell()
-        .child(header(chip, Some(ready.coverage)))
+        .child(header(trailing(span, chip), Some(ready.coverage)))
         .children(
-            shown
-                .iter()
-                .enumerate()
-                .map(|(i, row)| row_element(i, row, scale, i != last)),
+            shown.iter().enumerate().map(|(i, row)| {
+                row_element(i, row, state.traffic_curve(row), span, now, i != last)
+            }),
         )
         .into_any_element()
 }
 
-fn header(chip: Option<AnyElement>, coverage: Option<OwnerCoverage>) -> AnyElement {
+/// The real span, dim, beside the show-more chip. Absent until the book
+/// holds a second — a fresh curve must not be labelled as if it were full.
+fn trailing(span: Option<Duration>, chip: Option<AnyElement>) -> Option<AnyElement> {
+    let label = span.map(traffic::span_label);
+    if label.is_none() && chip.is_none() {
+        return None;
+    }
+    Some(
+        h_flex()
+            .items_center()
+            .gap(px(8.))
+            .children(label.map(|text| {
+                div()
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(text)
+            }))
+            .children(chip)
+            .into_any_element(),
+    )
+}
+
+fn header(trailing: Option<AnyElement>, coverage: Option<OwnerCoverage>) -> AnyElement {
     widgets::list_header(
         h_flex()
             .items_center()
             .gap(px(4.))
             .child(i18n::tr("traffic.title"))
             .child(widgets::info_icon("traffic-tip", tip(coverage))),
-        chip,
+        trailing,
     )
 }
 
@@ -140,7 +174,14 @@ fn note_line(text: String) -> AnyElement {
         .into_any_element()
 }
 
-fn row_element(index: usize, row: &ProgramRate, scale: f32, rule: bool) -> AnyElement {
+fn row_element(
+    index: usize,
+    row: &ProgramRate,
+    points: &[CurvePoint],
+    span: Option<Duration>,
+    now: Instant,
+    rule: bool,
+) -> AnyElement {
     let name = row
         .name
         .clone()
@@ -175,17 +216,7 @@ fn row_element(index: usize, row: &ProgramRate, scale: f32, rule: bool) -> AnyEl
                 .child(format!("↓ {}", format::rate(row.received_per_sec)))
                 .child(format!("↑ {}", format::rate(row.transmitted_per_sec))),
         )
-        .child(
-            h_flex()
-                .gap(px(3.))
-                .mt(px(5.))
-                .child(bar(row.received_per_sec.unwrap_or(0), scale, theme::ink()))
-                .child(bar(
-                    row.transmitted_per_sec.unwrap_or(0),
-                    scale,
-                    theme::text_dim(),
-                )),
-        )
+        .child(div().mt(px(5.)).child(sparkline(points, span, now)))
         .into_any_element()
 }
 
@@ -263,66 +294,109 @@ fn more_chip(hidden: usize, showing: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// Both directions share one scale, so ↓ and ↑ can be read against each
-/// other as well as against the other rows.
-fn scale_for(rows: &[ProgramRate]) -> f32 {
-    rows.iter()
-        .flat_map(|row| {
-            [
-                row.received_per_sec.unwrap_or(0),
-                row.transmitted_per_sec.unwrap_or(0),
-            ]
-        })
+/// The row's own peak, but never under the floor. A quiet program then
+/// sits on the axis instead of turning a few hundred bytes into a wave.
+fn curve_scale(points: &[CurvePoint]) -> f32 {
+    points
+        .iter()
+        .filter_map(|point| point.bytes_per_sec)
         .max()
         .map_or(SCALE_FLOOR_BYTES, |peak| {
             (peak as f32).max(SCALE_FLOOR_BYTES)
         })
 }
 
-fn bar(bytes_per_sec: u64, scale: f32, fill: gpui::Rgba) -> AnyElement {
-    div()
-        .flex_1()
-        .h(px(4.))
-        .rounded_full()
-        .bg(theme::inset())
-        .overflow_hidden()
-        .child(
-            div()
-                .h_full()
-                .w(relative((bytes_per_sec as f32 / scale).clamp(0.0, 1.0)))
-                .rounded_full()
-                .bg(fill),
-        )
-        .into_any_element()
+/// One ↓+↑ line. The slot is always the same height; a single point,
+/// or a span the header is not ready to name, paints nothing inside it.
+fn sparkline(points: &[CurvePoint], span: Option<Duration>, now: Instant) -> AnyElement {
+    let points = points.to_vec();
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if let Some(span) = span {
+                paint_sparkline(bounds, &points, span, now, window);
+            }
+        },
+    )
+    .h(px(CURVE_H))
+    .w_full()
+    .into_any_element()
+}
+
+fn paint_sparkline(
+    bounds: Bounds<Pixels>,
+    points: &[CurvePoint],
+    span: Duration,
+    now: Instant,
+    window: &mut Window,
+) {
+    let span_secs = span.as_secs_f64();
+    if span_secs <= 0.0 {
+        return;
+    }
+    let scale = curve_scale(points);
+    // Half the stroke, rounded up, so a peak on the top edge is not cut.
+    let pad = px(1.);
+    let top = bounds.top() + pad;
+    let bottom = bounds.bottom() - pad;
+    if bottom <= top {
+        return;
+    }
+    let height = bottom - top;
+    let x_of = |at: Instant| {
+        let age = now.saturating_duration_since(at).as_secs_f64();
+        let t = (1.0 - age / span_secs).clamp(0.0, 1.0);
+        bounds.left() + bounds.size.width * (t as f32)
+    };
+    let y_of = |rate: u64| {
+        let h = (rate as f32 / scale).clamp(0.0, 1.0);
+        bottom - height * h
+    };
+    let mut builder = PathBuilder::stroke(px(CURVE_STROKE));
+    let mut drew = false;
+    for segment in traffic::segments(points) {
+        let mut steps = segment.into_iter();
+        let Some((at, rate)) = steps.next() else {
+            continue;
+        };
+        builder.move_to(point(x_of(at), y_of(rate)));
+        for (at, rate) in steps {
+            builder.line_to(point(x_of(at), y_of(rate)));
+        }
+        drew = true;
+    }
+    if !drew {
+        return;
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, theme::ink());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
-    fn program(name: &str, rx: u64, tx: u64) -> ProgramRate {
-        ProgramRate {
-            name: Some(name.into()),
-            pids: BTreeSet::from([1]),
-            received_per_sec: Some(rx),
-            transmitted_per_sec: Some(tx),
+    fn point(bytes: u64) -> CurvePoint {
+        CurvePoint {
+            at: Instant::now(),
+            bytes_per_sec: Some(bytes),
         }
     }
 
     #[test]
-    fn the_track_follows_the_rows_but_never_below_the_floor() {
-        let quiet = [program("a", 11_000, 9_000), program("b", 3_000, 7_000)];
-        let scale = scale_for(&quiet);
+    fn the_line_follows_the_row_but_never_below_the_floor() {
+        let scale = curve_scale(&[point(11_000)]);
         assert_eq!(scale, SCALE_FLOOR_BYTES, "11 kB/s does not get to be full");
 
-        let busy = [
-            program("a", 5 * 1024 * 1024, 0),
-            program("b", 1024 * 1024, 0),
-        ];
-        let scale = scale_for(&busy);
-        assert_eq!(scale, 5.0 * 1024.0 * 1024.0, "the busiest row defines full");
+        let scale = curve_scale(&[point(5 * 1024 * 1024)]);
+        assert_eq!(scale, 5.0 * 1024.0 * 1024.0, "the row's own peak is full");
 
-        assert_eq!(scale_for(&[]), SCALE_FLOOR_BYTES);
+        assert_eq!(curve_scale(&[]), SCALE_FLOOR_BYTES);
+        let hole = [CurvePoint {
+            at: Instant::now(),
+            bytes_per_sec: None,
+        }];
+        assert_eq!(curve_scale(&hole), SCALE_FLOOR_BYTES);
     }
 }

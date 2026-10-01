@@ -46,6 +46,7 @@ mod placement;
 mod prefs;
 mod procscan;
 mod proxy;
+mod series;
 mod spaceinfo;
 mod state;
 mod terminate;

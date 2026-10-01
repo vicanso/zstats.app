@@ -30,6 +30,7 @@ use crate::i18n;
 use crate::metrics;
 use crate::prefs;
 use crate::procscan;
+use crate::series;
 use crate::spaceinfo::{self, SpaceInfo};
 use crate::traffic::{self, ProgramRate};
 use crate::tray;
@@ -531,13 +532,15 @@ pub enum ListenerView {
 const LISTENERS_REFRESH: Duration = Duration::from_secs(15);
 
 /// What the Network tab's traffic card shows. The outcome of the last
-/// `zstats::process_traffic()` call made while that tab was on screen,
-/// already diffed against the previous call ([`crate::traffic`]).
+/// `zstats::process_traffic()` call, already diffed against the previous
+/// one ([`crate::traffic`]).
 ///
 /// A panel-owned query, like the listening card: the counters are
-/// cumulative and zstats keeps no baseline, so a rate only exists while
-/// someone is looking. The first call of a visit is [`Self::Reading`] —
-/// that total is not a rate.
+/// cumulative and zstats keeps no baseline. Unlike that card, the read
+/// continues while the panel is hidden — the curve is ten minutes of
+/// rates, and a ring that only fills on a visit is a short stub. The
+/// first call of the process is [`Self::Reading`]; that total is not a
+/// rate.
 pub enum TrafficView {
     /// A baseline is in hand, or the first read has not landed. No rate
     /// either way, and the card must not say the machine is quiet.
@@ -563,17 +566,41 @@ pub struct TrafficReady {
     pub process_count: usize,
 }
 
-/// How often per-process traffic is re-read while the Network tab stays
-/// on screen.
+/// How often per-process traffic is re-read while the Network tab is on
+/// screen.
 ///
 /// Not the 15s listener cadence. A closed socket leaves the cumulative
 /// total, so its whole history is subtracted from the next diff; over
 /// 15s that fall is larger than what a busy program transferred and the
 /// row disappears. zstats measured the read at about 3.5 ms (0.9–4.4)
 /// and spaced its own checks 1.5 s apart. 2 s keeps a live rate while
-/// the tab is open — roughly 0.2% of one core — and a hidden panel does
-/// not call it at all.
+/// the tab is open — roughly 0.2% of one core.
 const TRAFFIC_REFRESH: Duration = Duration::from_secs(2);
+
+/// How often the same read runs while the Network tab is not on screen
+/// — another tab, or the panel hidden.
+///
+/// The curve wants samples the reader did not sit and watch for. 10s is
+/// ~0.04% of one core at the measured 3.5 ms, against the tray's own
+/// ~0.64%. The two clocks do not run together: on screen this yields to
+/// [`TRAFFIC_REFRESH`]. The hidden collector tick is 5s, which is often
+/// enough to notice a 10s gate.
+const TRAFFIC_BACKGROUND: Duration = Duration::from_secs(10);
+
+/// Which clock the next `process_traffic()` call is on.
+///
+/// A refusal, or a failure that replaced the card, does not heal in two
+/// seconds; retrying at the live cadence would re-read the kernel tables
+/// to paint the same sentence. A failure that left a Ready ranking in
+/// place is not this arm — the view is still Ready, and the curve wants
+/// the next sample on the normal clock.
+fn traffic_wait(view: Option<&TrafficView>, on_screen: bool) -> Duration {
+    match view {
+        Some(TrafficView::Restricted | TrafficView::Failed(_)) => LISTENERS_REFRESH,
+        _ if on_screen => TRAFFIC_REFRESH,
+        _ => TRAFFIC_BACKGROUND,
+    }
+}
 
 /// The resident tick only keeps `max-processes`, so a group's
 /// `process_count` can be 37 while the live table names four of them.
@@ -668,15 +695,22 @@ pub struct ZStatsAppState {
     listeners_inflight: bool,
     /// Reveal every program that moved bytes, not just the preview.
     show_all_traffic: bool,
-    /// The traffic card's last answer. Dropped on hide with the baseline:
-    /// a rate across the hours the panel was away would be a trickle and
-    /// read as the current one.
+    /// The traffic card's last answer. Kept across hide: sampling
+    /// continues, so the ranking on the next open is at most one
+    /// background interval stale rather than a fresh "reading…".
     traffic: Option<TrafficView>,
     traffic_at: Option<Instant>,
     traffic_inflight: bool,
-    /// The previous call's counters, keyed by the diff. `None` until the
-    /// first call of this visit lands — that call has no rate.
+    /// The previous call's counters. `None` until the first call of the
+    /// process lands — that call has no rate. Kept across hide for the
+    /// same reason as the curve: the next diff is against a sample from
+    /// seconds ago, not from whenever the panel was last open.
     traffic_baseline: Option<traffic::Sample>,
+    /// Ten minutes of ↓+↑ per program. Resident, like the baseline.
+    traffic_curves: traffic::CurveBook,
+    /// The failure already logged. A blip while a ranking is on screen
+    /// must not warn on every background read.
+    traffic_fault: Option<String>,
     /// The listening card's search input, created on first open (an
     /// [`InputState`] needs a `Window`) and kept, like the process filter.
     listen_filter: Option<Entity<InputState>>,
@@ -736,6 +770,15 @@ pub struct ZStatsAppState {
     /// banner, never an `AlertEvent`. `u16` MB caps at ~64 GB per
     /// tree, which is the whole machine.
     mem_trend: AppTrend,
+    /// Half an hour of whole-machine CPU, memory in use, and network
+    /// download and upload for Overview's charts (`series.rs`). Fed from
+    /// every tick, hidden panel included — those are already collected
+    /// then. Not cleared on hide: the tray is when most of the points
+    /// land.
+    cpu_series: series::Series,
+    mem_series: series::Series,
+    net_down_series: series::Series,
+    net_up_series: series::Series,
     /// Trees whose climb has been announced within the last
     /// [`trend::CREEP_REARM`] — the re-arm set, pruned by that clock
     /// and never by the figure, so a creep is one banner an hour, not
@@ -845,6 +888,8 @@ impl Default for ZStatsAppState {
             traffic_at: None,
             traffic_inflight: false,
             traffic_baseline: None,
+            traffic_curves: traffic::CurveBook::default(),
+            traffic_fault: None,
             listen_filter: None,
             listen_filter_open: false,
             listen_filter_text: String::new(),
@@ -864,6 +909,10 @@ impl Default for ZStatsAppState {
             net: NetActivity::default(),
             trend: AppTrend::default(),
             mem_trend: AppTrend::default(),
+            cpu_series: series::Series::default(),
+            mem_series: series::Series::default(),
+            net_down_series: series::Series::default(),
+            net_up_series: series::Series::default(),
             creep_notified: HashMap::new(),
             history: None,
             history_loaded_at: None,
@@ -1009,6 +1058,26 @@ impl ZStatsAppState {
             );
         }
 
+        // Overview's half-hour lines. These three are already on the
+        // tick while the panel is hidden; the ring is what makes that
+        // readable after it opens. Network repeats the last interface
+        // total between that channel's own refreshes — the snapshot,
+        // not a second sample.
+        self.cpu_series
+            .record(now, Some(f64::from(tick.snapshot.cpu.usage_percent)));
+        // Percent, not bytes. The curve's top is 100, the same axis as
+        // the headline's share of the machine; storing bytes and dividing
+        // by a later total would move old points when the total moved.
+        self.mem_series
+            .record(now, Some(f64::from(tick.snapshot.memory.used_percent)));
+        // One ring per direction: download is the line people read, and
+        // a sum could not say which way a burst went.
+        let io = &tick.snapshot.io_totals;
+        self.net_down_series
+            .record(now, io.network_received_bytes_per_sec.map(|b| b as f64));
+        self.net_up_series
+            .record(now, io.network_transmitted_bytes_per_sec.map(|b| b as f64));
+
         if !self.ejected.is_empty() {
             let listed: Vec<String> = tick
                 .snapshot
@@ -1030,10 +1099,12 @@ impl ZStatsAppState {
         if self.tab == Tab::Hardware && panel_visible(cx) {
             self.ensure_space_info(cx);
         }
-        // Same gate for the Network tab's own queries: on screen, not
-        // merely selected — the tab survives hide and a restart.
+        // Listeners are a photograph of a visit. Traffic is a ten-minute
+        // curve, so it keeps sampling on this tick — every 2s while that
+        // tab is on screen, every 10s otherwise — and a late answer is
+        // kept even when nobody is looking.
+        self.ensure_traffic(cx);
         if self.tab == Tab::Net && panel_visible(cx) {
-            self.ensure_traffic(cx);
             self.ensure_listeners(cx);
         }
         self.prune_stale_alerts();
@@ -1126,23 +1197,21 @@ impl ZStatsAppState {
         self.listeners.as_ref()
     }
 
-    /// Read per-process socket counters when the card has nothing, or has
-    /// held the same answer for [`TRAFFIC_REFRESH`] (longer after a
-    /// refusal — an app identity and a layout zstats will not parse do
-    /// not heal in two seconds, and retrying at the live cadence would
-    /// re-read the kernel tables to paint the same sentence).
+    /// Read per-process socket counters when the curve has nothing, or
+    /// the last answer is older than [`traffic_wait`].
     ///
     /// Single-flight, and off the main thread. The call is the same
-    /// kernel read as [`Self::ensure_listeners`]; both run only while
-    /// the Network tab is on screen.
+    /// kernel read as [`Self::ensure_listeners`], which still runs only
+    /// while the Network tab is on screen. This one does not: the curve
+    /// is filled from the resident tick.
     fn ensure_traffic(&mut self, cx: &mut Context<Self>) {
         if !zstats::snapshot::Capabilities::current().process_traffic {
             return;
         }
-        let wait = match &self.traffic {
-            Some(TrafficView::Restricted | TrafficView::Failed(_)) => LISTENERS_REFRESH,
-            _ => TRAFFIC_REFRESH,
-        };
+        let wait = traffic_wait(
+            self.traffic.as_ref(),
+            self.tab == Tab::Net && panel_visible(cx),
+        );
         if self.traffic_inflight || self.traffic_at.is_some_and(|at| at.elapsed() < wait) {
             return;
         }
@@ -1157,21 +1226,23 @@ impl ZStatsAppState {
                 .await;
             let _ = this.update(cx, |state, cx| {
                 state.traffic_inflight = false;
-                // Hidden while the tables were being read: the hide
-                // already dropped the baseline, and a late answer must
-                // not become the next visit's first sample.
-                if !(state.tab == Tab::Net && panel_visible(cx)) {
-                    return;
-                }
+                // Applied even if the panel hid or the tab changed while
+                // the tables were being read. Dropping a late answer
+                // would punch a hole in a curve that is supposed to
+                // survive exactly that. Repaint only when the card is
+                // on screen — a hidden window is not being drawn, and
+                // another tab does not show this one.
                 state.apply_traffic(outcome, at);
-                cx.notify();
+                if state.tab == Tab::Net && panel_visible(cx) {
+                    cx.notify();
+                }
             });
         })
         .detach();
     }
 
-    /// Fold one `process_traffic()` result into the card. The first call
-    /// of a visit is only a baseline.
+    /// Fold one `process_traffic()` result into the ranking and the curve.
+    /// The first call of the process is only a baseline.
     fn apply_traffic(
         &mut self,
         outcome: Result<zstats::ProcessTraffic, zstats::CollectError>,
@@ -1202,9 +1273,13 @@ impl ZStatsAppState {
                         self.traffic_at = Some(at);
                         return;
                     }
-                    let rates = traffic::diff(prev, &sample);
+                    // `diff` is the ranking: bytes that moved. `deltas` is
+                    // the same window plus the zeros and the breaks the
+                    // line has to draw, which the ranking leaves out.
+                    let deltas = traffic::deltas(prev, &sample);
+                    self.traffic_curves.record(at, &sample, &deltas);
                     self.traffic = Some(TrafficView::Ready(TrafficReady {
-                        rows: traffic::by_program(&rates),
+                        rows: traffic::by_program(&traffic::diff(prev, &sample)),
                         coverage,
                         process_count,
                     }));
@@ -1213,29 +1288,57 @@ impl ZStatsAppState {
                 }
                 self.traffic_baseline = Some(sample);
                 self.traffic_at = Some(at);
+                self.traffic_fault = None;
             }
             Err(zstats::CollectError::Restricted { .. }) => {
+                // A bare executable is answered with its own sockets
+                // only. Diffing that against a previous full sample, or
+                // leaving the curve up, would paint our two connections
+                // as the machine. The sentence replaces both.
                 self.traffic = Some(TrafficView::Restricted);
                 self.traffic_baseline = None;
+                self.traffic_curves = traffic::CurveBook::default();
+                self.traffic_fault = None;
                 self.traffic_at = Some(at);
             }
             Err(e) => {
                 let message = e.to_string();
-                // Once per distinct failure, not every retry.
-                if !matches!(&self.traffic, Some(TrafficView::Failed(m)) if *m == message) {
+                if self.traffic_fault.as_deref() != Some(message.as_str()) {
                     tracing::warn!(error = %message, "per-process traffic unavailable");
+                    self.traffic_fault = Some(message.clone());
+                }
+                self.traffic_at = Some(at);
+                // A blip while a ranking is on screen keeps the ranking,
+                // the baseline and the curve. The next good sample
+                // diffs against the last one; a long stall breaks the
+                // line by the gap, not by wiping it. The first failure,
+                // before any rate exists, still replaces the card.
+                if matches!(self.traffic, Some(TrafficView::Ready(_))) {
+                    return;
                 }
                 self.traffic = Some(TrafficView::Failed(message));
                 self.traffic_baseline = None;
-                self.traffic_at = Some(at);
+                self.traffic_curves = traffic::CurveBook::default();
             }
         }
     }
 
-    /// The traffic card's last answer; `None` before the first read of
-    /// this visit.
+    /// The traffic card's last answer; `None` before the first read.
     pub fn traffic(&self) -> Option<&TrafficView> {
         self.traffic.as_ref()
+    }
+
+    /// Points for this program's curve, oldest first. Empty when it has
+    /// not moved bytes inside the window.
+    pub fn traffic_curve(&self, row: &ProgramRate) -> &[traffic::CurvePoint] {
+        self.traffic_curves
+            .series(&traffic::CurveKey::for_program(row))
+    }
+
+    /// How long the curves actually cover. The header's label, and the
+    /// shared horizontal axis — `None` until the book holds a second.
+    pub fn traffic_span(&self, now: Instant) -> Option<Duration> {
+        self.traffic_curves.span(now)
     }
 
     pub fn show_all_traffic(&self) -> bool {
@@ -1322,6 +1425,26 @@ impl ZStatsAppState {
     /// The most recent collection, or `None` before the first one lands.
     pub fn latest(&self) -> Option<&Tick> {
         self.latest.as_ref()
+    }
+
+    /// Whole-machine CPU over the last half hour. See `series.rs`.
+    pub fn cpu_series(&self) -> &series::Series {
+        &self.cpu_series
+    }
+
+    /// Memory in use as `used_percent` (0–100), over the same half hour.
+    pub fn memory_series(&self) -> &series::Series {
+        &self.mem_series
+    }
+
+    /// Network download, bytes per second, over the same half hour.
+    pub fn net_down_series(&self) -> &series::Series {
+        &self.net_down_series
+    }
+
+    /// Network upload, bytes per second, over the same half hour.
+    pub fn net_up_series(&self) -> &series::Series {
+        &self.net_up_series
     }
 
     /// What the collector is running with. Seeded at startup, then replaced
@@ -1737,11 +1860,13 @@ impl ZStatsAppState {
         // hours-old list shown for a frame reads as current.
         self.listeners = None;
         self.listeners_at = None;
-        // The baseline too. A diff across the hours the panel was hidden
-        // is a trickle, and it would be painted as the current rate.
-        self.traffic = None;
-        self.traffic_at = None;
-        self.traffic_baseline = None;
+        // Traffic is not a photograph of the visit. The sampler keeps
+        // running while the panel is hidden, so the baseline and the
+        // ten-minute curve stay; clearing them is what made a reopened
+        // card start from a blank axis. The diff across those hours
+        // does not arise, because the read did not stop. Overview's
+        // half-hour rings stay for the same reason: the hidden tick is
+        // what fills them.
         cx.notify();
     }
 
@@ -1803,10 +1928,11 @@ impl ZStatsAppState {
         if tab == Tab::Hardware {
             self.ensure_space_info(cx);
         }
-        // A visit is what pays for the socket tables, and it reads them at
-        // once rather than a tick later. Traffic included: its first call
-        // is only a baseline, so starting it on entry is what lets the
-        // second call, one refresh later, already be a rate.
+        // Listeners are a visit: the list is a photograph, so a tab
+        // entry reads it now rather than a tick later. Traffic keeps
+        // its own clock, and entering still asks at once — a ranking
+        // left by the 10s cadence is then at most one live interval
+        // stale, instead of waiting out the rest of those 10s.
         if tab == Tab::Net {
             self.ensure_traffic(cx);
             self.ensure_listeners(cx);
@@ -3315,5 +3441,35 @@ mod tests {
         assert!(reloaded.alerts.cpu_overrides.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn traffic_samples_fast_only_while_the_card_is_on_screen() {
+        assert_eq!(traffic_wait(None, true), TRAFFIC_REFRESH);
+        assert_eq!(traffic_wait(None, false), TRAFFIC_BACKGROUND);
+        assert_eq!(
+            traffic_wait(Some(&TrafficView::Reading), false),
+            TRAFFIC_BACKGROUND
+        );
+        assert_eq!(
+            traffic_wait(
+                Some(&TrafficView::Ready(TrafficReady {
+                    rows: vec![],
+                    coverage: zstats::OwnerCoverage::AllProcesses,
+                    process_count: 0,
+                })),
+                true
+            ),
+            TRAFFIC_REFRESH,
+            "a ranking on screen stays on the live clock"
+        );
+        assert_eq!(
+            traffic_wait(Some(&TrafficView::Restricted), true),
+            LISTENERS_REFRESH
+        );
+        assert_eq!(
+            traffic_wait(Some(&TrafficView::Failed("layout".into())), false),
+            LISTENERS_REFRESH
+        );
     }
 }
