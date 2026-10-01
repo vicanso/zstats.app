@@ -101,6 +101,8 @@ bind = SUPER, M, exec, ~/.local/bin/zstats --toggle
 layerrule = blur, zstats
 ```
 
+在 Omarchy 上，设置 → 界面 → 主题里多一个 **Omarchy**：面板直接使用桌面当前的主题——配色、强调色和浅色/深色——切换主题后，下次打开面板即跟随。
+
 Linux 版不做的事：没有内存压力与 P/E 核的数字（内核不像 macOS 那样上报），没有 Time Machine 与可清除空间那两行，托盘只有图形、旁边没有数字——StatusNotifier 没有文字。应用内更新器会原地安装 tarball 并重启；由包管理器安装的二进制留给包管理器处理。
 
 ## 开发

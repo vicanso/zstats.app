@@ -101,6 +101,8 @@ bind = SUPER, M, exec, ~/.local/bin/zstats --toggle
 layerrule = blur, zstats
 ```
 
+On Omarchy, Settings → Interface → Theme offers **Omarchy**: the panel takes the desktop's current theme — its colours, accent and light or dark — and follows a theme switch the next time it opens.
+
 What the Linux build does not do: no memory-pressure or P/E-core figures (the kernel reports neither the way macOS does), no Time Machine or purgeable-space lines, and the tray wears a glyph with no number beside it — StatusNotifier has no text. The in-app updater installs the tarball in place and restarts; a binary owned by a package manager is left to that package manager.
 
 ## Develop

@@ -41,6 +41,11 @@ pub enum ThemePref {
     /// Notchclip's warm palette (`themes/golden.json`). Light or dark
     /// still follows the Mac; this only swaps which pair is painted.
     Golden,
+    /// The Omarchy desktop's current palette (`omarchy.rs`), light or
+    /// dark as that theme is. Offered only on Omarchy and in development
+    /// builds (`omarchy::selectable`); stored anywhere, it reads as
+    /// `System` where it is not offered (`crate::theme_in_force`).
+    Omarchy,
 }
 
 /// What the menu bar shows. `Auto` is the default and the only mode that
@@ -93,6 +98,7 @@ impl ThemePref {
             ThemePref::Light => Some("light"),
             ThemePref::Dark => Some("dark"),
             ThemePref::Golden => Some("golden"),
+            ThemePref::Omarchy => Some("omarchy"),
         }
     }
 
@@ -101,6 +107,7 @@ impl ThemePref {
             "light" => ThemePref::Light,
             "dark" => ThemePref::Dark,
             "golden" => ThemePref::Golden,
+            "omarchy" => ThemePref::Omarchy,
             _ => ThemePref::System,
         }
     }
@@ -209,6 +216,7 @@ fn encode_theme(pref: ThemePref) -> u8 {
         ThemePref::Light => 1,
         ThemePref::Dark => 2,
         ThemePref::Golden => 3,
+        ThemePref::Omarchy => 4,
     }
 }
 
@@ -217,6 +225,7 @@ fn decode_theme(raw: u8) -> ThemePref {
         1 => ThemePref::Light,
         2 => ThemePref::Dark,
         3 => ThemePref::Golden,
+        4 => ThemePref::Omarchy,
         _ => ThemePref::System,
     }
 }
@@ -966,6 +975,19 @@ mod tests {
 
         fs::write(file_path(&dir), "theme = \"golden\"\n").unwrap();
         assert_eq!(read(&dir).theme, ThemePref::Golden);
+        // Stored as written on any machine; whether it is honoured is
+        // `crate::theme_in_force`'s call, not the file's.
+        fs::write(file_path(&dir), "theme = \"omarchy\"\n").unwrap();
+        assert_eq!(read(&dir).theme, ThemePref::Omarchy);
+        for pref in [
+            ThemePref::System,
+            ThemePref::Light,
+            ThemePref::Dark,
+            ThemePref::Golden,
+            ThemePref::Omarchy,
+        ] {
+            assert_eq!(decode_theme(encode_theme(pref)), pref);
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

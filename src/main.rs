@@ -41,6 +41,7 @@ mod ipc;
 mod logger;
 mod metrics;
 mod notify;
+mod omarchy;
 mod opener;
 mod placement;
 mod prefs;
@@ -518,8 +519,8 @@ fn theme_mode_for_appearance(appearance: WindowAppearance) -> ThemeMode {
 /// mono family, so [`font::apply`] has to run every time. `appearance` is
 /// what the OS reports; a pinned theme preference wins over it.
 fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
-    let golden = prefs::theme() == prefs::ThemePref::Golden;
-    let mode = match prefs::theme() {
+    let pref = theme_in_force();
+    let mode = match pref {
         prefs::ThemePref::Light => ThemeMode::Light,
         prefs::ThemePref::Dark => ThemeMode::Dark,
         // Golden is a palette, not a third appearance: which of its two
@@ -527,8 +528,85 @@ fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
         prefs::ThemePref::System | prefs::ThemePref::Golden => {
             theme_mode_for_appearance(appearance)
         }
+        // Omarchy's light or dark is the desktop theme's own, so the
+        // window appearance has no say.
+        prefs::ThemePref::Omarchy => {
+            install_omarchy(omarchy::palette(), cx);
+            return;
+        }
     };
-    install_palette(golden, mode, cx);
+    install_palette(pref == prefs::ThemePref::Golden, mode, cx);
+}
+
+/// The theme preference as it applies on this machine. Omarchy is
+/// offered only where `omarchy::selectable` says so; an `app.toml` that
+/// names it anywhere else — copied from an Omarchy box, or written by a
+/// development build — reads as System rather than as a palette nobody
+/// can pick or unpick from the Interface page.
+pub fn theme_in_force() -> prefs::ThemePref {
+    match prefs::theme() {
+        prefs::ThemePref::Omarchy if !omarchy::selectable() => prefs::ThemePref::System,
+        pref => pref,
+    }
+}
+
+/// Paint gpui-kit and our own tokens from an Omarchy palette. The
+/// generated theme stands in for both halves of gpui-kit's light/dark
+/// pair, and `Theme::change` is given the palette's own mode, so
+/// nothing in the window appearance can swap it out.
+fn install_omarchy(palette: omarchy::Palette, cx: &mut App) {
+    let (name, json) = theme::omarchy_theme(&palette);
+    if !ThemeRegistry::global(cx)
+        .themes()
+        .contains_key(name.as_str())
+        && let Err(err) = ThemeRegistry::global_mut(cx).load_themes_from_str(&json)
+    {
+        tracing::error!("omarchy theme: {err}");
+    }
+    let Some(config) = ThemeRegistry::global(cx)
+        .themes()
+        .get(name.as_str())
+        .cloned()
+    else {
+        // Our own JSON failed to load: paint the classic pair rather
+        // than a half-applied theme.
+        tracing::error!("omarchy theme: {name} missing after load");
+        install_palette(false, ThemeMode::Dark, cx);
+        return;
+    };
+    let mode = if palette.dark {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    };
+    Theme::update(cx, |theme| {
+        theme.light_theme = config.clone();
+        theme.dark_theme = config;
+    });
+    Theme::change(mode, None, cx);
+    font::apply(cx);
+    theme::set_omarchy(&palette);
+}
+
+/// Re-read the Omarchy palette as the panel opens, and restyle only if
+/// the desktop's theme changed since it was painted. On Wayland the
+/// panel is rebuilt on every open, so a theme switch shows up the next
+/// time anyone looks — no file watcher idling in the tray for it.
+pub fn refresh_omarchy_palette(cx: &mut App) {
+    if theme_in_force() != prefs::ThemePref::Omarchy {
+        return;
+    }
+    let palette = omarchy::palette();
+    if theme::omarchy_palette_is(&palette) {
+        return;
+    }
+    install_omarchy(palette, cx);
+    #[cfg(target_os = "macos")]
+    apply_ns_appearance();
+    // The tray glyph is inked from `theme::is_dark` off macOS, and the
+    // new theme may have flipped it.
+    let store = cx.global::<ZStatsGlobalStore>().clone();
+    store.update(cx, |state, cx| tray::sync(cx, state));
 }
 
 /// Point gpui-kit at one pair of theme files, then repaint our own tokens
@@ -600,10 +678,19 @@ fn apply_ns_appearance() {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
-    let appearance = match prefs::theme() {
+    let appearance = match theme_in_force() {
         // Golden follows the Mac, so the material has to as well. Pinning
         // Aqua here would freeze the cream variant on a dark desktop.
         prefs::ThemePref::System | prefs::ThemePref::Golden => None,
+        // Omarchy is pinned to its palette's own mode (a development
+        // build is the only way it reaches a Mac).
+        prefs::ThemePref::Omarchy => NSAppearance::appearanceNamed(if omarchy::palette().dark {
+            // SAFETY: reading AppKit's exported appearance-name constants.
+            unsafe { NSAppearanceNameDarkAqua }
+        } else {
+            // SAFETY: as above.
+            unsafe { NSAppearanceNameAqua }
+        }),
         // SAFETY: reading AppKit's exported appearance-name constants.
         prefs::ThemePref::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
         prefs::ThemePref::Dark => {
@@ -1378,6 +1465,8 @@ fn panel_kind() -> gpui::WindowKind {
 /// last known position. On Wayland neither applies: [`panel_kind`] hands
 /// the placement to the compositor and only the size here is honoured.
 pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
+    // Before the window exists, so its first frame is the current theme.
+    refresh_omarchy_palette(cx);
     let saved = cx.global::<ZStatsGlobalStore>().read(cx).window_bounds();
     let default_size = {
         let (w, h) = DEFAULT_WINDOW_SIZE;
@@ -1674,6 +1763,9 @@ pub fn hide_main_window(cx: &mut App) {
 /// Position the existing window under the tray icon and bring it forward.
 #[cfg(target_os = "macos")]
 fn reveal_main_window(cx: &mut App, handle: gpui::AnyWindowHandle, anchor: Option<TrayAnchor>) {
+    // The retained macOS panel is not rebuilt on show; re-read here so a
+    // development build testing the Omarchy scheme follows a palette edit.
+    refresh_omarchy_palette(cx);
     let current = handle.update(cx, |_, window, _| window.bounds()).ok();
     let origin = match (anchor, current) {
         (Some(anchor), Some(bounds)) => bounds_below_tray(anchor, bounds.size, cx).origin,

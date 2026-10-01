@@ -31,6 +31,7 @@ use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::omarchy;
 use crate::opener;
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
 use crate::state::{
@@ -880,19 +881,34 @@ fn interface_card(
             crate::set_language_pref,
             None,
         ))
-        .child(pref_row(
-            "pref-theme",
-            i18n::tr("config.theme"),
-            vec![
+        .child({
+            let mut themes = vec![
                 (i18n::tr("config.follow_system"), ThemePref::System),
                 (i18n::tr("config.theme_light"), ThemePref::Light),
                 (i18n::tr("config.theme_dark"), ThemePref::Dark),
                 (i18n::tr("config.theme_golden"), ThemePref::Golden),
-            ],
-            prefs::theme(),
-            crate::set_theme_pref,
-            Some(i18n::tr("config.theme_tip")),
-        ))
+            ];
+            // Only where there is an Omarchy palette to follow, plus every
+            // development build so it can be tried from a Mac (where it
+            // paints Tokyo Night, Omarchy's default).
+            let omarchy = omarchy::selectable();
+            if omarchy {
+                // The desktop's own name for itself, in both locales.
+                themes.push(("Omarchy".into(), ThemePref::Omarchy));
+            }
+            pref_row(
+                "pref-theme",
+                i18n::tr("config.theme"),
+                themes,
+                crate::theme_in_force(),
+                crate::set_theme_pref,
+                Some(i18n::tr(if omarchy {
+                    "config.theme_tip_omarchy"
+                } else {
+                    "config.theme_tip"
+                })),
+            )
+        })
         .child(pref_row(
             "pref-tray",
             i18n::tr("config.tray"),
