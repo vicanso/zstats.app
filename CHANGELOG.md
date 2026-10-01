@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.16](https://github.com/vicanso/zstats.app/compare/v0.3.14..v0.3.16) - 2026-10-01
+
+### ⛰️  Features
+
+- The CPU and network charts print their axis top in the corner, CPU rounding up to the next 10% past 30, and Overview names three apps instead of five, the panel 61pt shorter to match - ([f1295e0](https://github.com/vicanso/zstats.app/commit/f1295e05cdafe11c98f1574294a993c275c2514f))
+- An Omarchy theme paints the panel from the desktop's current Omarchy palette its colours, accent, red and own light or dark, re-read each time the panel opens offered only on Omarchy and in development builds - ([725e338](https://github.com/vicanso/zstats.app/commit/725e3381b934c6df9d495494c3f860a2b57d061c))
+
+### 🐛 Bug Fixes
+
+- A chart's Max is the highest point it draws, its half hour is wall-clock time so a sleep is a gap rather than last night joined on, and a full window reads 30m instead of 29m - ([c9eefb5](https://github.com/vicanso/zstats.app/commit/c9eefb571c2dec6440d666fc011e36803c028979))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.15, and the changelog stops dropping commits whose subject wraps onto a second line - ([f24e0ae](https://github.com/vicanso/zstats.app/commit/f24e0ae1c0d0983a6725af875381749543cf4e4e))
+
 ## [0.3.15](https://github.com/vicanso/zstats.app/compare/v0.3.14..v0.3.15) - 2026-10-01
 
 ### ⛰️  Features
