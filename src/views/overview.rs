@@ -24,8 +24,11 @@ use zstats::snapshot::{
 };
 
 /// How many trees the first panel names. Enough to answer "who's
-/// hot" without turning Overview into a second Apps tab.
-const TOP_N: usize = 5;
+/// hot" without turning Overview into a second Apps tab. Three since
+/// the charts arrived: the first one or two rows are the answer, the
+/// rest were the same few residents every time, and each row is ~30pt
+/// of a panel the charts had already made taller. All opens the rest.
+const TOP_N: usize = 3;
 
 /// Per-core bar turns accent past this.
 const CORE_HOT: f32 = 85.0;
@@ -116,7 +119,7 @@ const RISE_FLOOR: f32 = 15.0;
 /// is the reason — and a steady 30% outranks a 2%→21% climber in any
 /// snapshot ranking. Always [`TOP_N`] rows: climbers take the top, the
 /// rest of the slots keep the current CPU ranking so a quiet climb
-/// (two trees) does not leave the card three rows short of the window.
+/// (one tree) does not leave the card rows short of the window.
 /// All still opens the full Apps list.
 fn top_apps(state: &ZStatsAppState) -> AnyElement {
     let Some(tick) = state.latest() else {
@@ -373,6 +376,7 @@ fn processor(
                 stroke: CurveStroke::Smooth,
                 unit: ChartUnit::Percent,
                 icon: None,
+                corner_label: true,
             },
             recent.now,
         ));
@@ -846,6 +850,7 @@ fn memory(
                 stroke: CurveStroke::Bars,
                 unit: ChartUnit::Percent,
                 icon: None,
+                corner_label: false,
             },
             recent.now,
         ))
@@ -891,6 +896,7 @@ fn memory(
                 // The row above carries disk rates too, with the same
                 // arrows; the glyph says which pair this chart is.
                 icon: Some(IconName::Network),
+                corner_label: true,
             },
             recent.now,
         ))
@@ -949,6 +955,13 @@ enum CurveStroke {
 /// that range use the slot. 12% then 14% stays on this top, so the
 /// line does not rescale while the machine is in the quiet band.
 const CPU_AXIS_LOW: f64 = 30.0;
+
+/// Past [`CPU_AXIS_LOW`] the top is the next multiple of this above the
+/// highest point: 33% draws on 0–40. It used to be the highest point
+/// itself, which the corner label would have printed as "33.2%" and
+/// moved on every decimal of a new high; a round step reads as an axis
+/// and holds still until the peak crosses it.
+const CPU_AXIS_STEP: f64 = 10.0;
 
 /// Memory axis. The series is `used_percent`, so the top is the whole
 /// machine. It does not zoom to the recent band — a line that grew
@@ -1098,16 +1111,20 @@ fn chart_runs(points: &[Point]) -> Vec<Vec<(Instant, f64)>> {
     out
 }
 
-/// 30 while every reading stays at or under 30. Once any reading goes
-/// over that, the top is the window's own highest reading, so a 40%
-/// peak fills the slot instead of sitting low on a 0–100 axis. Callers
-/// pass [`chart_buckets`], so the top matches the points on screen.
+/// 30 while every point stays at or under 30. Once one goes over, the
+/// next [`CPU_AXIS_STEP`] above the window's highest point, at most
+/// 100 — a 33% peak draws on 0–40 instead of sitting low on 0–100.
+/// Callers pass [`chart_buckets`], so the top follows the points on
+/// screen; the corner label ([`scale_label`]) prints it.
 fn cpu_axis_top(points: &[Point]) -> f64 {
     let peak = points
         .iter()
         .filter_map(|point| point.value)
         .fold(0.0, f64::max);
-    peak.max(CPU_AXIS_LOW)
+    if peak <= CPU_AXIS_LOW {
+        return CPU_AXIS_LOW;
+    }
+    ((peak / CPU_AXIS_STEP).ceil() * CPU_AXIS_STEP).min(100.0)
 }
 
 /// Where `age` sits on the 30-minute axis. `1` is now, the right edge.
@@ -1187,6 +1204,10 @@ struct Chart<'a> {
     /// Glyph at the head of the caption, for a chart whose card does
     /// not already say what it is.
     icon: Option<IconName>,
+    /// Print the top of the axis in the well's corner. On for the two
+    /// charts whose top moves (CPU, network); memory's is always 100%,
+    /// which the bars' own share of the slot already says.
+    corner_label: bool,
 }
 
 /// One series on a [`Chart`].
@@ -1243,16 +1264,54 @@ fn recent_line(chart: Chart, now: Instant) -> Option<AnyElement> {
                 // the chart off the card. The marks are inset in
                 // [`paint_curve`].
                 div()
+                    .relative()
                     .w_full()
                     .h(px(CURVE_H))
                     .rounded(px(CHART_WELL_RADIUS))
                     .bg(theme::inset())
                     .overflow_hidden()
-                    .child(sparkline(marks, span, now, chart.scale, chart.stroke)),
+                    .child(sparkline(marks, span, now, chart.scale, chart.stroke))
+                    .when(chart.corner_label, |well| {
+                        well.child(corner_label(scale_label(chart.unit, chart.scale)))
+                    }),
             )
             .child(chart_readout(&peaks, span, chart.unit, chart.icon))
             .into_any_element(),
     )
+}
+
+/// The top of the axis, printed as an axis: a whole percent, or whole
+/// MB/s for the network's doubling ceilings.
+fn scale_label(unit: ChartUnit, scale: f64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    match unit {
+        ChartUnit::Percent => format!("{scale:.0}%"),
+        ChartUnit::Rate if scale >= MIB => format!("{:.0} MB/s", scale / MIB),
+        ChartUnit::Rate => format::rate(Some(scale.max(0.0).round() as u64)),
+    }
+}
+
+/// The axis top in the well's top-left corner, where a reader looks for
+/// it: without it the top of the chart was a rule in a tooltip — 30%
+/// under a "Max 15.8%" caption, or an unnamed doubling under "Max 6.6
+/// MB/s". The left is the oldest half hour, so the newest data on the
+/// right is never under it. It sits over the stroke on a scrap of the
+/// well's own fill, so a line passing beneath dims instead of crossing
+/// the digits.
+fn corner_label(text: String) -> AnyElement {
+    div()
+        .absolute()
+        .top(px(2.))
+        .left(px(CHART_PAD))
+        .px(px(3.))
+        .rounded(px(3.))
+        .bg(theme::inset())
+        .font_family(font::MONO)
+        .text_size(px(9.))
+        .line_height(px(11.))
+        .text_color(theme::text_dim())
+        .child(text)
+        .into_any_element()
 }
 
 /// The highest reading (one per line, arrowed when there are two) and
@@ -1838,8 +1897,30 @@ mod tests {
         assert_eq!(cpu_axis_top(&[point(Some(29.9))]), CPU_AXIS_LOW);
         // Exactly 30 has not gone over the line, so the top stays 30.
         assert_eq!(cpu_axis_top(&[point(Some(30.0))]), CPU_AXIS_LOW);
-        assert_eq!(cpu_axis_top(&[point(Some(8.0)), point(Some(64.0))]), 64.0);
-        assert_eq!(cpu_axis_top(&[point(Some(30.1))]), 30.1);
+        // Over it, the next 10% step above the peak, never past 100.
+        assert_eq!(cpu_axis_top(&[point(Some(8.0)), point(Some(64.0))]), 70.0);
+        assert_eq!(cpu_axis_top(&[point(Some(30.1))]), 40.0);
+        assert_eq!(cpu_axis_top(&[point(Some(33.2))]), 40.0);
+        assert_eq!(cpu_axis_top(&[point(Some(40.0))]), 40.0);
+        assert_eq!(cpu_axis_top(&[point(Some(95.5))]), 100.0);
+        assert_eq!(cpu_axis_top(&[point(Some(100.0))]), 100.0);
+    }
+
+    #[test]
+    fn the_corner_label_reads_as_an_axis() {
+        assert_eq!(scale_label(ChartUnit::Percent, 30.0), "30%");
+        assert_eq!(scale_label(ChartUnit::Percent, 100.0), "100%");
+        assert_eq!(scale_label(ChartUnit::Rate, 1024.0 * 1024.0), "1 MB/s");
+        assert_eq!(
+            scale_label(ChartUnit::Rate, 8.0 * 1024.0 * 1024.0),
+            "8 MB/s"
+        );
+        // Under a MiB (not a ceiling the network line uses today) it
+        // falls back to the rate formatter rather than printing "0 MB/s".
+        assert_eq!(
+            scale_label(ChartUnit::Rate, 512.0 * 1024.0),
+            format::rate(Some(512 * 1024))
+        );
     }
 
     #[test]
