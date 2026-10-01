@@ -334,6 +334,22 @@ up_tip = "How long this process has been running."
 up_range_tip = "How long the newest and the oldest of these %{count} processes have been running."
 hide = "Hide"
 
+[traffic]
+title = "Traffic"
+tip = "Bytes each program moved since the previous reading, fastest first. One row per program; ×N is how many of its processes moved bytes. The counters are cumulative, so the first reading has no rate. These are the kernel's socket counters and will not add up to the interface totals."
+tip_macos = "Received bytes are macOS rxbytes, which counts more than the payload recv returned."
+tip_linux = "TCP only. A program that only speaks UDP has no row — the kernel publishes no cumulative UDP total."
+tip_partial = "Other users' processes could not be named, so their traffic is missing."
+reading = "Reading socket counters…"
+restricted = "Needs the installed zstats.app: macOS names socket owners only to an app, and shows a development build just its own."
+failed = "Could not read per-process traffic: %{error}"
+none = "No process has a counted socket."
+quiet = "Nothing moved since the previous reading."
+show_more = "Show more · %{count}"
+hide = "Hide"
+unknown = "unknown"
+pids_tip = "Processes in this row: %{pids}"
+
 [sensors]
 title = "Sensors"
 off = "Sensors — off"

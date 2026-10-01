@@ -1,5 +1,6 @@
 //! Listening: which process is waiting for connections on which address
-//! and port. Rendered on the Network tab under the interfaces.
+//! and port. Rendered on the Network tab, below process traffic and
+//! above the interfaces.
 //!
 //! The list is `zstats::listeners()` — a one-shot function outside the
 //! snapshot, read by the store when this tab comes on screen and every

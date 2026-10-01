@@ -31,6 +31,7 @@ use crate::metrics;
 use crate::prefs;
 use crate::procscan;
 use crate::spaceinfo::{self, SpaceInfo};
+use crate::traffic::{self, ProgramRate};
 use crate::tray;
 use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
@@ -529,6 +530,51 @@ pub enum ListenerView {
 /// covers someone watching the tab while they start one.
 const LISTENERS_REFRESH: Duration = Duration::from_secs(15);
 
+/// What the Network tab's traffic card shows. The outcome of the last
+/// `zstats::process_traffic()` call made while that tab was on screen,
+/// already diffed against the previous call ([`crate::traffic`]).
+///
+/// A panel-owned query, like the listening card: the counters are
+/// cumulative and zstats keeps no baseline, so a rate only exists while
+/// someone is looking. The first call of a visit is [`Self::Reading`] —
+/// that total is not a rate.
+pub enum TrafficView {
+    /// A baseline is in hand, or the first read has not landed. No rate
+    /// either way, and the card must not say the machine is quiet.
+    Reading,
+    /// macOS answered with this process's own sockets only. The same
+    /// bare-executable state as [`ListenerView::Restricted`]: a list of
+    /// our own traffic would read as "nothing else is talking".
+    Restricted,
+    /// The table could not be read, or its layout moved and zstats
+    /// refused to guess. The message is zstats'.
+    Failed(String),
+    Ready(TrafficReady),
+}
+
+/// The ranking the traffic card paints. Rows are programs that moved
+/// bytes over the last window; `process_count` is every process the
+/// call counted, idle ones included, so a quiet machine can say it
+/// looked.
+pub struct TrafficReady {
+    pub rows: Vec<ProgramRate>,
+    pub coverage: zstats::OwnerCoverage,
+    /// Processes in the call, including those whose counters did not move.
+    pub process_count: usize,
+}
+
+/// How often per-process traffic is re-read while the Network tab stays
+/// on screen.
+///
+/// Not the 15s listener cadence. A closed socket leaves the cumulative
+/// total, so its whole history is subtracted from the next diff; over
+/// 15s that fall is larger than what a busy program transferred and the
+/// row disappears. zstats measured the read at about 3.5 ms (0.9–4.4)
+/// and spaced its own checks 1.5 s apart. 2 s keeps a live rate while
+/// the tab is open — roughly 0.2% of one core — and a hidden panel does
+/// not call it at all.
+const TRAFFIC_REFRESH: Duration = Duration::from_secs(2);
+
 /// The resident tick only keeps `max-processes`, so a group's
 /// `process_count` can be 37 while the live table names four of them.
 ///
@@ -620,6 +666,17 @@ pub struct ZStatsAppState {
     listeners: Option<ListenerView>,
     listeners_at: Option<Instant>,
     listeners_inflight: bool,
+    /// Reveal every program that moved bytes, not just the preview.
+    show_all_traffic: bool,
+    /// The traffic card's last answer. Dropped on hide with the baseline:
+    /// a rate across the hours the panel was away would be a trickle and
+    /// read as the current one.
+    traffic: Option<TrafficView>,
+    traffic_at: Option<Instant>,
+    traffic_inflight: bool,
+    /// The previous call's counters, keyed by the diff. `None` until the
+    /// first call of this visit lands — that call has no rate.
+    traffic_baseline: Option<traffic::Sample>,
     /// The listening card's search input, created on first open (an
     /// [`InputState`] needs a `Window`) and kept, like the process filter.
     listen_filter: Option<Entity<InputState>>,
@@ -783,6 +840,11 @@ impl Default for ZStatsAppState {
             listeners: None,
             listeners_at: None,
             listeners_inflight: false,
+            show_all_traffic: false,
+            traffic: None,
+            traffic_at: None,
+            traffic_inflight: false,
+            traffic_baseline: None,
             listen_filter: None,
             listen_filter_open: false,
             listen_filter_text: String::new(),
@@ -968,9 +1030,10 @@ impl ZStatsAppState {
         if self.tab == Tab::Hardware && panel_visible(cx) {
             self.ensure_space_info(cx);
         }
-        // Same gate for the listening card: on screen, not merely
-        // selected — the tab survives hide and a restart.
+        // Same gate for the Network tab's own queries: on screen, not
+        // merely selected — the tab survives hide and a restart.
         if self.tab == Tab::Net && panel_visible(cx) {
+            self.ensure_traffic(cx);
             self.ensure_listeners(cx);
         }
         self.prune_stale_alerts();
@@ -1061,6 +1124,127 @@ impl ZStatsAppState {
     /// this visit.
     pub fn listeners(&self) -> Option<&ListenerView> {
         self.listeners.as_ref()
+    }
+
+    /// Read per-process socket counters when the card has nothing, or has
+    /// held the same answer for [`TRAFFIC_REFRESH`] (longer after a
+    /// refusal — an app identity and a layout zstats will not parse do
+    /// not heal in two seconds, and retrying at the live cadence would
+    /// re-read the kernel tables to paint the same sentence).
+    ///
+    /// Single-flight, and off the main thread. The call is the same
+    /// kernel read as [`Self::ensure_listeners`]; both run only while
+    /// the Network tab is on screen.
+    fn ensure_traffic(&mut self, cx: &mut Context<Self>) {
+        if !zstats::snapshot::Capabilities::current().process_traffic {
+            return;
+        }
+        let wait = match &self.traffic {
+            Some(TrafficView::Restricted | TrafficView::Failed(_)) => LISTENERS_REFRESH,
+            _ => TRAFFIC_REFRESH,
+        };
+        if self.traffic_inflight || self.traffic_at.is_some_and(|at| at.elapsed() < wait) {
+            return;
+        }
+        self.traffic_inflight = true;
+        cx.spawn(async move |this, cx| {
+            let (outcome, at) = cx
+                .background_executor()
+                .spawn(async {
+                    let outcome = zstats::process_traffic();
+                    (outcome, Instant::now())
+                })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.traffic_inflight = false;
+                // Hidden while the tables were being read: the hide
+                // already dropped the baseline, and a late answer must
+                // not become the next visit's first sample.
+                if !(state.tab == Tab::Net && panel_visible(cx)) {
+                    return;
+                }
+                state.apply_traffic(outcome, at);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fold one `process_traffic()` result into the card. The first call
+    /// of a visit is only a baseline.
+    fn apply_traffic(
+        &mut self,
+        outcome: Result<zstats::ProcessTraffic, zstats::CollectError>,
+        at: Instant,
+    ) {
+        match outcome {
+            Ok(table) => {
+                let coverage = table.coverage;
+                let sample = traffic::Sample {
+                    at,
+                    rows: table
+                        .processes
+                        .into_iter()
+                        .map(|row| traffic::RowSample {
+                            pid: row.pid,
+                            name: row.process.filter(|name| !name.is_empty()),
+                            run_time_secs: row.run_time_secs,
+                            received_bytes: row.received_bytes,
+                            transmitted_bytes: row.transmitted_bytes,
+                        })
+                        .collect(),
+                };
+                let process_count = sample.rows.len();
+                if let Some(prev) = &self.traffic_baseline {
+                    if at.saturating_duration_since(prev.at) < traffic::MIN_WINDOW {
+                        // Too close to divide. Keep the baseline that
+                        // still has a real window in front of it.
+                        self.traffic_at = Some(at);
+                        return;
+                    }
+                    let rates = traffic::diff(prev, &sample);
+                    self.traffic = Some(TrafficView::Ready(TrafficReady {
+                        rows: traffic::by_program(&rates),
+                        coverage,
+                        process_count,
+                    }));
+                } else {
+                    self.traffic = Some(TrafficView::Reading);
+                }
+                self.traffic_baseline = Some(sample);
+                self.traffic_at = Some(at);
+            }
+            Err(zstats::CollectError::Restricted { .. }) => {
+                self.traffic = Some(TrafficView::Restricted);
+                self.traffic_baseline = None;
+                self.traffic_at = Some(at);
+            }
+            Err(e) => {
+                let message = e.to_string();
+                // Once per distinct failure, not every retry.
+                if !matches!(&self.traffic, Some(TrafficView::Failed(m)) if *m == message) {
+                    tracing::warn!(error = %message, "per-process traffic unavailable");
+                }
+                self.traffic = Some(TrafficView::Failed(message));
+                self.traffic_baseline = None;
+                self.traffic_at = Some(at);
+            }
+        }
+    }
+
+    /// The traffic card's last answer; `None` before the first read of
+    /// this visit.
+    pub fn traffic(&self) -> Option<&TrafficView> {
+        self.traffic.as_ref()
+    }
+
+    pub fn show_all_traffic(&self) -> bool {
+        self.show_all_traffic
+    }
+
+    pub fn toggle_all_traffic(&mut self, cx: &mut Context<Self>) {
+        self.show_all_traffic = !self.show_all_traffic;
+        cx.notify();
     }
 
     /// Make the next tick re-read the listening sockets instead of waiting
@@ -1553,6 +1737,11 @@ impl ZStatsAppState {
         // hours-old list shown for a frame reads as current.
         self.listeners = None;
         self.listeners_at = None;
+        // The baseline too. A diff across the hours the panel was hidden
+        // is a trickle, and it would be painted as the current rate.
+        self.traffic = None;
+        self.traffic_at = None;
+        self.traffic_baseline = None;
         cx.notify();
     }
 
@@ -1615,8 +1804,11 @@ impl ZStatsAppState {
             self.ensure_space_info(cx);
         }
         // A visit is what pays for the socket tables, and it reads them at
-        // once rather than a tick later.
+        // once rather than a tick later. Traffic included: its first call
+        // is only a baseline, so starting it on entry is what lets the
+        // second call, one refresh later, already be a rate.
         if tab == Tab::Net {
+            self.ensure_traffic(cx);
             self.ensure_listeners(cx);
         }
         // Opening History is what pays for reading it. Re-read on every

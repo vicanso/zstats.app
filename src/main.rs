@@ -50,6 +50,7 @@ mod spaceinfo;
 mod state;
 mod terminate;
 mod theme;
+mod traffic;
 mod tray;
 mod trend;
 mod updater;

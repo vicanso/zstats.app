@@ -334,6 +334,22 @@ up_tip = "这个进程已经运行了多久。"
 up_range_tip = "这 %{count} 个进程中最新和最早启动的，各自已经运行了多久。"
 hide = "收起"
 
+[traffic]
+title = "流量"
+tip = "每个程序从上一次读取以来收发的字节，快的排在前面。一个程序一行，×N 是其中有流量的进程数。计数是累计值，所以第一次读取没有速率。这是内核的套接字计数，加起来不会等于下面的网卡总量。"
+tip_macos = "接收字节是 macOS 的 rxbytes，比 recv 拿到的载荷要多。"
+tip_linux = "只有 TCP。只走 UDP 的程序不会出现——内核没有 UDP 的累计字节。"
+tip_partial = "无法得知其他用户的进程名，它们的流量不在这张表里。"
+reading = "正在读取套接字计数…"
+restricted = "需要安装版的 zstats.app：macOS 只向应用程序提供套接字的所属进程，开发构建只能看到自己的。"
+failed = "无法读取进程流量：%{error}"
+none = "没有进程持有可计数的套接字。"
+quiet = "上一次读取以来没有流量。"
+show_more = "显示更多 · %{count}"
+hide = "收起"
+unknown = "未知"
+pids_tip = "这一行的进程：%{pids}"
+
 [sensors]
 title = "传感器"
 off = "传感器 — 已关闭"
