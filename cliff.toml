@@ -80,6 +80,12 @@ split_commits = false
 # subjects was never worth an undeclared dependency with a silent,
 # total failure mode.
 commit_preprocessors = [
+    # A subject wrapped onto a second line, with no blank line after it,
+    # is not a conventional commit — "Incorrect body syntax" — and
+    # `filter_unconventional` drops it with nothing but a WARN line.
+    # That emptied the 0.3.11, 0.3.14 and 0.3.15 sections. Join single
+    # newlines back into the subject; a blank line still starts a body.
+    { pattern = '([^\n])\n([^\n])', replace = "${1} ${2}" },
     { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](<REPO>/issues/${2}))" },
 ]
 # regex for parsing and grouping commits

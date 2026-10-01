@@ -144,6 +144,14 @@ version:
 		echo "v$(VERSION) is already tagged — this would add a second $(VERSION)"; \
 		echo "section to CHANGELOG.md. Bump first: make version-patch"; exit 1; }
 	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
+	@n=$$(git cliff --unreleased --tag v$(VERSION) 2>&1 >/dev/null \
+		| grep -o '[0-9]* commit(s) were skipped' | grep -o '^[0-9]*'); \
+	if [ -n "$$n" ]; then \
+		echo ""; \
+		echo "WARNING: $$n commit(s) are missing from the v$(VERSION) section — not"; \
+		echo "conventional-commit syntax. This names them:"; \
+		echo "  git cliff --unreleased -vv 2>&1 | grep 'did not match'"; \
+	fi
 
 # Bump Cargo.toml (+ Cargo.lock) via cargo-edit, then run `version` in a
 # fresh make invocation — VERSION is expanded at parse time, so the

@@ -1,6 +1,21 @@
 # Changelog
 
+## [0.3.15](https://github.com/vicanso/zstats.app/compare/v0.3.14..v0.3.15) - 2026-10-01
+
+### ⛰️  Features
+
+- The CPU and network charts print their axis top in the corner, CPU rounding up to the next 10% past 30, and Overview names three apps instead of five, the panel 61pt shorter to match - ([f1295e0](https://github.com/vicanso/zstats.app/commit/f1295e05cdafe11c98f1574294a993c275c2514f))
+- An Omarchy theme paints the panel from the desktop's current Omarchy palette its colours, accent, red and own light or dark, re-read each time the panel opens offered only on Omarchy and in development builds - ([725e338](https://github.com/vicanso/zstats.app/commit/725e3381b934c6df9d495494c3f860a2b57d061c))
+
 ## [0.3.14](https://github.com/vicanso/zstats.app/compare/v0.3.13..v0.3.14) - 2026-10-01
+
+### ⛰️  Features
+
+- Overview charts the last half hour under CPU, memory and network a CPU curve, memory bars with only the newest at full ink, download over a dimmer upload on a 1 MB/s floor, 10-minute guides, and the peak and span beneath and each Network-tab program row trades its bars for a ten-minute traffic line - ([893276b](https://github.com/vicanso/zstats.app/commit/893276b5f09f34d883eb572dad080dc0091c574b))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.14 - ([2ca898f](https://github.com/vicanso/zstats.app/commit/2ca898f596e767d2a0f1110579147d09ce714830))
 
 ## [0.3.13](https://github.com/vicanso/zstats.app/compare/v0.3.12..v0.3.13) - 2026-10-01
 
@@ -8,13 +23,29 @@
 
 - The Network tab ranks programs by the bytes they just moved - ([75e22c6](https://github.com/vicanso/zstats.app/commit/75e22c6b9d424aafbccfd14655e4a97aa150516c))
 
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.13 - ([0398711](https://github.com/vicanso/zstats.app/commit/0398711828b9bb1684c792a6ef08274175d98d61))
+
 ## [0.3.12](https://github.com/vicanso/zstats.app/compare/v0.3.11..v0.3.12) - 2026-09-30
 
 ### ⛰️  Features
 
 - Settings offers Golden, warm bone with the site's champagne gold - ([9d690f5](https://github.com/vicanso/zstats.app/commit/9d690f5c57bc71d348a326c250d94063aa902676))
 
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.12 - ([57597ee](https://github.com/vicanso/zstats.app/commit/57597ee326c334c1dbf69c3c825589635edd93ce))
+
 ## [0.3.11](https://github.com/vicanso/zstats.app/compare/v0.3.10..v0.3.11) - 2026-09-29
+
+### 🐛 Bug Fixes
+
+- The Linux panel lands where it was designed again — a vendored gpui-pre-linux patch reports layer surfaces as undecorated, so gpui-kit 0.7's frame no longer inflates the panel 20px a side past the compositor's anchor; the READMEs lead the Linux install with fetching install-linux.sh by curl - ([8c2a614](https://github.com/vicanso/zstats.app/commit/8c2a6148f96eb20a7d6717f5fd3d869dd3f39b3c))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.11 - ([e1ada57](https://github.com/vicanso/zstats.app/commit/e1ada57124aeaf74b157cc988e0d3bc52562b7ce))
 
 ## [0.3.10](https://github.com/vicanso/zstats.app/compare/v0.3.9..v0.3.10) - 2026-09-28
 
@@ -24,40 +55,59 @@
 
 ### ⚙️ Miscellaneous Tasks
 
+- Version 0.3.10 - ([a36cd66](https://github.com/vicanso/zstats.app/commit/a36cd669a2db188184642fdd4ac55ccb90ce5f97))
 - Move to gpui-kit 0.7, where Root hosts dialogs and notifications itself and the mono font is set through Theme::update; the Linux panel's lost frame opt-out is recorded as a known regression - ([6e5437c](https://github.com/vicanso/zstats.app/commit/6e5437c25066b42efa448378510769d5bcf9e38b))
 
-## [0.3.9](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.9) - 2026-09-27
+## [0.3.9](https://github.com/vicanso/zstats.app/compare/v0.3.8..v0.3.9) - 2026-09-27
 
 ### ⛰️  Features
 
 - Listeners carry their owner's run time, read from the same process entry as the name - ([97ec143](https://github.com/vicanso/zstats.app/commit/97ec1433c6411c756eca23da5314e4956043840c))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.9 - ([54707a8](https://github.com/vicanso/zstats.app/commit/54707a81693633e4b25255d0009f5145423f7273))
+
+## [0.3.8](https://github.com/vicanso/zstats.app/compare/v0.3.7..v0.3.8) - 2026-09-27
+
+### ⛰️  Features
+
 - The Network tab opens on who is listening, and a quiet interface list folds to one line - ([90489c3](https://github.com/vicanso/zstats.app/commit/90489c3d0706c9891ce4828cbdff08ef9188b181))
 
 ### ⚙️ Miscellaneous Tasks
 
 - Version 0.3.8 - ([16a6cd3](https://github.com/vicanso/zstats.app/commit/16a6cd32126dd2c77e881110f163c69f21638fd7))
-- Version 0.3.7 - ([902f216](https://github.com/vicanso/zstats.app/commit/902f216e9723f8d25f904b5a44513445d6caed16))
 
-## [0.3.8](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.8) - 2026-09-27
+## [0.3.7](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.7) - 2026-09-27
 
 ### ⛰️  Features
 
-- The Network tab opens on who is listening, and a quiet interface list folds to one line - ([90489c3](https://github.com/vicanso/zstats.app/commit/90489c3d0706c9891ce4828cbdff08ef9188b181))
+- The Network tab lists which program listens on which port, searchable, read only while it is open - ([2cee0a6](https://github.com/vicanso/zstats.app/commit/2cee0a60305718cc6d5828ee8fc454a14d66a325))
 
 ### ⚙️ Miscellaneous Tasks
 
 - Version 0.3.7 - ([902f216](https://github.com/vicanso/zstats.app/commit/902f216e9723f8d25f904b5a44513445d6caed16))
 
-## [0.3.7](https://github.com/vicanso/zstats.app/compare/v0.3.6..v0.3.7) - 2026-09-27
+## [0.3.6](https://github.com/vicanso/zstats.app/compare/v0.3.5..v0.3.6) - 2026-09-25
 
-## [0.3.6](https://github.com/vicanso/zstats.app/compare/v0.3.5..v0.3.6) - 2026-09-27
+### ⛰️  Features
 
+- Hardware lists drives and the GPU, read only while it is open, and the memory badge carries the kernel's available share - ([50682cc](https://github.com/vicanso/zstats.app/commit/50682cc7085fd5ba64b8b48de0a5234b5980c311))
 
-## [unreleased]
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.6 - ([cb24e3b](https://github.com/vicanso/zstats.app/commit/cb24e3be5aebd4ce4a54c88f9c4e8295dc1d5b95))
+- Update github workflow - ([6a9e491](https://github.com/vicanso/zstats.app/commit/6a9e491867ae1bfcc8a934a18f2739e9d1ff9253))
+
+## [0.3.5](https://github.com/vicanso/zstats.app/compare/v0.3.4..v0.3.5) - 2026-09-23
 
 ### ⛰️  Features
 
 - The Linux build updates in place, keeps awake, starts at login, and finds, trashes and reveals files - ([51349d3](https://github.com/vicanso/zstats.app/commit/51349d3a69d057f7007371222d6820e2021af20b))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.5 - ([94dc0e8](https://github.com/vicanso/zstats.app/commit/94dc0e89ab2f3278362a71bbfcb8df04439392f3))
 
 ## [0.3.4](https://github.com/vicanso/zstats.app/compare/v0.3.3..v0.3.4) - 2026-09-22
 
@@ -185,6 +235,7 @@
 
 - Climb floors follow RAM — 5% names a tree, 10% banners, both clamped - ([0b6cf65](https://github.com/vicanso/zstats.app/commit/0b6cf657fa53a93b246ea79735a3edd87d68fc83))
 - A quiet row can raise its own bar — and Config can take the line back - ([ba9b1ee](https://github.com/vicanso/zstats.app/commit/ba9b1eeb3c8837a93280234d2a5b8231729e52ae))
+- The launch-at-login status is logged, and asked at moments rather than per frame - ([7561c3b](https://github.com/vicanso/zstats.app/commit/7561c3bd3b9c06199e6ac24ca73b6a37d436799d))
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -201,6 +252,10 @@
 - The menu bar waits for critical pressure, not the warning tier - ([a041786](https://github.com/vicanso/zstats.app/commit/a0417864e0fe30b637b9bababc57bc7a8623bfbe))
 - Hovering a History band reads its stretches out, one line each - ([798c8f0](https://github.com/vicanso/zstats.app/commit/798c8f044309f500be3a717ffdec4fcc299df007))
 
+### 🐛 Bug Fixes
+
+- A memory climb skips the minutes its tree was missing, never counts them as an empty footprint - ([ce204c0](https://github.com/vicanso/zstats.app/commit/ce204c050775c4d5dd13d35658d9d4ab8f912d21))
+
 ### ⚙️ Miscellaneous Tasks
 
 - Version 0.1.17 - ([676dbd9](https://github.com/vicanso/zstats.app/commit/676dbd910ed0a350a0e73ca7b7965350262135b9))
@@ -211,10 +266,12 @@
 
 - A slow-burn banner says when nobody has been using the app - ([9d1aaba](https://github.com/vicanso/zstats.app/commit/9d1aaba6e9e2a6f7b30065917d779c9d05b8115f))
 - A notifications master switch — banners off, the record untouched - ([d34bf39](https://github.com/vicanso/zstats.app/commit/d34bf393ba310c3d1487703d704b1b2f10d46fd4))
+- The creep banner's click lands on something — announced climbs get the Alerts tab's second read-only card - ([a1338f1](https://github.com/vicanso/zstats.app/commit/a1338f1ebe7c1ebd054b454c5ea312c6a14b241f))
 
 ### 🐛 Bug Fixes
 
 - The creep banner re-arms on the clock, never on a dip - ([131403b](https://github.com/vicanso/zstats.app/commit/131403bed371e65c0e5aba7feda70a24c504bb6f))
+- A History row says its pid beside the name, and the caption is pure figures - ([6423150](https://github.com/vicanso/zstats.app/commit/64231500cde0c47c42a44941fc868b2c192895b0))
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -431,6 +488,7 @@
 
 - Update clean-up rules from GitHub — the app's first network call - ([90b92ae](https://github.com/vicanso/zstats.app/commit/90b92ae74d6f5d6bf4f456151900bf58173ac045))
 - History answers the week, not just the day - ([91f3455](https://github.com/vicanso/zstats.app/commit/91f3455a95fc151e31ecf56bfbb273db4a234fa9))
+- Tagged rows wear a "cache" pill; guessed folds explain themselves in the tooltip - ([7effe32](https://github.com/vicanso/zstats.app/commit/7effe32321f4af92f51702657cb1cbc8c5cc6b65))
 - Reload clean-up rules without a restart - ([02aaf06](https://github.com/vicanso/zstats.app/commit/02aaf06a576899fdce40036780edd530775ff519))
 - Launch at login, as a switch on the Interface page - ([09a2a75](https://github.com/vicanso/zstats.app/commit/09a2a75c502c0a224ec9c1fa187f34021de0a608))
 - Analyses survive a restart, and say so when they age - ([9560d3a](https://github.com/vicanso/zstats.app/commit/9560d3aa246b8e544662b13444ba583fba8ecf62))
