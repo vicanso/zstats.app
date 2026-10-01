@@ -1169,10 +1169,14 @@ enum ChartUnit {
     Rate,
 }
 
-/// Highest raw reading in the window. The drawn mark is a 20s average,
-/// so it can stay under this. There is no "now" beside it: the latest
-/// reading is the card's own headline (CPU %, memory, the rates row),
-/// and repeating it under the chart was the same number twice.
+/// Highest point the chart draws — the bucketed average the line or bar
+/// is made of, not the raw tick. It was the raw reading: a two-second
+/// spike set "Max 33%" while the 20s average under it barely bumped the
+/// line, so the caption named a height nothing on the chart reached and
+/// read as some older, all-time figure. There is no "now" beside it:
+/// the latest reading is the card's own headline (CPU %, memory, the
+/// rates row), and repeating it under the chart was the same number
+/// twice.
 fn chart_peak(points: &[Point]) -> Option<f64> {
     points
         .iter()
@@ -1245,10 +1249,13 @@ fn recent_line(chart: Chart, now: Instant) -> Option<AnyElement> {
             CurveStroke::Smooth => chart_buckets(line.series.points(), now),
         })
         .collect();
+    // The highest point drawn, so the caption names a height the reader
+    // can find on the line.
     let peaks: Vec<(Option<&'static str>, Option<f64>)> = chart
         .lines
         .iter()
-        .map(|line| (line.arrow, chart_peak(line.series.points())))
+        .zip(&marks)
+        .map(|(line, points)| (line.arrow, chart_peak(points)))
         .collect();
     Some(
         // The well stays [`CURVE_H`]. A ceiling change (CPU crossing
@@ -2006,7 +2013,28 @@ mod tests {
     }
 
     #[test]
-    fn the_readout_is_the_highest_raw_sample() {
+    fn the_readout_is_the_highest_point_drawn_not_the_raw_spike() {
+        // A 70% tick and a 10% tick in one 20s slice draw as 40%, and
+        // the caption says 40%: the height the line actually reaches.
+        let now = Instant::now();
+        let drawn = chart_buckets(
+            &[
+                Point {
+                    at: ago(now, 8),
+                    value: Some(70.0),
+                },
+                Point {
+                    at: ago(now, 2),
+                    value: Some(10.0),
+                },
+            ],
+            now,
+        );
+        assert_eq!(chart_peak(&drawn), Some(40.0));
+    }
+
+    #[test]
+    fn the_peak_is_the_highest_value_of_what_it_is_given() {
         let now = Instant::now();
         let peak = chart_peak(&[
             Point {

@@ -325,15 +325,40 @@ impl CurveBook {
     /// How long the book actually covers, measured from its oldest point.
     ///
     /// `None` under a second: the header would otherwise flash `0s` on
-    /// the sample that created the first point. Capped at
-    /// [`CURVE_WINDOW`], which is what a full book labels.
+    /// the sample that created the first point. [`CURVE_WINDOW`] once the
+    /// oldest point is within [`CURVE_GAP`] of it — pruning keeps only
+    /// points at most that old, so a full book's oldest is a sample
+    /// younger and an exact comparison labelled it "9m" for good.
     pub fn span(&self, now: Instant) -> Option<Duration> {
         let oldest = self.series.values().flatten().map(|point| point.at).min()?;
         let span = now.saturating_duration_since(oldest);
         if span < Duration::from_secs(1) {
             None
+        } else if span + CURVE_GAP >= CURVE_WINDOW {
+            Some(CURVE_WINDOW)
         } else {
-            Some(span.min(CURVE_WINDOW))
+            Some(span)
+        }
+    }
+
+    /// Move every point recorded at or before `before` back by `by`, the
+    /// sleep `Instant` did not count — `series::Series::shift` for this
+    /// book, so ten minutes are wall-clock minutes here too. A point that
+    /// cannot move that far is long out of the window and is dropped.
+    pub fn shift(&mut self, before: Instant, by: Duration) {
+        for points in self.series.values_mut() {
+            points.retain_mut(|point| {
+                if point.at > before {
+                    return true;
+                }
+                match point.at.checked_sub(by) {
+                    Some(at) => {
+                        point.at = at;
+                        true
+                    }
+                    None => false,
+                }
+            });
         }
     }
 
@@ -936,5 +961,33 @@ mod tests {
             Duration::from_secs(40),
             "the axis is how long the book has actually been filling"
         );
+        // A 10s cadence never lands on the edge: an oldest point 9:52
+        // old is a full book, not "9m".
+        let full = at(t0, 10) + CURVE_WINDOW - Duration::from_secs(8);
+        assert_eq!(book.span(full), Some(CURVE_WINDOW));
+        assert_eq!(span_label(book.span(full).unwrap()), "10m");
+    }
+
+    #[test]
+    fn a_sleep_moves_the_points_before_it_back_by_its_length() {
+        let t0 = Instant::now() + Duration::from_secs(3600);
+        let mut book = CurveBook::default();
+        record_step(
+            &mut book,
+            t0,
+            10,
+            vec![row(1, "redis", 10, 0, 0)],
+            vec![row(1, "redis", 20, 100_000, 0)],
+        );
+        let before = at(t0, 10);
+        book.shift(before, Duration::from_secs(120));
+        let moved = book.series(&key("redis"))[0].at;
+        assert_eq!(
+            before.saturating_duration_since(moved),
+            Duration::from_secs(120)
+        );
+        // A point recorded after the wake is already on the real clock.
+        book.shift(moved - Duration::from_secs(1), Duration::from_secs(600));
+        assert_eq!(book.series(&key("redis"))[0].at, moved);
     }
 }

@@ -21,16 +21,25 @@
 //!
 //! A gap longer than [`GAP`] is also a break. The hidden tick is 5s, so
 //! a step that landed on the next beat is still under this, and one
-//! beat late still connects. `Instant` does not advance while the
-//! machine is asleep, so a sleep occupies no width when the first
-//! reading after wake is within the gap. The network channel itself
-//! refreshes about every 15s; ticks in between repeat the last total,
-//! which is what the snapshot holds, so the line holds flat and then
-//! steps. That repeat is the reading, not a new sample.
+//! beat late still connects. The network channel itself refreshes
+//! about every 15s; ticks in between repeat the last total, which is
+//! what the snapshot holds, so the line holds flat and then steps. That
+//! repeat is the reading, not a new sample.
+//!
+//! The half hour is wall-clock time. `Instant` stands still while the
+//! machine sleeps (macOS `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`),
+//! and that used to fold a night's lid-close out of the ring: the
+//! morning panel drew last night's last thirty awake minutes joined
+//! straight onto this morning's, and its Max was last night's peak.
+//! Each tick now compares how far the wall clock and `Instant` moved
+//! ([`slept`]); past [`GAP`] of difference, every earlier point is
+//! moved back by the sleep ([`Series::shift`]), so the sleep takes its
+//! real width — a break — and anything it pushed past [`WINDOW`] falls
+//! off at the next record.
 
 #[cfg(test)]
 use std::mem;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// How long a curve keeps a point. Half an hour is the axis Overview
 /// labels once the ring is full. Older points fall off. The length does
@@ -41,10 +50,22 @@ pub const WINDOW: Duration = Duration::from_secs(30 * 60);
 /// A gap wider than this is a missed sample, not a line between two
 /// readings that were never neighbours. The hidden tick is 5s and the
 /// open panel's tick is 2s, so a step one beat late is still under
-/// this. A sleep is the same shape: `Instant` stands still, and the
-/// first reading after wake is this far from the last only when the
-/// gap itself was.
+/// this. Also the tolerance on both clocks: a sleep shorter than this
+/// is not one ([`slept`]), and a ring whose oldest point is within it
+/// of [`WINDOW`] is full ([`Series::span`]).
 pub const GAP: Duration = Duration::from_secs(15);
+
+/// How long the machine slept between two ticks, each stamped with
+/// `Instant` and the wall clock: the wall clock's progress less
+/// `Instant`'s, which stood still. `None` under [`GAP`] — scheduling
+/// jitter and NTP slews, not a sleep — and when the wall clock went
+/// backwards (a clock change, not a sleep).
+pub fn slept(prev: (Instant, SystemTime), now: (Instant, SystemTime)) -> Option<Duration> {
+    let awake = now.0.saturating_duration_since(prev.0);
+    let wall = now.1.duration_since(prev.1).ok()?;
+    let asleep = wall.saturating_sub(awake);
+    (asleep > GAP).then_some(asleep)
+}
 
 /// One sample. `None` is a break: the line stops and starts again
 /// after it, rather than bridging a figure we do not have.
@@ -69,18 +90,43 @@ impl Series {
     /// How long the series actually covers, from its oldest point.
     ///
     /// `None` under a second: the label would otherwise flash `0s` on
-    /// the sample that created the first point. Capped at [`WINDOW`],
-    /// which is what a full ring labels. One point still has a span
-    /// once it is a second old. The chart's axis is [`WINDOW`] either
-    /// way; this span is only the caption beside it.
+    /// the sample that created the first point. [`WINDOW`] once the
+    /// oldest point is within [`GAP`] of it: pruning keeps only points
+    /// at most [`WINDOW`] old, so on a full ring the oldest is always a
+    /// tick younger than that — 29:58 — and an exact comparison labelled
+    /// a full ring "29m" for good. One point still has a span once it is
+    /// a second old. The chart's axis is [`WINDOW`] either way; this
+    /// span is only the caption beside it.
     pub fn span(&self, now: Instant) -> Option<Duration> {
         let oldest = self.points.first()?.at;
         let span = now.saturating_duration_since(oldest);
         if span < Duration::from_secs(1) {
             None
+        } else if span + GAP >= WINDOW {
+            Some(WINDOW)
         } else {
-            Some(span.min(WINDOW))
+            Some(span)
         }
+    }
+
+    /// Move every point recorded at or before `before` back by `by` —
+    /// the sleep [`slept`] measured, which `Instant` did not count. Only
+    /// those points: one recorded after the wake is already on the real
+    /// clock. A point that cannot move that far (before `Instant`'s own
+    /// origin) is long out of the window and is dropped.
+    pub fn shift(&mut self, before: Instant, by: Duration) {
+        self.points.retain_mut(|point| {
+            if point.at > before {
+                return true;
+            }
+            match point.at.checked_sub(by) {
+                Some(at) => {
+                    point.at = at;
+                    true
+                }
+                None => false,
+            }
+        });
     }
 
     /// Append one reading and drop whatever has aged out of [`WINDOW`].
@@ -265,5 +311,77 @@ mod tests {
             series.span(t0 + WINDOW + Duration::from_secs(10)).unwrap(),
             WINDOW
         );
+    }
+
+    #[test]
+    fn a_full_ring_reads_as_the_window_even_a_tick_short_of_it() {
+        // Ticks that do not land on the window's edge (7s apart here):
+        // the oldest point a full ring keeps is 29:59 old, and that is
+        // full.
+        let t0 = Instant::now();
+        let mut series = Series::default();
+        for tick in 0..=258 {
+            series.record(at(t0, tick * 7), Some(1.0));
+        }
+        let now = at(t0, 258 * 7);
+        let oldest = now.saturating_duration_since(series.points()[0].at);
+        assert!(oldest < WINDOW, "pruning keeps the edge out: {oldest:?}");
+        assert_eq!(series.span(now), Some(WINDOW));
+        assert_eq!(span_label(series.span(now).unwrap()), "30m");
+        // Short of the window by more than a missed sample is not full.
+        let mut young = Series::default();
+        young.record(t0, Some(1.0));
+        let early = t0 + WINDOW - GAP - Duration::from_secs(1);
+        assert_eq!(
+            young.span(early),
+            Some(WINDOW - GAP - Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn a_sleep_is_the_wall_clock_less_the_instant() {
+        let i0 = Instant::now();
+        let w0 = SystemTime::now();
+        // Instant moved 5s, the wall clock an hour: an hour less 5s asleep.
+        let woke = (at(i0, 5), w0 + Duration::from_secs(3600));
+        assert_eq!(slept((i0, w0), woke), Some(Duration::from_secs(3595)));
+        // Both clocks together, or under the gap of skew: no sleep.
+        assert_eq!(
+            slept((i0, w0), (at(i0, 5), w0 + Duration::from_secs(5))),
+            None
+        );
+        assert_eq!(
+            slept((i0, w0), (at(i0, 5), w0 + Duration::from_secs(19))),
+            None
+        );
+        // A wall clock that went back is a clock change, not a sleep.
+        assert_eq!(
+            slept((i0, w0), (at(i0, 5), w0 - Duration::from_secs(60))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_sleep_takes_its_real_width_and_ages_the_ring_out() {
+        let t0 = Instant::now() + Duration::from_secs(4 * 3600);
+        let mut series = Series::default();
+        series.record(t0, Some(10.0));
+        series.record(at(t0, 600), Some(20.0));
+        // Ten minutes asleep after the second point: both earlier points
+        // move back by it, so the gap to the next reading is real.
+        series.shift(at(t0, 600), Duration::from_secs(600));
+        series.record(at(t0, 605), Some(30.0));
+        let ages: Vec<u64> = series
+            .points()
+            .iter()
+            .map(|p| at(t0, 605).saturating_duration_since(p.at).as_secs())
+            .collect();
+        assert_eq!(ages, [1205, 605, 0]);
+        // A night asleep pushes the whole ring past the window: the next
+        // record starts the chart over instead of joining last night on.
+        series.shift(at(t0, 605), Duration::from_secs(8 * 3600));
+        series.record(at(t0, 610), Some(40.0));
+        assert_eq!(series.points().len(), 1);
+        assert_eq!(series.points()[0].value, Some(40.0));
     }
 }

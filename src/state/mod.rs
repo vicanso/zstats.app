@@ -779,6 +779,10 @@ pub struct ZStatsAppState {
     mem_series: series::Series,
     net_down_series: series::Series,
     net_up_series: series::Series,
+    /// The last tick's `Instant` and wall clock, which is how the next
+    /// one sees a sleep (`series::slept`) and moves every chart's
+    /// earlier points back by it, so the windows are wall-clock time.
+    chart_clock: Option<(Instant, SystemTime)>,
     /// Trees whose climb has been announced within the last
     /// [`trend::CREEP_REARM`] — the re-arm set, pruned by that clock
     /// and never by the figure, so a creep is one banner an hour, not
@@ -913,6 +917,7 @@ impl Default for ZStatsAppState {
             mem_series: series::Series::default(),
             net_down_series: series::Series::default(),
             net_up_series: series::Series::default(),
+            chart_clock: None,
             creep_notified: HashMap::new(),
             history: None,
             history_loaded_at: None,
@@ -1057,6 +1062,28 @@ impl ZStatsAppState {
                 }),
             );
         }
+
+        // A sleep since the last tick: `Instant` did not count it, so
+        // every chart point from before it moves back by its length —
+        // the half hour (and the traffic card's ten minutes) are
+        // wall-clock time, and a night's lid-close leaves a fresh chart
+        // rather than last night's minutes joined onto this morning's.
+        if let Some(prev) = self.chart_clock
+            && let Some(asleep) = series::slept(prev, (now, wall))
+        {
+            let before = prev.0;
+            for ring in [
+                &mut self.cpu_series,
+                &mut self.mem_series,
+                &mut self.net_down_series,
+                &mut self.net_up_series,
+            ] {
+                ring.shift(before, asleep);
+            }
+            self.traffic_curves.shift(before, asleep);
+            tracing::debug!("charts: {}s asleep since the last tick", asleep.as_secs());
+        }
+        self.chart_clock = Some((now, wall));
 
         // Overview's half-hour lines. These three are already on the
         // tick while the panel is hidden; the ring is what makes that
