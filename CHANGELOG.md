@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.1](https://github.com/vicanso/zstats.app/compare/v0.4.0..v0.4.1) - 2026-10-02
+
+### ⛰️  Features
+
+- The disk-space window opens wide and short (720×480), drops the boot-volume band from every tab, and scrolls each tab's result inside its card while the header and toolbar stay put - ([4d9a1fa](https://github.com/vicanso/zstats.app/commit/4d9a1fac1f04956e25472404af5108b9eca2cc38))
+
 ## [0.4.0](https://github.com/vicanso/zstats.app/compare/v0.3.15..v0.4.0) - 2026-10-02
 
 ### ⛰️  Features
