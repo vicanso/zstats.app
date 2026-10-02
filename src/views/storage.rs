@@ -5,7 +5,7 @@
 //! Both were sections of the Hardware tab's boot-volume card until the
 //! panel ran out of width for them. Three ranked tables at 320px meant
 //! every path was an ellipsis and every table a fold; the window opens at
-//! 507 and has room to be read. It also settles a smaller
+//! 720 and has room to be read. It also settles a smaller
 //! contradiction: these are one-shot *queries* — the walk takes minutes
 //! and survives hide by design — while the popover auto-hides on any
 //! focus loss. A surface you cannot look away from was the wrong home
@@ -19,8 +19,10 @@
 //! Tabs rather than one stack of cards: the three answer different
 //! questions (which folder is big, which file is big, what is stored
 //! twice), each result is a long table, and stacked they made the third
-//! one a long scroll away. The tab strip stays put above the scrolling
-//! body, and each tab keeps its own scroll position (`StorageWindow`).
+//! one a long scroll away. The tab strip stays put, and so does each
+//! card's header and toolbar: only the result scrolls, inside the card's
+//! own border ([`tab_card`]), and each tab keeps its own scroll position
+//! (`StorageWindow`).
 //!
 //! Nothing here owns state. Every feature lives in `ZStatsAppState`,
 //! the selected tab included; this window observes the same store the
@@ -50,11 +52,12 @@ use crate::theme;
 use gpui::Entity;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, div, px, relative,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
@@ -62,21 +65,58 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The selected tab's body, under the band every tab shares: the disk
-/// the window is named for, and what is waiting in the Trash.
-pub fn render(state: &ZStatsAppState, exclude: &Entity<InputState>) -> Vec<AnyElement> {
+/// The selected tab's body. Once anything has moved to the Trash this
+/// session, one line above it says the space comes back only when the
+/// Trash is emptied — on every tab, since all three can move files.
+///
+/// There used to be a band of the boot volume here too, on every tab:
+/// the Hardware card's free space and meter. It cost a fifth of the
+/// window's height to repeat a figure the panel already shows, and it
+/// does not move after a cleanup anyway — trashed files stay on the
+/// disk until the Trash is emptied, which this window never does.
+///
+/// `scroll` is the selected tab's: the card scrolls inside itself
+/// ([`tab_card`]), so this returns what sits in the window's fixed frame.
+pub fn render(
+    state: &ZStatsAppState,
+    exclude: &Entity<InputState>,
+    scroll: &ScrollHandle,
+) -> Vec<AnyElement> {
     let mut cards = Vec::new();
-    match summary_band(state) {
-        Some(band) => cards.push(band),
-        // No sample yet: the trashed line still has to be said.
-        None => cards.extend(trashed_note(state.trashed_this_session())),
-    }
+    cards.extend(
+        trashed_note(state.trashed_this_session())
+            .map(|note| div().flex_none().child(note).into_any_element()),
+    );
     cards.push(match state.storage_tab() {
-        StorageTab::Analysis => analysis_card(state, exclude),
-        StorageTab::LargeFiles => big_files_card(state),
-        StorageTab::Duplicates => dupes_card(state),
+        StorageTab::Analysis => analysis_card(state, exclude, scroll),
+        StorageTab::LargeFiles => big_files_card(state, scroll),
+        StorageTab::Duplicates => dupes_card(state, scroll),
     });
     cards
+}
+
+/// A tab's card: `head` stays put, `body` scrolls inside the card under
+/// an overlay scrollbar. The card keeps its natural height while it fits
+/// and gives up exactly the overflow once it meets the window's bottom
+/// margin — `min_h_0` lets it shrink, and the scroll area is the one part
+/// that can. The whole body used to scroll as one, so a long table ran
+/// off the window's bottom edge with the card's border cut, and the
+/// scope chips and Analyze scrolled away from the result they control.
+fn tab_card(head: Vec<AnyElement>, body: AnyElement, scroll: &ScrollHandle) -> AnyElement {
+    widgets::list_shell()
+        .min_h_0()
+        .pt(px(4.))
+        .children(head.into_iter().map(|part| div().flex_none().child(part)))
+        .child(
+            div()
+                .id("storage-tab-scroll")
+                .track_scroll(scroll)
+                .min_h_0()
+                .overflow_y_scroll()
+                .vertical_scrollbar(scroll)
+                .child(body),
+        )
+        .into_any_element()
 }
 
 /// The three tabs, underlined: labels in a row over a hairline, the
@@ -397,144 +437,6 @@ fn empty_state(lead: String, cost: String, tip: String, button: AnyElement) -> A
         .into_any_element()
 }
 
-/// Above every tab: the boot volume as zstats measures it — the same
-/// figures, words and colour rule as its Hardware card, nothing derived
-/// here — and what is waiting in the Trash. The window was titled "Disk
-/// Space" and never showed the disk; after a cleanup the one number that
-/// proves it worked (free space, once the Trash is emptied) was in
-/// another window.
-fn summary_band(state: &ZStatsAppState) -> Option<AnyElement> {
-    let disks = state.latest()?.snapshot.disks.as_deref()?;
-    let boot = disks.iter().find(|d| d.mount_point == "/")?;
-    let used = boot.used_percent;
-    let hot = used > super::disk::FULL_PERCENT;
-    let name = if boot.name.trim().is_empty() {
-        boot.mount_point.clone()
-    } else {
-        boot.name.clone()
-    };
-    let trash = trash_line(state);
-    Some(
-        widgets::card()
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(
-                                        Icon::new(IconName::HardDrive)
-                                            .with_size(Size::Size(px(13.)))
-                                            .text_color(Hsla::from(theme::text_dim())),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(HEAD_PT))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme::text())
-                                            .child(name),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .items_baseline()
-                                    .gap(px(5.))
-                                    .child(size_text(boot.available_bytes))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(META_PT))
-                                            .text_color(theme::text_dim())
-                                            .child(
-                                                t!(
-                                                    "disk.free_of",
-                                                    total = format::capacity(boot.total_bytes),
-                                                    used = format!("{used:.0}")
-                                                )
-                                                .to_string(),
-                                            ),
-                                    ),
-                            ),
-                    )
-                    .children(trash),
-            )
-            .child(div().mt(px(9.)).child(widgets::meter(
-                used / 100.0,
-                Hsla::from(theme::fill_for(hot)),
-                4.,
-            )))
-            .into_any_element(),
-    )
-}
-
-/// The band's right half: what this session moved to the Trash, or —
-/// before anything has moved — how much the last home analysis found in
-/// it. Either way the space comes back only when the Trash is emptied,
-/// and the button opens it; emptying stays the reader's own act.
-fn trash_line(state: &ZStatsAppState) -> Option<AnyElement> {
-    let moved = state.trashed_this_session();
-    let (figure, caption, tip) = if moved > 0 {
-        (
-            moved,
-            i18n::tr("disk.band_moved"),
-            t!("disk.trashed_note", bytes = format::memory(moved)).to_string(),
-        )
-    } else {
-        let DiskAnalysis::Ready(result) = state.disk_analysis() else {
-            return None;
-        };
-        let home = env::var_os("HOME")?;
-        let trash = Path::new(&home).join(".Trash");
-        let hit = result.dirs.iter().find(|d| d.path == trash)?;
-        (
-            hit.bytes,
-            i18n::tr("disk.band_in_trash"),
-            t!(
-                "disk.band_in_trash_tip",
-                ago = format::ago(result.scanned_at.elapsed().unwrap_or_default())
-            )
-            .to_string(),
-        )
-    };
-    Some(
-        h_flex()
-            .flex_none()
-            .items_center()
-            .gap(px(10.))
-            .child(
-                v_flex()
-                    .id("band-trash")
-                    .items_end()
-                    .gap(px(2.))
-                    .tooltip(widgets::wrap_tooltip(tip))
-                    .child(size_text(figure))
-                    .child(
-                        div()
-                            .text_size(px(META_PT))
-                            .text_color(theme::text_dim())
-                            .child(caption),
-                    ),
-            )
-            .child(
-                Button::new("band-open-trash")
-                    .xsmall()
-                    .label(i18n::tr("disk.open_trash"))
-                    .on_click(|_, _, _| bigfiles::open_trash()),
-            )
-            .into_any_element(),
-    )
-}
-
 /// The analyser card: what the shown result is and the control that
 /// re-runs it, one toolbar line of scope and settings, then the result.
 ///
@@ -543,7 +445,11 @@ fn trash_line(state: &ZStatsAppState) -> Option<AnyElement> {
 /// the first result row sat at 38% and the big-directory table at 87%,
 /// below rows used once a month. They are one line now; the exclusions
 /// open as a drawer from it.
-fn analysis_card(state: &ZStatsAppState, exclude: &Entity<InputState>) -> AnyElement {
+fn analysis_card(
+    state: &ZStatsAppState,
+    exclude: &Entity<InputState>,
+    scroll: &ScrollHandle,
+) -> AnyElement {
     let running = matches!(state.disk_analysis(), DiskAnalysis::Running { .. });
     let mismatch = analysis_mismatch(state);
     let body =
@@ -576,13 +482,14 @@ fn analysis_card(state: &ZStatsAppState, exclude: &Entity<InputState>) -> AnyEle
                 ))
                 .into_any_element(),
         };
-    widgets::list_shell()
-        .pt(px(4.))
-        .children(analysis_header(state))
-        .child(analysis_toolbar(state, running))
-        .children(
-            (state.analysis_exclude_open() && !running).then(|| analysis_exclude_drawer(exclude)),
-        )
+    // The drawer stays with the toolbar that opens it: inside the scroll
+    // it would open above a table read halfway down, out of sight.
+    let mut head: Vec<AnyElement> = analysis_header(state).into_iter().collect();
+    head.push(analysis_toolbar(state, running));
+    head.extend(
+        (state.analysis_exclude_open() && !running).then(|| analysis_exclude_drawer(exclude)),
+    );
+    let body = div()
         .children(fda_hint(state).map(|hint| div().px(px(13.)).pb(px(8.)).child(hint)))
         .children(mismatch.map(|(shown, ago, selected)| {
             div().px(px(13.)).pb(px(8.)).child(widgets::note(
@@ -596,7 +503,8 @@ fn analysis_card(state: &ZStatsAppState, exclude: &Entity<InputState>) -> AnyEle
             ))
         }))
         .child(body)
-        .into_any_element()
+        .into_any_element();
+    tab_card(head, body, scroll)
 }
 
 /// The scope a person would call it: "Home", "Caches", "Whole disk", or
@@ -2386,8 +2294,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
     }
     // The Trash is the one directory whose space comes back without
     // judging anything in it: its row's reveal opens the Trash itself —
-    // never empties it, that step stays the reader's. (The band at the
-    // top says how much is waiting there.)
+    // never empties it, that step stays the reader's.
     let is_trash = env::var_os("HOME").is_some_and(|home| path == Path::new(&home).join(".Trash"));
     let reveal_path = path.to_path_buf();
     let trash_path = path.to_path_buf();
@@ -2618,31 +2525,29 @@ fn run_chip(id: &'static str, label: String, enabled: bool) -> gpui::Stateful<gp
 
 /// The duplicate search's card: the scope row, then either the empty
 /// state or the header and the groups, most to free first.
-fn dupes_card(state: &ZStatsAppState) -> AnyElement {
+fn dupes_card(state: &ZStatsAppState, scroll: &ScrollHandle) -> AnyElement {
     let off = matches!(state.dupe_search(), DupeSearch::Off);
-    widgets::list_shell()
-        .pt(px(4.))
-        .children((!off).then(|| dupes_header(state)))
-        .children(dupes_scope_row(state))
-        .child(if off {
-            empty_state(
-                i18n::tr("disk.dup_empty_lead"),
-                i18n::tr("disk.dup_empty_cost"),
-                i18n::tr("disk.dup_hint"),
-                primary_button("dupes-start", i18n::tr("disk.dup_find"), |cx| {
-                    cx.global::<ZStatsGlobalStore>()
-                        .clone()
-                        .update(cx, |state, cx| state.start_dupes(cx));
-                }),
-            )
-        } else {
-            div()
-                .px(px(13.))
-                .pb(px(11.))
-                .child(dupes_body(state))
-                .into_any_element()
-        })
-        .into_any_element()
+    let mut head: Vec<AnyElement> = (!off).then(|| dupes_header(state)).into_iter().collect();
+    head.extend(dupes_scope_row(state));
+    let body = if off {
+        empty_state(
+            i18n::tr("disk.dup_empty_lead"),
+            i18n::tr("disk.dup_empty_cost"),
+            i18n::tr("disk.dup_hint"),
+            primary_button("dupes-start", i18n::tr("disk.dup_find"), |cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.start_dupes(cx));
+            }),
+        )
+    } else {
+        div()
+            .px(px(13.))
+            .pb(px(11.))
+            .child(dupes_body(state))
+            .into_any_element()
+    };
+    tab_card(head, body, scroll)
 }
 
 fn dupes_header(state: &ZStatsAppState) -> AnyElement {
@@ -3103,21 +3008,19 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize, oldest: bool) -> An
 
 /// The index query's card: the empty state before the first query, the
 /// header and the rows after it.
-fn big_files_card(state: &ZStatsAppState) -> AnyElement {
+fn big_files_card(state: &ZStatsAppState, scroll: &ScrollHandle) -> AnyElement {
     if matches!(state.big_files(), BigFiles::Off) {
-        return widgets::list_shell()
-            .pt(px(4.))
-            .child(empty_state(
-                i18n::tr("disk.big_empty_lead"),
-                i18n::tr("disk.big_empty_cost"),
-                i18n::tr("disk.big_hint"),
-                primary_button("bigfiles-start", i18n::tr("disk.big_scan"), |cx| {
-                    cx.global::<ZStatsGlobalStore>()
-                        .clone()
-                        .update(cx, |state, cx| state.start_big_files(cx));
-                }),
-            ))
-            .into_any_element();
+        let empty = empty_state(
+            i18n::tr("disk.big_empty_lead"),
+            i18n::tr("disk.big_empty_cost"),
+            i18n::tr("disk.big_hint"),
+            primary_button("bigfiles-start", i18n::tr("disk.big_scan"), |cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.start_big_files(cx));
+            }),
+        );
+        return tab_card(Vec::new(), empty, scroll);
     }
     // A finished listing is twenty rows deep; the ✕ is how you put it
     // away again — only for a *finished* one, because `mdfind` is spawned
@@ -3162,18 +3065,20 @@ fn big_files_card(state: &ZStatsAppState) -> AnyElement {
             ))
         })
         .into_any_element();
-    widgets::list_shell()
-        .pt(px(4.))
-        .child(tab_header(
-            // `mdfind -onlyin $HOME`: the query's scope, said as the
-            // analyser and the duplicate search say theirs.
-            i18n::tr("disk.ana_preset_home"),
-            big_files_caption(state),
-            ("big-files-basis", i18n::tr("disk.big_hint")),
-            controls,
-        ))
-        .child(div().px(px(13.)).pb(px(11.)).child(big_files_body(state)))
-        .into_any_element()
+    let head = tab_header(
+        // `mdfind -onlyin $HOME`: the query's scope, said as the
+        // analyser and the duplicate search say theirs.
+        i18n::tr("disk.ana_preset_home"),
+        big_files_caption(state),
+        ("big-files-basis", i18n::tr("disk.big_hint")),
+        controls,
+    );
+    let body = div()
+        .px(px(13.))
+        .pb(px(11.))
+        .child(big_files_body(state))
+        .into_any_element();
+    tab_card(vec![head], body, scroll)
 }
 
 /// The threshold the rows clear, how many there are, and what "new"

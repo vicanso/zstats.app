@@ -26,7 +26,7 @@ use std::process;
 use zstats::snapshot::DiskSnapshot;
 
 /// The design's default disk alert bar.
-pub(super) const FULL_PERCENT: f32 = 90.0;
+const FULL_PERCENT: f32 = 90.0;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(tick) = state.latest() else {

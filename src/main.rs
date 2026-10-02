@@ -210,13 +210,26 @@ const POINTER_LEAVE_GRACE: Duration = Duration::from_millis(400);
 /// budget has to subtract exactly it.
 const AUX_BODY_PAD: f32 = 14.;
 
-/// Both auxiliary windows open at the same size, deliberately: settings
-/// and disk space are two halves of "the app's own windows", and two
-/// nearly-equal sizes read as an accident rather than a decision. Still
-/// resizable — this is where they open, not where they must stay.
-const AUX_WINDOW_SIZE: (f32, f32) = (507., 620.);
-/// Floor for both. Has to stay under [`AUX_WINDOW_SIZE`]: a minimum
-/// wider than the opening width would silently widen the window.
+/// Where the settings window opens. Disk space shared it until its
+/// paths needed the width ([`STORAGE_WINDOW_SIZE`]); the two are now
+/// different shapes, which reads as a decision, where two nearly-equal
+/// sizes read as an accident. Still resizable — this is where it opens,
+/// not where it must stay.
+const SETTINGS_WINDOW_SIZE: (f32, f32) = (507., 620.);
+/// Where the disk-space window opens: wide rather than tall. At 507 a
+/// path got what was left after its size, pills and two buttons; 720
+/// reads `Library/Application Support/GIMP/2.10/cache/fontconfig` whole.
+/// 840 tall was tried and stood nearly the full height of a 14-inch
+/// screen — a window you open to look something up, not a document to
+/// live in. 480 keeps about six list rows under the tabs and the card's
+/// header, and every tab scrolls. Sizing to the content was weighed
+/// and dropped: once run, every tab's list outgrows any cap, so the
+/// window would only move in the empty and running states — growing
+/// when a walk lands, shrinking on a tab switch.
+const STORAGE_WINDOW_SIZE: (f32, f32) = (720., 480.);
+/// Floor for both auxiliary windows. Has to stay under both opening
+/// sizes: a minimum wider than the opening width would silently widen
+/// the window.
 const AUX_MIN_WINDOW_SIZE: (f32, f32) = (460., 420.);
 
 actions!(
@@ -1225,7 +1238,8 @@ struct StorageWindow {
     /// Escape / cmd-w bindings never reach the root's `key_context`.
     focus_handle: gpui::FocusHandle,
     /// One per tab (`StorageTab::index`): switching to Duplicates and
-    /// back must not lose your place halfway down the analysis.
+    /// back must not lose your place halfway down the analysis. Each
+    /// drives the scroll inside that tab's card, not the window body.
     scrolls: [ScrollHandle; 3],
     /// Where a directory to leave out of the analysis is typed.
     /// Committed on Enter, never on a keystroke — half a path is a path
@@ -1291,9 +1305,7 @@ impl Render for StorageWindow {
         let fg = cx.theme().foreground;
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
         let scroll = &self.scrolls[state.storage_tab().index()];
-        let body = gpui_kit::component::v_flex()
-            .gap(px(8.))
-            .children(views::storage::render(state, &self.exclude_input));
+        let cards = views::storage::render(state, &self.exclude_input, scroll);
         gpui_kit::component::v_flex()
             .relative()
             .size_full()
@@ -1322,7 +1334,7 @@ impl Render for StorageWindow {
             }))
             .bg(bg)
             .text_color(fg)
-            // Outside the scrolling body, so the tabs stay reachable from
+            // Outside the scrolling card, so the tabs stay reachable from
             // the bottom of a long table.
             .child(
                 div()
@@ -1331,23 +1343,24 @@ impl Render for StorageWindow {
                     .pt(px(AUX_BODY_PAD))
                     .child(views::storage::tab_strip(state)),
             )
+            // Does not scroll itself: the tab's card does, inside its own
+            // border (`storage::tab_card`), so the window keeps this
+            // padding under the card however long the table is.
             .child(
-                div()
-                    .id("storage-body")
-                    .track_scroll(scroll)
+                gpui_kit::component::v_flex()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .overflow_y_scroll()
                     .px(px(16.))
                     .py(px(AUX_BODY_PAD))
-                    .child(body),
+                    .gap(px(8.))
+                    .children(cards),
             )
     }
 }
 
-fn aux_window_size() -> gpui::Size<gpui::Pixels> {
-    let (w, h) = AUX_WINDOW_SIZE;
+fn settings_window_size() -> gpui::Size<gpui::Pixels> {
+    let (w, h) = SETTINGS_WINDOW_SIZE;
     size(px(w), px(h))
 }
 
@@ -1377,7 +1390,7 @@ pub fn open_settings_window(cx: &mut App) {
     {
         return;
     }
-    let bounds = Bounds::centered(None, aux_window_size(), cx);
+    let bounds = Bounds::centered(None, settings_window_size(), cx);
     let opened = cx.open_window(
         with_app_identity(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1409,11 +1422,10 @@ pub fn open_settings_window(cx: &mut App) {
 /// not die to the popover's auto-hide, and neither must the reading of
 /// its result.
 ///
-/// Opens at [`AUX_WINDOW_SIZE`], the same as settings. Even at that width
-/// a row has half again the panel's 320 to spend on a path, which is what
-/// drove the tables out of the card; anyone reading deep paths all day can
-/// drag it wider, and macOS remembers nothing here on purpose — every open
-/// starts from the same known-good frame.
+/// Opens at [`STORAGE_WINDOW_SIZE`] — wider than settings, because three
+/// ranked tables of paths are what it is for. Anyone who wants more rows
+/// can drag it taller, and macOS remembers nothing here on purpose —
+/// every open starts from the same known-good frame.
 pub fn open_storage_window(cx: &mut App) {
     // Same reason as settings: an overlay panel would sit on top of this
     // window. Deferred for the same reason too.
@@ -1434,7 +1446,8 @@ pub fn open_storage_window(cx: &mut App) {
     cx.global::<ZStatsGlobalStore>()
         .clone()
         .update(cx, |state, cx| state.reset_storage_views(cx));
-    let bounds = Bounds::centered(None, aux_window_size(), cx);
+    let (w, h) = STORAGE_WINDOW_SIZE;
+    let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
     let opened = cx.open_window(
         with_app_identity(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
