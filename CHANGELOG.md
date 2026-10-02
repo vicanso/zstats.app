@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.4.0](https://github.com/vicanso/zstats.app/compare/v0.3.15..v0.4.0) - 2026-10-02
+
+### ⛰️  Features
+
+- The traffic card shows every program averaging over 10 kB/s in the last minute, at least three rows, and keeps the rest behind Show more - ([0ee428d](https://github.com/vicanso/zstats.app/commit/0ee428d809c7b6fa021b07378a9b21f09ea27945))
+- The disk-space window's second pass — a finished analysis opens on a bar of the scope's largest folders and their shares, a total the cache now keeps; row buttons stay faint until the row is hovered; an opened folder's bars measure against that folder; large files show when they last changed; each duplicate group marks its oldest copy when the dates tell the copies apart; and classic light captions darken to 4.65:1 - ([114d7f2](https://github.com/vicanso/zstats.app/commit/114d7f25341bc8b62cf690f13124f1d53865159c))
+- The disk-space window gets a design pass — a band on every tab shows the boot volume's free space and what is waiting in the Trash; scope, exclusions and the daily check fold into one toolbar row that stays put during a walk; the card is titled by its scope and dims when another scope is selected; a walk shows progress against last time's count; paths read as dim folders plus a bright name, every row keeps the same action slots so sizes align, bars are thin and faint, and type settles on three sizes; suggestions show five with a total and Trash all; empty tabs get two sentences and a primary button; clearing a result asks first; ⌘1–3 and ⌘R - ([9467b70](https://github.com/vicanso/zstats.app/commit/9467b70222b589e35c2be9444d733b1e6bed86a6))
+- A UI pass across the panel and the disk window — disk and network get their own Overview card (panel 14pt taller), sleep gaps in the charts are dotted, padded rows in the climbing card are set apart, bundle-id names show their last part, pids read "pid N", traffic rows fit on two lines, Watching thresholds sit in a card two to a row, a day's repeat alerts fold into one row under a "Yesterday"-style date, History names its lens in the title with a time axis and an in-card show-more, and the analysis caption folds its skips into one hover with staleness shown on Re-analyze - ([18d1519](https://github.com/vicanso/zstats.app/commit/18d1519fe101a380a38e72b0c56411a196c15a04))
+- The disk-space window becomes three underlined tabs (Analysis / Large files / Duplicates), with a duplicate finder that compares size, then a BLAKE3 of the first 64 KB, then the whole file — home at ≥1 MB or a picked folder at once, hard links and APFS clones counted honestly, tool-owned trees and packages skipped, single copies to the Trash and never the last; a daily background walk of home records what grew this week and posts a silent banner past 5 GB; the cache cleanup confirm lists every item to untick, each row says why it rebuilds and whether its app is running, and a hard-linked file is counted once - ([d0f7564](https://github.com/vicanso/zstats.app/commit/d0f756456727f097e490b3a0fb2b591f86d682e5))
+
+### 🐛 Bug Fixes
+
+- A hidden panel's traffic reads every 10s again instead of slipping a tick to 15s, and a curve bridges one late or missed read, so its lines stop breaking into dashes - ([4ef37ad](https://github.com/vicanso/zstats.app/commit/4ef37ad8cfd5c8b1314d370d11bd3fd3ada8da11))
+- A traffic line no longer breaks where a socket closed or a pid was new — it draws 0 there and from the card's left edge, sits in an inset well like Overview's charts, and a full window still reads 10m without moving its axis - ([bf696de](https://github.com/vicanso/zstats.app/commit/bf696de58d14b34658f344ceda28b195591b706e))
+- A chart's Max is the highest point it draws, its half hour is wall-clock time so a sleep is a gap rather than last night joined on, and a full window reads 30m instead of 29m - ([c9eefb5](https://github.com/vicanso/zstats.app/commit/c9eefb571c2dec6440d666fc011e36803c028979))
+
+### 🧪 Testing
+
+- Two checks of the macOS clean-up hints list run on macOS only — Linux ships no built-in list yet, so the trashable-app check and the "skipped because a hint names it" assertion failed there - ([e0ff9b9](https://github.com/vicanso/zstats.app/commit/e0ff9b9558f9dea65086bd0b9e2f3df38f9d8e9f))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.3.16 - ([1a72015](https://github.com/vicanso/zstats.app/commit/1a72015064bfb3060b76ab4739c01494801e3245))
+
 ## [0.3.16](https://github.com/vicanso/zstats.app/compare/v0.3.14..v0.3.16) - 2026-10-01
 
 ### ⛰️  Features
