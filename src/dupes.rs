@@ -756,6 +756,10 @@ mod tests {
         assert_eq!(search(&dir).groups.len(), 1, "a plain vendor folder");
         assert!(skips_dir(Path::new("/x/Library.photoslibrary")));
         assert!(skips_dir(Path::new("/x/Proj.FCPBUNDLE")));
+        // Skipped because the built-in clean-up hints name it — macOS's
+        // list; Linux ships none yet, so there the name alone decides
+        // nothing (its build trees still carry a CACHEDIR.TAG).
+        #[cfg(target_os = "macos")]
         assert!(skips_dir(Path::new("/x/target")), "a clean-up hint by name");
         assert!(!skips_dir(Path::new("/x/Movies")));
         let _ = fs::remove_dir_all(&dir);

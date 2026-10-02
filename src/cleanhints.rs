@@ -575,7 +575,11 @@ owner = "skipped too"
     }
 
     /// Every GUI app whose cache is on the cleanup list names its bundle
-    /// id, so the row can say when that app is running.
+    /// id, so the row can say when that app is running. A claim about the
+    /// macOS list's content: Linux ships no built-in list yet
+    /// (`cleanhints-linux.toml` is content still to be written), so there
+    /// is nothing there to check.
+    #[cfg(target_os = "macos")]
     #[test]
     fn every_trashable_app_cache_names_its_app() {
         let embedded = assets::get(FILE).unwrap();
