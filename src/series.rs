@@ -90,22 +90,17 @@ impl Series {
     /// How long the series actually covers, from its oldest point.
     ///
     /// `None` under a second: the label would otherwise flash `0s` on
-    /// the sample that created the first point. [`WINDOW`] once the
-    /// oldest point is within [`GAP`] of it: pruning keeps only points
-    /// at most [`WINDOW`] old, so on a full ring the oldest is always a
-    /// tick younger than that — 29:58 — and an exact comparison labelled
-    /// a full ring "29m" for good. One point still has a span once it is
-    /// a second old. The chart's axis is [`WINDOW`] either way; this
-    /// span is only the caption beside it.
+    /// the sample that created the first point. Capped at [`WINDOW`].
+    /// One point still has a span once it is a second old. The chart's
+    /// axis is [`WINDOW`] either way; this span is only the caption
+    /// beside it, and [`span_label`] decides when it reads as full.
     pub fn span(&self, now: Instant) -> Option<Duration> {
         let oldest = self.points.first()?.at;
         let span = now.saturating_duration_since(oldest);
         if span < Duration::from_secs(1) {
             None
-        } else if span + GAP >= WINDOW {
-            Some(WINDOW)
         } else {
-            Some(span)
+            Some(span.min(WINDOW))
         }
     }
 
@@ -155,9 +150,14 @@ impl Series {
 /// `40s`. Under a minute stays in seconds — [`crate::format::uptime_short`]
 /// collapses that to `0m`, which would label a fresh curve as empty.
 /// The text is the same in every locale: a unit, not a sentence.
+///
+/// Full means within [`GAP`] of [`WINDOW`]: pruning keeps only points
+/// at most [`WINDOW`] old, so a full ring's oldest point is always a
+/// tick younger than that — 29:58 — and an exact comparison labelled a
+/// full ring "29m" for good.
 pub fn span_label(span: Duration) -> String {
     let secs = span.as_secs();
-    if secs >= WINDOW.as_secs() {
+    if span + GAP >= WINDOW {
         format!("{}m", WINDOW.as_secs() / 60)
     } else if secs >= 60 {
         format!("{}m", secs / 60)
@@ -326,16 +326,11 @@ mod tests {
         let now = at(t0, 258 * 7);
         let oldest = now.saturating_duration_since(series.points()[0].at);
         assert!(oldest < WINDOW, "pruning keeps the edge out: {oldest:?}");
-        assert_eq!(series.span(now), Some(WINDOW));
+        // The span stays the real one; the label calls it full.
+        assert_eq!(series.span(now), Some(oldest));
         assert_eq!(span_label(series.span(now).unwrap()), "30m");
         // Short of the window by more than a missed sample is not full.
-        let mut young = Series::default();
-        young.record(t0, Some(1.0));
-        let early = t0 + WINDOW - GAP - Duration::from_secs(1);
-        assert_eq!(
-            young.span(early),
-            Some(WINDOW - GAP - Duration::from_secs(1))
-        );
+        assert_eq!(span_label(WINDOW - GAP - Duration::from_secs(1)), "29m");
     }
 
     #[test]

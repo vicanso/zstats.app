@@ -34,7 +34,7 @@
 //! only ever been quiet never starts a series — idle socket owners are
 //! most of the table.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::mem;
 use std::time::{Duration, Instant};
 
@@ -173,8 +173,8 @@ pub fn deltas(prev: &Sample, next: &Sample) -> Vec<PidDelta> {
         // A fall is `None`. Summed with a sibling that is still
         // transferring it contributes nothing, which is what keeps the
         // sibling's download in the ranking. Summed with nothing else
-        // it is a hole: drawing it as zero would say the program went
-        // idle, and the socket simply closed.
+        // the ranking leaves the program out, and its curve draws 0
+        // (`CurveBook::record`).
         if sum > 0 {
             out.push(PidDelta::Moved(Rate {
                 pid: row.pid,
@@ -285,10 +285,6 @@ impl CurveKey {
         }
     }
 
-    fn for_row(row: &RowSample) -> Self {
-        Self::for_name_pid(&row.name, row.pid)
-    }
-
     /// The series a ranking row draws. Unnamed rows are one pid each.
     pub fn for_program(row: &ProgramRate) -> Self {
         match &row.name {
@@ -325,19 +321,17 @@ impl CurveBook {
     /// How long the book actually covers, measured from its oldest point.
     ///
     /// `None` under a second: the header would otherwise flash `0s` on
-    /// the sample that created the first point. [`CURVE_WINDOW`] once the
-    /// oldest point is within [`CURVE_GAP`] of it — pruning keeps only
-    /// points at most that old, so a full book's oldest is a sample
-    /// younger and an exact comparison labelled it "9m" for good.
+    /// the sample that created the first point. Capped at
+    /// [`CURVE_WINDOW`]. It is also every row's x axis, so it stays the
+    /// real length — oldest point on the left edge — and [`span_label`]
+    /// alone decides when it reads as full.
     pub fn span(&self, now: Instant) -> Option<Duration> {
         let oldest = self.series.values().flatten().map(|point| point.at).min()?;
         let span = now.saturating_duration_since(oldest);
         if span < Duration::from_secs(1) {
             None
-        } else if span + CURVE_GAP >= CURVE_WINDOW {
-            Some(CURVE_WINDOW)
         } else {
-            Some(span)
+            Some(span.min(CURVE_WINDOW))
         }
     }
 
@@ -368,34 +362,40 @@ impl CurveBook {
     /// moved bytes sets the program's point, even when a sibling broke —
     /// the sum is the ranking's total, and one helper closing a socket
     /// must not punch a hole through a program that is still
-    /// transferring. A quiet program extends a series that already
-    /// exists and does not start one. A program that left the table gets
-    /// a single break, so a later return does not connect across the
-    /// absence.
-    pub fn record(&mut self, at: Instant, next: &Sample, deltas: &[PidDelta]) {
-        let present: HashSet<CurveKey> = next.rows.iter().map(CurveKey::for_row).collect();
+    /// transferring.
+    ///
+    /// Every program that already has a line gets a point on every
+    /// sample, and one the sample cannot price is 0: a counter that fell
+    /// (the per-pid total is over the sockets open now, so it falls
+    /// whenever one closes — routine for anything with short-lived
+    /// connections), a reused pid, a pid with no baseline yet, or the
+    /// program gone from the table. Each used to be a break, and a
+    /// tunnel or a browser helper drew as scattered dashes; a line with
+    /// holes read as missing data, where 0 reads as what it almost
+    /// always was — nothing worth drawing moved. Only time breaks it:
+    /// a gap past [`CURVE_GAP`] between samples ([`segments`]). A quiet
+    /// program still does not start a line, so idle sockets stay off
+    /// the card.
+    pub fn record(&mut self, at: Instant, deltas: &[PidDelta]) {
         let mut folded: HashMap<CurveKey, Fold> = HashMap::new();
         for delta in deltas {
             let key = delta.key();
             folded.entry(key).or_default().absorb(delta);
         }
         for (key, fold) in &folded {
-            if let Some(sum) = fold.moved {
-                self.push(key.clone(), at, Some(sum), sum > 0);
-            } else if fold.quiet {
-                self.push(key.clone(), at, Some(0), false);
-            } else {
-                self.push(key.clone(), at, None, false);
+            match fold.moved {
+                Some(sum) => self.push(key.clone(), at, Some(sum), sum > 0),
+                None => self.push(key.clone(), at, Some(0), false),
             }
         }
-        let stale: Vec<CurveKey> = self
+        let unpriced: Vec<CurveKey> = self
             .series
             .keys()
-            .filter(|key| !folded.contains_key(*key) && !present.contains(*key))
+            .filter(|key| !folded.contains_key(*key))
             .cloned()
             .collect();
-        for key in stale {
-            self.push(key, at, None, false);
+        for key in unpriced {
+            self.push(key, at, Some(0), false);
         }
         self.prune(at);
     }
@@ -427,9 +427,12 @@ impl CurveBook {
 /// `10m` once the window is full, otherwise the real length: `9m`, `40s`.
 /// Under a minute stays in seconds — [`crate::format::uptime_short`]
 /// collapses that to `0m`, which would label a fresh curve as empty.
+/// Full means within [`CURVE_GAP`] of the window: pruning keeps only
+/// points at most that old, so a full book's oldest is a sample younger
+/// and an exact comparison labelled it "9m" for good.
 pub fn span_label(span: Duration) -> String {
     let secs = span.as_secs();
-    if secs >= CURVE_WINDOW.as_secs() {
+    if span + CURVE_GAP >= CURVE_WINDOW {
         format!("{}m", CURVE_WINDOW.as_secs() / 60)
     } else if secs >= 60 {
         format!("{}m", secs / 60)
@@ -720,7 +723,7 @@ mod tests {
     ) {
         let prev = sample(t0, from);
         let next = sample(at(t0, step), to);
-        book.record(next.at, &next, &deltas(&prev, &next));
+        book.record(next.at, &deltas(&prev, &next));
     }
 
     #[test]
@@ -748,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_socket_breaks_the_line_instead_of_reading_as_zero() {
+    fn a_closed_socket_draws_as_zero_and_keeps_the_line_whole() {
         let t0 = Instant::now();
         let mut book = CurveBook::default();
         record_step(
@@ -765,12 +768,38 @@ mod tests {
             vec![row(1, "redis", 20, 100_000, 0)],
             vec![row(1, "redis", 30, 1_000, 0)],
         );
+        // The counter fell (the socket that carried 100 kB closed), so
+        // the sample cannot price the program: it draws 0 and connects.
         let points = book.series(&key("redis"));
-        assert_eq!(points.last().unwrap().bytes_per_sec, None);
-        assert!(
-            segments(points).is_empty(),
-            "one point and a break is not a line"
+        assert_eq!(points.last().unwrap().bytes_per_sec, Some(0));
+        assert_eq!(segments(points).len(), 1, "no hole where the socket closed");
+    }
+
+    #[test]
+    fn a_program_with_only_new_pids_draws_zero_rather_than_nothing() {
+        let t0 = Instant::now();
+        let mut book = CurveBook::default();
+        record_step(
+            &mut book,
+            t0,
+            10,
+            vec![row(1, "helper", 10, 0, 0)],
+            vec![row(1, "helper", 20, 50_000, 0)],
         );
+        // pid 1 is gone and pid 2 has no baseline yet: no delta at all
+        // for the program, which used to leave no point and, a sample
+        // later, a gap.
+        record_step(
+            &mut book,
+            at(t0, 10),
+            10,
+            vec![row(1, "helper", 20, 50_000, 0)],
+            vec![row(2, "helper", 1, 9_000, 0)],
+        );
+        let points = book.series(&key("helper"));
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[1].bytes_per_sec, Some(0));
+        assert_eq!(segments(points).len(), 1);
     }
 
     #[test]
@@ -788,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn a_program_that_leaves_and_returns_does_not_connect_across_the_gap() {
+    fn a_program_that_leaves_draws_zero_until_it_returns() {
         let t0 = Instant::now();
         let mut book = CurveBook::default();
         record_step(
@@ -805,15 +834,14 @@ mod tests {
             vec![row(1, "curl", 20, 20_000, 0)],
             vec![row(1, "curl", 30, 40_000, 0)],
         );
-        // Gone. The series takes a break so the next visit cannot bridge it.
-        let gone = sample(at(t0, 30), vec![]);
-        book.record(gone.at, &gone, &[]);
+        // Gone from the table: nothing moved under its name, so 0.
+        book.record(at(t0, 30), &[]);
         assert_eq!(
             book.series(&key("curl")).last().unwrap().bytes_per_sec,
-            None
+            Some(0)
         );
-        // Back, under a new pid. Two samples so the new run is long
-        // enough to draw, and it must not include the earlier points.
+        // Back, under a new pid, and priced again: one line through the
+        // whole visit, down to 0 while it was away.
         record_step(
             &mut book,
             at(t0, 30),
@@ -829,8 +857,9 @@ mod tests {
             vec![row(7, "curl", 21, 40_000, 0)],
         );
         let runs = segments(book.series(&key("curl")));
-        assert_eq!(runs.len(), 2);
-        assert!(runs.iter().all(|run| run.len() == 2));
+        assert_eq!(runs.len(), 1);
+        let rates: Vec<u64> = runs[0].iter().map(|(_, rate)| *rate).collect();
+        assert_eq!(rates, [2_000, 2_000, 0, 2_000, 2_000]);
     }
 
     #[test]
@@ -851,7 +880,7 @@ mod tests {
                 row(2, "Chrome", 102, 10_000, 0),
             ],
         );
-        book.record(next.at, &next, &deltas(&prev, &next));
+        book.record(next.at, &deltas(&prev, &next));
         let points = book.series(&key("Chrome"));
         assert_eq!(points.len(), 1);
         // pid 1 moved 2_000 B/s. pid 2's counter fell, so it adds nothing
@@ -877,7 +906,7 @@ mod tests {
             later + Duration::from_secs(10),
             vec![row(1, "redis", 10_010, 100_000, 0)],
         );
-        book.record(next.at, &next, &deltas(&prev, &next));
+        book.record(next.at, &deltas(&prev, &next));
         assert!(
             book.series(&key("redis")).is_empty(),
             "the old peak aged out and the new sample is a zero"
@@ -964,7 +993,11 @@ mod tests {
         // A 10s cadence never lands on the edge: an oldest point 9:52
         // old is a full book, not "9m".
         let full = at(t0, 10) + CURVE_WINDOW - Duration::from_secs(8);
-        assert_eq!(book.span(full), Some(CURVE_WINDOW));
+        assert_eq!(
+            book.span(full),
+            Some(CURVE_WINDOW - Duration::from_secs(8)),
+            "the span is every row's axis, so it stays real"
+        );
         assert_eq!(span_label(book.span(full).unwrap()), "10m");
     }
 

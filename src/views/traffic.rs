@@ -42,11 +42,24 @@ const PREVIEW_ROWS: usize = 6;
 /// housekeeping must not get to define "full" for itself.
 const SCALE_FLOOR_BYTES: f32 = 64.0 * 1024.0;
 
-/// Height of the curve slot. Reserved on every row, including one that
+/// Height of the curve's well. Reserved on every row, including one that
 /// does not have two points yet, so the list does not jump as a line
 /// appears. It replaces the 4px bars; a third block under them would
-/// have pushed the listener card off the panel.
+/// have pushed the listener card off the panel. 14 was tried and
+/// reverted: inside the well that left about 8px of swing, and a burst
+/// flattened into the same faint ripple as noise.
 const CURVE_H: f32 = 22.;
+
+/// The well's inset from its rounded edge to the drawing — the same
+/// recess as Overview's charts, scaled to this slot. Horizontal
+/// keeps the line's ends off the corners; vertical keeps a flat 0 off
+/// the well's floor, where it would read as the edge rather than a
+/// reading.
+const WELL_PAD_X: f32 = 4.;
+const WELL_PAD_Y: f32 = 2.;
+
+/// Corner of the well: Overview's 8px at 40px tall, scaled to the slot.
+const WELL_RADIUS: f32 = 5.;
 
 /// Thin enough to read as a trace, thick enough to survive the panel's
 /// scale. The slot insets by a pixel so the stroke is not clipped.
@@ -216,7 +229,18 @@ fn row_element(
                 .child(format!("↓ {}", format::rate(row.received_per_sec)))
                 .child(format!("↑ {}", format::rate(row.transmitted_per_sec))),
         )
-        .child(div().mt(px(5.)).child(sparkline(points, span, now)))
+        // On the recessed meter-track fill, as Overview's charts are.
+        // Without it a quiet program's flat 0 read as a row divider.
+        .child(
+            div()
+                .mt(px(5.))
+                .h(px(CURVE_H))
+                .px(px(WELL_PAD_X))
+                .py(px(WELL_PAD_Y))
+                .rounded(px(WELL_RADIUS))
+                .bg(theme::inset())
+                .child(sparkline(points, span, now)),
+        )
         .into_any_element()
 }
 
@@ -318,8 +342,7 @@ fn sparkline(points: &[CurvePoint], span: Option<Duration>, now: Instant) -> Any
             }
         },
     )
-    .h(px(CURVE_H))
-    .w_full()
+    .size_full()
     .into_any_element()
 }
 
@@ -354,6 +377,23 @@ fn paint_sparkline(
     };
     let mut builder = PathBuilder::stroke(px(CURVE_STROKE));
     let mut drew = false;
+    // Before its first moved byte a program was quiet or not in the
+    // table — 0 either way, as `CurveBook::record` draws it once a line
+    // exists — so the line starts at the card's left edge, flat, and
+    // rises where the program did, instead of appearing mid-row. The
+    // left edge is the book's oldest sample, so a line that started
+    // there needs nothing.
+    if let Some(first) = points.first()
+        && let Some(rate) = first.bytes_per_sec
+        && now.saturating_duration_since(first.at) < span
+    {
+        let floor = y_of(0);
+        let x = x_of(first.at);
+        builder.move_to(point(bounds.left(), floor));
+        builder.line_to(point(x, floor));
+        builder.line_to(point(x, y_of(rate)));
+        drew = true;
+    }
     for segment in traffic::segments(points) {
         let mut steps = segment.into_iter();
         let Some((at, rate)) = steps.next() else {

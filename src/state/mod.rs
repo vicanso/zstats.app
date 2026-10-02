@@ -1304,7 +1304,7 @@ impl ZStatsAppState {
                     // the same window plus the zeros and the breaks the
                     // line has to draw, which the ranking leaves out.
                     let deltas = traffic::deltas(prev, &sample);
-                    self.traffic_curves.record(at, &sample, &deltas);
+                    self.traffic_curves.record(at, &deltas);
                     self.traffic = Some(TrafficView::Ready(TrafficReady {
                         rows: traffic::by_program(&traffic::diff(prev, &sample)),
                         coverage,
