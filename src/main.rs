@@ -232,6 +232,10 @@ actions!(
         GoTab5,
         GoTab6,
         GoTab7,
+        StorageTab1,
+        StorageTab2,
+        StorageTab3,
+        StorageRerun,
     ]
 );
 
@@ -1302,6 +1306,20 @@ impl Render for StorageWindow {
             .on_action(cx.listener(|_, _: &CloseWindow, window, _cx| {
                 window.remove_window();
             }))
+            .on_action(cx.listener(|_, _: &StorageTab1, _window, cx| {
+                go_storage_tab(cx, state::StorageTab::Analysis);
+            }))
+            .on_action(cx.listener(|_, _: &StorageTab2, _window, cx| {
+                go_storage_tab(cx, state::StorageTab::LargeFiles);
+            }))
+            .on_action(cx.listener(|_, _: &StorageTab3, _window, cx| {
+                go_storage_tab(cx, state::StorageTab::Duplicates);
+            }))
+            .on_action(cx.listener(|_, _: &StorageRerun, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.rerun_storage_tab(cx));
+            }))
             .bg(bg)
             .text_color(fg)
             // Outside the scrolling body, so the tabs stay reachable from
@@ -1438,6 +1456,12 @@ pub fn open_storage_window(cx: &mut App) {
             .clone()
             .update(cx, |state, _| state.set_storage_window(handle.into()));
     }
+}
+
+fn go_storage_tab(cx: &mut Context<StorageWindow>, tab: state::StorageTab) {
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, cx| state.set_storage_tab(tab, cx));
 }
 
 fn go_panel_tab(cx: &mut Context<ZStatsApp>, index: usize) {
@@ -2018,6 +2042,12 @@ fn main() {
             KeyBinding::new("secondary-6", GoTab6, Some("Panel")),
             KeyBinding::new("secondary-7", GoTab7, Some("Panel")),
             KeyBinding::new("secondary-p", TogglePin, Some("Panel")),
+            // The disk-space window's tabs and its "run this tab again",
+            // `secondary-` for the panel's reason above.
+            KeyBinding::new("secondary-1", StorageTab1, Some("StorageWindow")),
+            KeyBinding::new("secondary-2", StorageTab2, Some("StorageWindow")),
+            KeyBinding::new("secondary-3", StorageTab3, Some("StorageWindow")),
+            KeyBinding::new("secondary-r", StorageRerun, Some("StorageWindow")),
         ]);
         install_menus(cx);
 

@@ -97,6 +97,11 @@ pub enum DiskAnalysis {
         /// rendered under the running banner so minutes-long walks pay
         /// out from their first seconds.
         partial: Option<ScanResult>,
+        /// The last finished walk of this scope's directory count — what
+        /// the progress line measures against ("about 45% of last
+        /// time"). `None` on a first walk of a scope, where there is
+        /// nothing honest to compare with.
+        expected_dirs: Option<usize>,
         /// Whether a finished result is written to the per-root cache.
         /// True for top-level analyses (the "last analysed X" a fresh
         /// launch opens with). Expansion sub-walks never come through
@@ -161,6 +166,10 @@ pub(crate) struct Analysis {
     disk_analysis_root: Option<ScanScope>,
     analysis_diff: Option<DiffBaseline>,
     analysis_show_all_dirs: bool,
+    /// Every cleanup suggestion listed, not just the first few.
+    analysis_show_all_sugs: bool,
+    /// The excluded-folders drawer under the toolbar is open.
+    analysis_exclude_open: bool,
     disk_analysis_runs: u64,
     /// Bytes this session moved to the Trash from the disk-space window.
     /// A move frees nothing until the Trash is emptied, and the window
@@ -243,6 +252,8 @@ impl Default for Analysis {
                 .flatten()
                 .map(|prev| DiffBaseline::from_result(&prev)),
             analysis_show_all_dirs: false,
+            analysis_show_all_sugs: false,
+            analysis_exclude_open: false,
             trashed: 0,
             watch_last,
             watch_cancel: None,
@@ -263,6 +274,25 @@ impl ZStatsAppState {
         if self.analysis.storage_tab != tab {
             self.analysis.storage_tab = tab;
             cx.notify();
+        }
+    }
+
+    /// ⌘R in the disk-space window: run the selected tab again. Never a
+    /// cancel — a stray ⌘R must not throw away a walk minutes in — so a
+    /// tab that is already working ignores it.
+    pub fn rerun_storage_tab(&mut self, cx: &mut Context<Self>) {
+        match self.analysis.storage_tab {
+            StorageTab::Analysis => {
+                if !matches!(self.analysis.disk_analysis, DiskAnalysis::Running { .. }) {
+                    self.start_disk_analysis(cx);
+                }
+            }
+            StorageTab::LargeFiles => self.start_big_files(cx),
+            StorageTab::Duplicates => {
+                if !self.dupes_running() {
+                    self.start_dupes(cx);
+                }
+            }
         }
     }
 
@@ -458,6 +488,24 @@ impl ZStatsAppState {
         self.analysis.analysis_show_all_dirs
     }
 
+    pub fn analysis_show_all_sugs(&self) -> bool {
+        self.analysis.analysis_show_all_sugs
+    }
+
+    pub fn toggle_analysis_show_all_sugs(&mut self, cx: &mut Context<Self>) {
+        self.analysis.analysis_show_all_sugs = !self.analysis.analysis_show_all_sugs;
+        cx.notify();
+    }
+
+    pub fn analysis_exclude_open(&self) -> bool {
+        self.analysis.analysis_exclude_open
+    }
+
+    pub fn toggle_analysis_exclude(&mut self, cx: &mut Context<Self>) {
+        self.analysis.analysis_exclude_open = !self.analysis.analysis_exclude_open;
+        cx.notify();
+    }
+
     pub fn set_analysis_show_all_dirs(&mut self, show: bool, cx: &mut Context<Self>) {
         self.analysis.analysis_show_all_dirs = show;
         cx.notify();
@@ -503,11 +551,18 @@ impl ZStatsAppState {
         self.analysis.disk_analysis_runs += 1;
         let run_id = self.analysis.disk_analysis_runs;
         let cancel = Arc::new(AtomicBool::new(false));
+        // The result on screen when it is this scope's, else its cache
+        // file (one small read, once per walk).
+        let expected_dirs = match &self.analysis.disk_analysis {
+            DiskAnalysis::Ready(result) if result.roots == scope.roots => Some(result.dirs_seen),
+            _ => diskscan::load_cache(&scope.roots).map(|result| result.dirs_seen),
+        };
         self.analysis.disk_analysis = DiskAnalysis::Running {
             run_id,
             dirs_done: 0,
             scope: scope.clone(),
             partial: None,
+            expected_dirs,
             persist,
             cancel: cancel.clone(),
         };
@@ -962,6 +1017,8 @@ impl ZStatsAppState {
     pub fn reset_storage_views(&mut self, cx: &mut Context<Self>) {
         self.analysis.big_files = BigFiles::Off;
         self.analysis.analysis_show_all_dirs = false;
+        self.analysis.analysis_show_all_sugs = false;
+        self.analysis.analysis_exclude_open = false;
         // Opened rows are questions too — a window opened tomorrow should
         // show the result the way a finished scan leaves it, not a tree
         // somebody unfolded yesterday.
