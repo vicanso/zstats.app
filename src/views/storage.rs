@@ -1,5 +1,6 @@
-//! The disk-space window: the Spotlight large-file query and the
-//! directory analyser, in a standard window of their own.
+//! The disk-space window: the directory analyser, the Spotlight
+//! large-file query and the duplicate search, one tab each, in a
+//! standard window of their own.
 //!
 //! Both were sections of the Hardware tab's boot-volume card until the
 //! panel ran out of width for them. Three ranked tables at 320px meant
@@ -15,22 +16,35 @@
 //! docs/disk-analysis.md used to require. The Hardware tab keeps one
 //! button, and the window carries the answer.
 //!
-//! Nothing here owns state. Both features live in `ZStatsAppState`, this
-//! window observes the same store the panel does, and every action
-//! (start, cancel, open a row, trash) goes through the methods the
-//! panel's chips called — so a scan started here keeps running with
-//! the window closed, exactly as it did with the panel hidden.
+//! Tabs rather than one stack of cards: the three answer different
+//! questions (which folder is big, which file is big, what is stored
+//! twice), each result is a long table, and stacked they made the third
+//! one a long scroll away. The tab strip stays put above the scrolling
+//! body, and each tab keeps its own scroll position (`StorageWindow`).
+//!
+//! Nothing here owns state. Every feature lives in `ZStatsAppState`,
+//! the selected tab included; this window observes the same store the
+//! panel does, and every action (start, cancel, open a row, trash) goes
+//! through the store's methods — so a scan or a search started here
+//! keeps running with the window closed, exactly as it did with the
+//! panel hidden.
 
 use super::widgets;
+use crate::active;
 use crate::bigfiles;
-use crate::cleanhints;
+use crate::cleanhints::{self, CleanHint};
 use crate::confirm;
 use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult, ScanScope};
+use crate::diskwatch;
+use crate::dupes::{DupeFile, DupeGroup, DupeScope};
 use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs;
-use crate::state::{BigFiles, DiskAnalysis, Expansion, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{
+    BigFiles, DiskAnalysis, DupeProgress, DupeSearch, Expansion, StorageTab, ZStatsAppState,
+    ZStatsGlobalStore,
+};
 use crate::theme;
 use gpui::Entity;
 use gpui::prelude::FluentBuilder;
@@ -40,18 +54,108 @@ use gpui::{
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The window body, in the order the two answers should be reached for:
-/// the index query first (seconds, no permission prompts, and often
-/// answer enough), the walk second (minutes, and where you go when the
-/// index saw nothing).
+/// The selected tab's body. The trashed note leads every tab: a move
+/// from any of them frees nothing until the Trash is emptied.
 pub fn render(state: &ZStatsAppState, exclude: &Entity<InputState>) -> Vec<AnyElement> {
-    vec![big_files_card(state), analysis_card(state, exclude)]
+    let mut cards = Vec::new();
+    cards.extend(trashed_note(state.trashed_this_session()));
+    cards.push(match state.storage_tab() {
+        StorageTab::Analysis => analysis_card(state, exclude),
+        StorageTab::LargeFiles => big_files_card(state),
+        StorageTab::Duplicates => dupes_card(state),
+    });
+    cards
+}
+
+/// The three tabs, underlined: labels in a row over a hairline, the
+/// selected one standing on a 2px bar (the theme's mark where it has one,
+/// otherwise the text ink — accent stays for thresholds). Hovering an
+/// unselected tab brightens its label and previews the bar in the border
+/// ink, which is its affordance. Every label keeps one weight: these tabs
+/// are as wide as their words, and a bolder selected label would nudge
+/// the ones after it on every switch.
+///
+/// A tab whose work is running while another is selected wears a dot:
+/// walks and searches outlive the tab as they outlive the window, and the
+/// dot is how one left running stays findable.
+pub fn tab_strip(state: &ZStatsAppState) -> AnyElement {
+    let active = state.storage_tab();
+    let busy = |tab: StorageTab| match tab {
+        StorageTab::Analysis => matches!(state.disk_analysis(), DiskAnalysis::Running { .. }),
+        StorageTab::LargeFiles => matches!(state.big_files(), BigFiles::Running),
+        StorageTab::Duplicates => matches!(state.dupe_search(), DupeSearch::Running { .. }),
+    };
+    let bar = theme::mark().map_or(theme::text(), |(fill, _)| fill);
+    let cell = |tab: StorageTab| {
+        let on = tab == active;
+        let group = SharedString::from(format!("storage-tab-{}", tab.index()));
+        v_flex()
+            .id(("storage-tab", tab.index()))
+            .group(group.clone())
+            .flex_none()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .px(px(2.))
+                    .pt(px(2.))
+                    .pb(px(7.))
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if on { theme::text() } else { theme::text_dim() })
+                    .when(!on, |d| {
+                        d.group_hover(group.clone(), |s| s.text_color(theme::text()))
+                    })
+                    .child(i18n::tr(tab.label_key()))
+                    .when(busy(tab) && !on, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .size(px(5.))
+                                .rounded_full()
+                                .bg(theme::text_dim()),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .h(px(2.))
+                    .rounded_full()
+                    .when(on, |d| d.bg(bar))
+                    .when(!on, |d| d.group_hover(group, |s| s.bg(theme::border()))),
+            )
+            .on_click(move |_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.set_storage_tab(tab, cx));
+            })
+    };
+    // The hairline is painted first and the bars over it, so the selected
+    // bar sits on the line rather than floating above it.
+    div()
+        .relative()
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(1.))
+                .bg(theme::border_subtle()),
+        )
+        .child(
+            h_flex()
+                .gap(px(18.))
+                .children(StorageTab::ALL.into_iter().map(cell)),
+        )
+        .into_any_element()
 }
 
 /// The analyser card: header, scope row, then whatever the current run
@@ -109,6 +213,7 @@ fn analysis_card(state: &ZStatsAppState, exclude: &Entity<InputState>) -> AnyEle
         .child(analysis_header(state))
         .children(analysis_scope_row(state))
         .children(analysis_exclude_row(state, exclude))
+        .children(analysis_watch_row(state))
         .child(body)
         .into_any_element()
 }
@@ -244,6 +349,151 @@ fn analysis_exclude_row(
                         .detach();
                     }),
             )
+            .into_any_element(),
+    )
+}
+
+/// The daily background check (`diskwatch`): a switch, and when it last
+/// measured. Here rather than in Settings for the exclusion row's
+/// reason — the question "should this keep an eye on my disk" comes up
+/// while looking at the disk. Hidden while a walk the user started is
+/// running, like the rows above it.
+fn analysis_watch_row(state: &ZStatsAppState) -> Option<AnyElement> {
+    if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
+        return None;
+    }
+    let status = if !prefs::disk_watch() {
+        i18n::tr("disk.watch_off")
+    } else if state.disk_check_running() {
+        i18n::tr("disk.watch_running")
+    } else {
+        match state.disk_check_last() {
+            Some(at) => t!(
+                "disk.watch_last",
+                ago = format::ago(at.elapsed().unwrap_or_default())
+            )
+            .to_string(),
+            None => i18n::tr("disk.watch_first"),
+        }
+    };
+    Some(
+        h_flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(13.))
+            .pb(px(8.))
+            .child(
+                div()
+                    .id("ana-watch-label")
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(theme::text_dim())
+                    .tooltip(widgets::wrap_tooltip(i18n::tr("disk.watch_tip")))
+                    .child(i18n::tr("disk.watch")),
+            )
+            .child(
+                Switch::new("ana-watch")
+                    .small()
+                    .checked(prefs::disk_watch())
+                    .on_click(|checked, _window, cx| {
+                        prefs::set_disk_watch(*checked);
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |_, cx| cx.notify());
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(status),
+            )
+            .into_any_element(),
+    )
+}
+
+/// What grew in the home tree since about a week ago (`diskwatch`), as
+/// the first table of a home result — the question "what is big" has a
+/// sibling, "what is getting big", and only this table answers it.
+/// Read-only rows: growth is a reason to look, not a cleanup verdict;
+/// the reveal button leads to the folder, and a cache that grew is
+/// already in the suggestions below with its own controls.
+fn growth_section(report: &diskwatch::Report) -> Option<AnyElement> {
+    if report.rows.is_empty() {
+        return None;
+    }
+    let days = (report.over.as_secs_f64() / 86_400.0).round().max(1.0) as u64;
+    let max = report.rows.iter().map(|g| g.grew).max().unwrap_or(1).max(1);
+    Some(
+        div()
+            .px(px(13.))
+            .pb(px(8.))
+            .child(
+                div()
+                    .id("ana-growth-title")
+                    .pb(px(4.))
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme::text_dim())
+                    .tooltip(widgets::wrap_tooltip(i18n::tr("disk.growth_tip")))
+                    .child(t!("disk.growth_title", days = days).to_string()),
+            )
+            .children(report.rows.iter().map(|row| {
+                let reveal = row.path.clone();
+                let key = format!("ana-growth:{}", row.path.display());
+                div()
+                    .py(px(4.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("{key}-name")))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(11.))
+                                    .text_color(theme::text())
+                                    .tooltip(widgets::wrap_tooltip(format::tilde(&row.path)))
+                                    .child(format::tilde(&row.path)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(font::MONO)
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme::text())
+                                    .child(format!("+{}", format::memory(row.grew))),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(font::MONO)
+                                    .text_size(px(10.))
+                                    .text_color(theme::text_muted())
+                                    .child(format::memory(row.now)),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("{key}-reveal")))
+                                    .icon(IconName::Folder)
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip(reveal_tip())
+                                    .on_click(move |_, _, _| bigfiles::reveal(&reveal)),
+                            ),
+                    )
+                    .child(div().mt(px(3.)).child(widgets::meter(
+                        row.grew as f32 / max as f32,
+                        Hsla::from(theme::ink()),
+                        3.,
+                    )))
+            }))
             .into_any_element(),
     )
 }
@@ -660,6 +910,10 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
     if result.skipped_dataless > 0 {
         extras.push(t!("disk.ana_skip_dataless", n = result.skipped_dataless).to_string());
     }
+    // Why the totals can read lower than Finder adding up the folders.
+    if result.shared_links > 0 {
+        extras.push(t!("disk.ana_shared_links", n = result.shared_links).to_string());
+    }
     // Said out loud for the same reason the other three are: a walk that
     // left out somebody's whole code tree must not let the totals below
     // it read as the whole scope.
@@ -702,11 +956,11 @@ fn scope_display(roots: &[PathBuf], base: &Path, home: &str) -> String {
     if roots.len() > 1 {
         roots
             .iter()
-            .map(|r| tilde_path(&r.display().to_string(), home))
+            .map(|r| format::tilde_path(&r.display().to_string(), home))
             .collect::<Vec<_>>()
             .join(" + ")
     } else {
-        tilde_path(&base.display().to_string(), home)
+        format::tilde_path(&base.display().to_string(), home)
     }
 }
 
@@ -718,7 +972,7 @@ fn analysis_caption_parts(
     dirs_seen: String,
     extras: Vec<String>,
 ) -> String {
-    let root = tilde_path(root_display, home);
+    let root = format::tilde_path(root_display, home);
     let mut parts = Vec::new();
     if root != "~" {
         parts.push(root);
@@ -738,6 +992,8 @@ fn analysis_tables(
     diff: Option<&DiffBaseline>,
 ) -> AnyElement {
     let root = result.root.clone();
+    // Asked once per paint of the tables, not per row.
+    let running = active::running_bundle_ids();
     // One tooltip for every ± in these tables: which run the figure is
     // measured against, and why silence is not a claim of "new".
     let delta_tip = diff.map(|d| {
@@ -753,6 +1009,7 @@ fn analysis_tables(
             state,
             diff,
             delta_tip: delta_tip.clone(),
+            running: &running,
             id,
             deletable,
             // Only a finished result has the retained index behind it;
@@ -775,6 +1032,7 @@ fn analysis_tables(
                     delta_tip: delta_tip.clone(),
                     kind: None,
                     asset: None,
+                    running: &running,
                     group_max: max,
                     root: &root,
                     deletable: false,
@@ -819,7 +1077,16 @@ fn analysis_tables(
     // because unlike the capped tables the full list is retained.
     let sug_head = &result.suggestions[..result.suggestions.len().min(diskscan::TABLE_CAP)];
     let sug_total: u64 = result.suggestions.iter().map(|d| d.bytes).sum();
+    // Growth is measured on the home tree only (`diskwatch`); a result
+    // for any other scope says nothing about it.
+    let home_result = diskscan::default_root().is_some_and(|home| result.roots == [home]);
     div()
+        .children(
+            state
+                .disk_growth()
+                .filter(|_| home_result && actions)
+                .and_then(growth_section),
+        )
         .children(section(
             t!(
                 "disk.sug_title",
@@ -828,7 +1095,7 @@ fn analysis_tables(
             )
             .to_string(),
             dir_rows(sug_head, "ana-sug", actions),
-            actions.then(|| suggest_clear_button(&result.suggestions, sug_total)),
+            actions.then(|| suggest_clear_button(&result.suggestions, &running)),
         ))
         .children({
             // Suggestions already name the trashable caches. Repeating
@@ -871,11 +1138,26 @@ fn analysis_tables(
 }
 
 /// "Trash all" for the suggestion set — acts on the FULL set (TAG trees
-/// plus hint-trashable caches), not just the rendered head; the confirm
-/// restates the count and total so nothing moves that was not announced.
-fn suggest_clear_button(hits: &[DirHit], total: u64) -> AnyElement {
-    let n = hits.len();
+/// plus hint-trashable caches), not just the rendered head. The confirm
+/// lists every row with its size and a tick, so what moves is what the
+/// reader saw, and a row can be kept back; a cache whose app is running
+/// starts unticked, because moving it frees nothing until the app quits.
+fn suggest_clear_button(hits: &[DirHit], running: &[String]) -> AnyElement {
+    let home = env::var("HOME").unwrap_or_default();
     let paths: Vec<PathBuf> = hits.iter().map(|h| h.path.clone()).collect();
+    let items: Vec<(String, u64, Option<String>)> = hits
+        .iter()
+        .map(|hit| {
+            let caution = cleanhints::lookup(&hit.path)
+                .filter(|hint| hint.running_in(running))
+                .map(|hint| t!("disk.pick_running", owner = &hint.owner).to_string());
+            (
+                format::tilde_path(&hit.path.display().to_string(), &home),
+                hit.bytes,
+                caution,
+            )
+        })
+        .collect();
     Button::new("ana-sug-clear")
         .icon(IconName::Delete)
         .ghost()
@@ -883,21 +1165,69 @@ fn suggest_clear_button(hits: &[DirHit], total: u64) -> AnyElement {
         .label(i18n::tr("disk.sug_clear"))
         .on_click(move |_, window, cx| {
             let paths = paths.clone();
-            confirm::ask(
-                window,
-                cx,
-                i18n::tr("disk.sug_clear_title"),
-                t!("disk.sug_clear_body", n = n, bytes = format::memory(total)).to_string(),
-                i18n::tr("disk.big_trash_ok"),
-                move |cx| {
-                    let paths = paths.clone();
-                    cx.global::<ZStatsGlobalStore>()
-                        .clone()
-                        .update(cx, |state, cx| state.trash_regenerable(&paths, cx));
+            let sheet = confirm::PickSheet {
+                title: i18n::tr("disk.sug_clear_title"),
+                body: i18n::tr("disk.sug_pick_body"),
+                items: items
+                    .iter()
+                    .map(|(label, bytes, caution)| confirm::PickItem {
+                        label: label.clone(),
+                        bytes: *bytes,
+                        caution: caution.clone(),
+                    })
+                    .collect(),
+                ok: |n, bytes| {
+                    t!("disk.sug_pick_ok", n = n, bytes = format::memory(bytes)).to_string()
                 },
-            );
+            };
+            confirm::ask_pick(window, cx, sheet, move |chosen, cx| {
+                let picked: Vec<PathBuf> = chosen.iter().map(|&i| paths[i].clone()).collect();
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.trash_regenerable(&picked, cx));
+            });
         })
         .into_any_element()
+}
+
+/// Above every tab's card once anything went to the Trash this session: a move
+/// frees nothing until the Trash is emptied, and without saying so a
+/// "Trash all · 26.8 GB" read as 26.8 GB back while the volume did not
+/// move. The button only opens the Trash — emptying it is the reader's
+/// own act, the one step that cannot be undone.
+fn trashed_note(bytes: u64) -> Option<AnyElement> {
+    if bytes == 0 {
+        return None;
+    }
+    Some(
+        widgets::card()
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.))
+                    .px(px(13.))
+                    .py(px(9.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .line_height(relative(1.35))
+                            .text_color(theme::text_muted())
+                            .child(
+                                t!("disk.trashed_note", bytes = format::memory(bytes)).to_string(),
+                            ),
+                    )
+                    .child(
+                        Button::new("disk-open-trash")
+                            .xsmall()
+                            .label(i18n::tr("disk.open_trash"))
+                            .on_click(|_, _, _| bigfiles::open_trash()),
+                    ),
+            )
+            .into_any_element(),
+    )
 }
 
 /// How many children an opened row lists before it stops and says how
@@ -928,6 +1258,8 @@ struct TreeCtx<'a> {
     state: &'a ZStatsAppState,
     diff: Option<&'a DiffBaseline>,
     delta_tip: Option<String>,
+    /// Bundle ids of the running apps, for the "running" pill.
+    running: &'a [String],
     /// Id prefix, one per table, so the same path listed in two tables
     /// (a suggestion can also rank as a big directory) stays two rows.
     id: &'static str,
@@ -961,6 +1293,7 @@ fn dir_row_tree(
         delta_tip: ctx.delta_tip.clone(),
         kind: Some(hit.kind),
         asset: hit.asset.as_ref(),
+        running: ctx.running,
         group_max,
         root: parent,
         deletable: ctx.deletable,
@@ -1083,23 +1416,74 @@ fn asset_pill(key: &SharedString, note: &diskscan::AssetNote) -> AnyElement {
         .into_any_element()
 }
 
-fn kind_pill(key: &SharedString, kind: HitKind) -> Option<AnyElement> {
-    if kind != HitKind::Tag {
-        return None;
-    }
-    Some(
-        div()
-            .id(SharedString::from(format!("{key}-kind")))
-            .flex_none()
-            .rounded_full()
-            .px(px(5.))
-            .text_size(px(9.))
-            .bg(theme::inset())
-            .text_color(theme::tiny_label(theme::text_muted()))
-            .tooltip(widgets::wrap_tooltip(i18n::tr("disk.kind_tag_tip")))
-            .child(i18n::tr("disk.kind_tag"))
-            .into_any_element(),
+/// What a row's cleanup standing rests on, as a word on the row rather
+/// than only in the name's tooltip — the cleanup list used to label just
+/// its CACHEDIR.TAG trees, so 31 documented tool caches beside one tagged
+/// tree read as unexplained. "rebuilds": the owner declared the tree
+/// regenerable (TAG), or its tool's documentation lists it as a cache it
+/// re-creates (`trashable` hint). "manual": a known owner whose content
+/// it does not simply rebuild — data, downloads, a working tree — which
+/// is why it never joins the suggestions. Plain rows carry nothing.
+fn basis_pill(
+    key: &SharedString,
+    kind: Option<HitKind>,
+    hint: Option<&CleanHint>,
+) -> Option<AnyElement> {
+    let (label, tip) = if kind == Some(HitKind::Tag) {
+        (i18n::tr("disk.kind_tag"), i18n::tr("disk.kind_tag_tip"))
+    } else {
+        let hint = hint?;
+        let base = if hint.trashable {
+            t!("disk.basis_rebuild_tip", owner = &hint.owner).to_string()
+        } else {
+            t!("disk.basis_manual_tip", owner = &hint.owner).to_string()
+        };
+        let tip = match &hint.command {
+            Some(cmd) => format!(
+                "{base} {}",
+                t!("disk.basis_cmd", owner = &hint.owner, cmd = cmd)
+            ),
+            None => base,
+        };
+        let label = if hint.trashable {
+            i18n::tr("disk.kind_tag")
+        } else {
+            i18n::tr("disk.basis_manual")
+        };
+        (label, tip)
+    };
+    Some(row_pill(
+        SharedString::from(format!("{key}-kind")),
+        label,
+        tip,
+        theme::text_muted(),
+    ))
+}
+
+/// The cache's app is running. Moving a cache out from under a live app
+/// frees nothing — it keeps writing into the moved folder until it
+/// restarts — so the row says so before the trash control is reached.
+fn running_pill(key: &SharedString, owner: &str) -> AnyElement {
+    row_pill(
+        SharedString::from(format!("{key}-running")),
+        i18n::tr("disk.running"),
+        t!("disk.running_tip", owner = owner).to_string(),
+        theme::text(),
     )
+}
+
+fn row_pill(id: SharedString, label: String, tip: String, ink: gpui::Rgba) -> AnyElement {
+    div()
+        .id(id)
+        .flex_none()
+        .rounded_full()
+        .px(px(5.))
+        .text_size(px(9.))
+        .bg(theme::inset())
+        .text_color(theme::tiny_label(ink))
+        .tooltip(widgets::wrap_tooltip(tip))
+        .child(label)
+        .into_any_element()
 }
 
 /// The dirs section's fold: "show more · N" ↔ "show less".
@@ -1151,6 +1535,9 @@ struct AnalysisRow<'a> {
     /// `None` for every other path, and for the file table — files
     /// carry no declaration of their own.
     asset: Option<&'a diskscan::AssetNote>,
+    /// Bundle ids of the running apps: a row whose cache belongs to one
+    /// wears "running", and its trash confirm says what that costs.
+    running: &'a [String],
     /// The group's largest row, the meter's 100%.
     group_max: u64,
     /// The row's label is this path made relative — the scan root at
@@ -1214,6 +1601,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         delta_tip,
         kind,
         asset,
+        running,
         group_max,
         root,
         deletable,
@@ -1225,7 +1613,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         .strip_prefix(root)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| path.display().to_string());
-    let mut full = tilde_path(
+    let mut full = format::tilde_path(
         &path.display().to_string(),
         &env::var("HOME").unwrap_or_default(),
     );
@@ -1236,7 +1624,9 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
     }
     // Annotation, not action: a matching clean-hint rides the tooltip —
     // owner tool plus its own cleanup command, never run by us.
-    if let Some(hint) = cleanhints::lookup(path) {
+    let hint = cleanhints::lookup(path);
+    let app_running = hint.as_ref().is_some_and(|hint| hint.running_in(running));
+    if let Some(hint) = &hint {
         full.push_str(" — ");
         full.push_str(&match &hint.command {
             Some(cmd) => t!("disk.hint_cmd", owner = &hint.owner, cmd = cmd).to_string(),
@@ -1303,7 +1693,12 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                         .tooltip(widgets::wrap_tooltip(full))
                         .child(label),
                 )
-                .children(kind.and_then(|kind| kind_pill(&key, kind)))
+                .children(basis_pill(&key, kind, hint.as_ref()))
+                .children(
+                    hint.as_ref()
+                        .filter(|_| app_running)
+                        .map(|hint| running_pill(&key, &hint.owner)),
+                )
                 .children(asset.map(|note| asset_pill(&key, note)))
                 .children(delta_label(bytes, prev_bytes).map(|delta| {
                     // Quiet on purpose: the sign carries the meaning, and
@@ -1349,6 +1744,16 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                             .tooltip(i18n::tr("disk.big_trash"))
                             .on_click({
                                 let bytes_str = format::memory(bytes);
+                                // A running owner is the one thing the
+                                // sheet must add: the move frees nothing
+                                // until that app lets go.
+                                let caution = hint
+                                    .as_ref()
+                                    .filter(|_| app_running)
+                                    .map(|hint| {
+                                        t!("disk.trash_running", owner = &hint.owner).to_string()
+                                    })
+                                    .unwrap_or_default();
                                 move |_, window, cx| {
                                     cx.stop_propagation();
                                     let path = trash_path.clone();
@@ -1356,12 +1761,15 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                                         window,
                                         cx,
                                         i18n::tr("disk.big_trash_title"),
-                                        t!(
-                                            "disk.ana_trash_body",
-                                            name = confirm_label.clone(),
-                                            bytes = bytes_str.clone()
-                                        )
-                                        .to_string(),
+                                        format!(
+                                            "{}{}",
+                                            t!(
+                                                "disk.ana_trash_body",
+                                                name = confirm_label.clone(),
+                                                bytes = bytes_str.clone()
+                                            ),
+                                            caution
+                                        ),
                                         i18n::tr("disk.big_trash_ok"),
                                         move |cx| {
                                             let paths = vec![path.clone()];
@@ -1382,6 +1790,568 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
             Hsla::from(theme::ink()),
             3.,
         )))
+        .into_any_element()
+}
+
+// ---- duplicates ---------------------------------------------------------
+
+/// Copies listed under one group before the rest become a count. A
+/// picked folder has no size floor, and the same small file can sit in a
+/// hundred places; ten rows say "this is everywhere" as well as a
+/// hundred would.
+const DUPE_FILES_SHOWN: usize = 10;
+
+/// The duplicate search's card: header (Find / Cancel and the caption),
+/// the scope row, then the groups, most to free first.
+fn dupes_card(state: &ZStatsAppState) -> AnyElement {
+    widgets::list_shell()
+        .child(dupes_header(state))
+        .children(dupes_scope_row(state))
+        .child(div().px(px(13.)).pb(px(11.)).child(dupes_body(state)))
+        .into_any_element()
+}
+
+fn dupes_header(state: &ZStatsAppState) -> AnyElement {
+    let caption = dupes_caption(state);
+    let asked = !matches!(state.dupe_search(), DupeSearch::Off);
+    div()
+        .px(px(13.))
+        .pt(px(11.))
+        .pb(px(9.))
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::text())
+                                .child(i18n::tr("disk.dup_title")),
+                        )
+                        .child(widgets::info_icon("dupes-basis", i18n::tr("disk.dup_hint"))),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(dupes_chip(state))
+                        // A view action, like the analyser's ✕: drops the
+                        // list (and cancels a running search), touches
+                        // nothing on disk.
+                        .when(asked, |row| {
+                            row.child(widgets::with_wrap_tooltip(
+                                "dupes-dismiss-tip",
+                                i18n::tr("disk.dup_dismiss_hint"),
+                                Button::new("dupes-dismiss")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(|_, _window, cx| {
+                                        cx.global::<ZStatsGlobalStore>()
+                                            .clone()
+                                            .update(cx, |state, cx| state.clear_dupes(cx));
+                                    }),
+                            ))
+                        }),
+                ),
+        )
+        .when(!caption.is_empty(), |d| {
+            d.child(
+                div()
+                    .mt(px(3.))
+                    .min_w_0()
+                    .text_size(px(10.))
+                    .line_height(relative(1.35))
+                    .text_color(theme::text_dim())
+                    .whitespace_normal()
+                    .child(caption),
+            )
+        })
+        .into_any_element()
+}
+
+/// Find / Cancel. Running stays clickable — it is the cancel, the only
+/// way a search stops early, as with the analyser's chip.
+fn dupes_chip(state: &ZStatsAppState) -> AnyElement {
+    let label = match state.dupe_search() {
+        DupeSearch::Running { .. } => i18n::tr("disk.ana_cancel"),
+        DupeSearch::Ready(_) => i18n::tr("disk.dup_again"),
+        DupeSearch::Off | DupeSearch::Failed(_) => i18n::tr("disk.dup_find"),
+    };
+    div()
+        .id("dupes-chip")
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::inset())
+        .px(px(8.))
+        .py(px(2.))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text())
+        .hover(|d| d.bg(theme::surface_raised()))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| {
+                    if matches!(state.dupe_search(), DupeSearch::Running { .. }) {
+                        state.clear_dupes(cx);
+                    } else {
+                        state.start_dupes(cx);
+                    }
+                });
+        })
+        .child(label)
+        .into_any_element()
+}
+
+/// Home, or a picked folder. Home is selected with the header's Find,
+/// because it is the slow one; a picked folder is searched the moment it
+/// is picked — picking is the ask. Gone while a search runs: changing
+/// what a running search covers goes through cancel.
+fn dupes_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
+    if matches!(state.dupe_search(), DupeSearch::Running { .. }) {
+        return None;
+    }
+    let folder = match state.dupe_scope() {
+        DupeScope::Home => None,
+        DupeScope::Folder(path) => Some(path.clone()),
+    };
+    let picked = folder.is_some();
+    let home_chip = div()
+        .id("dupes-scope-home")
+        .flex_none()
+        .rounded(px(4.))
+        .px(px(5.))
+        .py(px(1.))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .when(!picked, |d| d.bg(theme::chip()).text_color(theme::text()))
+        .when(picked, |d| {
+            d.text_color(theme::text_muted())
+                .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+                .on_click(|_, _window, cx| {
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.reset_dupe_scope(cx));
+                })
+        })
+        .tooltip(widgets::wrap_tooltip(i18n::tr("disk.dup_scope_home_tip")))
+        .child(i18n::tr("disk.ana_preset_home"));
+    let pick = Button::new("dupes-pick")
+        .icon(IconName::FolderOpen)
+        .ghost()
+        .xsmall()
+        .on_click(|_, _window, cx| {
+            let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some(i18n::tr("disk.dup_pick_go").into()),
+            });
+            cx.spawn(async move |cx| {
+                if let Ok(Ok(Some(paths))) = rx.await
+                    && let Some(folder) = paths.into_iter().next()
+                {
+                    cx.update(|cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.search_dupes_in(folder, cx));
+                    });
+                }
+            })
+            .detach();
+        });
+    Some(
+        h_flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(13.))
+            .pb(px(8.))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("disk.dup_scope_label")),
+            )
+            .child(home_chip)
+            .children(folder.map(|path| {
+                div()
+                    .id("dupes-scope-folder")
+                    .flex_none()
+                    .rounded(px(4.))
+                    .px(px(5.))
+                    .py(px(1.))
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .bg(theme::chip())
+                    .text_color(theme::text())
+                    .tooltip(widgets::wrap_tooltip(i18n::tr("disk.dup_scope_folder_tip")))
+                    .child(
+                        div()
+                            .max_w(px(220.))
+                            .min_w_0()
+                            .truncate()
+                            .child(format::tilde(&path)),
+                    )
+            }))
+            .child(widgets::with_wrap_tooltip(
+                "dupes-pick-tip",
+                i18n::tr("disk.dup_pick_hint"),
+                pick,
+            ))
+            .into_any_element(),
+    )
+}
+
+/// Progress while running; afterwards the scope, the age, what was
+/// compared and every honesty counter that is not zero.
+fn dupes_caption(state: &ZStatsAppState) -> String {
+    let folder_label = |scope: &DupeScope| match scope {
+        // The default goes without saying, as `~` does on the analyser.
+        DupeScope::Home => None,
+        DupeScope::Folder(path) => Some(format::tilde(path)),
+    };
+    match state.dupe_search() {
+        DupeSearch::Off => String::new(),
+        DupeSearch::Failed(e) => t!("disk.dup_failed", e = e.clone()).to_string(),
+        DupeSearch::Running {
+            scope, progress, ..
+        } => {
+            let what = match progress {
+                DupeProgress::Walking { files } => {
+                    t!("disk.dup_walking", n = format::thousands(*files)).to_string()
+                }
+                // "At most": the total assumes every same-size file is read
+                // whole, and the 64 KB pass rules most of them out first.
+                DupeProgress::Hashing { read, total } => t!(
+                    "disk.dup_hashing",
+                    read = format::memory(*read),
+                    total = format::memory(*total)
+                )
+                .to_string(),
+            };
+            match folder_label(scope) {
+                Some(folder) => format!("{folder} · {what}"),
+                None => what,
+            }
+        }
+        DupeSearch::Ready(result) => {
+            let mut parts: Vec<String> = Vec::new();
+            parts.extend(folder_label(&result.scope));
+            parts.push(format::ago(result.scanned_at.elapsed().unwrap_or_default()));
+            parts.push(t!("disk.ana_took", t = format::took(result.took)).to_string());
+            let n = format::thousands(result.files_seen);
+            parts.push(match result.scope {
+                DupeScope::Home => t!("disk.dup_files_home", n = n).to_string(),
+                DupeScope::Folder(_) => t!("disk.dup_files", n = n).to_string(),
+            });
+            if result.unreadable > 0 {
+                parts.push(t!("disk.dup_unreadable", n = result.unreadable).to_string());
+            }
+            parts.join(" · ")
+        }
+    }
+}
+
+fn dupes_body(state: &ZStatsAppState) -> AnyElement {
+    let padded_note = |text: String| div().child(widgets::note(text)).into_any_element();
+    let result = match state.dupe_search() {
+        DupeSearch::Off => return padded_note(i18n::tr("disk.dup_hint")),
+        DupeSearch::Running { .. } => return padded_note(i18n::tr("disk.dup_running")),
+        // The caption carries the error.
+        DupeSearch::Failed(_) => return div().into_any_element(),
+        DupeSearch::Ready(result) => result,
+    };
+    if result.groups.is_empty() {
+        return padded_note(i18n::tr("disk.dup_none"));
+    }
+    let home = env::var("HOME").unwrap_or_default();
+    let shown = state.dupes_shown().min(result.groups.len());
+    let hidden = result.groups.len() - shown;
+    div()
+        .child(
+            div()
+                .pb(px(4.))
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text())
+                .child(
+                    t!(
+                        "disk.dup_summary",
+                        groups = result.groups.len(),
+                        copies = result.extra_copies(),
+                        bytes = format::memory(result.reclaimable())
+                    )
+                    .to_string(),
+                ),
+        )
+        .when(state.dupes_stale(), |d| {
+            d.child(
+                div()
+                    .pb(px(4.))
+                    .child(widgets::note(i18n::tr("disk.dup_stale"))),
+            )
+        })
+        .children(
+            result.groups[..shown]
+                .iter()
+                .enumerate()
+                .map(|(i, group)| dupe_group(group, &home, i + 1 == shown && hidden == 0)),
+        )
+        .when(hidden > 0, |d| {
+            d.child(
+                h_flex().pt(px(6.)).child(
+                    div()
+                        .id("dupes-more")
+                        .flex_none()
+                        .rounded(px(4.))
+                        .px(px(6.))
+                        .py(px(1.))
+                        .text_size(px(10.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::text_muted())
+                        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+                        .child(t!("disk.ana_more", count = hidden).to_string())
+                        .on_click(|_, _window, cx| {
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| state.show_more_dupes(cx));
+                        }),
+                ),
+            )
+        })
+        .into_any_element()
+}
+
+/// One group: a name for it, how many and how big, what moving all but
+/// one would free — then the copies themselves.
+fn dupe_group(group: &DupeGroup, home: &str, last: bool) -> AnyElement {
+    let key = row_key("dup", &group.files[0].path);
+    // The shortest name among the copies: "Installer.dmg" rather than
+    // "Installer (1).dmg", "trip.mov" rather than "trip copy.mov" — the
+    // copy's name is usually the original's plus what made it a copy.
+    let name = group
+        .files
+        .iter()
+        .filter_map(|f| f.path.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .min_by_key(|n| n.chars().count())
+        .unwrap_or_default();
+    let frees_tip = if group.reclaimable == 0 {
+        i18n::tr("disk.dup_frees_none_tip")
+    } else {
+        t!(
+            "disk.dup_frees_tip",
+            bytes = format::memory(group.reclaimable)
+        )
+        .to_string()
+    };
+    let hidden = group.files.len().saturating_sub(DUPE_FILES_SHOWN);
+    let others = group.files.len() - 1;
+    v_flex()
+        .py(px(7.))
+        .when(!last, |d| {
+            d.border_b(px(1.)).border_color(theme::border_subtle())
+        })
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(11.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                        .truncate()
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.))
+                        .text_color(theme::text_dim())
+                        .child(
+                            t!(
+                                "disk.dup_group_meta",
+                                n = group.files.len(),
+                                size = format::memory(group.len)
+                            )
+                            .to_string(),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{key}-frees")))
+                        .flex_none()
+                        .font_family(font::MONO)
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(if group.reclaimable == 0 {
+                            theme::text_dim()
+                        } else {
+                            theme::text()
+                        })
+                        .tooltip(widgets::wrap_tooltip(frees_tip))
+                        .child(format::memory(group.reclaimable)),
+                ),
+        )
+        .children(
+            group
+                .files
+                .iter()
+                .take(DUPE_FILES_SHOWN)
+                .map(|file| dupe_file_row(file, home, others)),
+        )
+        .when(hidden > 0, |d| {
+            d.child(
+                div()
+                    .pl(px(INDENT_STEP))
+                    .pt(px(3.))
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(t!("disk.dup_more_copies", n = hidden).to_string()),
+            )
+        })
+        .into_any_element()
+}
+
+/// One copy: where it is, what it frees if it goes, when it was last
+/// changed (the usual way to choose which to keep), Reveal and Trash.
+/// Every listed group has two copies or more, so Trash is never the last
+/// one — and the store re-checks that against the disk before it moves
+/// anything (`DupeGroup::spare`).
+fn dupe_file_row(file: &DupeFile, home: &str, others: usize) -> AnyElement {
+    let key = row_key("dupf", &file.path);
+    let full = format::tilde_path(&file.path.display().to_string(), home);
+    let dir = file
+        .path
+        .parent()
+        .map(|p| format::tilde_path(&p.display().to_string(), home))
+        .unwrap_or_default();
+    let name = file
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let path = file.path.clone();
+    let frees = file.frees();
+    let confirm_path = full.clone();
+    h_flex()
+        .items_center()
+        .gap(px(6.))
+        .pl(px(INDENT_STEP))
+        .pt(px(3.))
+        .child(
+            // The directory gives way first: copies usually share a name
+            // and differ in where they are, but the name is what says
+            // which file a row is when they do not.
+            h_flex()
+                .id(SharedString::from(format!("{key}-path")))
+                .flex_1()
+                .min_w_0()
+                .text_size(px(10.5))
+                .tooltip(widgets::wrap_tooltip(full))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme::text_muted())
+                        .child(format!("{dir}/")),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(px(200.))
+                        .truncate()
+                        .text_color(theme::text())
+                        .child(name),
+                ),
+        )
+        .when(file.shares_storage, |d| {
+            d.child(row_pill(
+                SharedString::from(format!("{key}-clone")),
+                i18n::tr("disk.dup_clone"),
+                i18n::tr("disk.dup_clone_tip"),
+                theme::text_muted(),
+            ))
+        })
+        .when(file.linked, |d| {
+            d.child(row_pill(
+                SharedString::from(format!("{key}-linked")),
+                i18n::tr("disk.dup_linked"),
+                i18n::tr("disk.dup_linked_tip"),
+                theme::text_muted(),
+            ))
+        })
+        .children(file.modified.map(|at| {
+            let day = format::date(at);
+            div()
+                .id(SharedString::from(format!("{key}-modified")))
+                .flex_none()
+                .font_family(font::MONO)
+                .text_size(px(10.))
+                .text_color(theme::text_dim())
+                .tooltip(widgets::wrap_tooltip(
+                    t!("disk.dup_modified", date = day.clone()).to_string(),
+                ))
+                .child(day)
+        }))
+        .child(
+            Button::new(SharedString::from(format!("{key}-reveal")))
+                .icon(IconName::Folder)
+                .ghost()
+                .xsmall()
+                .tooltip(reveal_tip())
+                .on_click({
+                    let path = file.path.clone();
+                    move |_, _window, _cx| bigfiles::reveal(&path)
+                }),
+        )
+        .child(
+            Button::new(SharedString::from(format!("{key}-trash")))
+                .icon(IconName::Delete)
+                .ghost()
+                .xsmall()
+                .tooltip(i18n::tr("disk.dup_trash"))
+                .on_click(move |_, window, cx| {
+                    let path = path.clone();
+                    let mut body = t!(
+                        "disk.dup_trash_body",
+                        path = confirm_path.clone(),
+                        n = others
+                    )
+                    .to_string();
+                    if !frees {
+                        body.push(' ');
+                        body.push_str(&i18n::tr("disk.dup_trash_nothing"));
+                    }
+                    confirm::ask(
+                        window,
+                        cx,
+                        i18n::tr("disk.dup_trash_title"),
+                        body,
+                        i18n::tr("disk.big_trash_ok"),
+                        move |cx| {
+                            let path = path.clone();
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |state, cx| state.trash_dupe(&path, cx));
+                        },
+                    );
+                }),
+        )
         .into_any_element()
 }
 
@@ -1418,38 +2388,6 @@ fn big_files_card(state: &ZStatsAppState) -> AnyElement {
             ))
         })
         .into_any_element();
-    // Off is a one-row toolbar, not an empty well sitting above the
-    // analyser. The ⓘ still carries the read-once hint.
-    if matches!(state.big_files(), BigFiles::Off) {
-        return widgets::card()
-            .pt(px(8.))
-            .pb(px(8.))
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme::text())
-                                    .child(i18n::tr("disk.big_title")),
-                            )
-                            .child(widgets::info_icon(
-                                "big-files-basis",
-                                i18n::tr("disk.big_hint"),
-                            )),
-                    )
-                    .child(controls),
-            )
-            .into_any_element();
-    }
     widgets::list_shell()
         .child(widgets::list_header(
             h_flex()
@@ -1507,9 +2445,8 @@ fn big_files_body(state: &ZStatsAppState) -> AnyElement {
     // The card body carries the padding; these are plain notes.
     let padded_note = |text: String| div().child(widgets::note(text)).into_any_element();
     match state.big_files() {
-        // Not reached from the card, which draws no body before the
-        // first query — the ⓘ in its header carries this now. Kept as
-        // the arm's honest answer rather than an unreachable panic.
+        // Nothing asked yet: what the query reads and what it cannot
+        // see, as the tab's body — the analyser's card does the same.
         BigFiles::Off => padded_note(i18n::tr("disk.big_hint")),
         BigFiles::Running => padded_note(i18n::tr("disk.big_running")),
         BigFiles::Failed { indexing_off: true } => padded_note(i18n::tr("disk.big_index_off")),
@@ -1605,31 +2542,6 @@ fn display_bar(bytes: u64) -> u64 {
     (bytes / step) * step
 }
 
-/// `/Users/you/…` collapses to `~/…` — the shared prefix every row would
-/// otherwise spend its tooltip width repeating. Pure so it can be tested
-/// without touching the real environment.
-///
-/// The whole-disk scope walks `/System/Volumes/Data`, so its paths
-/// arrive wearing that prefix; it is dropped first. Not cosmetic —
-/// `/System/Volumes/Data/Users/you/Downloads` and `~/Downloads` are the
-/// same inode reached through a firmlink, and showing the mount-point
-/// spelling would make a familiar folder look like somewhere strange
-/// while also defeating the `~` collapse below.
-fn tilde_path(path: &str, home: &str) -> String {
-    let path = path
-        .strip_prefix(diskscan::DATA_VOLUME_DISPLAY_PREFIX)
-        .filter(|rest| rest.starts_with('/'))
-        .unwrap_or(path);
-    match path.strip_prefix(home) {
-        // Component boundary required: /Users/xy must not collapse under
-        // a /Users/x home.
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
-            format!("~{rest}")
-        }
-        _ => path.to_string(),
-    }
-}
-
 /// `new_since` carries the baseline's age when this row is one the
 /// previous listing would have shown and did not — the pill says "new",
 /// its tooltip says since when. `None` covers both "was there before"
@@ -1649,7 +2561,7 @@ fn big_file_row(
     // The full location rides the name's tooltip instead of a second line:
     // most rows never need it (the Finder button answers "where" better),
     // and a 320px column has no honest way to show a deep path anyway.
-    let mut full = tilde_path(
+    let mut full = format::tilde_path(
         &file.path.display().to_string(),
         &env::var("HOME").unwrap_or_default(),
     );
@@ -1834,46 +2746,6 @@ mod tests {
         };
         let text = asset_clause(&denied);
         assert!(!text.contains("required"), "{text}");
-    }
-
-    #[test]
-    fn tilde_path_collapses_home_only() {
-        assert_eq!(
-            tilde_path("/Users/x/Movies/a.mkv", "/Users/x"),
-            "~/Movies/a.mkv"
-        );
-        assert_eq!(tilde_path("/tmp/a", "/Users/x"), "/tmp/a");
-        // An empty home must not turn every path into "~<path>".
-        assert_eq!(tilde_path("/tmp/a", ""), "/tmp/a");
-        // Prefix only counts on a component boundary.
-        assert_eq!(tilde_path("/Users/xy/f", "/Users/x"), "/Users/xy/f");
-    }
-
-    /// The whole-disk scope walks the data volume, so its paths arrive
-    /// wearing that mount point. They are the same directories reached
-    /// through a firmlink, and the reader knows them by their ordinary
-    /// names — the prefix comes off before the `~` collapse, not after,
-    /// or a home path under it would never collapse at all.
-    #[test]
-    fn tilde_path_drops_the_data_volume_mount_point() {
-        assert_eq!(
-            tilde_path("/System/Volumes/Data/Users/x/Movies/a.mkv", "/Users/x"),
-            "~/Movies/a.mkv"
-        );
-        assert_eq!(
-            tilde_path("/System/Volumes/Data/System/Library/AssetsV2", "/Users/x"),
-            "/System/Library/AssetsV2"
-        );
-        // The mount point itself is not a path under it.
-        assert_eq!(
-            tilde_path("/System/Volumes/Data", "/Users/x"),
-            "/System/Volumes/Data"
-        );
-        // A same-named directory elsewhere keeps its full path.
-        assert_eq!(
-            tilde_path("/System/Volumes/DataSet/x", "/Users/x"),
-            "/System/Volumes/DataSet/x"
-        );
     }
 
     #[test]

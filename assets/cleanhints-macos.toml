@@ -29,6 +29,14 @@
 # toolchains) or living inside working trees (node_modules, target):
 # those stay annotation-only.
 #
+# app = "bundle.id" names the application that writes a trashable cache
+# (a prefix ending in "." covers a vendor's family: "com.jetbrains.").
+# It is identity, not a cleanup rule — read from the app's own
+# Info.plist — and only lets the row say the app is running: a cache
+# moved out from under a live app keeps being written in the Trash and
+# frees nothing until the app restarts. A wrong id only loses that
+# warning. Leave it off for command-line tools.
+#
 # A user copy at ~/.zstats/cleanhints-macos.toml replaces this list
 # wholesale (read once at launch). The name carries the platform there
 # too: ~/.zstats is shared with the zstats CLI and may be synced between
@@ -292,26 +300,31 @@ trashable = true
 match = "~/Library/Developer/Xcode/DerivedData"
 owner = "Xcode"
 trashable = true
+app = "com.apple.dt.Xcode"
 
 [[hint]]
 match = "~/Library/Caches/com.apple.dt.Xcode"
 owner = "Xcode"
 trashable = true
+app = "com.apple.dt.Xcode"
 
 [[hint]]
 match = "~/Library/Developer/Xcode/iOS DeviceSupport"
 owner = "Xcode"
 trashable = true
+app = "com.apple.dt.Xcode"
 
 [[hint]]
 match = "~/Library/Developer/Xcode/watchOS DeviceSupport"
 owner = "Xcode"
 trashable = true
+app = "com.apple.dt.Xcode"
 
 [[hint]]
 match = "~/Library/Developer/Xcode/tvOS DeviceSupport"
 owner = "Xcode"
 trashable = true
+app = "com.apple.dt.Xcode"
 
 # Exported IPAs / xcarchive bundles — user artefacts, never a cleanup target.
 [[hint]]
@@ -322,6 +335,7 @@ owner = "Xcode"
 match = "~/Library/Developer/CoreSimulator/Caches"
 owner = "Simulator"
 trashable = true
+app = "com.apple.iphonesimulator"
 
 [[hint]]
 match = "~/Library/Developer/CoreSimulator"
@@ -334,51 +348,61 @@ command = "xcrun simctl delete unavailable"
 match = "~/Library/Application Support/Code/Cache"
 owner = "VS Code"
 trashable = true
+app = "com.microsoft.VSCode"
 
 [[hint]]
 match = "~/Library/Application Support/Code/CachedData"
 owner = "VS Code"
 trashable = true
+app = "com.microsoft.VSCode"
 
 [[hint]]
 match = "~/Library/Application Support/Code/CachedExtensionVSIXs"
 owner = "VS Code"
 trashable = true
+app = "com.microsoft.VSCode"
 
 [[hint]]
 match = "~/Library/Application Support/Code/GPUCache"
 owner = "VS Code"
 trashable = true
+app = "com.microsoft.VSCode"
 
 [[hint]]
 match = "~/Library/Application Support/Cursor/Cache"
 owner = "Cursor"
 trashable = true
+app = "com.todesktop.230313mzl4w4u92"
 
 [[hint]]
 match = "~/Library/Application Support/Cursor/CachedData"
 owner = "Cursor"
 trashable = true
+app = "com.todesktop.230313mzl4w4u92"
 
 [[hint]]
 match = "~/Library/Application Support/Cursor/GPUCache"
 owner = "Cursor"
 trashable = true
+app = "com.todesktop.230313mzl4w4u92"
 
 [[hint]]
 match = "~/Library/Caches/dev.zed.Zed"
 owner = "Zed"
 trashable = true
+app = "dev.zed.Zed"
 
 [[hint]]
 match = "~/Library/Caches/JetBrains"
 owner = "JetBrains"
 trashable = true
+app = "com.jetbrains."
 
 [[hint]]
 match = "~/Library/Application Support/Claude/Cache"
 owner = "Claude"
 trashable = true
+app = "com.anthropic.claudefordesktop"
 
 # --- browsers for tests, containers, ML -------------------------------
 
@@ -463,11 +487,13 @@ command = "Telegram → Settings → Data and Storage"
 match = "~/Library/Application Support/Slack/Cache"
 owner = "Slack"
 trashable = true
+app = "com.tinyspeck.slackmacgap"
 
 [[hint]]
 match = "~/Library/Application Support/discord/Cache"
 owner = "Discord"
 trashable = true
+app = "com.hnc.Discord"
 
 # Recordings live here — user data, never suggest it.
 [[hint]]
@@ -478,6 +504,7 @@ owner = "Zoom"
 match = "~/Library/Caches/us.zoom.xos"
 owner = "Zoom"
 trashable = true
+app = "us.zoom.xos"
 
 # --- browsers (cache dirs only, never profiles) ------------------------
 
@@ -485,21 +512,25 @@ trashable = true
 match = "~/Library/Caches/Google/Chrome"
 owner = "Chrome"
 trashable = true
+app = "com.google.Chrome"
 
 [[hint]]
 match = "~/Library/Caches/Microsoft Edge"
 owner = "Edge"
 trashable = true
+app = "com.microsoft.edgemac"
 
 [[hint]]
 match = "~/Library/Caches/Firefox"
 owner = "Firefox"
 trashable = true
+app = "org.mozilla.firefox"
 
 [[hint]]
 match = "~/Library/Caches/com.brave.Browser"
 owner = "Brave"
 trashable = true
+app = "com.brave.Browser"
 
 # Profile / Spaces live under Application Support — annotation only.
 # The short Caches/Arc name is not a documented, stable location.
@@ -522,6 +553,7 @@ match = "~/Library/Caches/com.spotify.client"
 owner = "Spotify"
 command = "Spotify → Settings → Storage → Clear cache"
 trashable = true
+app = "com.spotify.client"
 
 [[hint]]
 match = "~/Library/Containers/com.netease.163music"
@@ -563,16 +595,19 @@ owner = "Dropbox"
 match = "~/Library/Application Support/Adobe/Common/Media Cache Files"
 owner = "Adobe"
 trashable = true
+app = "com.adobe."
 
 [[hint]]
 match = "~/Library/Application Support/Adobe/Common/Media Cache"
 owner = "Adobe"
 trashable = true
+app = "com.adobe."
 
 [[hint]]
 match = "~/Library/Caches/Adobe"
 owner = "Adobe"
 trashable = true
+app = "com.adobe."
 
 [[hint]]
 match = "~/Library/Application Support/Notion"
@@ -582,6 +617,7 @@ owner = "Notion"
 match = "~/Library/Application Support/Notion/Cache"
 owner = "Notion"
 trashable = true
+app = "notion.id"
 
 [[hint]]
 match = "~/Library/Application Support/Figma"
@@ -591,6 +627,7 @@ owner = "Figma"
 match = "~/Library/Application Support/Figma/Cache"
 owner = "Figma"
 trashable = true
+app = "com.figma.Desktop"
 
 [[hint]]
 match = "~/Library/Containers/com.kingsoft.wpsoffice.mac"

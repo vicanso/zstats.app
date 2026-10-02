@@ -409,6 +409,32 @@ fn file_uri(path: &Path) -> String {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn reveal(_path: &Path) {}
 
+/// Open the Trash in the file manager — where emptying it is the user's
+/// own act. Nothing here empties it: that is the one irreversible step,
+/// and this app's touches are recoverable by rule.
+#[cfg(target_os = "macos")]
+pub fn open_trash() {
+    let Some(home) = env::var_os("HOME") else {
+        return;
+    };
+    let trash = Path::new(&home).join(".Trash");
+    if let Err(e) = opener::open([trash.as_os_str()]) {
+        tracing::warn!("open Trash: {e}");
+    }
+}
+
+/// The freedesktop Trash, through GIO's own scheme — what `gio trash`
+/// (`trash` above) moved things into.
+#[cfg(target_os = "linux")]
+pub fn open_trash() {
+    if let Err(e) = opener::open(["trash:///"]) {
+        tracing::warn!("open Trash: {e}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn open_trash() {}
+
 #[cfg(target_os = "macos")]
 fn query(root: &str, threshold: u64) -> Result<Vec<PathBuf>, ScanError> {
     let out = Command::new("mdfind")

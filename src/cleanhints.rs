@@ -63,6 +63,13 @@ pub struct CleanHint {
     /// an entry from a pulled update that forgets the flag can only ever
     /// under-suggest, never volunteer user data for deletion.
     pub trashable: bool,
+    /// The app that writes this cache, by bundle id — or a prefix ending
+    /// in `.` for a vendor's whole family (`com.jetbrains.`). Lets a row
+    /// say "running" (`running_in`): moving a cache out from under a live
+    /// app does not free the space, since it keeps writing into the moved
+    /// folder until it restarts. A fact about the app's identity, not a
+    /// cleanup rule; a wrong id only loses that pill.
+    pub app: Option<String>,
     rule: Rule,
 }
 
@@ -76,6 +83,21 @@ enum Rule {
 }
 
 impl CleanHint {
+    /// Whether the app that writes this cache is among `running` (bundle
+    /// ids of the running applications).
+    pub fn running_in<'a>(&self, running: impl IntoIterator<Item = &'a String>) -> bool {
+        let Some(app) = self.app.as_deref() else {
+            return false;
+        };
+        running.into_iter().any(|id| {
+            if app.ends_with('.') {
+                id.starts_with(app)
+            } else {
+                id == app
+            }
+        })
+    }
+
     fn matches(&self, path: &Path) -> bool {
         match &self.rule {
             Rule::Exact(p) => path == p,
@@ -267,6 +289,11 @@ fn parse(content: &str, home: &Path) -> Vec<CleanHint> {
                 .get("trashable")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let app = entry
+                .get("app")
+                .and_then(|v| v.as_str())
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
             let rule = if let Some(rest) = matcher.strip_prefix("~/") {
                 Rule::Exact(home.join(rest))
             } else if matcher.starts_with('/') {
@@ -280,6 +307,7 @@ fn parse(content: &str, home: &Path) -> Vec<CleanHint> {
                 owner,
                 command,
                 trashable,
+                app,
                 rule,
             })
         })
@@ -506,6 +534,80 @@ owner = "skipped too"
                 hint.trashable,
                 "{path} is a pure cache and should stay on the cleanup list"
             );
+        }
+    }
+
+    #[test]
+    fn a_running_app_is_matched_by_id_or_by_vendor_prefix() {
+        let hints = parse(
+            r#"
+            [[hint]]
+            match = "~/Library/Caches/Google/Chrome"
+            owner = "Chrome"
+            trashable = true
+            app = "com.google.Chrome"
+
+            [[hint]]
+            match = "~/Library/Caches/JetBrains"
+            owner = "JetBrains"
+            trashable = true
+            app = "com.jetbrains."
+
+            [[hint]]
+            match = "~/.npm"
+            owner = "npm"
+            trashable = true
+            "#,
+            &p("/Users/x"),
+        );
+        let running = [
+            "com.google.Chrome".to_string(),
+            "com.jetbrains.rustrover".to_string(),
+        ];
+        assert!(hints[0].running_in(&running));
+        assert!(
+            hints[1].running_in(&running),
+            "a vendor prefix covers the family"
+        );
+        assert!(!hints[2].running_in(&running), "no app, never running");
+        // An exact id is exact: Chrome Canary is not Chrome.
+        assert!(!hints[0].running_in(&["com.google.Chrome.canary".to_string()]));
+    }
+
+    /// Every GUI app whose cache is on the cleanup list names its bundle
+    /// id, so the row can say when that app is running.
+    #[test]
+    fn every_trashable_app_cache_names_its_app() {
+        let embedded = assets::get(FILE).unwrap();
+        let hints = parse(str::from_utf8(&embedded).unwrap(), &p("/Users/x"));
+        for owner in [
+            "Chrome",
+            "Edge",
+            "Firefox",
+            "Brave",
+            "Spotify",
+            "Zoom",
+            "Slack",
+            "Discord",
+            "VS Code",
+            "Cursor",
+            "Zed",
+            "JetBrains",
+            "Claude",
+            "Notion",
+            "Figma",
+            "Adobe",
+            "Xcode",
+            "Simulator",
+        ] {
+            let mine: Vec<&CleanHint> = hints
+                .iter()
+                .filter(|h| h.owner == owner && h.trashable)
+                .collect();
+            assert!(!mine.is_empty(), "{owner} has no trashable entry");
+            for hint in mine {
+                assert!(hint.app.is_some(), "{owner} names no app");
+            }
         }
     }
 }

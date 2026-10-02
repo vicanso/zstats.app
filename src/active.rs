@@ -167,6 +167,22 @@ pub fn start() {
 #[cfg(not(target_os = "macos"))]
 pub fn start() {}
 
+/// Bundle ids of every running application, asked at the moment a
+/// cleanup row is drawn — the disk-space window marks a cache whose app
+/// is running (`cleanhints::CleanHint::running_in`). One AppKit call
+/// over the application list, no polling: the window repaints on its
+/// own events, and a stale answer between them only delays a pill.
+#[cfg(target_os = "macos")]
+pub fn running_bundle_ids() -> Vec<String> {
+    native::running_bundle_ids()
+}
+
+/// No application list to ask off macOS; no row says "running".
+#[cfg(not(target_os = "macos"))]
+pub fn running_bundle_ids() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(target_os = "macos")]
 mod native {
     use block2::RcBlock;
@@ -178,6 +194,15 @@ mod native {
     use objc2_foundation::NSNotification;
     use std::mem;
     use std::time::Instant;
+
+    pub(super) fn running_bundle_ids() -> Vec<String> {
+        NSWorkspace::sharedWorkspace()
+            .runningApplications()
+            .iter()
+            .filter_map(|app| app.bundleIdentifier())
+            .map(|id| id.to_string())
+            .collect()
+    }
 
     /// Who is in front right now. Asked only while a banner is being
     /// composed — the activation table answers everything else.

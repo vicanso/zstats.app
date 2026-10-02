@@ -13,12 +13,15 @@
 
 mod alerts;
 mod analysis;
+mod dupes;
 
 pub use alerts::SeenAlert;
-pub use analysis::{BigFiles, DiskAnalysis, Expansion};
+pub use analysis::{BigFiles, DiskAnalysis, Expansion, GrowthNotice, StorageTab};
+pub use dupes::{DupeProgress, DupeSearch};
 
 use alerts::{AlertBook, keep_alert};
 use analysis::Analysis;
+use dupes::Dupes;
 
 use crate::alerttpl;
 use crate::cachepreset;
@@ -742,6 +745,9 @@ pub struct ZStatsAppState {
     /// analyser (see [`DiskAnalysis`]); the listing is query-like and
     /// reset on hide.
     pub(crate) analysis: Analysis,
+    /// The disk-space window's duplicate search. Survives hide and the
+    /// window's close, like the analyser (see `state/dupes.rs`).
+    pub(crate) dupes: Dupes,
     /// The boot volume's purgeable-space / snapshot readout, refreshed
     /// lazily while Hardware is the visible tab (throttled below) — a
     /// panel-owned query, deliberately not a Monitor metric.
@@ -915,6 +921,7 @@ impl Default for ZStatsAppState {
             listen_filter_open: false,
             listen_filter_text: String::new(),
             analysis: Analysis::default(),
+            dupes: Dupes::default(),
             space: None,
             space_at: None,
             space_inflight: false,
@@ -1148,6 +1155,28 @@ impl ZStatsAppState {
         // tab is on screen, every 10s otherwise — and a late answer is
         // kept even when nobody is looking.
         self.ensure_traffic(cx);
+        // The daily disk check rides the tick like the reads above, but
+        // only ever starts when nobody is looking (`diskwatch::due`).
+        let storage_open = self.storage_window.is_some_and(|handle| {
+            cx.windows()
+                .iter()
+                .any(|w| w.window_id() == handle.window_id())
+        });
+        let (on_battery, cpu_percent) = self.latest().map_or((false, None), |tick| {
+            (
+                tick.snapshot
+                    .battery
+                    .as_ref()
+                    .is_some_and(|b| matches!(b.state.as_str(), "Discharging" | "Empty")),
+                Some(tick.snapshot.cpu.usage_percent),
+            )
+        });
+        let moment = analysis::DiskCheckMoment {
+            on_battery,
+            cpu_percent,
+            someone_looking: panel_visible(cx) || storage_open,
+        };
+        self.maybe_check_disk(moment, cx);
         if self.tab == Tab::Net && panel_visible(cx) {
             self.ensure_listeners(cx);
         }

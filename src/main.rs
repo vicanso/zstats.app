@@ -28,8 +28,10 @@ mod cachepreset;
 mod cleanhints;
 mod confirm;
 mod diskscan;
+mod diskwatch;
 #[cfg(target_os = "macos")]
 mod dock;
+mod dupes;
 mod font;
 mod format;
 mod fullscan;
@@ -1205,10 +1207,10 @@ fn settings_nav(
         .into_any_element()
 }
 
-/// The disk-space window's view. Owns nothing but focus and a scroll
-/// offset — both features it shows live in the global store, which this
-/// observes exactly as the panel does, so a walk's progress lands here
-/// with no plumbing of its own.
+/// The disk-space window's view. Owns nothing but focus and the scroll
+/// offsets — everything it shows, the selected tab included, lives in
+/// the global store, which this observes exactly as the panel does, so a
+/// walk's progress lands here with no plumbing of its own.
 ///
 /// Note the observer is unconditional, unlike the panel's: `CollectorPace`
 /// gates the panel's repaint because that window is moved off screen
@@ -1218,7 +1220,9 @@ struct StorageWindow {
     /// keystrokes along the focus path, so without a focused node the
     /// Escape / cmd-w bindings never reach the root's `key_context`.
     focus_handle: gpui::FocusHandle,
-    scroll: ScrollHandle,
+    /// One per tab (`StorageTab::index`): switching to Duplicates and
+    /// back must not lose your place halfway down the analysis.
+    scrolls: [ScrollHandle; 3],
     /// Where a directory to leave out of the analysis is typed.
     /// Committed on Enter, never on a keystroke — half a path is a path
     /// that excludes the wrong thing.
@@ -1265,7 +1269,11 @@ impl StorageWindow {
         window.focus(&focus_handle, cx);
         Self {
             focus_handle,
-            scroll: ScrollHandle::new(),
+            scrolls: [
+                ScrollHandle::new(),
+                ScrollHandle::new(),
+                ScrollHandle::new(),
+            ],
             exclude_input,
         }
     }
@@ -1278,10 +1286,11 @@ impl Render for StorageWindow {
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
+        let scroll = &self.scrolls[state.storage_tab().index()];
         let body = gpui_kit::component::v_flex()
             .gap(px(8.))
             .children(views::storage::render(state, &self.exclude_input));
-        div()
+        gpui_kit::component::v_flex()
             .relative()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -1295,11 +1304,22 @@ impl Render for StorageWindow {
             }))
             .bg(bg)
             .text_color(fg)
+            // Outside the scrolling body, so the tabs stay reachable from
+            // the bottom of a long table.
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(16.))
+                    .pt(px(AUX_BODY_PAD))
+                    .child(views::storage::tab_strip(state)),
+            )
             .child(
                 div()
                     .id("storage-body")
-                    .track_scroll(&self.scroll)
-                    .size_full()
+                    .track_scroll(scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
                     .overflow_y_scroll()
                     .px(px(16.))
                     .py(px(AUX_BODY_PAD))

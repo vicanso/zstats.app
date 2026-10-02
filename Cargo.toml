@@ -130,6 +130,11 @@ time = "0.3"
 # it, but only until gpui moves again.
 resvg = "0.46"
 
+# Content hashes for the disk window's duplicate finder (dupes.rs): a
+# 64 KB head hash, then the whole file, only for files that already share a
+# size. Fast enough that the read, not the hash, is the cost.
+blake3 = "1.8.7"
+
 # Tray, backend one of two: `NSStatusItem` on macOS, Shell_NotifyIcon on
 # Windows.
 #

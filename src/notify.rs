@@ -517,6 +517,30 @@ pub fn post_memory_creep(creep: &state::MemoryCreep) {
     });
 }
 
+/// The daily disk check found a directory that grew past
+/// `diskwatch::NOTIFY_BYTES` over about a week. Silent, like the other
+/// watchers' banners: a disk filling over days is worth knowing, not
+/// worth a sound. The click lands on the Alerts tab's growth card.
+pub fn post_disk_growth(notice: &state::GrowthNotice) {
+    let days = (notice.over.as_secs_f64() / 86_400.0).round().max(1.0) as u64;
+    dispatch(Banner {
+        id: format!("zstats-growth-{}", notice.growth.path.display()),
+        title: format::tilde(&notice.growth.path),
+        subtitle: t!(
+            "disk.growth_banner_subtitle",
+            grew = format::memory(notice.growth.grew),
+            days = days
+        )
+        .to_string(),
+        body: t!(
+            "disk.growth_banner_body",
+            now = format::memory(notice.growth.now)
+        )
+        .to_string(),
+        silent: true,
+    });
+}
+
 fn signal_click() {
     if let Some(tx) = CLICK.get() {
         let _ = tx.try_send(());

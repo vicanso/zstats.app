@@ -22,7 +22,7 @@ use crate::cleanhints;
 use crate::prefs;
 use jwalk::{Parallelism, WalkDirGeneric};
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -103,7 +103,7 @@ const PARTIAL_EVERY: Duration = Duration::from_secs(2);
 /// keeps small machines breathable. Note the walk is syscall-bound, not
 /// compute-bound: these threads spend most of their time blocked in the
 /// kernel, so the process's CPU% stays low by nature.
-fn walk_threads() -> usize {
+pub(crate) fn walk_threads() -> usize {
     let cores = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
@@ -166,6 +166,11 @@ pub struct ScanResult {
     pub skipped_denied: usize,
     pub skipped_protected: usize,
     pub skipped_dataless: usize,
+    /// Names of files whose inode was already counted under another
+    /// name in this walk — hard links. Their blocks are in the totals
+    /// once, as `du` counts them; the figure is shown so a total that
+    /// reads lower than Finder's sum of the folders says why.
+    pub shared_links: usize,
     /// Directories the user excluded (`analysis_exclude` in app.toml),
     /// pruned like the TCC list. Counted and shown, never silent: a walk
     /// that quietly leaves out 40 GB of somebody's code would make every
@@ -189,6 +194,25 @@ pub struct ScanResult {
     /// a finished scan (partials skip the cost); drill-derived results
     /// share their parent's index, so deeper levels stay instant.
     pub index: Option<Arc<DirIndex>>,
+}
+
+impl ScanResult {
+    /// Every directory whose subtree reached `floor`, with its total —
+    /// what `diskwatch` keeps per day to say what grew. Empty unless the
+    /// result is a finished top-level walk (only those carry the index).
+    pub fn dir_totals(&self, floor: u64) -> Vec<(PathBuf, u64)> {
+        self.index
+            .as_ref()
+            .map(|index| {
+                index
+                    .totals
+                    .iter()
+                    .filter(|(_, bytes)| **bytes >= floor)
+                    .map(|(path, bytes)| (path.clone(), *bytes))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// What survives a finished scan for instant drill-downs: subtree totals
@@ -259,16 +283,59 @@ impl ScanScope {
     }
 }
 
+/// How hard a walk may lean on the machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pace {
+    /// Someone pressed Analyze and is waiting: the dedicated pool
+    /// ([`walk_threads`]).
+    Foreground,
+    /// The daily check nobody is watching (`diskwatch`): one thread, at
+    /// background QoS on macOS — the scheduler then throttles both its
+    /// CPU and its disk I/O behind anything a person is doing — and
+    /// nice 19 on Linux. Slower, and nobody is waiting for it.
+    Background,
+}
+
 pub fn spawn(scope: ScanScope, cancel: Arc<AtomicBool>, tx: smol::channel::Sender<ScanEvent>) {
-    thread::spawn(move || match run(&scope, &cancel, &tx) {
-        Ok(Some(result)) => {
-            let _ = tx.send_blocking(ScanEvent::Done(Box::new(result)));
+    spawn_paced(scope, Pace::Foreground, cancel, tx);
+}
+
+pub fn spawn_paced(
+    scope: ScanScope,
+    pace: Pace,
+    cancel: Arc<AtomicBool>,
+    tx: smol::channel::Sender<ScanEvent>,
+) {
+    thread::spawn(move || {
+        if pace == Pace::Background {
+            lower_this_thread();
         }
-        Ok(None) => {} // cancelled
-        Err(e) => {
-            let _ = tx.send_blocking(ScanEvent::Failed(e));
+        match run(&scope, pace, &cancel, &tx) {
+            Ok(Some(result)) => {
+                let _ = tx.send_blocking(ScanEvent::Done(Box::new(result)));
+            }
+            Ok(None) => {} // cancelled
+            Err(e) => {
+                let _ = tx.send_blocking(ScanEvent::Failed(e));
+            }
         }
     });
+}
+
+/// Drop the calling thread to the background tier. A serial walk runs
+/// entirely on this thread, so this is the whole walk's priority.
+fn lower_this_thread() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: sets the calling thread's own QoS class; no pointers.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: adjusts the calling thread's own nice value (per-thread
+    // under NPTL); no pointers.
+    unsafe {
+        libc::nice(19);
+    }
 }
 
 /// The default root: the whole home directory. With the leaf rules in
@@ -338,6 +405,20 @@ pub const DATA_VOLUME_DISPLAY_PREFIX: &str = DATA_VOLUME;
 /// their scope still gets it walked — the prune is about what a
 /// *whole-disk* walk wanders into, not about those paths being off
 /// limits.
+/// The TCC-protected subtrees ([`TCC_DENY`]) under this user's
+/// `~/Library` — pruned, never read, by every walk that might reach them.
+pub(crate) fn tcc_deny() -> Vec<PathBuf> {
+    env::var("HOME")
+        .ok()
+        .map(|h| {
+            TCC_DENY
+                .iter()
+                .map(|s| Path::new(&h).join("Library").join(s))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn volume_prunes(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots
         .iter()
@@ -348,6 +429,7 @@ fn volume_prunes(roots: &[PathBuf]) -> Vec<PathBuf> {
 
 fn run(
     scope: &ScanScope,
+    pace: Pace,
     cancel: &Arc<AtomicBool>,
     tx: &smol::channel::Sender<ScanEvent>,
 ) -> Result<Option<ScanResult>, String> {
@@ -362,15 +444,7 @@ fn run(
     // The user's own list, pruned exactly like the TCC one — the
     // difference is only whose decision it was.
     let excluded: Vec<PathBuf> = prefs::analysis_exclude();
-    let mut deny: Vec<PathBuf> = env::var("HOME")
-        .ok()
-        .map(|h| {
-            TCC_DENY
-                .iter()
-                .map(|s| Path::new(&h).join("Library").join(s))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut deny = tcc_deny();
     deny.extend(volume_prunes(&walked));
 
     // Raw collection: one bytes counter per owning directory, the fold
@@ -382,6 +456,11 @@ fn run(
     let mut files: Vec<FileHit> = Vec::new();
     let mut denied = 0usize;
     let mut dataless = 0usize;
+    // Inodes already counted, for files with more than one name. Only
+    // those are recorded, so the set stays the size of the hard-linked
+    // population (a pnpm store, Xcode's toolchains), not the walk.
+    let mut seen_links: HashSet<(u64, u64)> = HashSet::new();
+    let mut shared_links = 0usize;
     let mut dirs_done = 0usize;
     let started = Instant::now();
     let mut last_progress = started;
@@ -397,7 +476,12 @@ fn run(
             Walk::new(root)
                 .follow_links(false)
                 .skip_hidden(false)
-                .parallelism(Parallelism::RayonNewPool(walk_threads()))
+                .parallelism(match pace {
+                    Pace::Foreground => Parallelism::RayonNewPool(walk_threads()),
+                    // On this (lowered) thread — a pool's workers would
+                    // not inherit its QoS.
+                    Pace::Background => Parallelism::Serial,
+                })
                 .process_read_dir(move |_depth, _path, _state, children| {
                     if cancelled.load(Ordering::Relaxed) {
                         // Stop expanding: without this the workers keep
@@ -456,6 +540,7 @@ fn run(
                         skipped_denied: denied,
                         skipped_protected: protected.load(Ordering::Relaxed),
                         skipped_dataless: dataless,
+                        shared_links,
                         skipped_excluded: excluded_hits.load(Ordering::Relaxed),
                         build_index: false,
                     });
@@ -490,6 +575,18 @@ fn run(
                 dataless += 1;
                 continue;
             }
+            // A second name for an inode this walk already counted: its
+            // blocks are in some directory's total already. Without this
+            // a pnpm store and the node_modules linked from it, or one
+            // Xcode toolchain under two paths, counted twice — and the
+            // cleanup total promised space the Trash could never free.
+            // Counted under the first name the walk meets, as `du` does.
+            if let Some(inode) = shared_inode(&meta)
+                && !seen_links.insert(inode)
+            {
+                shared_links += 1;
+                continue;
+            }
             let bytes = physical_size(&meta);
             let folded = fold_owner(&fold, &path, root);
             let owner = folded
@@ -520,6 +617,7 @@ fn run(
         skipped_denied: denied,
         skipped_protected: protected.load(Ordering::Relaxed),
         skipped_dataless: dataless,
+        shared_links,
         build_index: true,
     })))
 }
@@ -539,6 +637,7 @@ struct Aggregates<'a> {
     skipped_denied: usize,
     skipped_protected: usize,
     skipped_dataless: usize,
+    shared_links: usize,
     skipped_excluded: usize,
     /// Final results build the drill index and the suggestion set;
     /// partial snapshots skip both.
@@ -561,6 +660,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
         skipped_denied,
         skipped_protected,
         skipped_dataless,
+        shared_links,
         skipped_excluded,
         build_index,
     } = agg;
@@ -598,6 +698,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
         skipped_denied,
         skipped_protected,
         skipped_dataless,
+        shared_links,
         skipped_excluded,
         regenerable,
         dirs,
@@ -695,6 +796,7 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
         skipped_denied: parent.skipped_denied,
         skipped_protected: parent.skipped_protected,
         skipped_dataless: parent.skipped_dataless,
+        shared_links: parent.shared_links,
         skipped_excluded: parent.skipped_excluded,
         regenerable,
         dirs,
@@ -1049,6 +1151,7 @@ fn serialise(result: &ScanResult) -> String {
         "skipped_dataless".into(),
         clamp(result.skipped_dataless as u64),
     );
+    doc.insert("shared_links".into(), clamp(result.shared_links as u64));
     doc.insert(
         "excluded".into(),
         Value::Array(
@@ -1204,6 +1307,7 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
         skipped_denied: int("skipped_denied") as usize,
         skipped_protected: int("skipped_protected") as usize,
         skipped_dataless: int("skipped_dataless") as usize,
+        shared_links: int("shared_links") as usize,
         skipped_excluded: int("skipped_excluded") as usize,
         regenerable: dirs_of("regenerable"),
         dirs: dirs_of("dir"),
@@ -1339,7 +1443,7 @@ fn classify(path: &Path, heuristics_suspended: bool) -> Option<HitKind> {
 }
 
 /// CACHEDIR.TAG with the spec's signature as its first bytes.
-fn has_cache_tag(dir: &Path) -> bool {
+pub(crate) fn has_cache_tag(dir: &Path) -> bool {
     let Ok(bytes) = fs::read(dir.join("CACHEDIR.TAG")) else {
         return false;
     };
@@ -1358,7 +1462,7 @@ fn in_blind_spot(path: &Path) -> bool {
     }) || env::var("HOME").is_ok_and(|h| path.starts_with(Path::new(&h).join("Library")))
 }
 
-fn is_dataless(meta: &fs::Metadata) -> bool {
+pub(crate) fn is_dataless(meta: &fs::Metadata) -> bool {
     #[cfg(target_os = "macos")]
     {
         use std::os::macos::fs::MetadataExt;
@@ -1371,7 +1475,22 @@ fn is_dataless(meta: &fs::Metadata) -> bool {
     }
 }
 
-fn physical_size(meta: &fs::Metadata) -> u64 {
+/// The inode behind a file with more than one name — the only files a
+/// walk can meet twice. `None` for an ordinary file.
+fn shared_inode(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (meta.nlink() > 1).then(|| (meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+pub(crate) fn physical_size(meta: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1445,6 +1564,7 @@ mod tests {
         let (tx, _rx) = smol::channel::unbounded();
         let result = run(
             &ScanScope::single(root.clone()),
+            Pace::Foreground,
             &Arc::new(AtomicBool::new(false)),
             &tx,
         )
@@ -1577,6 +1697,7 @@ mod tests {
             skipped_denied: 0,
             skipped_protected: 0,
             skipped_dataless: 0,
+            shared_links: 0,
             skipped_excluded: 0,
             regenerable: Vec::new(),
             dirs: Vec::new(),
@@ -1689,6 +1810,7 @@ mod tests {
             skipped_denied: 1,
             skipped_protected: 2,
             skipped_dataless: 3,
+            shared_links: 0,
             skipped_excluded: 0,
             regenerable: vec![DirHit {
                 path: p("/r/cache"),
@@ -1764,6 +1886,7 @@ mod tests {
             skipped_denied: 0,
             skipped_protected: 0,
             skipped_dataless: 0,
+            shared_links: 0,
             skipped_excluded: 0,
             regenerable: vec![DirHit {
                 path: p("/r/cache"),
@@ -1803,9 +1926,14 @@ mod tests {
             roots: vec![a.clone(), base.join("missing"), b.clone()],
         };
         let (tx, _rx) = smol::channel::unbounded();
-        let result = run(&scope, &Arc::new(AtomicBool::new(false)), &tx)
-            .expect("merged scan should succeed")
-            .expect("scan was not cancelled");
+        let result = run(
+            &scope,
+            Pace::Foreground,
+            &Arc::new(AtomicBool::new(false)),
+            &tx,
+        )
+        .expect("merged scan should succeed")
+        .expect("scan was not cancelled");
         assert_eq!(result.root, base);
         // Identity records the REQUESTED set verbatim, absentee included.
         assert_eq!(result.roots, scope.roots);
@@ -1818,7 +1946,50 @@ mod tests {
             base: base.clone(),
             roots: vec![base.join("nope")],
         };
-        assert!(run(&gone, &Arc::new(AtomicBool::new(false)), &tx).is_err());
+        assert!(
+            run(
+                &gone,
+                Pace::Foreground,
+                &Arc::new(AtomicBool::new(false)),
+                &tx
+            )
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_hard_linked_file_counts_once_and_says_so() {
+        let base = env::temp_dir().join(format!("zstats-links-{}", process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("store")).unwrap();
+        fs::create_dir_all(base.join("project/node_modules")).unwrap();
+        // Over INDEX_FLOOR, so the root's total is in the index.
+        let data = vec![7u8; 11 << 20];
+        fs::write(base.join("store/blob"), &data).unwrap();
+        fs::hard_link(
+            base.join("store/blob"),
+            base.join("project/node_modules/blob"),
+        )
+        .unwrap();
+        let one = physical_size(&fs::metadata(base.join("store/blob")).unwrap());
+
+        let (tx, _rx) = smol::channel::unbounded();
+        let result = run(
+            &ScanScope::single(base.clone()),
+            Pace::Background,
+            &Arc::new(AtomicBool::new(false)),
+            &tx,
+        )
+        .expect("scan should succeed")
+        .expect("scan was not cancelled");
+        assert_eq!(result.shared_links, 1, "the second name is the one skipped");
+        let index = result.index.as_ref().expect("a finished scan has an index");
+        assert_eq!(
+            index.totals.get(&base).copied(),
+            Some(one),
+            "one inode, one set of blocks — not two"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 

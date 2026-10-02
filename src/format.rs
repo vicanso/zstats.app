@@ -5,6 +5,9 @@
 //! live apart from the views and are unit-tested. Lives at the crate root
 //! rather than under `views` because the tray title needs [`pct`] too.
 
+use crate::diskscan::DATA_VOLUME_DISPLAY_PREFIX;
+use std::env;
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const KIB: f64 = 1024.0;
@@ -172,6 +175,27 @@ pub fn clock(t: SystemTime) -> String {
     };
     let zoned = stamp.to_zoned(jiff::tz::TimeZone::system());
     format!("{:02}:{:02}", zoned.hour(), zoned.minute())
+}
+
+/// A wall-clock instant as the local calendar date, `2026-09-01`. For a
+/// file's modification time, which can be years back — [`ago`] stops at
+/// hours. ISO order reads the same in both locales. `—` for an instant
+/// before the epoch.
+pub fn date(t: SystemTime) -> String {
+    let Ok(since) = t.duration_since(UNIX_EPOCH) else {
+        return "—".into();
+    };
+    let Ok(stamp) = jiff::Timestamp::from_second(since.as_secs().min(i64::MAX as u64) as i64)
+    else {
+        return "—".into();
+    };
+    let zoned = stamp.to_zoned(jiff::tz::TimeZone::system());
+    format!(
+        "{:04}-{:02}-{:02}",
+        zoned.year(),
+        zoned.month(),
+        zoned.day()
+    )
 }
 
 /// Disk-style capacity, promoting to TB past a terabyte.
@@ -347,6 +371,40 @@ pub fn span(elapsed: Duration) -> String {
     }
 }
 
+/// `/Users/you/…` collapses to `~/…` — the shared prefix every row would
+/// otherwise spend its tooltip width repeating. Pure so it can be tested
+/// without touching the real environment.
+///
+/// The whole-disk scope walks `/System/Volumes/Data`, so its paths
+/// arrive wearing that prefix; it is dropped first. Not cosmetic —
+/// `/System/Volumes/Data/Users/you/Downloads` and `~/Downloads` are the
+/// same inode reached through a firmlink, and showing the mount-point
+/// spelling would make a familiar folder look like somewhere strange
+/// while also defeating the `~` collapse below.
+pub fn tilde_path(path: &str, home: &str) -> String {
+    let path = path
+        .strip_prefix(DATA_VOLUME_DISPLAY_PREFIX)
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(path);
+    match path.strip_prefix(home) {
+        // Component boundary required: /Users/xy must not collapse under
+        // a /Users/x home.
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("~{rest}")
+        }
+        _ => path.to_string(),
+    }
+}
+
+/// [`tilde_path`] against this user's `$HOME`, for a path a banner or a
+/// card names.
+pub fn tilde(path: &Path) -> String {
+    tilde_path(
+        &path.display().to_string(),
+        &env::var("HOME").unwrap_or_default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +429,17 @@ mod tests {
         let at = UNIX_EPOCH + Duration::from_secs(noon.timestamp().as_second() as u64);
         assert_eq!(clock(at), "14:20");
         assert_eq!(clock(UNIX_EPOCH - Duration::from_secs(1)), "--:--");
+    }
+
+    #[test]
+    fn date_reads_the_local_calendar_day() {
+        let late = jiff::civil::date(2026, 9, 1)
+            .at(23, 59, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .unwrap();
+        let at = UNIX_EPOCH + Duration::from_secs(late.timestamp().as_second() as u64);
+        assert_eq!(date(at), "2026-09-01");
+        assert_eq!(date(UNIX_EPOCH - Duration::from_secs(1)), "—");
     }
 
     #[test]
@@ -529,5 +598,45 @@ mod tests {
         assert_eq!(ago(Duration::from_secs(5)), "just now");
         assert_eq!(ago(Duration::from_secs(12 * 60)), "12m ago");
         assert_eq!(ago(Duration::from_secs(3_600 + 4 * 60)), "1h 04m ago");
+    }
+
+    #[test]
+    fn tilde_path_collapses_home_only() {
+        assert_eq!(
+            tilde_path("/Users/x/Movies/a.mkv", "/Users/x"),
+            "~/Movies/a.mkv"
+        );
+        assert_eq!(tilde_path("/tmp/a", "/Users/x"), "/tmp/a");
+        // An empty home must not turn every path into "~<path>".
+        assert_eq!(tilde_path("/tmp/a", ""), "/tmp/a");
+        // Prefix only counts on a component boundary.
+        assert_eq!(tilde_path("/Users/xy/f", "/Users/x"), "/Users/xy/f");
+    }
+
+    /// The whole-disk scope walks the data volume, so its paths arrive
+    /// wearing that mount point. They are the same directories reached
+    /// through a firmlink, and the reader knows them by their ordinary
+    /// names — the prefix comes off before the `~` collapse, not after,
+    /// or a home path under it would never collapse at all.
+    #[test]
+    fn tilde_path_drops_the_data_volume_mount_point() {
+        assert_eq!(
+            tilde_path("/System/Volumes/Data/Users/x/Movies/a.mkv", "/Users/x"),
+            "~/Movies/a.mkv"
+        );
+        assert_eq!(
+            tilde_path("/System/Volumes/Data/System/Library/AssetsV2", "/Users/x"),
+            "/System/Library/AssetsV2"
+        );
+        // The mount point itself is not a path under it.
+        assert_eq!(
+            tilde_path("/System/Volumes/Data", "/Users/x"),
+            "/System/Volumes/Data"
+        );
+        // A same-named directory elsewhere keeps its full path.
+        assert_eq!(
+            tilde_path("/System/Volumes/DataSet/x", "/Users/x"),
+            "/System/Volumes/DataSet/x"
+        );
     }
 }

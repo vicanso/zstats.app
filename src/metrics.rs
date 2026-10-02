@@ -380,6 +380,18 @@ pub fn start(cx: &mut App) {
                                 notify::post_sustained(&notice);
                             }
                         }
+                        for notice in state.take_disk_growth_notices() {
+                            tracing::info!(
+                                path = %notice.growth.path.display(),
+                                grew = notice.growth.grew,
+                                now = notice.growth.now,
+                                banner = if muted { "muted" } else { "delivered" },
+                                "disk growth notice"
+                            );
+                            if !muted {
+                                notify::post_disk_growth(&notice);
+                            }
+                        }
                         for creep in state.take_memory_creep_notices() {
                             tracing::info!(
                                 name = %creep.name,

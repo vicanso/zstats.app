@@ -20,11 +20,14 @@ use super::widgets::{self, card};
 use crate::alertlog::{self, DayLog};
 use crate::assets;
 use crate::confirm;
+use crate::diskwatch;
 use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs;
-use crate::state::{MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore};
+use crate::state::{
+    GrowthNotice, MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore,
+};
 use crate::terminate;
 use crate::theme;
 use crate::trend;
@@ -46,8 +49,14 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let earlier: Vec<&SeenAlert> = state.alerts().iter().filter(|s| !s.live).collect();
     let holdings = state.sustained_active();
     let creeps = state.creeps_active();
+    let growth = state.disk_growth_announced();
 
-    if live.is_empty() && earlier.is_empty() && holdings.is_empty() && creeps.is_empty() {
+    if live.is_empty()
+        && earlier.is_empty()
+        && holdings.is_empty()
+        && creeps.is_empty()
+        && growth.is_empty()
+    {
         // An empty list is indistinguishable from a broken watcher unless
         // it says what it is armed with — so quote the thresholds in force.
         // The week's record still follows: a quiet today is not a quiet
@@ -68,6 +77,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
     if let Some(card) = creep_from(&creeps) {
         let ago = creeps.iter().map(|(_, ago)| *ago).min().unwrap_or_default();
+        watchers.push((ago, card));
+    }
+    if let Some(card) = growth_from(&growth) {
+        let ago = growth.iter().map(|(_, ago)| *ago).min().unwrap_or_default();
         watchers.push((ago, card));
     }
     watchers.sort_by_key(|(ago, _)| *ago);
@@ -508,6 +521,86 @@ fn creep_from(creeps: &[(MemoryCreep, Duration)]) -> Option<AnyElement> {
     )
 }
 
+/// What the daily disk check announced, as a read-only card — the
+/// landing spot for its banner, the way [`creep_from`] is for the memory
+/// one. Display only (an observer, not a rule); the one control opens
+/// the disk-space window, where the full growth list and the tools to
+/// act on it are.
+fn growth_from(growth: &[(GrowthNotice, Duration)]) -> Option<AnyElement> {
+    if growth.is_empty() {
+        return None;
+    }
+    let last = growth.len() - 1;
+    Some(
+        card()
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::text())
+                            .child(i18n::tr("alerts.growth_title")),
+                    )
+                    .child(
+                        Button::new("growth-open-disk")
+                            .xsmall()
+                            .label(i18n::tr("alerts.growth_open"))
+                            .on_click(|_, _, cx| crate::open_storage_window(cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(3.))
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("alerts.growth_note")),
+            )
+            .children(growth.iter().enumerate().map(|(i, (notice, _))| {
+                let days = (notice.over.as_secs_f64() / 86_400.0).round().max(1.0) as u64;
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .py(px(7.))
+                    .when(i != last, |d| {
+                        d.border_b(px(1.)).border_color(theme::border_subtle())
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme::text())
+                            .truncate()
+                            .child(format::tilde(&notice.growth.path)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(font::MONO)
+                            .text_size(px(10.))
+                            .text_color(theme::text_muted())
+                            .child(
+                                t!(
+                                    "alerts.growth_row",
+                                    grew = format::memory(notice.growth.grew),
+                                    days = days,
+                                    now = format::memory(notice.growth.now)
+                                )
+                                .to_string(),
+                            ),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    )
+}
+
 /// The rules the engine is armed with right now, resolved through
 /// zstats' own [`ActiveThresholds`] (same source as the Config tab, so
 /// the two can never disagree). One pair per rule — a single joined
@@ -574,6 +667,18 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
         )
         .to_string(),
     ));
+    // The daily disk check is the other watcher with a banner; listed
+    // while it is on, for the creep row's reason.
+    if prefs::disk_watch() {
+        rows.push((
+            i18n::tr("alerts.kind_growth"),
+            t!(
+                "alerts.watch_growth",
+                delta = format::memory(diskwatch::NOTIFY_BYTES)
+            )
+            .to_string(),
+        ));
+    }
     rows.push((
         i18n::tr("alerts.empty_cooldown"),
         super::config::humanize(eff.cooldown),

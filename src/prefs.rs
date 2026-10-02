@@ -182,6 +182,11 @@ static PINNED: AtomicBool = AtomicBool::new(false);
 /// Absent key is off: a preference that keeps a Mac awake has to be
 /// asked for, never inherited from a default.
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(false);
+/// The daily background disk check (`diskwatch.rs`). On unless the file
+/// says `disk_watch = false`: it only runs once a home analysis has
+/// been done by hand, and it is the one thing that can warn before a
+/// disk fills.
+static DISK_WATCH: AtomicBool = AtomicBool::new(true);
 /// Last panel tab as its file key, `None` = Overview / unset. Written on
 /// each tab switch so a restart opens where the reader left, not always
 /// on Overview. Kept as the string the file holds: `Tab::from_pref_key`
@@ -477,6 +482,7 @@ pub fn load() {
         .expect("analysis exclude pref lock poisoned") = prefs.analysis_exclude;
     PINNED.store(prefs.pinned, Ordering::Relaxed);
     KEEP_AWAKE.store(prefs.keep_awake, Ordering::Relaxed);
+    DISK_WATCH.store(!prefs.disk_watch_off, Ordering::Relaxed);
     *LAST_TAB.write().expect("last tab pref lock poisoned") = prefs.last_tab;
 }
 
@@ -530,6 +536,7 @@ fn persist() {
             .clone(),
         pinned: PINNED.load(Ordering::Relaxed),
         keep_awake: KEEP_AWAKE.load(Ordering::Relaxed),
+        disk_watch_off: !DISK_WATCH.load(Ordering::Relaxed),
         last_tab: LAST_TAB
             .read()
             .expect("last tab pref lock poisoned")
@@ -571,6 +578,9 @@ struct Prefs {
     analysis_exclude: Vec<String>,
     pinned: bool,
     keep_awake: bool,
+    /// `disk_watch = false` in the file; the derived default (`false`)
+    /// is the check on.
+    disk_watch_off: bool,
     /// `tab` in the file; `None` is Overview, omitted like every other
     /// default.
     last_tab: Option<String>,
@@ -624,6 +634,10 @@ fn read(dir: &Path) -> Prefs {
             .get("keep_awake")
             .and_then(toml::Value::as_bool)
             .unwrap_or(false),
+        disk_watch_off: table
+            .get("disk_watch")
+            .and_then(toml::Value::as_bool)
+            .is_some_and(|on| !on),
         last_tab: get("tab")
             .map(str::trim)
             .filter(|k| !k.is_empty())
@@ -655,6 +669,17 @@ pub fn keep_awake() -> bool {
 /// this module keeps touching nothing but the file.
 pub fn set_keep_awake(on: bool) {
     KEEP_AWAKE.store(on, Ordering::Relaxed);
+    persist();
+}
+
+/// Whether the daily background disk check may run.
+pub fn disk_watch() -> bool {
+    DISK_WATCH.load(Ordering::Relaxed)
+}
+
+/// Remember and persist the daily-check switch.
+pub fn set_disk_watch(on: bool) {
+    DISK_WATCH.store(on, Ordering::Relaxed);
     persist();
 }
 
@@ -749,6 +774,9 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if prefs.keep_awake {
         doc.insert("keep_awake".into(), toml::Value::Boolean(true));
     }
+    if prefs.disk_watch_off {
+        doc.insert("disk_watch".into(), toml::Value::Boolean(false));
+    }
     if let Some(key) = prefs.last_tab.as_deref() {
         doc.insert("tab".into(), toml::Value::String(key.into()));
     }
@@ -817,6 +845,7 @@ mod tests {
                 analysis_exclude: vec!["~/github".to_string()],
                 pinned: true,
                 keep_awake: true,
+                disk_watch_off: true,
                 last_tab: Some("alerts".into()),
             },
         )
@@ -837,11 +866,13 @@ mod tests {
         assert_eq!(back.analysis_exclude, vec!["~/github".to_string()]);
         assert!(back.pinned);
         assert!(back.keep_awake);
+        assert!(back.disk_watch_off);
         assert_eq!(back.last_tab.as_deref(), Some("alerts"));
         // The switch is stored as the off value only.
         assert!(back.muted);
         let text = fs::read_to_string(file_path(&dir)).unwrap();
         assert!(text.contains("notifications = false"), "{text}");
+        assert!(text.contains("disk_watch = false"), "{text}");
 
         // Both back to System: the keys disappear rather than being written
         // as a third value. Same for an unset opacity.
@@ -872,6 +903,10 @@ mod tests {
             "the default must not write a key that keeps a Mac awake"
         );
         assert!(!text.contains("tab"), "Overview should omit the key");
+        assert!(
+            !text.contains("disk_watch"),
+            "the daily check on should omit the key"
+        );
         let back = read(&dir);
         assert_eq!(back.language, LanguagePref::System);
         assert_eq!(back.theme, ThemePref::System);
