@@ -15,8 +15,8 @@ use std::env;
 
 /// Menu-bar panel: 320px matches Control Center / Stats combined popovers
 /// and lets the icon tab strip breathe. Height covers the icon strip,
-/// Processor + Top apps + Memory, and the footer, with a few pixels under
-/// the last card.
+/// Processor + Top apps + Memory + the disk-and-network card, and the
+/// footer, with a few pixels under the last card.
 ///
 /// 778 is the 2026-09-28 fit (653) plus the three Overview charts and
 /// the caption under each, less two rows of the apps card. A chart is
@@ -26,9 +26,14 @@ use std::env;
 /// five rows to three (`overview::TOP_N`) took 61 back, measured: the
 /// Memory card's bottom edge moved 122 device pixels up at @2x, and the
 /// 16pt under it is the same at 778 as it was at 839 with five rows.
+/// 792 is that plus 14 for moving the disk/network rates and the
+/// network chart out of the Memory card into a card of their own
+/// (`overview::io_card`) — the second card's padding and the gap
+/// between cards, less the hairline row it replaced; measured as the
+/// last card's bottom edge moving 28 device pixels down at @2x.
 /// Overview is sized not to scroll; the other tabs scroll either way.
 #[cfg(not(target_os = "linux"))]
-pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 778.);
+pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 792.);
 /// Linux: 53 shorter than macOS, for the same fit, then the same chart
 /// and caption budget. Overview's cards measured 543 tall on macOS and
 /// 489 on Omarchy (2026-09-28, before the charts): the gap is the
@@ -36,11 +41,12 @@ pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 778.);
 /// (`perf_levels`). At 653 that left 57 of empty panel under Memory, where
 /// macOS keeps 4; 600 kept the same 4. 725 / 778 keep that remainder
 /// after the charts, the caption under each, and the two apps rows
-/// dropped. Revisit when zstats grows
+/// dropped, and 14 more for the disk-and-network card, as on macOS.
+/// Revisit when zstats grows
 /// Linux perf levels (hybrid Intel parts have them in sysfs) — the rows
 /// come back and so do the 53.
 #[cfg(target_os = "linux")]
-pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 725.);
+pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 739.);
 /// Fixed width — the layout is built for exactly this and nothing reflows.
 pub const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
 /// Gap between the tray icon and the top of the window.

@@ -94,7 +94,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         // one-shot and long — they live in a window now
                         // (views/storage.rs), not in this card.
                         .when(d.mount_point == "/", |row| row.child(storage_chip()))
-                        .child(volume_badge(i, d)),
+                        .children(eject_badge(i, d)),
                 )
                 .child(
                     h_flex()
@@ -180,14 +180,21 @@ fn volume_title(disk: &DiskSnapshot) -> String {
     }
 }
 
-/// The footer's right slot: "/ · apfs". The technical identity, in the
-/// smallest text on the card, so moving the name up top loses nothing.
+/// The footer's right slot: "/ · apfs · SSD". The technical identity, in
+/// the smallest text on the card, so moving the name up top loses
+/// nothing. The drive kind joined it from the header, where its outlined
+/// pill sat beside the Analyze button and read as a second button.
 fn volume_footer_id(disk: &DiskSnapshot) -> String {
-    if disk.name.trim().is_empty() {
-        disk.file_system.clone()
-    } else {
-        format!("{} · {}", disk.mount_point, disk.file_system)
+    let mut parts = Vec::new();
+    if !disk.name.trim().is_empty() {
+        parts.push(disk.mount_point.as_str());
     }
+    parts.push(disk.file_system.as_str());
+    let kind = disk.kind.trim();
+    if !kind.is_empty() && !kind.eq_ignore_ascii_case("unknown") {
+        parts.push(kind);
+    }
+    parts.join(" · ")
 }
 
 /// Opens the disk-space window (large files + the directory analyser).
@@ -256,7 +263,10 @@ pub(super) fn open_full_disk_access() {
         opener::open(["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]);
 }
 
-fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
+/// Eject, on a removable volume — the header's one control there. A
+/// fixed volume has none: its kind is a fact, and it moved to the footer
+/// (`volume_footer_id`).
+fn eject_badge(index: usize, disk: &DiskSnapshot) -> Option<AnyElement> {
     if disk.is_removable {
         let mount = disk.mount_point.clone();
         let tip = i18n::tr("disk.eject");
@@ -300,8 +310,9 @@ fn volume_badge(index: usize, disk: &DiskSnapshot) -> AnyElement {
                     .text_color(Hsla::from(theme::text_dim())),
             )
             .into_any_element()
+            .into()
     } else {
-        widgets::outline_pill(disk.kind.clone())
+        None
     }
 }
 
@@ -449,13 +460,16 @@ mod tests {
     fn volume_title_prefers_the_name_and_keeps_the_mount_point_below() {
         let boot = snapshot("Macintosh HD", "/");
         assert_eq!(volume_title(&boot), "Macintosh HD");
-        assert_eq!(volume_footer_id(&boot), "/ · apfs");
+        assert_eq!(volume_footer_id(&boot), "/ · apfs · SSD");
 
         let unnamed = snapshot("  ", "/Volumes/disk3s2");
         assert_eq!(volume_title(&unnamed), "/Volumes/disk3s2");
         // The title already is the mount point; repeating it below would
         // be the same string twice on one card.
-        assert_eq!(volume_footer_id(&unnamed), "apfs");
+        assert_eq!(volume_footer_id(&unnamed), "apfs · SSD");
+        let mut unknown = snapshot("Data", "/Volumes/Data");
+        unknown.kind = "Unknown".into();
+        assert_eq!(volume_footer_id(&unknown), "/Volumes/Data · apfs");
     }
 
     #[test]

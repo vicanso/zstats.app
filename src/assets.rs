@@ -92,6 +92,11 @@ pub enum CustomIconName {
     /// and `Moon`, but both read as the theme picker's glyphs — this
     /// one has to say "the Mac is being held awake" and nothing else.
     Coffee,
+    /// Move-to-Trash on the disk-space window's rows; lucide `trash-2`.
+    /// gpui-kit's `IconName::Trash` names the same glyph but is not in its
+    /// default embedded set, and its `Delete` is a backspace key — which
+    /// read as "clear this field" on a control that moves files.
+    Trash,
 }
 
 impl CustomIconName {
@@ -108,6 +113,7 @@ impl CustomIconName {
             CustomIconName::Shield => "icons/shield.svg",
             CustomIconName::Pin => "icons/pin.svg",
             CustomIconName::Coffee => "icons/coffee.svg",
+            CustomIconName::Trash => "icons/trash.svg",
         }
         .into()
     }
@@ -142,6 +148,7 @@ mod tests {
             CustomIconName::Shield,
             CustomIconName::Pin,
             CustomIconName::Coffee,
+            CustomIconName::Trash,
         ] {
             let path = icon.path();
             assert!(get(&path).is_some(), "{path} is not embedded");

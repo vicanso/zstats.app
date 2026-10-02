@@ -82,7 +82,7 @@ const DOMINANCE_PERCENT: u64 = 90;
 /// Whole-machine CPU above which the check waits. A walk competes for
 /// the disk more than the CPU, but a busy machine is a person working,
 /// and the check can run in the next quiet tick.
-const BUSY_CPU: f32 = 25.0;
+pub const BUSY_CPU: f32 = 25.0;
 
 /// A baseline younger than this says nothing about a week.
 const MIN_BASELINE_AGE: Duration = Duration::from_secs(20 * 60 * 60);

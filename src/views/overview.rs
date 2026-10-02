@@ -75,7 +75,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         net_up: state.net_up_series(),
         now,
     };
-    vec![
+    let mut cards = vec![
         processor(
             &snapshot.cpu,
             &snapshot.load,
@@ -86,12 +86,13 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         top_apps(state),
         memory(
             &snapshot.memory,
-            &snapshot.io_totals,
             snapshot.capabilities,
             state.memory_climbers(),
             recent,
         ),
-    ]
+    ];
+    cards.extend(io_card(&snapshot.io_totals, recent));
+    cards
 }
 
 /// The half-hour series behind the three charts, stamped once per paint.
@@ -169,6 +170,17 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
         )
     };
     let n = rows.len();
+    // In the climbing mode, the rows after the climbers are the current
+    // CPU ranking filling the card — not climbers. Without a mark the
+    // title called all three "climbing". A firmer hairline above the
+    // first of them and a word in its rise slot set them apart, and
+    // neither costs a pixel of height (this card is in the panel's fixed
+    // budget).
+    let first_fill = rows
+        .first()
+        .is_some_and(|(_, delta)| delta.is_some())
+        .then(|| rows.iter().position(|(_, delta)| delta.is_none()))
+        .flatten();
 
     widgets::list_shell()
         .child(widgets::list_header(
@@ -193,7 +205,12 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                 .px(px(13.))
                 .py(px(5.))
                 .when(i + 1 < n, |d| {
-                    d.border_b(px(1.)).border_color(theme::border_subtle())
+                    d.border_b(px(1.))
+                        .border_color(if Some(i + 1) == first_fill {
+                            theme::border()
+                        } else {
+                            theme::border_subtle()
+                        })
                 })
                 // The row answers "who" — the Apps tab answers the next
                 // question, so a click lands there with this tree open
@@ -231,6 +248,19 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                         .flex_none()
                         .items_baseline()
                         .gap(px(6.))
+                        .when(Some(i) == first_fill, |cluster| {
+                            cluster.child(
+                                div()
+                                    .id(("top-app-fill", g.root_pid as usize))
+                                    .flex_none()
+                                    .text_size(px(10.))
+                                    .text_color(theme::text_dim())
+                                    .tooltip(widgets::wrap_tooltip(i18n::tr(
+                                        "overview.busy_now_tip",
+                                    )))
+                                    .child(i18n::tr("overview.busy_now")),
+                            )
+                        })
                         .children(delta.map(|delta| {
                             div()
                                 .id(("top-app-rise", g.root_pid as usize))
@@ -370,7 +400,11 @@ fn processor(
                     arrow: None,
                 }],
                 scale: cpu_axis_top(&chart_buckets(recent.cpu.points(), recent.now)),
-                tip: i18n::tr("overview.cpu_curve_tip"),
+                tip: format!(
+                    "{} {}",
+                    i18n::tr("overview.cpu_curve_tip"),
+                    i18n::tr("overview.chart_gap_tip")
+                ),
                 // Each point is a 20s average. The cubic follows those and
                 // does not rise above one that was the peak.
                 stroke: CurveStroke::Smooth,
@@ -668,7 +702,6 @@ fn swap_activity_strip(mem: &MemorySnapshot) -> Option<AnyElement> {
 /// every branch here resolves exactly as it did before 0.5.2.
 fn memory(
     mem: &MemorySnapshot,
-    io: &IoTotalsSnapshot,
     caps: Capabilities,
     climbers: Vec<MemoryCreep>,
     recent: Recent<'_>,
@@ -745,14 +778,13 @@ fn memory(
     let compressed_fill = Hsla::from(theme::text_muted());
 
     // Total is already in the hero caption ("used of 24 GB"). The bar
-    // shows compressed as a slice but not how many GB that is — and
-    // that number is the early pressure signal. Swap is the other
-    // fact the hero and the bar both omit.
-    let compressed_label = match mem.compressed_bytes {
-        Some(b) => format::gb(b),
-        None if !supported => i18n::tr("common.n_a"),
-        None => format::PLACEHOLDER.to_string(),
-    };
+    // shows compressed as a slice, and its legend names how many GB that
+    // is — that number is the early pressure signal. It used to be a row
+    // of its own as well, under a legend that said "Compressed" with no
+    // figure: the same fact twice. Swap is the other fact the hero and
+    // the bar both omit. Used and Free stay words: the slices they mark
+    // are used − compressed and total − used, figures zstats does not
+    // report and this app does not derive.
     // Deliberately not `mem.swap_used_percent`: that field *is* swap
     // against its own allocation, the ratio [`SWAP_HOT`] explains is
     // unusable here. Dividing those two bytes locally would also have
@@ -764,18 +796,15 @@ fn memory(
     // — but a guard against a collector reporting no memory at all, where
     // that floor would turn any swap into a huge percentage and paint red.
     let swap_hot = mem.total_bytes > 0 && (mem.swap_used_bytes as f32 / total) * 100.0 >= SWAP_HOT;
-    let rows = vec![
-        (
-            i18n::tr("overview.swap"),
-            format!(
-                "{} / {}",
-                format::gb(mem.swap_used_bytes),
-                format::gb(mem.swap_total_bytes)
-            ),
-            swap_hot,
+    let rows = vec![(
+        i18n::tr("overview.swap"),
+        format!(
+            "{} / {}",
+            format::gb(mem.swap_used_bytes),
+            format::gb(mem.swap_total_bytes)
         ),
-        (i18n::tr("overview.compressed"), compressed_label, false),
-    ];
+        swap_hot,
+    )];
 
     let mut legend = vec![(
         widgets::LegendMark::Fill(used_fill),
@@ -785,7 +814,12 @@ fn memory(
     if compressed > 0 {
         legend.push((
             widgets::LegendMark::Fill(compressed_fill),
-            i18n::tr("overview.compressed").into(),
+            format!(
+                "{} {}",
+                i18n::tr("overview.compressed"),
+                format::gb(compressed)
+            )
+            .into(),
             i18n::tr("overview.compressed_tip").into(),
         ));
     }
@@ -846,7 +880,11 @@ fn memory(
                     arrow: None,
                 }],
                 scale: MEM_AXIS_TOP,
-                tip: i18n::tr("overview.mem_curve_tip"),
+                tip: format!(
+                    "{} {}",
+                    i18n::tr("overview.mem_curve_tip"),
+                    i18n::tr("overview.chart_gap_tip")
+                ),
                 stroke: CurveStroke::Bars,
                 unit: ChartUnit::Percent,
                 icon: None,
@@ -862,45 +900,63 @@ fn memory(
         .child(widgets::kv_packed(rows))
         .children(swap_activity_strip(mem))
         .children(mem_climb_strip(&climbers, mem.total_bytes))
-        .child(io_strip(io))
-        .children(recent_line(
-            Chart {
-                id: "net-curve",
-                // Download leads: it is the line most people read. Upload
-                // stays on the chart, dimmer, because a backup or a sync
-                // pushing out is just as often why the network is busy.
-                lines: vec![
-                    ChartLine {
-                        series: recent.net_down,
-                        arrow: Some("↓"),
-                    },
-                    ChartLine {
-                        series: recent.net_up,
-                        arrow: Some("↑"),
-                    },
-                ],
-                // One ceiling for both, so the two heights compare.
-                scale: net_scale(
-                    &[
-                        chart_buckets(recent.net_down.points(), recent.now),
-                        chart_buckets(recent.net_up.points(), recent.now),
-                    ]
-                    .concat(),
-                ),
-                tip: i18n::tr("overview.net_curve_tip"),
-                // Same cubic as CPU. A rate that holds between the 15s
-                // refreshes has a flat tangent, so the hold stays a hold;
-                // the bend is only where two readings differ.
-                stroke: CurveStroke::Smooth,
-                unit: ChartUnit::Rate,
-                // The row above carries disk rates too, with the same
-                // arrows; the glyph says which pair this chart is.
-                icon: Some(IconName::Network),
-                corner_label: true,
-            },
-            recent.now,
-        ))
         .into_any_element()
+}
+
+/// Disk and network throughput: the rates row and the network chart. A
+/// card of its own — they used to close the Memory card, so the network
+/// chart sat under a "Memory" title. No title: the row's two glyphs are
+/// the tab strip's Hardware and Network icons, and a header would cost
+/// the panel another 20px for a word those glyphs already say.
+fn io_card(io: &IoTotalsSnapshot, recent: Recent<'_>) -> Option<AnyElement> {
+    let rates = io_strip(io);
+    let chart = recent_line(
+        Chart {
+            id: "net-curve",
+            // Download leads: it is the line most people read. Upload
+            // stays on the chart, dimmer, because a backup or a sync
+            // pushing out is just as often why the network is busy.
+            lines: vec![
+                ChartLine {
+                    series: recent.net_down,
+                    arrow: Some("↓"),
+                },
+                ChartLine {
+                    series: recent.net_up,
+                    arrow: Some("↑"),
+                },
+            ],
+            // One ceiling for both, so the two heights compare.
+            scale: net_scale(
+                &[
+                    chart_buckets(recent.net_down.points(), recent.now),
+                    chart_buckets(recent.net_up.points(), recent.now),
+                ]
+                .concat(),
+            ),
+            tip: format!(
+                "{} {}",
+                i18n::tr("overview.net_curve_tip"),
+                i18n::tr("overview.chart_gap_tip")
+            ),
+            // Same cubic as CPU. A rate that holds between the 15s
+            // refreshes has a flat tangent, so the hold stays a hold;
+            // the bend is only where two readings differ.
+            stroke: CurveStroke::Smooth,
+            unit: ChartUnit::Rate,
+            // The row above carries disk rates too, with the same
+            // arrows; the glyph says which pair this chart is.
+            icon: Some(IconName::Network),
+            corner_label: true,
+        },
+        recent.now,
+    );
+    // Nothing measured and nothing drawn yet: no card, rather than an
+    // empty one.
+    if rates.is_none() && chart.is_none() {
+        return None;
+    }
+    Some(card().children(rates).children(chart).into_any_element())
 }
 
 /// Height of an Overview chart. CPU and network are curves; memory is
@@ -1434,6 +1490,11 @@ fn sparkline(
                 let ink = if index == 0 { theme::ink() } else { dim_ink() };
                 paint_curve(bounds, points, now, scale, stroke, ink, window);
             }
+            // The lead line's holes only: two dotted rows under the
+            // network's pair would be one fact drawn twice.
+            if let Some(lead) = marks.first() {
+                paint_gaps(bounds, lead, now, stroke, window);
+            }
         },
     )
     .size_full()
@@ -1467,6 +1528,84 @@ fn paint_guides(bounds: Bounds<Pixels>, window: &mut Window) {
             theme::border_subtle(),
         ));
         age += GUIDE_EVERY;
+    }
+}
+
+/// One dot of a gap's baseline, and the pitch between dots.
+const GAP_DOT: f32 = 2.;
+const GAP_DOT_STEP: f32 = 5.;
+
+/// A dotted baseline across every hole *between* readings — not before
+/// the first, which is the window still filling and has the guides to
+/// say so. The rings are fed every tick, panel hidden or not, so a hole
+/// in the middle is time with nothing recorded: the Mac asleep, or this
+/// app not running. Bare, that read as a chart that broke; dotted, it
+/// reads as a stretch where nothing was measured.
+fn paint_gaps(
+    bounds: Bounds<Pixels>,
+    points: &[Point],
+    now: Instant,
+    stroke: CurveStroke,
+    window: &mut Window,
+) {
+    let pad = px(CHART_PAD);
+    let left = f32::from(bounds.left() + pad);
+    let width = f32::from(bounds.size.width - pad * 2.);
+    let y = f32::from(bounds.bottom() - pad) - 1.0;
+    if width <= 0.0 {
+        return;
+    }
+    let x_of = |at: Instant| left + width * axis_t(now.saturating_duration_since(at)) as f32;
+    match stroke {
+        CurveStroke::Smooth => {
+            // A one-bucket run is drawn as a dash a slice wide
+            // (`lone_reading`), so its end is half a slice out.
+            let half = width / CHART_BUCKETS as f32 / 2.0;
+            let runs = chart_runs(points);
+            for pair in runs.windows(2) {
+                let (prev, next) = (&pair[0], &pair[1]);
+                let (Some(last), Some(first)) = (prev.last(), next.first()) else {
+                    continue;
+                };
+                let from = x_of(last.0) + if prev.len() == 1 { half } else { 0.0 };
+                let to = x_of(first.0) - if next.len() == 1 { half } else { 0.0 };
+                paint_dotted(from, to, y, window);
+            }
+        }
+        CurveStroke::Bars => {
+            let mut slots: Vec<usize> = points
+                .iter()
+                .filter(|sample| sample.value.is_some())
+                .filter_map(|sample| bucket_index(sample.at, now))
+                .collect();
+            // Oldest (highest index) first, left to right.
+            slots.sort_unstable_by(|a, b| b.cmp(a));
+            slots.dedup();
+            for pair in slots.windows(2) {
+                if pair[0] - pair[1] < 2 {
+                    continue;
+                }
+                let (_, from) = bar_edges(pair[0], left, width);
+                let (to, _) = bar_edges(pair[1], left, width);
+                paint_dotted(from, to, y, window);
+            }
+        }
+    }
+}
+
+/// Dots from `from` to `to` on the row at `y`, in the history's dim ink.
+/// A hole narrower than two dots says nothing a dot could.
+fn paint_dotted(from: f32, to: f32, y: f32, window: &mut Window) {
+    if to - from < GAP_DOT_STEP * 2.0 {
+        return;
+    }
+    let mut x = from + (GAP_DOT_STEP - GAP_DOT) / 2.0;
+    while x + GAP_DOT <= to {
+        window.paint_quad(gpui::fill(
+            Bounds::new(point(px(x.round()), px(y)), size(px(GAP_DOT), px(1.))),
+            dim_ink(),
+        ));
+        x += GAP_DOT_STEP;
     }
 }
 
@@ -1775,7 +1914,7 @@ fn endpoint_slope(h0: f32, h1: f32, d0: f32, d1: f32) -> f32 {
 /// sentence at this size. The glyphs are the same ones the tab strip
 /// already uses for Hardware and Network, so they carry that meaning
 /// here; the translated name sits on the tooltip.
-fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
+fn io_strip(io: &IoTotalsSnapshot) -> Option<AnyElement> {
     let cells = [
         (
             "io-disk",
@@ -1796,46 +1935,44 @@ fn io_strip(io: &IoTotalsSnapshot) -> AnyElement {
         .iter()
         .all(|(_, _, _, r, w)| r.is_none() && w.is_none())
     {
-        return div().into_any_element();
+        return None;
     }
 
-    h_flex()
-        .mt(px(8.))
-        // Extra padding above the rates, not margin: the hairline stays
-        // with this row, and the extra air sits *inside* the footnote
-        // instead of as a gap that read as the card ending early.
-        .pt(px(14.))
-        .gap(px(16.))
-        .border_t(px(1.))
-        .border_color(theme::border_subtle())
-        .children(cells.into_iter().map(|(id, icon, label, read, write)| {
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .id(id)
-                        .flex_none()
-                        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-                        .child(
-                            Icon::new(icon)
-                                .with_size(Size::Size(px(12.)))
-                                .text_color(Hsla::from(theme::text_dim())),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap(px(6.))
-                        .font_family(font::MONO)
-                        .text_size(px(10.))
-                        .text_color(theme::text_muted())
-                        .child(format!("↓ {}", format::rate(read)))
-                        .child(format!("↑ {}", format::rate(write))),
-                )
-        }))
-        .into_any_element()
+    // The first row of its own card now (`io_card`), so no hairline and
+    // no air above it: the card's padding is the separation.
+    let row =
+        h_flex()
+            .gap(px(16.))
+            .children(cells.into_iter().map(|(id, icon, label, read, write)| {
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .id(id)
+                            .flex_none()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(label.clone()).build(window, cx)
+                            })
+                            .child(
+                                Icon::new(icon)
+                                    .with_size(Size::Size(px(12.)))
+                                    .text_color(Hsla::from(theme::text_dim())),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .font_family(font::MONO)
+                            .text_size(px(10.))
+                            .text_color(theme::text_muted())
+                            .child(format!("↓ {}", format::rate(read)))
+                            .child(format!("↑ {}", format::rate(write))),
+                    )
+            }));
+    Some(row.into_any_element())
 }
 
 #[cfg(test)]

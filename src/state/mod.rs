@@ -287,14 +287,6 @@ impl HistoryRange {
             HistoryRange::Month => "history.range_month",
         }
     }
-
-    pub fn title_key(self) -> &'static str {
-        match self {
-            HistoryRange::Today => "history.title_today",
-            HistoryRange::Week => "history.title_week",
-            HistoryRange::Month => "history.title_month",
-        }
-    }
 }
 
 /// What the History list ranks by. A view preference like [`ProcSort`]
@@ -323,19 +315,22 @@ impl HistorySort {
         }
     }
 
-    pub fn label_key(self) -> &'static str {
-        match self {
-            HistorySort::CpuTime => "history.sort_cpu",
-            HistorySort::PeakMemory => "history.sort_mem",
-            HistorySort::MemoryGrowth => "history.sort_growth",
-        }
-    }
-
     pub fn tip_key(self) -> &'static str {
         match self {
             HistorySort::CpuTime => "history.sort_cpu_tip",
             HistorySort::PeakMemory => "history.sort_mem_tip",
             HistorySort::MemoryGrowth => "history.sort_growth_tip",
+        }
+    }
+
+    /// The card's title, which names the lens: it is the control that
+    /// switches it, so the title can no longer say "CPU spenders" over a
+    /// list ranked by memory.
+    pub fn title_key(self) -> &'static str {
+        match self {
+            HistorySort::CpuTime => "history.title_cpu",
+            HistorySort::PeakMemory => "history.title_mem",
+            HistorySort::MemoryGrowth => "history.title_growth",
         }
     }
 }
@@ -825,6 +820,9 @@ pub struct ZStatsAppState {
     history_range: HistoryRange,
     /// The order the History list shows.
     history_sort: HistorySort,
+    /// History's rows past its top dozen are on screen. A question, like
+    /// the name filter: reset on hide.
+    show_all_history: bool,
     /// The last (or in-flight) clean-hints update fetch.
     hints_sync: Option<HintsSync>,
     /// The last (or in-flight) Caches-preset roots fetch.
@@ -947,6 +945,7 @@ impl Default for ZStatsAppState {
             history_loaded_at: None,
             history_range: HistoryRange::default(),
             history_sort: HistorySort::default(),
+            show_all_history: false,
             hints_sync: None,
             caches_sync: None,
             template_sync: None,
@@ -1920,6 +1919,7 @@ impl ZStatsAppState {
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
         self.member_table = MemberTable::Off;
+        self.show_all_history = false;
         // The question goes with the photograph. `ensure_apps_topology`
         // keeps the member table fresh for a selected tree on every
         // tick, ahead of its visibility gate — an expansion left
@@ -2383,6 +2383,15 @@ impl ZStatsAppState {
     /// One button, two orders — cycle like the process sort chip.
     pub fn cycle_history_sort(&mut self, cx: &mut Context<Self>) {
         self.history_sort = self.history_sort.next();
+        cx.notify();
+    }
+
+    pub fn show_all_history(&self) -> bool {
+        self.show_all_history
+    }
+
+    pub fn toggle_all_history(&mut self, cx: &mut Context<Self>) {
+        self.show_all_history = !self.show_all_history;
         cx.notify();
     }
 

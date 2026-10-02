@@ -16,11 +16,12 @@ use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px,
+    StatefulInteractiveElement, Styled, div, px, relative,
 };
-use gpui_kit::component::{Icon, Sizable, Size, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// How many rows to name. Beyond this the tail is all daemons doing their job.
@@ -28,7 +29,8 @@ const TOP_N: usize = 12;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let range = state.history_range();
-    let title = i18n::tr(range.title_key());
+    let sort = state.history_sort();
+    let title = i18n::tr(sort.title_key());
     let Some(rows) = state.history() else {
         // The read is on the background executor; this is the frame or two
         // before it lands (or a freshly switched range re-reading).
@@ -41,7 +43,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             widgets::list_shell()
                 .child(widgets::list_header(
                     i18n::tr("history.empty_title"),
-                    Some(header_controls(state, range)),
+                    Some(header_controls(range)),
                 ))
                 .child(
                     div()
@@ -53,7 +55,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ];
     }
 
-    let sort = state.history_sort();
     // Re-ordered in the view: rank() ships CPU-time order, and the
     // memory order is a lens over the same rows, not a second dataset.
     let mut ordered: Vec<_> = rows.iter().collect();
@@ -74,9 +75,24 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             HistorySort::MemoryGrowth => s.memory_growth_bytes.max(0) as u64,
         })
         .max(1);
-    let shown: Vec<_> = ordered.into_iter().take(TOP_N).collect();
+    let hidden = rows.len().saturating_sub(TOP_N);
+    let show_all = state.show_all_history();
+    let shown: Vec<_> = ordered
+        .into_iter()
+        .take(if show_all { rows.len() } else { TOP_N })
+        .collect();
     let last = shown.len().saturating_sub(1);
-    let has_note = rows.len() > TOP_N;
+    // Names that more than one shown row carries. Only those rows say
+    // their pid — elsewhere it was a number beside every name on a page
+    // about whole days, where the pid is history; between two "Google
+    // Chrome Helper" rows it is the one thing that tells them apart.
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for s in &shown {
+        *name_counts.entry(shown_name(s)).or_default() += 1;
+    }
+    // Today draws each row's band on a shared 00:00 → now axis; the
+    // other ranges draw a share meter and have no clock to label.
+    let today = rows.iter().any(|s| s.band.is_some());
 
     let list = widgets::list_shell()
         .child(widgets::list_header(
@@ -90,13 +106,14 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .items_center()
                 .gap(px(4.))
                 .min_w_0()
-                .child(div().min_w_0().truncate().child(title))
+                .child(lens_title(sort, title))
                 .child(widgets::info_icon(
                     "history-basis",
                     i18n::tr("history.about_body"),
                 )),
-            Some(header_controls(state, range)),
+            Some(header_controls(range)),
         ))
+        .when(today, |list| list.child(band_axis()))
         .child(
             // The rows scroll under the header rather than taking the
             // whole card past the top of the panel — the same pinned
@@ -108,7 +125,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id("history-rows")
                 .track_scroll(state.history_rows_scroll())
                 .overflow_y_scroll()
-                .max_h(px(rows_height(state, has_note)))
+                .max_h(px(rows_height(state, today)))
                 .children(shown.into_iter().enumerate().map(|(i, s)| {
                     let pid = s.pid;
                     let name = s.name.clone();
@@ -148,24 +165,25 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                             gpui::FontWeight::MEDIUM,
                                             Hsla::from(theme::text()),
                                         ))
-                                        // The pid rides beside the name on
-                                        // every row (it used to appear only
-                                        // when two rows shared a name): it
-                                        // is identity, and identity reads
-                                        // best at the title — which also
-                                        // frees the caption to be pure
-                                        // figures. The name truncates, the
-                                        // pid does not: a cut name is still
-                                        // recognisable, a cut pid is a
+                                        // The pid beside the name, only
+                                        // where the name repeats (above).
+                                        // At the title, not in the caption,
+                                        // so the caption stays pure figures;
+                                        // the name truncates and the pid
+                                        // does not — a cut pid is a
                                         // different number.
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .font_family(font::MONO)
-                                                .text_size(px(9.5))
-                                                .text_color(theme::text_faint())
-                                                .child(s.pid.to_string()),
-                                        ),
+                                        .when(name_counts[shown_name(s)] > 1, |title| {
+                                            title.child(
+                                                div()
+                                                    .flex_none()
+                                                    .text_size(px(9.5))
+                                                    .text_color(theme::text_faint())
+                                                    .child(
+                                                        t!("processes.pid_only", pid = s.pid)
+                                                            .to_string(),
+                                                    ),
+                                            )
+                                        }),
                                 )
                                 // The headline figure is core-time, which shares a
                                 // unit *shape* with the wall-clock minutes below —
@@ -221,15 +239,22 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         .min_w_0()
                                         .items_center()
                                         .gap(px(6.))
-                                        .children(s.shape.map(|shape| {
-                                            shape_pill(
-                                                ("hist-shape", s.pid as usize),
-                                                shape,
-                                                s.peak_cpu_percent,
-                                                s.span,
-                                                s.minutes,
-                                            )
-                                        }))
+                                        // Steady is most rows on most days,
+                                        // and a word every row wears says
+                                        // nothing; only the exceptions do.
+                                        .children(
+                                            s.shape
+                                                .filter(|shape| *shape != HistoryShape::Sustained)
+                                                .map(|shape| {
+                                                    shape_pill(
+                                                        ("hist-shape", s.pid as usize),
+                                                        shape,
+                                                        s.peak_cpu_percent,
+                                                        s.span,
+                                                        s.minutes,
+                                                    )
+                                                }),
+                                        )
                                         .child(
                                             // Pure figure: the pid lives
                                             // beside the name now, so the
@@ -302,16 +327,124 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             ),
                         }))
                         .into_any_element()
-                })),
+                }))
+                // Inside the card, at the end of the rows — the same chip
+                // as every other "show more". It was a sentence under the
+                // card that only said the rows existed.
+                .when(hidden > 0, |rows| {
+                    rows.child(
+                        h_flex()
+                            .px(px(13.))
+                            .py(px(8.))
+                            .child(more_chip(hidden, show_all)),
+                    )
+                }),
         );
 
-    let mut out = vec![list.into_any_element()];
-    if has_note {
-        out.push(widgets::note(
-            t!("history.more", count = rows.len() - TOP_N).to_string(),
-        ));
-    }
-    out
+    vec![list.into_any_element()]
+}
+
+/// The title names the lens and is the control that switches it: a
+/// separate "CPU" chip beside Today / 7d / 30d read as a fourth range.
+fn lens_title(sort: HistorySort, title: String) -> AnyElement {
+    h_flex()
+        .id("history-sort")
+        .items_center()
+        .gap(px(3.))
+        .min_w_0()
+        .rounded(px(4.))
+        // Padded for the hover fill, pulled back so the title still
+        // starts on the card's text line.
+        .px(px(4.))
+        .ml(px(-4.))
+        .hover(|d| d.bg(theme::surface_raised()))
+        .tooltip(widgets::wrap_tooltip(i18n::tr(sort.tip_key())))
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.cycle_history_sort(cx));
+        })
+        .child(div().min_w_0().truncate().child(title))
+        .child(
+            Icon::new(IconName::ChevronDown)
+                .with_size(Size::Size(px(10.)))
+                .text_color(Hsla::from(theme::text_dim())),
+        )
+        .into_any_element()
+}
+
+fn more_chip(hidden: usize, showing: bool) -> AnyElement {
+    div()
+        .id("history-more")
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border_subtle())
+        .hover(|d| d.bg(theme::surface_raised()).border_color(theme::border()))
+        .px(px(7.))
+        .py(px(1.))
+        .text_size(px(9.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text_dim())
+        .child(if showing {
+            i18n::tr("history.less")
+        } else {
+            t!("history.more", count = hidden).to_string()
+        })
+        .on_click(|_, _window, cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.toggle_all_history(cx));
+        })
+        .into_any_element()
+}
+
+/// Height of [`band_axis`], reserved out of the rows' budget.
+const AXIS_ROW: f32 = 16.;
+
+/// The clock under Today's bands: 0:00 at the left, now at the right,
+/// and the six-hour marks the lived day has reached between them. The
+/// bands had no axis at all — a lit cell could be placed only by
+/// hovering it. Same width and same lived-day scale as [`band`].
+fn band_axis() -> AnyElement {
+    let now = jiff::Zoned::now();
+    let lived_minutes = now.hour().max(0) as usize * 60 + now.minute().max(0) as usize;
+    let lived = (lived_minutes / history::BAND_BUCKET_MINUTES + 1).min(history::BAND_BUCKETS);
+    let label = |text: String| {
+        div()
+            .font_family(font::MONO)
+            .text_size(px(9.))
+            .text_color(theme::text_dim())
+            .child(text)
+    };
+    // A mark too near either end would collide with its label.
+    let marks = [6usize, 12, 18].into_iter().filter_map(|hour| {
+        let at = (hour * 60 / history::BAND_BUCKET_MINUTES) as f32 / lived as f32;
+        (0.15..0.8).contains(&at).then_some((hour, at))
+    });
+    div()
+        .mx(px(13.))
+        .h(px(AXIS_ROW))
+        .relative()
+        .child(
+            label(i18n::tr("history.axis_start"))
+                .absolute()
+                .left_0()
+                .top_0(),
+        )
+        .children(marks.map(|(hour, at)| {
+            label(format!("{hour}:00"))
+                .absolute()
+                .left(relative(at))
+                .top_0()
+        }))
+        .child(
+            label(i18n::tr("history.axis_now"))
+                .absolute()
+                .right_0()
+                .top_0(),
+        )
+        .into_any_element()
 }
 
 /// What a row is titled: the record's display name where it carries one
@@ -473,30 +606,21 @@ fn band_alpha(peak: f32) -> f32 {
     }
 }
 
-/// The "N more processes" note and the gap above it — the only thing
-/// left under this list now that the explainer moved into the header's
-/// ⓘ.
-///
-/// Reserving exactly it is what makes the pin real: the card then adds
-/// up to the body's height with the note, the tab has nothing left to
-/// scroll, and the header cannot be scrolled away no matter what the
-/// wheel is over. Reserved only when the note exists — a list that fits
-/// keeps the row.
-const TRAILING_NOTE: f32 = 26.;
-
 /// The rows region's height — the same budget the Processes list gets,
-/// less the note when there is one.
-fn rows_height(state: &ZStatsAppState, has_note: bool) -> f32 {
-    let trailing = if has_note { TRAILING_NOTE } else { 0. };
-    (super::processes::rows_height(state) - trailing).max(160.)
+/// less Today's axis row when it is drawn. Reserving exactly that is what
+/// makes the pin real: the card adds up to the body's height, the tab
+/// has nothing left to scroll, and the header cannot be scrolled away.
+fn rows_height(state: &ZStatsAppState, axis: bool) -> f32 {
+    let axis = if axis { AXIS_ROW } else { 0. };
+    (super::processes::rows_height(state) - axis).max(160.)
 }
 
-/// Sort, range and refresh, side by side in the header.
-fn header_controls(state: &ZStatsAppState, current: HistoryRange) -> AnyElement {
+/// Range and refresh, side by side in the header. The lens is the title
+/// ([`lens_title`]).
+fn header_controls(current: HistoryRange) -> AnyElement {
     h_flex()
         .items_center()
         .gap(px(2.))
-        .child(sort_chip(state.history_sort()))
         .children(HistoryRange::ALL.into_iter().enumerate().map(|(i, range)| {
             let on = range == current;
             div()
@@ -552,31 +676,6 @@ fn shape_pill(
         .text_color(theme::tiny_label(theme::text_muted()))
         .tooltip(widgets::wrap_tooltip(tip))
         .child(label)
-        .into_any_element()
-}
-
-/// One button cycling the two orders, the process page's idiom — the
-/// label names the order in force, the tooltip carries its caveat.
-fn sort_chip(sort: HistorySort) -> AnyElement {
-    let tip = i18n::tr(sort.tip_key());
-    h_flex()
-        .id("history-sort")
-        .items_center()
-        .rounded(px(4.))
-        .px(px(5.))
-        .py(px(1.))
-        .mr(px(4.))
-        .text_size(px(9.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme::text_muted())
-        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
-        .tooltip(widgets::wrap_tooltip(tip))
-        .child(i18n::tr(sort.label_key()))
-        .on_click(|_, _window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.cycle_history_sort(cx));
-        })
         .into_any_element()
 }
 

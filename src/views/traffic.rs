@@ -199,6 +199,10 @@ fn row_element(
         .name
         .clone()
         .unwrap_or_else(|| i18n::tr("traffic.unknown"));
+    // Two lines, not three: who and how fast on one, the curve under
+    // it. The rates used to have a line of their own with ↑ pushed to the
+    // far edge, which parted the pair a reader compares and spent ~20px a
+    // row; the pid sits after the name, dim, as the listening card has it.
     v_flex()
         .px(px(13.))
         .py(px(8.))
@@ -207,33 +211,40 @@ fn row_element(
         })
         .child(
             h_flex()
-                .items_center()
+                .items_baseline()
                 .justify_between()
                 .gap(px(8.))
-                .child(widgets::truncating_name(
-                    ("traffic-owner", index),
-                    name,
-                    11.,
-                    gpui::FontWeight::MEDIUM,
-                    theme::text().into(),
-                ))
-                .child(pid_label(index, row)),
-        )
-        .child(
-            h_flex()
-                .justify_between()
-                .mt(px(3.))
-                .font_family(font::MONO)
-                .text_size(px(11.))
-                .text_color(theme::text())
-                .child(format!("↓ {}", format::rate(row.received_per_sec)))
-                .child(format!("↑ {}", format::rate(row.transmitted_per_sec))),
+                .child(
+                    h_flex()
+                        .items_baseline()
+                        .gap(px(6.))
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::truncating_name(
+                            ("traffic-owner", index),
+                            name,
+                            11.,
+                            gpui::FontWeight::MEDIUM,
+                            theme::text().into(),
+                        ))
+                        .children(pid_label(index, row)),
+                )
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .gap(px(8.))
+                        .font_family(font::MONO)
+                        .text_size(px(11.))
+                        .text_color(theme::text())
+                        .child(format!("↓ {}", format::rate(row.received_per_sec)))
+                        .child(format!("↑ {}", format::rate(row.transmitted_per_sec))),
+                ),
         )
         // On the recessed meter-track fill, as Overview's charts are.
         // Without it a quiet program's flat 0 read as a row divider.
         .child(
             div()
-                .mt(px(5.))
+                .mt(px(4.))
                 .h(px(CURVE_H))
                 .px(px(WELL_PAD_X))
                 .py(px(WELL_PAD_Y))
@@ -244,17 +255,13 @@ fn row_element(
         .into_any_element()
 }
 
-/// The pid for one process, `×N` when the row stands for several. The
-/// several case is where the pids went, so the tooltip gives them back.
-fn pid_label(index: usize, row: &ProgramRate) -> AnyElement {
+/// `pid N` for one process, `×N` when the row stands for several — a bare
+/// number in that spot read as a count. The several case is where the
+/// pids went, so the tooltip gives them back.
+fn pid_label(index: usize, row: &ProgramRate) -> Option<AnyElement> {
     let label = match row.pids.len() {
-        0 => String::new(),
-        1 => row
-            .pids
-            .iter()
-            .next()
-            .map(u32::to_string)
-            .unwrap_or_default(),
+        0 => return None,
+        1 => t!("processes.pid_only", pid = row.pids.iter().next()?).to_string(),
         n => format!("×{n}"),
     };
     let el = div()
@@ -263,7 +270,7 @@ fn pid_label(index: usize, row: &ProgramRate) -> AnyElement {
         .text_color(theme::text_dim())
         .child(label);
     if row.pids.len() < 2 {
-        return el.into_any_element();
+        return Some(el.into_any_element());
     }
     let pids = row
         .pids
@@ -271,11 +278,13 @@ fn pid_label(index: usize, row: &ProgramRate) -> AnyElement {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    el.id(("traffic-pids", index))
-        .tooltip(widgets::wrap_tooltip(
-            t!("traffic.pids_tip", pids = pids).to_string(),
-        ))
-        .into_any_element()
+    Some(
+        el.id(("traffic-pids", index))
+            .tooltip(widgets::wrap_tooltip(
+                t!("traffic.pids_tip", pids = pids).to_string(),
+            ))
+            .into_any_element(),
+    )
 }
 
 fn more_chip(hidden: usize, showing: bool) -> AnyElement {

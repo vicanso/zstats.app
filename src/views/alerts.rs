@@ -97,7 +97,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
     // Watching belongs here too, not only on the empty list: otherwise
     // one episode leaves half the panel blank and hides what is armed.
-    cards.extend(armed_block(state).map(on_content_line));
+    // In a card of its own: as loose text between cards it read as a
+    // card that failed to draw.
+    cards.extend(armed_block(state).map(|block| card().child(block).into_any_element()));
     cards.extend(past_days_block(state.alert_history()));
     cards
 }
@@ -240,19 +242,21 @@ fn past_day_card(day: &DayLog) -> AnyElement {
     } else {
         t!("alerts.past_count", count = count).to_string()
     };
-    let shown = count.min(PAST_ROWS_PER_DAY);
-    let hidden = count - shown;
+    let groups = past_groups(&day.episodes);
+    let shown = groups.len().min(PAST_ROWS_PER_DAY);
+    let hidden = groups.len() - shown;
+    let today = jiff::Zoned::now().date();
     widgets::list_shell()
         .child(widgets::list_header(
-            day.date.clone(),
+            format::day_heading(&day.date, today),
             Some(widgets::note(count_text)),
         ))
         .children(
-            day.episodes
+            groups
                 .iter()
                 .take(shown)
                 .enumerate()
-                .map(|(i, e)| past_row(e, i + 1 == shown && hidden == 0)),
+                .map(|(i, group)| past_row(i, group, i + 1 == shown && hidden == 0)),
         )
         .when(hidden > 0, |d| {
             d.child(div().px(px(13.)).py(px(6.)).child(widgets::note(
@@ -262,8 +266,62 @@ fn past_day_card(day: &DayLog) -> AnyElement {
         .into_any_element()
 }
 
-fn past_row(e: &alertlog::Restored, last: bool) -> AnyElement {
-    let critical = e.event.severity() == Severity::Critical;
+/// A day's episodes with the same subject and kind, as one row: a
+/// program that crossed the CPU line twice is one fact with a count, and
+/// as two rows its pids (history, by the time anyone reads this) were
+/// the only difference. Most recent first, like the episodes.
+fn past_groups(episodes: &[alertlog::Restored]) -> Vec<Vec<&alertlog::Restored>> {
+    let mut groups: Vec<Vec<&alertlog::Restored>> = Vec::new();
+    for e in episodes {
+        let key = (subject_name(&e.event.subject), e.event.kind());
+        match groups
+            .iter_mut()
+            .find(|g| (subject_name(&g[0].event.subject), g[0].event.kind()) == key)
+        {
+            Some(group) => group.push(e),
+            None => groups.push(vec![e]),
+        }
+    }
+    groups
+}
+
+/// A subject without its pid — what makes two episodes the same story.
+fn subject_name(subject: &AlertSubject) -> String {
+    match subject {
+        AlertSubject::Process {
+            name, display_name, ..
+        }
+        | AlertSubject::App {
+            name, display_name, ..
+        } => display_name.as_deref().unwrap_or(name).to_string(),
+        other => subject_label(other),
+    }
+}
+
+fn past_row(index: usize, group: &[&alertlog::Restored], last: bool) -> AnyElement {
+    let e = group[0];
+    let critical = group
+        .iter()
+        .any(|e| e.event.severity() == Severity::Critical);
+    let dismissed = group.iter().all(|e| e.dismissed);
+    let label = if group.len() == 1 {
+        subject_label(&e.event.subject)
+    } else {
+        format!("{} ×{}", subject_name(&e.event.subject), group.len())
+    };
+    // Each time (and pid, for a process) that the count stands for.
+    let times: Vec<gpui::SharedString> = group
+        .iter()
+        .map(|e| match &e.event.subject {
+            AlertSubject::Process { pid, .. } => format!(
+                "{} · {}",
+                format::clock(e.at),
+                t!("processes.pid_only", pid = pid)
+            )
+            .into(),
+            _ => format::clock(e.at).into(),
+        })
+        .collect();
     h_flex()
         .items_center()
         .gap(px(8.))
@@ -281,23 +339,34 @@ fn past_row(e: &alertlog::Restored, last: bool) -> AnyElement {
                 .child(format::clock(e.at)),
         )
         // Severity as the cards paint it: accent past the line, ink
-        // otherwise — the one colour rule every threshold shares.
+        // otherwise — the one colour rule every threshold shares. Its
+        // word on hover: a dot's colour was the only key to it.
         .child(
             div()
+                .id(("past-severity", index))
                 .flex_none()
                 .w(px(6.))
                 .h(px(6.))
                 .rounded_full()
-                .bg(theme::fill_for(critical)),
+                .bg(theme::fill_for(critical))
+                .tooltip(widgets::wrap_tooltip(i18n::tr(if critical {
+                    "alerts.severity_critical"
+                } else {
+                    "alerts.severity_warning"
+                }))),
         )
         .child(
             div()
+                .id(("past-subject", index))
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_size(px(11.))
                 .text_color(theme::text())
-                .child(subject_label(&e.event.subject)),
+                .when(group.len() > 1, |d| {
+                    d.tooltip(widgets::wrap_tooltip_lines(times.clone()))
+                })
+                .child(label),
         )
         .child(
             div()
@@ -306,10 +375,7 @@ fn past_row(e: &alertlog::Restored, last: bool) -> AnyElement {
                 .text_color(theme::tiny_label(theme::text_muted()))
                 .child(i18n::tr(past_kind_key(e.event.kind()))),
         )
-        .children(
-            e.dismissed
-                .then(|| widgets::outline_pill(i18n::tr("alerts.past_dismissed"))),
-        )
+        .children(dismissed.then(|| widgets::outline_pill(i18n::tr("alerts.past_dismissed"))))
         .into_any_element()
 }
 
@@ -394,44 +460,57 @@ fn sustained_from(active: &[SustainedNotice]) -> Option<AnyElement> {
         return None;
     }
     let last = active.len() - 1;
+    // What this card is rides the ⓘ; it was a paragraph above the rows,
+    // the longest text on the tab for the one card that never changes.
+    // Each row is two lines so the name is not cut to make room for the
+    // figures beside it.
     Some(
         card()
             .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
-                    .child(i18n::tr("alerts.sustained_title")),
-            )
-            .child(
-                div()
-                    .mt(px(3.))
-                    .text_size(px(10.))
-                    .text_color(theme::text_dim())
-                    .child(i18n::tr("alerts.sustained_note")),
-            )
-            .children(active.iter().enumerate().map(|(i, notice)| {
                 h_flex()
                     .items_center()
-                    .justify_between()
-                    .gap(px(8.))
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::text())
+                            .child(i18n::tr("alerts.sustained_title")),
+                    )
+                    .child(widgets::info_icon(
+                        "alerts-sustained-info",
+                        i18n::tr("alerts.sustained_note"),
+                    )),
+            )
+            .children(active.iter().enumerate().map(|(i, notice)| {
+                v_flex()
                     .py(px(7.))
                     .when(i != last, |d| {
                         d.border_b(px(1.)).border_color(theme::border_subtle())
                     })
                     .child(
-                        div()
-                            .flex_1()
+                        h_flex()
+                            .items_baseline()
+                            .gap(px(6.))
                             .min_w_0()
-                            .text_size(px(11.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme::text())
-                            .truncate()
-                            .child(format!("{} — pid {}", notice.name, notice.pid)),
+                            .child(widgets::truncating_name(
+                                ("sustained-name", i),
+                                notice.name.clone(),
+                                11.5,
+                                gpui::FontWeight::MEDIUM,
+                                theme::text().into(),
+                            ))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.))
+                                    .text_color(theme::text_dim())
+                                    .child(t!("processes.pid_only", pid = notice.pid).to_string()),
+                            ),
                     )
                     .child(
                         div()
-                            .flex_none()
+                            .mt(px(2.))
                             .font_family(font::MONO)
                             .text_size(px(10.))
                             .text_color(theme::text_muted())
@@ -606,12 +685,16 @@ fn growth_from(growth: &[(GrowthNotice, Duration)]) -> Option<AnyElement> {
 /// the two can never disagree). One pair per rule — a single joined
 /// line wrapped mid-token at 320px (`CPU 30 Memory:`). `None` with no
 /// readable config: the empty body already covers the waiting state.
-fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
+///
+/// The third field marks a wide row — a watcher's sentence ("≥2.0 GB in
+/// an hour") that does not fit half the card; the thresholds are a few
+/// characters and go two to a row ([`armed_block`]).
+fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String, bool)>> {
     let file = state.settings()?;
     let eff = zstats::alerts::ActiveThresholds::from_config(&file.alerts);
     let mut rows = Vec::new();
     if let Some(v) = eff.cpu.base() {
-        rows.push((i18n::tr("alerts.kind_cpu"), format!("{v:.0}%")));
+        rows.push((i18n::tr("alerts.kind_cpu"), format!("{v:.0}%"), false));
     }
     // Memory bars are the LOWER of a share and an absolute ceiling, so
     // the percentage alone overstates them: 25% reads as 16 GB on a
@@ -621,12 +704,16 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
     // "the base bar" means here.
     let total = state.latest().map(|tick| tick.snapshot.memory.total_bytes);
     match total.and_then(|t| eff.memory_bar_bytes("", t)) {
-        Some(bytes) => rows.push((i18n::tr("alerts.kind_mem"), format::memory(bytes))),
+        Some(bytes) => rows.push((i18n::tr("alerts.kind_mem"), format::memory(bytes), false)),
         // Before the first sample there is no total to resolve against;
         // the share is all that can be said honestly.
         None => {
             if let Some(f) = eff.memory.base() {
-                rows.push((i18n::tr("alerts.kind_mem"), format!("{:.0}%", f * 100.0)));
+                rows.push((
+                    i18n::tr("alerts.kind_mem"),
+                    format!("{:.0}%", f * 100.0),
+                    false,
+                ));
             }
         }
     }
@@ -636,15 +723,20 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
     // half of what "per-program thresholds" means, so an armed list
     // that omits them understates the watch.
     if let Some(v) = eff.app_cpu.base() {
-        rows.push((i18n::tr("alerts.kind_app_cpu"), format!("{v:.0}%")));
+        rows.push((i18n::tr("alerts.kind_app_cpu"), format!("{v:.0}%"), false));
     }
     if let Some(bytes) = total.and_then(|t| eff.app_memory_bar_bytes("", t)) {
-        rows.push((i18n::tr("alerts.kind_app_mem"), format::memory(bytes)));
+        rows.push((
+            i18n::tr("alerts.kind_app_mem"),
+            format::memory(bytes),
+            false,
+        ));
     }
     if let Some(f) = eff.disk.base() {
         rows.push((
             i18n::tr("alerts.kind_disk"),
             format!("{:.0}%", f64::from(f) * 100.0),
+            false,
         ));
     }
     rows.push((
@@ -655,6 +747,7 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
             after = format::span(state.sustained_rule().after)
         )
         .to_string(),
+        true,
     ));
     // The other watcher: a list that names one and not the other would
     // make the creep card (and its banner) look like they came from
@@ -666,6 +759,7 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
             delta = format::memory(trend::creep_notify_bytes(total.unwrap_or(0)))
         )
         .to_string(),
+        true,
     ));
     // The daily disk check is the other watcher with a banner; listed
     // while it is on, for the creep row's reason.
@@ -677,11 +771,13 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
                 delta = format::memory(diskwatch::NOTIFY_BYTES)
             )
             .to_string(),
+            true,
         ));
     }
     rows.push((
         i18n::tr("alerts.empty_cooldown"),
         super::config::humanize(eff.cooldown),
+        false,
     ));
     // The master switch, said where the watching is listed: a banner
     // that quietly never arrives reads as a rule that stopped firing —
@@ -690,6 +786,7 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
         rows.push((
             i18n::tr("alerts.armed_notifications"),
             i18n::tr("alerts.armed_muted"),
+            true,
         ));
     }
     Some(rows)
@@ -697,7 +794,48 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String)>> {
 
 fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
     let rows = armed_rows(state)?;
-    let last = rows.len().saturating_sub(1);
+    // The short thresholds two to a row, then each watcher's sentence on
+    // a row of its own — nine single rows were a third of the tab for a
+    // reference list. Order within each kind is `armed_rows`'.
+    let (short, wide): (Vec<_>, Vec<_>) = rows.into_iter().partition(|(_, _, wide)| !wide);
+    // `(cells, half)`: a half row is a threshold row, whose single cell
+    // (an odd count) keeps half the width.
+    let mut lines: Vec<(Vec<(String, String)>, bool)> = short
+        .chunks(2)
+        .map(|pair| {
+            (
+                pair.iter()
+                    .map(|(k, v, _)| (k.clone(), v.clone()))
+                    .collect(),
+                true,
+            )
+        })
+        .collect();
+    lines.extend(wide.into_iter().map(|(k, v, _)| (vec![(k, v)], false)));
+    let last = lines.len().saturating_sub(1);
+    let cell = |(k, v): (String, String)| {
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .justify_between()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(k),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(font::MONO)
+                    .text_size(px(10.))
+                    .text_color(theme::text_muted())
+                    .child(v),
+            )
+    };
     Some(
         v_flex()
             .w_full()
@@ -721,29 +859,18 @@ fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
                         }),
                     )),
             )
-            .children(rows.into_iter().enumerate().map(|(i, (k, v))| {
+            .children(lines.into_iter().enumerate().map(|(i, (line, half))| {
+                let lone = half && line.len() == 1;
                 h_flex()
                     .w_full()
-                    .justify_between()
-                    .gap(px(8.))
+                    .gap(px(16.))
                     .pt(px(4.))
                     .when(i != last, |d| d.pb(px(4.)))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.))
-                            .text_color(theme::text_dim())
-                            .child(k),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(font::MONO)
-                            .text_size(px(10.))
-                            .text_color(theme::text_muted())
-                            .child(v),
-                    )
+                    .children(line.into_iter().map(cell))
+                    // A threshold left alone on the last short row keeps
+                    // half the width, so its value lines up with the
+                    // column above instead of the card's right edge.
+                    .when(lone, |row| row.child(div().flex_1()))
                     .into_any_element()
             }))
             .into_any_element(),
@@ -1597,6 +1724,39 @@ mod tests {
         let t = override_target(&cpu_process("ghostty")).expect("target");
         assert_eq!(t.key, "alert-cpu");
         assert_eq!(t.name, "ghostty");
+    }
+
+    #[test]
+    fn a_day_folds_repeats_of_one_subject_and_kind_into_a_row() {
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let episode = |pid: u32, name: &str| alertlog::Restored {
+            event: AlertEvent {
+                subject: AlertSubject::Process {
+                    pid,
+                    name: name.into(),
+                    display_name: None,
+                },
+                ..cpu_process(name)
+            },
+            first_at: at,
+            at,
+            reports: 1,
+            dismissed: false,
+        };
+        let day = vec![
+            episode(98054, "Telegram"),
+            episode(1, "zstats"),
+            episode(12931, "Telegram"),
+        ];
+        let groups = past_groups(&day);
+        assert_eq!(groups.len(), 2, "two Telegram episodes, one row");
+        assert_eq!(groups[0].len(), 2);
+        // Most recent first, as the day's file lists them.
+        assert!(matches!(
+            groups[0][0].event.subject,
+            AlertSubject::Process { pid: 98054, .. }
+        ));
+        assert_eq!(groups[1].len(), 1);
     }
 
     fn seen(event: AlertEvent, live: bool) -> SeenAlert {

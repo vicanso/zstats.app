@@ -74,6 +74,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             // colour key are the same number, where the old absolute sort
             // could push a near-its-limit sensor below the preview cut and
             // hide it.
+            // The hottest reading in degrees, for the header. The rows rank
+            // by share of each sensor's own limit (above), so the top row
+            // is not always this one — and "how hot is it" is the first
+            // question, answered here before the raw labels below.
+            let hottest = temps.iter().map(|t| t.celsius).fold(f32::MIN, f32::max);
             let mut sorted: Vec<_> = temps.iter().collect();
             sorted.sort_by(|a, b| crit_fraction(b).total_cmp(&crit_fraction(a)));
             let show_all = state.show_all_sensors();
@@ -91,10 +96,42 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             // Same card and the same two-up cells as the Battery card
             // under it, so the two read as one kind of block.
             card()
-                .child(widgets::card_header(
-                    i18n::tr("sensors.title"),
-                    Some(more_chip(hideable, show_all)),
-                ))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme::text())
+                                        .child(i18n::tr("sensors.title")),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(10.))
+                                        .text_color(theme::text_muted())
+                                        .child(
+                                            t!("sensors.hottest", t = format!("{hottest:.1} °C"))
+                                                .to_string(),
+                                        ),
+                                )
+                                .child(widgets::info_icon(
+                                    "sensors-names",
+                                    i18n::tr("sensors.names_tip"),
+                                )),
+                        )
+                        .child(more_chip(hideable, show_all)),
+                )
                 .child(sensor_grid(&sorted))
                 .into_any_element()
         }
@@ -267,8 +304,10 @@ fn battery_time(b: &zstats::snapshot::BatterySnapshot) -> Option<(String, String
 
 fn battery_grid(b: &zstats::snapshot::BatterySnapshot) -> AnyElement {
     let charge = (i18n::tr("sensors.charge"), format::pct(b.charge_percent));
+    // zstats' `power_watts` is the present flow either way, and `state`
+    // says which: "Draw" beside "charging" read as the machine's own use.
     let draw = (
-        i18n::tr("sensors.draw"),
+        i18n::tr(power_label_key(&b.state)),
         b.power_watts
             .map_or(format::PLACEHOLDER.to_string(), |w| format!("{w:.1} W")),
     );
@@ -282,22 +321,31 @@ fn battery_grid(b: &zstats::snapshot::BatterySnapshot) -> AnyElement {
         b.cycle_count
             .map_or(format::PLACEHOLDER.to_string(), |c| c.to_string()),
     );
-    let temp = (
-        i18n::tr("sensors.cell_temp"),
-        b.temperature_celsius
-            .map_or(format::PLACEHOLDER.to_string(), |c| format!("{c:.1} °C")),
-    );
-    // Six slots so two-up is always three-and-three. The time cell is
-    // the one that comes and goes; an empty pair keeps the row height
-    // when there is nothing to say.
-    widgets::kv_columns(vec![
-        charge,
-        draw,
-        health,
-        cycles,
-        temp,
-        battery_time(b).unwrap_or_else(|| (String::new(), "\u{00a0}".into())),
-    ])
+    // A cell temperature this machine does not report is not a row: a
+    // dash under "Cell temp" said nothing a missing row does not.
+    let temp = b
+        .temperature_celsius
+        .map(|c| (i18n::tr("sensors.cell_temp"), format!("{c:.1} °C")));
+    // Six slots so two-up is always three-and-three. The temperature and
+    // the time are the cells that come and go; empty pairs keep the row
+    // height when there is nothing to say.
+    let mut cells = vec![charge, draw, health, cycles];
+    cells.extend(temp);
+    cells.extend(battery_time(b));
+    while cells.len() < 6 {
+        cells.push((String::new(), "\u{00a0}".into()));
+    }
+    widgets::kv_columns(cells)
+}
+
+/// The power cell's label for this battery state: the same zstats field
+/// is charging power or draw.
+fn power_label_key(state: &str) -> &'static str {
+    match state.to_ascii_lowercase().as_str() {
+        "charging" => "sensors.charging_power",
+        "discharging" | "empty" => "sensors.draw",
+        _ => "sensors.power",
+    }
 }
 
 fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElement> {
@@ -332,6 +380,13 @@ mod tests {
             time_to_full_secs: to_full,
             time_to_empty_secs: to_empty,
         }
+    }
+
+    #[test]
+    fn the_power_cell_is_named_for_the_direction_of_flow() {
+        assert_eq!(power_label_key("Charging"), "sensors.charging_power");
+        assert_eq!(power_label_key("Discharging"), "sensors.draw");
+        assert_eq!(power_label_key("Full"), "sensors.power");
     }
 
     /// A battery is either emptying or filling. The card used to reserve

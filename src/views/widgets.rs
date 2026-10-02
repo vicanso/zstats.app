@@ -5,6 +5,7 @@
 //! percentage, so there is nothing to gain from real components.
 
 use crate::font;
+use crate::format;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -193,6 +194,22 @@ pub fn info_icon(id: impl Into<ElementId>, tip: impl Into<SharedString> + 'stati
         .into_any_element()
 }
 
+/// [`info_icon`] carrying more than one paragraph — one ⓘ per card
+/// header, with each note its own block, rather than two icons a reader
+/// has to tell apart.
+pub fn info_icon_lines(id: impl Into<ElementId>, lines: Vec<SharedString>) -> AnyElement {
+    div()
+        .id(id)
+        .flex_none()
+        .tooltip(wrap_tooltip_lines(lines))
+        .child(
+            Icon::new(IconName::Info)
+                .with_size(Size::Size(px(11.)))
+                .text_color(gpui::Hsla::from(theme::text_dim())),
+        )
+        .into_any_element()
+}
+
 /// A name that may ellipsis at 320px. Short names skip the tooltip —
 /// hovering "Finder" to read "Finder" is noise — and the cutoff is
 /// characters, the same proxy [`KV_TIP_FROM`] uses.
@@ -200,6 +217,10 @@ const NAME_TIP_FROM: usize = 16;
 
 /// Truncating label with a hover-to-read-the-tail tooltip when the
 /// string is long enough that the ellipsis is likely real.
+///
+/// Every caller passes a process or app name, so a reverse-DNS one is
+/// shown as its last label (`format::display_name`) and the tooltip gives
+/// the whole identifier back.
 pub fn truncating_name(
     id: impl Into<ElementId>,
     name: impl Into<SharedString>,
@@ -207,8 +228,15 @@ pub fn truncating_name(
     weight: FontWeight,
     color: gpui::Hsla,
 ) -> AnyElement {
-    let name = name.into();
-    let long = name.chars().count() >= NAME_TIP_FROM;
+    let full: SharedString = name.into();
+    let shown = format::display_name(&full);
+    let shortened = shown.len() != full.len();
+    let name = if shortened {
+        SharedString::from(shown.to_string())
+    } else {
+        full.clone()
+    };
+    let long = shortened || name.chars().count() >= NAME_TIP_FROM;
     // Content-sized, not `flex_1`: every caller sits this at the left
     // of a `justify_between` row, where growing changes nothing — but a
     // sibling *inside* the left group (History's inline pid) must hug
@@ -223,7 +251,7 @@ pub fn truncating_name(
         .font_weight(weight)
         .text_color(color)
         .truncate()
-        .when(long, |d| d.tooltip(wrap_tooltip(name.clone())))
+        .when(long, |d| d.tooltip(wrap_tooltip(full.clone())))
         .child(name)
         .into_any_element()
 }
@@ -241,12 +269,15 @@ pub fn truncating_name_tailed(
     weight: FontWeight,
     color: gpui::Hsla,
 ) -> AnyElement {
-    let name = name.into();
+    let name: SharedString = name.into();
     let Some(tail) = tail else {
         return truncating_name(id, name, size, weight, color);
     };
     let full: SharedString = format!("{name} · {tail}").into();
-    let long = full.chars().count() >= NAME_TIP_FROM;
+    let shown = format::display_name(&name);
+    let shortened = shown.len() != name.len();
+    let name = SharedString::from(shown.to_string());
+    let long = shortened || full.chars().count() >= NAME_TIP_FROM;
     h_flex()
         .id(id)
         .flex_1()

@@ -89,6 +89,13 @@ fn drive_row(index: usize, drive: &DriveSnapshot, last: bool) -> AnyElement {
         (None, None) => String::new(),
     };
     let errors = drive.read_errors + drive.write_errors;
+    // No baseline yet — the first read after arriving on the tab (the
+    // switch restarts drive rates from nothing). Two rows of `R — · —`
+    // and a `Q —` read as a broken card; one quiet word says the numbers
+    // are on their way, and the queue waits with them.
+    let measuring = drive.read_ops_per_sec.is_none()
+        && drive.write_ops_per_sec.is_none()
+        && drive.queue_depth.is_none();
     v_flex()
         .px(px(13.))
         .py(px(8.))
@@ -122,55 +129,70 @@ fn drive_row(index: usize, drive: &DriveSnapshot, last: bool) -> AnyElement {
                             theme::text_dim().into(),
                         )),
                 )
-                .child(
-                    // A depth, not a percentage: the driver keeps no
-                    // busy-time clock, so a 0-100 bar cannot be derived
-                    // honestly and is deliberately not drawn.
-                    font::mono_unless_cjk(div())
-                        .id(("drive-queue", index))
-                        .flex_none()
-                        .text_size(px(10.))
-                        .text_color(theme::text_muted())
-                        .tooltip(widgets::wrap_tooltip(i18n::tr("drives.queue_tip")))
-                        .child(
+                .when(!measuring, |row| {
+                    row.child(
+                        // A depth, not a percentage: the driver keeps no
+                        // busy-time clock, so a 0-100 bar cannot be derived
+                        // honestly and is deliberately not drawn.
+                        font::mono_unless_cjk(div())
+                            .id(("drive-queue", index))
+                            .flex_none()
+                            .text_size(px(10.))
+                            .text_color(theme::text_muted())
+                            .tooltip(widgets::wrap_tooltip(i18n::tr("drives.queue_tip")))
+                            .child(
+                                t!(
+                                    "drives.queue",
+                                    depth = drive
+                                        .queue_depth
+                                        .map_or(format::PLACEHOLDER.to_string(), |q| format!(
+                                            "{q:.2}"
+                                        ))
+                                )
+                                .to_string(),
+                            ),
+                    )
+                }),
+        )
+        .when(measuring, |row| {
+            row.child(
+                div()
+                    .mt(px(4.))
+                    .text_size(px(10.))
+                    .text_color(theme::text_dim())
+                    .child(i18n::tr("drives.measuring")),
+            )
+        })
+        .when(!measuring, |row| {
+            row.child(
+                h_flex()
+                    .justify_between()
+                    .gap(px(8.))
+                    .mt(px(4.))
+                    .text_size(px(10.))
+                    .text_color(theme::text_muted())
+                    .child(
+                        font::mono_unless_cjk(div()).child(
                             t!(
-                                "drives.queue",
-                                depth = drive
-                                    .queue_depth
-                                    .map_or(format::PLACEHOLDER.to_string(), |q| format!("{q:.2}"))
+                                "drives.read",
+                                ops = format::ops(drive.read_ops_per_sec),
+                                lat = format::millis(drive.read_latency_ms)
                             )
                             .to_string(),
                         ),
-                ),
-        )
-        .child(
-            h_flex()
-                .justify_between()
-                .gap(px(8.))
-                .mt(px(4.))
-                .text_size(px(10.))
-                .text_color(theme::text_muted())
-                .child(
-                    font::mono_unless_cjk(div()).child(
-                        t!(
-                            "drives.read",
-                            ops = format::ops(drive.read_ops_per_sec),
-                            lat = format::millis(drive.read_latency_ms)
-                        )
-                        .to_string(),
+                    )
+                    .child(
+                        font::mono_unless_cjk(div()).child(
+                            t!(
+                                "drives.write",
+                                ops = format::ops(drive.write_ops_per_sec),
+                                lat = format::millis(drive.write_latency_ms)
+                            )
+                            .to_string(),
+                        ),
                     ),
-                )
-                .child(
-                    font::mono_unless_cjk(div()).child(
-                        t!(
-                            "drives.write",
-                            ops = format::ops(drive.write_ops_per_sec),
-                            lat = format::millis(drive.write_latency_ms)
-                        )
-                        .to_string(),
-                    ),
-                ),
-        )
+            )
+        })
         // Cumulative since boot, and rare enough that any count is news:
         // accent, never a comparison against a bar.
         .when(errors > 0, |row| {

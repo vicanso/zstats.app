@@ -116,9 +116,17 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .truncate()
                         .child(t!("apps.count_of", shown = shown).to_string()),
                 )
-                .child(widgets::info_icon(
+                // One ⓘ for both notes: what the CPU figure is, and what
+                // a tree is (why `login` can head the list, where the cap
+                // comes from). The second used to be its own ⓘ at the far
+                // end of the controls, and two identical icons in one
+                // header left the reader to guess which said what.
+                .child(widgets::info_icon_lines(
                     "apps-cpu-basis",
-                    i18n::tr("apps.cpu_basis_tip"),
+                    vec![
+                        i18n::tr("apps.cpu_basis_tip").into(),
+                        i18n::tr("apps.cap_note").into(),
+                    ],
                 )),
             Some(
                 h_flex()
@@ -127,15 +135,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     .child(processes::filter_chip(state))
                     .child(sort_control(state))
                     .child(full_scan_chip(state))
-                    // The whole explanation — what a tree is, why `login`
-                    // can legitimately head the list, where the cap comes
-                    // from. Used to be a "tree totals" label that sat next
-                    // to All and read as a third chip; ⓘ is the same idiom
-                    // the title already uses for the CPU-basis note.
-                    .child(widgets::info_icon(
-                        "apps-tree-totals",
-                        i18n::tr("apps.cap_note"),
-                    ))
                     .into_any_element(),
             ),
         ))
@@ -408,17 +407,26 @@ fn app_row(
                         .text_color(theme::text_dim())
                         .child(tree_meta(g, ambiguous)),
                 )
+                // Memory last and in the text ink: it is the figure the
+                // row is read for, and the rightmost spot is what lets the
+                // eye run down it as a column (`io_mem_line` says why).
+                // IO stays muted beside it — it comes and goes.
                 .child(
-                    div()
+                    h_flex()
                         .flex_none()
+                        .gap(px(4.))
                         .font_family(font::MONO)
                         .text_size(px(9.5))
                         .text_color(theme::text_muted())
-                        .child(io_mem_line(
-                            shown_memory(g),
-                            g.read_bytes_per_sec,
-                            g.write_bytes_per_sec,
-                        )),
+                        .children(
+                            io_line(g.read_bytes_per_sec, g.write_bytes_per_sec)
+                                .map(|io| format!("{io} ·")),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme::text())
+                                .child(format::memory(shown_memory(g))),
+                        ),
                 ),
         )
         .child(div().mt(px(4.)).child(widgets::meter(
@@ -878,30 +886,22 @@ fn repeated_names<'a>(names: impl Iterator<Item = &'a str>) -> HashSet<&'a str> 
     twice
 }
 
-/// Memory **last**, so it lands on the row's right edge in every row and
-/// forms a column the eye can run down. With it first — as it was — the
-/// IO half is what aligns, and IO is the part that comes and goes, so
-/// the memory figure moved horizontally from row to row and could not be
-/// compared at all.
-fn io_mem_line(memory: u64, read: Option<u64>, write: Option<u64>) -> String {
-    match io_line(read, write) {
-        Some(io) => format!("{io} · {}", format::memory(memory)),
-        None => format::memory(memory),
-    }
-}
-
+/// The row's IO, left of its memory. Memory goes **last**, so it lands on
+/// the row's right edge in every row and forms a column the eye can run
+/// down; with it first — as it was — the IO half aligned, and IO is the
+/// part that comes and goes.
+///
+/// Only the sides that moved: zero draws the same nothing as "not
+/// collected". Most trees idle at R 0 B/s · W 0 B/s, and a lone
+/// "W 0 B/s" beside a live read was the same ink without information.
+/// The expanded detail keeps the explicit numbers.
 fn io_line(read: Option<u64>, write: Option<u64>) -> Option<String> {
-    // Zero draws the same nothing as "not collected": most trees idle at
-    // R 0 B/s · W 0 B/s, and repeating that on every row is ink without
-    // information. The expanded detail keeps the explicit numbers.
-    if read.unwrap_or(0) == 0 && write.unwrap_or(0) == 0 {
-        return None;
-    }
-    Some(format!(
-        "R {} · W {}",
-        format::rate(read),
-        format::rate(write)
-    ))
+    let sides: Vec<String> = [("R", read), ("W", write)]
+        .into_iter()
+        .filter(|(_, rate)| rate.unwrap_or(0) > 0)
+        .map(|(label, rate)| format!("{label} {}", format::rate(rate)))
+        .collect();
+    (!sides.is_empty()).then(|| sides.join(" · "))
 }
 
 #[cfg(test)]
@@ -972,17 +972,12 @@ mod tests {
         // and "R 0 B/s · W 0 B/s" on each was ink without information.
         assert_eq!(io_line(Some(0), Some(0)), None);
         assert_eq!(io_line(Some(0), None), None);
-        // One live side brings the whole line back, zeros included.
+        // Only the side that moved.
+        assert_eq!(io_line(Some(2048), Some(0)), Some("R 2 kB/s".into()));
+        assert_eq!(io_line(None, Some(2048)), Some("W 2 kB/s".into()));
         assert_eq!(
-            io_line(Some(2048), Some(0)),
-            Some("R 2 kB/s · W 0 B/s".into())
-        );
-        assert_eq!(io_mem_line(98 * 1024 * 1024, None, None), "98 MB");
-        assert_eq!(io_mem_line(98 * 1024 * 1024, Some(0), Some(0)), "98 MB");
-        // Memory last, always — that is what gives the column an edge.
-        assert!(
-            io_mem_line(98 * 1024 * 1024, Some(2048), Some(0)).ends_with("98 MB"),
-            "memory has to be the rightmost figure"
+            io_line(Some(2048), Some(4096)),
+            Some("R 2 kB/s · W 4 kB/s".into())
         );
     }
 

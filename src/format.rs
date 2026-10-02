@@ -177,6 +177,66 @@ pub fn clock(t: SystemTime) -> String {
     format!("{:02}:{:02}", zoned.hour(), zoned.minute())
 }
 
+/// A process name that is a reverse-DNS identifier
+/// (`com.apple.appkit.xpc.openAndSavePanelService`) as its last label —
+/// the word that names the program. The vendor prefix filled a 320px row
+/// and truncated exactly that word away. Anything else comes back as
+/// given: one dot (`spotlightknowledged.updater`), spaces, or a first
+/// label that is not a short lower-case domain (`Python3.12.app`) is a
+/// name, not an identifier. Display only — search and alert rules keep
+/// matching the full name, and the row's tooltip carries it.
+pub fn display_name(name: &str) -> &str {
+    let first = name.split('.').next().unwrap_or_default();
+    let identifier = name.matches('.').count() >= 2
+        && !name.contains(char::is_whitespace)
+        && (2..=6).contains(&first.len())
+        && first.bytes().all(|b| b.is_ascii_lowercase());
+    match name.rsplit('.').next() {
+        Some(last) if identifier && !last.is_empty() => last,
+        _ => name,
+    }
+}
+
+/// A past day's heading: `Oct 1 · Yesterday`, `Sep 30 · Wed` (`10月1日 ·
+/// 昨天`). The ISO `2026-10-01` it replaces made every heading a small
+/// calculation — which day was that? — on a list read to answer exactly
+/// that. `date` is the `YYYY-MM-DD` a day's log is named by; anything
+/// else comes back as given.
+pub fn day_heading(date: &str, today: jiff::civil::Date) -> String {
+    use rust_i18n::t;
+    let Ok(day) = date.parse::<jiff::civil::Date>() else {
+        return date.to_string();
+    };
+    let months = t!("time.months").to_string();
+    let month = months
+        .split(',')
+        .nth(day.month() as usize - 1)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let md = t!(
+        "time.month_day",
+        month = month,
+        m = day.month(),
+        d = day.day()
+    )
+    .to_string();
+    let relative = match day.until(today).map(|span| span.get_days()) {
+        Ok(0) => t!("time.today").to_string(),
+        Ok(1) => t!("time.yesterday").to_string(),
+        _ => {
+            let weekdays = t!("time.weekdays").to_string();
+            weekdays
+                .split(',')
+                .nth(day.weekday().to_monday_zero_offset() as usize)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        }
+    };
+    format!("{md} · {relative}")
+}
+
 /// A wall-clock instant as the local calendar date, `2026-09-01`. For a
 /// file's modification time, which can be years back — [`ago`] stops at
 /// hours. ISO order reads the same in both locales. `—` for an instant
@@ -340,6 +400,11 @@ pub fn ago(elapsed: Duration) -> String {
     if secs < 60 {
         return t!("time.just_now").to_string();
     }
+    // Past a day the minutes are noise and the hours were unreadable:
+    // a week-old analysis read "143h 14m ago". Whole days from there.
+    if secs >= 86_400 {
+        return t!("time.days_ago", d = secs / 86_400).to_string();
+    }
     let h = secs / 3_600;
     let m = (secs % 3_600) / 60;
     if h > 0 {
@@ -429,6 +494,36 @@ mod tests {
         let at = UNIX_EPOCH + Duration::from_secs(noon.timestamp().as_second() as u64);
         assert_eq!(clock(at), "14:20");
         assert_eq!(clock(UNIX_EPOCH - Duration::from_secs(1)), "--:--");
+    }
+
+    #[test]
+    fn display_name_shortens_only_reverse_dns_identifiers() {
+        assert_eq!(
+            display_name("com.apple.appkit.xpc.openAndSavePanelService"),
+            "openAndSavePanelService"
+        );
+        assert_eq!(
+            display_name("com.apple.quicklook.ThumbnailsAgent"),
+            "ThumbnailsAgent"
+        );
+        // Names that merely contain dots stay whole.
+        assert_eq!(
+            display_name("spotlightknowledged.updater"),
+            "spotlightknowledged.updater"
+        );
+        assert_eq!(display_name("Python3.12.app"), "Python3.12.app");
+        assert_eq!(display_name("Google Chrome Helper"), "Google Chrome Helper");
+        assert_eq!(display_name("com.x.y z"), "com.x.y z");
+        assert_eq!(display_name("com.apple."), "com.apple.");
+    }
+
+    #[test]
+    fn a_past_day_is_headed_with_its_date_and_its_place_in_the_week() {
+        let today = jiff::civil::date(2026, 10, 2);
+        assert_eq!(day_heading("2026-10-01", today), "Oct 1 · Yesterday");
+        assert_eq!(day_heading("2026-09-30", today), "Sep 30 · Wed");
+        assert_eq!(day_heading("2026-10-02", today), "Oct 2 · Today");
+        assert_eq!(day_heading("not a date", today), "not a date");
     }
 
     #[test]
@@ -598,6 +693,8 @@ mod tests {
         assert_eq!(ago(Duration::from_secs(5)), "just now");
         assert_eq!(ago(Duration::from_secs(12 * 60)), "12m ago");
         assert_eq!(ago(Duration::from_secs(3_600 + 4 * 60)), "1h 04m ago");
+        assert_eq!(ago(Duration::from_secs(26 * 3_600 + 4 * 60)), "1d ago");
+        assert_eq!(ago(Duration::from_secs(143 * 3_600)), "5d ago");
     }
 
     #[test]

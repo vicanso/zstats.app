@@ -31,6 +31,7 @@
 
 use super::widgets;
 use crate::active;
+use crate::assets::CustomIconName;
 use crate::bigfiles;
 use crate::cleanhints::{self, CleanHint};
 use crate::confirm;
@@ -368,11 +369,15 @@ fn analysis_watch_row(state: &ZStatsAppState) -> Option<AnyElement> {
         i18n::tr("disk.watch_running")
     } else {
         match state.disk_check_last() {
-            Some(at) => t!(
-                "disk.watch_last",
-                ago = format::ago(at.elapsed().unwrap_or_default())
-            )
-            .to_string(),
+            Some(at) => {
+                let since = at.elapsed().unwrap_or_default();
+                let last = t!("disk.watch_last", ago = format::ago(since)).to_string();
+                if since > diskwatch::CHECK_EVERY {
+                    format!("{last} · {}", i18n::tr(overdue_reason(state)))
+                } else {
+                    last
+                }
+            }
             None => i18n::tr("disk.watch_first"),
         }
     };
@@ -413,6 +418,27 @@ fn analysis_watch_row(state: &ZStatsAppState) -> Option<AnyElement> {
             )
             .into_any_element(),
     )
+}
+
+/// Why a check that is due has not run, in the order the gates fall
+/// (`diskwatch::due`). "Last 1d ago" beside a switch that is on read as
+/// a broken schedule, when the check was only waiting — and one of the
+/// things it waits for is this very window closing, so that is what it
+/// says once nothing else is in the way. Reads the same fields the gate
+/// does, for display only.
+fn overdue_reason(state: &ZStatsAppState) -> &'static str {
+    let tick = state.latest();
+    let on_battery = tick
+        .and_then(|t| t.snapshot.battery.as_ref())
+        .is_some_and(|b| matches!(b.state.as_str(), "Discharging" | "Empty"));
+    let busy = tick.is_some_and(|t| t.snapshot.cpu.usage_percent > diskwatch::BUSY_CPU);
+    if on_battery {
+        "disk.watch_wait_power"
+    } else if busy {
+        "disk.watch_wait_quiet"
+    } else {
+        "disk.watch_wait_closed"
+    }
 }
 
 /// What grew in the home tree since about a week ago (`diskwatch`), as
@@ -552,15 +578,35 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
                 ),
         )
         .when(!caption.is_empty(), |d| {
+            let skips = match state.disk_analysis() {
+                DiskAnalysis::Ready(result) => analysis_skips(result),
+                _ => None,
+            };
             d.child(
-                div()
+                h_flex()
                     .mt(px(3.))
                     .min_w_0()
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap_x(px(4.))
                     .text_size(px(10.))
                     .line_height(relative(1.35))
                     .text_color(theme::text_dim())
-                    .whitespace_normal()
-                    .child(caption),
+                    .child(div().min_w_0().whitespace_normal().child(caption))
+                    .children(skips.map(|(label, lines)| {
+                        h_flex()
+                            .id("ana-skips")
+                            .flex_none()
+                            .items_center()
+                            .gap(px(3.))
+                            .tooltip(widgets::wrap_tooltip_lines(lines))
+                            .child(format!("· {label}"))
+                            .child(
+                                Icon::new(IconName::Info)
+                                    .with_size(Size::Size(px(10.)))
+                                    .text_color(Hsla::from(theme::text_dim())),
+                            )
+                    })),
             )
         })
         .children(fda_hint(state))
@@ -573,6 +619,16 @@ fn analysis_header(state: &ZStatsAppState) -> AnyElement {
 /// see `state/analysis.rs`).
 fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
     let running = matches!(state.disk_analysis(), DiskAnalysis::Running { .. });
+    // Older than [`STALE_AFTER`]: the chip itself asks, with a brighter
+    // outline and a sentence on hover, where the caption used to end on
+    // "stale — consider re-analyzing". Neutral on purpose — an old
+    // result is not a crossed line, so no accent.
+    let stale = match state.disk_analysis() {
+        DiskAnalysis::Ready(result) => {
+            result.scanned_at.elapsed().unwrap_or_default() > STALE_AFTER
+        }
+        _ => false,
+    };
     let label = if running {
         i18n::tr("disk.ana_cancel")
     } else if matches!(state.disk_analysis(), DiskAnalysis::Ready(_)) {
@@ -585,11 +641,19 @@ fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
         .flex_none()
         .rounded_full()
         .border_1()
-        .border_color(theme::border())
-        .bg(theme::inset())
+        .border_color(if stale {
+            theme::text_muted()
+        } else {
+            theme::border()
+        })
+        .bg(if stale { theme::chip() } else { theme::inset() })
         .px(px(8.))
         .py(px(2.))
-        .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_hint")))
+        .tooltip(widgets::wrap_tooltip(if stale {
+            i18n::tr("disk.ana_stale")
+        } else {
+            i18n::tr("disk.ana_hint")
+        }))
         .text_size(px(10.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme::text())
@@ -862,8 +926,8 @@ fn reveal_tip() -> String {
     })
 }
 
-/// Results older than this get a "consider re-analyzing" nudge appended
-/// to the caption. Display only, like every threshold in views/ —
+/// Results older than this get a "consider re-analyzing" nudge on the
+/// Re-analyze chip. Display only, like every threshold in views/ —
 /// nothing refreshes itself: a minutes-long walk must never
 /// self-trigger, so a nudge is where staleness honesty ends. A day is
 /// when "the numbers are from earlier" stops going without saying —
@@ -900,26 +964,11 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
     };
     let home = env::var("HOME").unwrap_or_default();
     let age = result.scanned_at.elapsed().unwrap_or_default();
+    // The honesty counters are no longer listed here — they are one
+    // hoverable "N skipped" after the caption (`analysis_skips`). Seven
+    // clauses made two lines nobody parsed; the counts are for whoever
+    // asks why a total reads low, and that reader hovers.
     let mut extras = Vec::new();
-    if result.skipped_protected > 0 {
-        extras.push(t!("disk.ana_skip_protected", n = result.skipped_protected).to_string());
-    }
-    if result.skipped_denied > 0 {
-        extras.push(t!("disk.ana_skip_denied", n = result.skipped_denied).to_string());
-    }
-    if result.skipped_dataless > 0 {
-        extras.push(t!("disk.ana_skip_dataless", n = result.skipped_dataless).to_string());
-    }
-    // Why the totals can read lower than Finder adding up the folders.
-    if result.shared_links > 0 {
-        extras.push(t!("disk.ana_shared_links", n = result.shared_links).to_string());
-    }
-    // Said out loud for the same reason the other three are: a walk that
-    // left out somebody's whole code tree must not let the totals below
-    // it read as the whole scope.
-    if result.skipped_excluded > 0 {
-        extras.push(t!("disk.ana_skip_excluded", n = result.skipped_excluded).to_string());
-    }
     // Names what the per-row ± compares against. Its absence when no
     // row moved is itself the answer: nothing big changed.
     if let Some(diff) = state.analysis_diff_for(result) {
@@ -930,9 +979,6 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
             )
             .to_string(),
         );
-    }
-    if age > STALE_AFTER {
-        extras.push(i18n::tr("disk.ana_stale"));
     }
     analysis_caption_parts(
         &scope_display(&result.roots, &result.root, &home),
@@ -947,6 +993,38 @@ fn analysis_caption(state: &ZStatsAppState) -> String {
         extras,
     )
 }
+/// Everything a finished walk left out, as one figure and its breakdown:
+/// `("70 skipped", [each non-zero count])`. The figure counts places the
+/// walk did not measure (protected, unreadable, cloud placeholders,
+/// excluded); hard links counted once are not a skip and only join the
+/// breakdown — alone, they are the figure. `None` when there is nothing
+/// to say.
+fn analysis_skips(result: &ScanResult) -> Option<(String, Vec<SharedString>)> {
+    let skipped = [
+        ("disk.ana_skip_protected", result.skipped_protected),
+        ("disk.ana_skip_denied", result.skipped_denied),
+        ("disk.ana_skip_dataless", result.skipped_dataless),
+        // Said for the same reason as the others: a walk that left out
+        // somebody's whole code tree must not let the totals below it
+        // read as the whole scope.
+        ("disk.ana_skip_excluded", result.skipped_excluded),
+    ];
+    let mut lines: Vec<SharedString> = skipped
+        .iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(key, n)| t!(*key, n = n).to_string().into())
+        .collect();
+    // Why the totals can read lower than Finder adding up the folders.
+    let links = (result.shared_links > 0)
+        .then(|| t!("disk.ana_shared_links", n = result.shared_links).to_string());
+    let total: usize = skipped.iter().map(|(_, n)| *n).sum();
+    if total == 0 {
+        return links.map(|text| (text.clone(), vec![text.into()]));
+    }
+    lines.extend(links.map(SharedString::from));
+    Some((t!("disk.ana_skipped_total", n = total).to_string(), lines))
+}
+
 /// One string naming a scope: the single root, or a multi-root scope's
 /// roots listed in full — passing the base alone would read as a walk of
 /// the whole home tree. Every path tilde'd; a plain "~" is the default
@@ -1039,6 +1117,8 @@ fn analysis_tables(
                     expandable: false,
                     open: false,
                     depth: 0,
+                    // Files never sit in the suggestions.
+                    suggested: false,
                 })
             })
             .collect()
@@ -1159,7 +1239,7 @@ fn suggest_clear_button(hits: &[DirHit], running: &[String]) -> AnyElement {
         })
         .collect();
     Button::new("ana-sug-clear")
-        .icon(IconName::Delete)
+        .icon(CustomIconName::Trash)
         .ghost()
         .xsmall()
         .label(i18n::tr("disk.sug_clear"))
@@ -1300,6 +1380,7 @@ fn dir_row_tree(
         expandable: ctx.expandable,
         open,
         depth,
+        suggested: ctx.id == "ana-sug",
     })];
     if !open {
         return out;
@@ -1486,18 +1567,27 @@ fn row_pill(id: SharedString, label: String, tip: String, ink: gpui::Rgba) -> An
         .into_any_element()
 }
 
+/// The outlined pill every "show more" in the app wears (Sensors,
+/// Traffic, Listening, History) — this window's two used to be bare text
+/// links, a fourth look for the same control.
+fn more_pill(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(theme::border_subtle())
+        .hover(|d| d.bg(theme::surface_raised()).border_color(theme::border()))
+        .px(px(7.))
+        .py(px(1.))
+        .text_size(px(9.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme::text_dim())
+}
+
 /// The dirs section's fold: "show more · N" ↔ "show less".
 fn more_chip(hidden: usize, show_all: bool) -> AnyElement {
-    div()
-        .id("ana-dirs-more")
-        .flex_none()
-        .rounded(px(4.))
-        .px(px(6.))
-        .py(px(1.))
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme::text_muted())
-        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+    more_pill("ana-dirs-more")
         .child(if show_all {
             i18n::tr("disk.ana_less")
         } else {
@@ -1549,7 +1639,16 @@ struct AnalysisRow<'a> {
     open: bool,
     /// Nesting level, purely visual: one indent step per level.
     depth: usize,
+    /// A row of the cleanup suggestions. Every one of those rebuilds
+    /// itself — the section title says so once — so its basis pill would
+    /// be the same word on every row; the basis moves to the name's
+    /// tooltip and only the exceptions ("running") stay as pills.
+    suggested: bool,
 }
+
+/// The delta column's width: `-999.9 MB` at 9.5px mono, the widest a
+/// delta prints.
+const DELTA_W: f32 = 56.;
 
 /// Below this a row shows no delta: the tables rank hundreds of MB and
 /// up, so a ±few-MB drift on every row would be noise dressed as
@@ -1608,6 +1707,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         expandable,
         open,
         depth,
+        suggested,
     } = row;
     let label = path
         .strip_prefix(root)
@@ -1621,6 +1721,12 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
     if kind == Some(HitKind::Heuristic) {
         full.push_str(" — ");
         full.push_str(&i18n::tr("disk.kind_guess_tip"));
+    }
+    // In the suggestions the pill is gone (`AnalysisRow::suggested`), so
+    // a TAG tree's declaration rides the name like a hint's owner does.
+    if suggested && kind == Some(HitKind::Tag) {
+        full.push_str(" — ");
+        full.push_str(&i18n::tr("disk.kind_tag_tip"));
     }
     // Annotation, not action: a matching clean-hint rides the tooltip —
     // owner tool plus its own cleanup command, never run by us.
@@ -1640,6 +1746,10 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         full.push_str(" — ");
         full.push_str(&asset_clause(note));
     }
+    // The Trash is the one directory whose space comes back without
+    // judging anything in it: it is already what someone threw away.
+    // Its row opens it — never empties it, that step stays the reader's.
+    let is_trash = env::var_os("HOME").is_some_and(|home| path == Path::new(&home).join(".Trash"));
     let reveal_path = path.to_path_buf();
     let trash_path = path.to_path_buf();
     let open_path = path.to_path_buf();
@@ -1693,25 +1803,37 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                         .tooltip(widgets::wrap_tooltip(full))
                         .child(label),
                 )
-                .children(basis_pill(&key, kind, hint.as_ref()))
+                .children(
+                    (!suggested)
+                        .then(|| basis_pill(&key, kind, hint.as_ref()))
+                        .flatten(),
+                )
                 .children(
                     hint.as_ref()
                         .filter(|_| app_running)
                         .map(|hint| running_pill(&key, &hint.owner)),
                 )
                 .children(asset.map(|note| asset_pill(&key, note)))
-                .children(delta_label(bytes, prev_bytes).map(|delta| {
-                    // Quiet on purpose: the sign carries the meaning, and
-                    // accent is reserved for over-threshold (views/mod.rs).
-                    div()
-                        .id(SharedString::from(format!("{key}-delta")))
-                        .flex_none()
-                        .font_family(font::MONO)
-                        .text_size(px(9.5))
-                        .text_color(theme::text_muted())
-                        .when_some(delta_tip, |d, tip| d.tooltip(widgets::wrap_tooltip(tip)))
-                        .child(delta)
-                }))
+                // A fixed slot whenever the table has a baseline, filled or
+                // not: sized to the content, the column wandered with the
+                // pills beside it and no two deltas lined up.
+                .when_some(delta_tip, |row, tip| {
+                    row.child(
+                        h_flex()
+                            .id(SharedString::from(format!("{key}-delta")))
+                            .flex_none()
+                            .w(px(DELTA_W))
+                            .justify_end()
+                            // Quiet on purpose: the sign carries the
+                            // meaning, and accent is reserved for
+                            // over-threshold (views/mod.rs).
+                            .font_family(font::MONO)
+                            .text_size(px(9.5))
+                            .text_color(theme::text_muted())
+                            .tooltip(widgets::wrap_tooltip(tip))
+                            .children(delta_label(bytes, prev_bytes)),
+                    )
+                })
                 .child(
                     div()
                         .flex_none()
@@ -1721,24 +1843,40 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                         .text_color(theme::text())
                         .child(format::memory(bytes)),
                 )
-                .child(
-                    // Look-first before remove, same order as the
-                    // large-file rows.
-                    Button::new(SharedString::from(format!("{key}-reveal")))
-                        .icon(IconName::Folder)
-                        .ghost()
-                        .xsmall()
-                        .tooltip(reveal_tip())
-                        .on_click(move |_, _window, cx| {
-                            // The row itself opens; the button must not.
-                            cx.stop_propagation();
-                            bigfiles::reveal(&reveal_path);
-                        }),
-                )
+                .when(is_trash, |row| {
+                    row.child(widgets::with_wrap_tooltip(
+                        SharedString::from(format!("{key}-open-trash-tip")),
+                        t!("disk.trash_row_tip", bytes = format::memory(bytes)).to_string(),
+                        Button::new(SharedString::from(format!("{key}-open-trash")))
+                            .ghost()
+                            .xsmall()
+                            .label(i18n::tr("disk.open_trash"))
+                            .on_click(|_, _window, cx| {
+                                cx.stop_propagation();
+                                bigfiles::open_trash();
+                            }),
+                    ))
+                })
+                .when(!is_trash, |row| {
+                    row.child(
+                        // Look-first before remove, same order as the
+                        // large-file rows.
+                        Button::new(SharedString::from(format!("{key}-reveal")))
+                            .icon(IconName::Folder)
+                            .ghost()
+                            .xsmall()
+                            .tooltip(reveal_tip())
+                            .on_click(move |_, _window, cx| {
+                                // The row itself opens; the button must not.
+                                cx.stop_propagation();
+                                bigfiles::reveal(&reveal_path);
+                            }),
+                    )
+                })
                 .when(deletable, |row| {
                     row.child(
                         Button::new(SharedString::from(format!("{key}-trash")))
-                            .icon(IconName::Delete)
+                            .icon(CustomIconName::Trash)
                             .ghost()
                             .xsmall()
                             .tooltip(i18n::tr("disk.big_trash"))
@@ -2111,16 +2249,7 @@ fn dupes_body(state: &ZStatsAppState) -> AnyElement {
         .when(hidden > 0, |d| {
             d.child(
                 h_flex().pt(px(6.)).child(
-                    div()
-                        .id("dupes-more")
-                        .flex_none()
-                        .rounded(px(4.))
-                        .px(px(6.))
-                        .py(px(1.))
-                        .text_size(px(10.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme::text_muted())
-                        .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
+                    more_pill("dupes-more")
                         .child(t!("disk.ana_more", count = hidden).to_string())
                         .on_click(|_, _window, cx| {
                             cx.global::<ZStatsGlobalStore>()
@@ -2321,7 +2450,7 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize) -> AnyElement {
         )
         .child(
             Button::new(SharedString::from(format!("{key}-trash")))
-                .icon(IconName::Delete)
+                .icon(CustomIconName::Trash)
                 .ghost()
                 .xsmall()
                 .tooltip(i18n::tr("disk.dup_trash"))
@@ -2645,7 +2774,7 @@ fn big_file_row(
             // An explicit control with confirm, and the request is Finder's
             // own recoverable move-to-Trash — never a direct unlink.
             Button::new(("bigfile-trash", index))
-                .icon(IconName::Delete)
+                .icon(CustomIconName::Trash)
                 .ghost()
                 .xsmall()
                 .tooltip(i18n::tr("disk.big_trash"))

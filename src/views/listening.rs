@@ -525,12 +525,16 @@ impl Row {
         self.endpoints.iter().any(|(e, _)| e.scope != Scope::Local)
     }
 
-    /// The pid for a one-process row, `×N` for a name that stands for
-    /// several, nothing when no pid is known.
+    /// `pid N` for a one-process row, `×N` for a name that stands for
+    /// several, nothing when no pid is known. Spelled out like every other
+    /// pid in the panel: a bare number beside a name read as a count.
     fn pid_label(&self) -> Option<String> {
         match self.pids.len() {
             0 => None,
-            1 => self.pids.first().map(u32::to_string),
+            1 => self
+                .pids
+                .first()
+                .map(|pid| t!("processes.pid_only", pid = pid).to_string()),
             n => Some(format!("×{n}")),
         }
     }
@@ -716,7 +720,7 @@ mod tests {
         assert_eq!(labels(&rows[0]), ["*:7777"], "v4 and v6 * are one service");
         assert_eq!(labels(&rows[2]), ["localhost:12334"]);
         assert!(rows[0].exposed() && !rows[1].exposed());
-        assert_eq!(rows[0].pid_label().as_deref(), Some("20"));
+        assert_eq!(rows[0].pid_label().as_deref(), Some("pid 20"));
     }
 
     #[test]
@@ -789,11 +793,11 @@ mod tests {
         // Substring on the label: 6379 and 36379 both contain it
         assert_eq!(names(&found), ["container-runtime", "redis-server"]);
         assert_eq!(labels(&found[0]), ["*:6379"]);
-        assert_eq!(found[0].pid_label().as_deref(), Some("98170"));
+        assert_eq!(found[0].pid_label().as_deref(), Some("pid 98170"));
         assert_eq!(labels(&found[1]), ["*:36379"]);
         assert_eq!(
             found[1].pid_label().as_deref(),
-            Some("17302"),
+            Some("pid 17302"),
             "×2 narrowed to the holder"
         );
     }
