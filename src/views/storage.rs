@@ -57,6 +57,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
+use std::cmp::Reverse;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -260,9 +261,20 @@ fn path_label(id: SharedString, text: &str, tip: String, size: f32) -> AnyElemen
         .into_any_element()
 }
 
+/// How far a row's buttons recede until the row is hovered. Thirty-odd
+/// identical folder and trash glyphs at full ink were the loudest thing
+/// in a table of figures; at rest they stay visible — a control nobody
+/// can see is not a control — and come forward with the row under the
+/// pointer.
+const ACTION_REST: f32 = 0.4;
+
 /// A row's two trailing slots, each [`ACTION_SLOT`] wide whether or not
-/// it holds a button.
-fn action_slots(first: Option<AnyElement>, second: Option<AnyElement>) -> AnyElement {
+/// it holds a button. `row` is the row's hover group.
+fn action_slots(
+    row: &SharedString,
+    first: Option<AnyElement>,
+    second: Option<AnyElement>,
+) -> AnyElement {
     let slot = |button: Option<AnyElement>| {
         h_flex()
             .flex_none()
@@ -272,6 +284,8 @@ fn action_slots(first: Option<AnyElement>, second: Option<AnyElement>) -> AnyEle
     };
     h_flex()
         .flex_none()
+        .opacity(ACTION_REST)
+        .group_hover(row.clone(), |s| s.opacity(1.))
         .child(slot(first))
         .child(slot(second))
         .into_any_element()
@@ -1153,8 +1167,10 @@ fn growth_section(report: &diskwatch::Report) -> Option<AnyElement> {
             .children(report.rows.iter().map(|row| {
                 let reveal = row.path.clone();
                 let key = format!("ana-growth:{}", row.path.display());
+                let group = SharedString::from(key.clone());
                 let shown = format::tilde_path(&row.path.display().to_string(), &home);
                 div()
+                    .group(group.clone())
                     .py(px(5.))
                     .child(
                         h_flex()
@@ -1177,6 +1193,7 @@ fn growth_section(report: &diskwatch::Report) -> Option<AnyElement> {
                             )
                             .child(size_text(row.now))
                             .child(action_slots(
+                                &group,
                                 Some(
                                     Button::new(SharedString::from(format!("{key}-reveal")))
                                         .icon(IconName::Folder)
@@ -1486,17 +1503,25 @@ fn analysis_skips(result: &ScanResult) -> Option<(String, Vec<SharedString>)> {
     let mut lines: Vec<SharedString> = skipped
         .iter()
         .filter(|(_, n)| *n > 0)
-        .map(|(key, n)| t!(*key, n = n).to_string().into())
+        .map(|(key, n)| t!(*key, n = format::thousands(*n)).to_string().into())
         .collect();
     // Why the totals can read lower than Finder adding up the folders.
-    let links = (result.shared_links > 0)
-        .then(|| t!("disk.ana_shared_links", n = result.shared_links).to_string());
+    let links = (result.shared_links > 0).then(|| {
+        t!(
+            "disk.ana_shared_links",
+            n = format::thousands(result.shared_links)
+        )
+        .to_string()
+    });
     let total: usize = skipped.iter().map(|(_, n)| *n).sum();
     if total == 0 {
         return links.map(|text| (text.clone(), vec![text.into()]));
     }
     lines.extend(links.map(SharedString::from));
-    Some((t!("disk.ana_skipped_total", n = total).to_string(), lines))
+    Some((
+        t!("disk.ana_skipped_total", n = format::thousands(total)).to_string(),
+        lines,
+    ))
 }
 
 /// One string naming a scope: the single root, or a multi-root scope's
@@ -1619,6 +1644,7 @@ fn analysis_tables(
     // for any other scope says nothing about it.
     let home_result = diskscan::default_root().is_some_and(|home| result.roots == [home]);
     div()
+        .children(actions.then(|| composition_bar(result)).flatten())
         .children(
             state
                 .disk_growth()
@@ -1703,6 +1729,130 @@ fn analysis_tables(
 /// lists every row with its size and a tick, so what moves is what the
 /// reader saw, and a row can be kept back; a cache whose app is running
 /// starts unticked, because moving it frees nothing until the app quits.
+/// Directories the composition bar draws before the rest becomes
+/// "other". Six is where a 449pt bar's segments stop being readable as
+/// shares — the seventh is a sliver.
+const COMPOSITION_SEGMENTS: usize = 6;
+
+/// Each segment's share of the ink, largest first — one hue, stepped
+/// down, because accent is for crossed lines and a ranking is not one.
+const COMPOSITION_INK: [f32; COMPOSITION_SEGMENTS] = [0.85, 0.66, 0.52, 0.42, 0.34, 0.27];
+
+/// The scope as one bar: its largest directories as segments, the rest
+/// as "other", and under it the top three named with their shares — the
+/// answer to "where did it go" before any row is read (Library was 60%
+/// of a home folder, which the table never says). Every figure is the
+/// walk's own; the whole is `ScanResult::total`, so a result cached
+/// before that field existed draws no bar until the next walk.
+fn composition_bar(result: &ScanResult) -> Option<AnyElement> {
+    let total = result.total.filter(|t| *t > 0)? as f64;
+    let mut parts: Vec<&DirHit> = result.dirs.iter().collect();
+    parts.sort_by_key(|d| Reverse(d.bytes));
+    parts.truncate(COMPOSITION_SEGMENTS);
+    if parts.is_empty() {
+        return None;
+    }
+    let label = |hit: &DirHit| {
+        hit.path
+            .strip_prefix(&result.root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| format::tilde(&hit.path))
+    };
+    let share = |bytes: u64| (bytes as f64 / total).min(1.0);
+    let pct = |frac: f64| {
+        if frac < 0.01 {
+            "<1%".to_string()
+        } else {
+            format!("{:.0}%", frac * 100.0)
+        }
+    };
+    let shown: u64 = parts.iter().map(|d| d.bytes).sum();
+    let other = (total as u64).saturating_sub(shown);
+    let ink = theme::ink();
+    let segment = |id: SharedString, frac: f64, fill: Hsla, tip: String| {
+        div()
+            .id(id)
+            .h_full()
+            .flex_shrink(1.)
+            .w(relative(frac as f32))
+            .bg(fill)
+            .tooltip(widgets::wrap_tooltip(tip))
+    };
+    let scope = scope_word(&result.roots, &result.root);
+    let bar = h_flex()
+        .h(px(8.))
+        .w_full()
+        .gap(px(1.5))
+        .rounded(px(4.))
+        .overflow_hidden()
+        .bg(theme::inset())
+        .children(parts.iter().enumerate().map(|(i, hit)| {
+            segment(
+                row_key("comp", &hit.path),
+                share(hit.bytes),
+                Hsla::from(gpui::Rgba {
+                    a: ink.a * COMPOSITION_INK[i],
+                    ..ink
+                }),
+                t!(
+                    "disk.comp_tip",
+                    name = label(hit),
+                    bytes = format::memory(hit.bytes),
+                    pct = pct(share(hit.bytes)),
+                    scope = scope.clone()
+                )
+                .to_string(),
+            )
+        }))
+        .when(other > 0, |bar| {
+            bar.child(segment(
+                SharedString::from("comp-other"),
+                share(other),
+                Hsla::from(theme::border()),
+                t!(
+                    "disk.comp_tip",
+                    name = i18n::tr("disk.comp_other"),
+                    bytes = format::memory(other),
+                    pct = pct(share(other)),
+                    scope = scope.clone()
+                )
+                .to_string(),
+            ))
+        });
+    // The three largest by name; everything past them is one figure.
+    let named: Vec<String> = parts
+        .iter()
+        .take(3)
+        .map(|hit| format!("{} {}", label(hit), pct(share(hit.bytes))))
+        .collect();
+    let rest = (total as u64).saturating_sub(parts.iter().take(3).map(|d| d.bytes).sum());
+    let mut caption = named.join(" · ");
+    if rest > 0 {
+        caption.push_str(&format!(
+            " · {} {}",
+            i18n::tr("disk.comp_other"),
+            pct(share(rest))
+        ));
+    }
+    Some(
+        div()
+            .px(px(13.))
+            .pt(px(2.))
+            .pb(px(8.))
+            .child(bar)
+            .child(
+                div()
+                    .mt(px(5.))
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(META_PT))
+                    .text_color(theme::text_dim())
+                    .child(caption),
+            )
+            .into_any_element(),
+    )
+}
+
 /// Suggestions listed before "show more". Enough to see the shape of
 /// it — the largest usually dwarf the rest — without pushing the big
 /// directories, the real answer to "where did it go", below the fold.
@@ -1872,11 +2022,13 @@ fn dir_row_tree(
         return out;
     }
     match ctx.state.expansion(&hit.path) {
-        // Children are ranked against each other, not against the
-        // table's largest: a meter that reads 2% on every child says
-        // nothing about which of them is the heavy one.
+        // Children are measured against the row they open from — a share
+        // of their parent. Against the table's largest a deep row's
+        // children all read 2%; against their own largest sibling the
+        // biggest child drew full width, as if it were the whole parent
+        // (Application Support at 38 of Library's 67 GB filled the bar).
         Some(Expansion::Ready(rows)) if !rows.is_empty() => {
-            let max = rows.iter().map(|r| r.bytes).max().unwrap_or(1).max(1);
+            let max = hit.bytes.max(1);
             for child in rows.iter().take(expand_shown(rows)) {
                 out.extend(dir_row_tree(ctx, child, &hit.path, max, depth + 1));
             }
@@ -2244,6 +2396,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
 
     div()
         .id(SharedString::from(format!("{key}-row")))
+        .group(key.clone())
         .py(px(4.))
         .px(px(4.))
         .mx(px(-4.))
@@ -2324,6 +2477,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                 })
                 .child(size_text(bytes))
                 .child(action_slots(
+                    &key,
                     Some(
                         // Look-first before remove, same order as every
                         // other row in this window.
@@ -2773,6 +2927,7 @@ fn dupe_group(group: &DupeGroup, home: &str, last: bool) -> AnyElement {
     };
     let hidden = group.files.len().saturating_sub(DUPE_FILES_SHOWN);
     let others = group.files.len() - 1;
+    let oldest = group.oldest().map(Path::to_path_buf);
     v_flex()
         .py(px(8.))
         .when(!last, |d| {
@@ -2814,13 +2969,10 @@ fn dupe_group(group: &DupeGroup, home: &str, last: bool) -> AnyElement {
                         .child(frees_label(group.reclaimable)),
                 ),
         )
-        .children(
-            group
-                .files
-                .iter()
-                .take(DUPE_FILES_SHOWN)
-                .map(|file| dupe_file_row(file, home, others)),
-        )
+        .children(group.files.iter().take(DUPE_FILES_SHOWN).map(|file| {
+            let is_oldest = oldest.as_deref() == Some(file.path.as_path());
+            dupe_file_row(file, home, others, is_oldest)
+        }))
         .when(hidden > 0, |d| {
             d.child(
                 div()
@@ -2839,13 +2991,15 @@ fn dupe_group(group: &DupeGroup, home: &str, last: bool) -> AnyElement {
 /// Every listed group has two copies or more, so Trash is never the last
 /// one — and the store re-checks that against the disk before it moves
 /// anything (`DupeGroup::spare`).
-fn dupe_file_row(file: &DupeFile, home: &str, others: usize) -> AnyElement {
+fn dupe_file_row(file: &DupeFile, home: &str, others: usize, oldest: bool) -> AnyElement {
     let key = row_key("dupf", &file.path);
     let full = format::tilde_path(&file.path.display().to_string(), home);
     let path = file.path.clone();
     let frees = file.frees();
     let confirm_path = full.clone();
     h_flex()
+        .id(SharedString::from(format!("{key}-row")))
+        .group(key.clone())
         .items_center()
         .gap(px(ROW_GAP))
         .pl(px(INDENT_STEP))
@@ -2856,6 +3010,16 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize) -> AnyElement {
             full.clone(),
             ROW_PT,
         ))
+        // A fact, not advice: neutral like every pill here, and the
+        // trash control stays on this row as on the others.
+        .when(oldest, |d| {
+            d.child(row_pill(
+                SharedString::from(format!("{key}-oldest")),
+                i18n::tr("disk.dup_oldest"),
+                i18n::tr("disk.dup_oldest_tip"),
+                theme::text_muted(),
+            ))
+        })
         .when(file.shares_storage, |d| {
             d.child(row_pill(
                 SharedString::from(format!("{key}-clone")),
@@ -2886,6 +3050,7 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize) -> AnyElement {
                 .child(day)
         }))
         .child(action_slots(
+            &key,
             Some(
                 Button::new(SharedString::from(format!("{key}-reveal")))
                     .icon(IconName::Folder)
@@ -3144,6 +3309,8 @@ fn big_file_row(
     // their files, not caches that rebuild.
     let confirm_path = shown.clone();
     v_flex()
+        .id(SharedString::from(format!("{key}-row")))
+        .group(key.clone())
         .py(px(5.))
         .child(
             h_flex()
@@ -3166,8 +3333,24 @@ fn big_file_row(
                         theme::text_muted(),
                     )
                 }))
+                // When it last changed — the usual way to decide whether a
+                // big file is still wanted, as on the duplicate rows.
+                .children(file.modified.map(|at| {
+                    let day = format::date(at);
+                    div()
+                        .id(SharedString::from(format!("{key}-modified")))
+                        .flex_none()
+                        .font_family(font::MONO)
+                        .text_size(px(META_PT))
+                        .text_color(theme::text_dim())
+                        .tooltip(widgets::wrap_tooltip(
+                            t!("disk.dup_modified", date = day.clone()).to_string(),
+                        ))
+                        .child(day)
+                }))
                 .child(size_text(file.size))
                 .child(action_slots(
+                    &key,
                     // Navigation, not an action — no confirm, just Finder
                     // with the file selected. Left of the destructive
                     // control, so "look first" comes before "remove".

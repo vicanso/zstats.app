@@ -306,9 +306,12 @@ pub fn text_muted() -> Rgba {
 /// Tertiary text: field labels, footnotes.
 #[inline]
 pub fn text_dim() -> Rgba {
-    // Classic keeps one grey in both modes. Golden steps down to
+    // Classic dark keeps the system grey. Classic light is a step darker
+    // than it: `#8e8e93` on the near-white card measured 3.26:1, under the
+    // 4.5:1 that 10pt captions and path prefixes need, while every other
+    // scheme cleared 4.9; `#747479` reads 4.65:1. Golden steps down to
     // `--ink-faint`, the site's last published ink.
-    tone(0x8e8e93ff, 0x8e8e93ff, 0x968d81ff, 0x645d54ff, |t| {
+    tone(0x8e8e93ff, 0x747479ff, 0x968d81ff, 0x645d54ff, |t| {
         t.text_dim
     })
 }

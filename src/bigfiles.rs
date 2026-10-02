@@ -71,6 +71,9 @@ pub struct BigFile {
     /// figures surface together whenever they disagree, or the list looks
     /// like it broke its own bar.
     pub logical: u64,
+    /// Last modified — "is this still in use" is decided by when it last
+    /// changed far more often than by how big it is.
+    pub modified: Option<SystemTime>,
 }
 
 pub struct BigFilesScan {
@@ -289,6 +292,7 @@ fn collect(paths: Vec<PathBuf>, threshold: u64) -> Vec<BigFile> {
             Some(BigFile {
                 size: physical_size(&meta),
                 logical: meta.len(),
+                modified: meta.modified().ok(),
                 path,
             })
         })
@@ -599,6 +603,7 @@ mod tests {
             path: PathBuf::from(path),
             size,
             logical: size,
+            modified: None,
         }
     }
 

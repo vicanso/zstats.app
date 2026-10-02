@@ -194,6 +194,13 @@ pub struct ScanResult {
     /// a finished scan (partials skip the cost); drill-derived results
     /// share their parent's index, so deeper levels stay instant.
     pub index: Option<Arc<DirIndex>>,
+    /// Everything the walk measured under its roots — the whole the
+    /// window's composition bar divides. Kept apart from `index` because
+    /// it has to survive the cache (the index does not): a launch that
+    /// restores yesterday's result still knows what "the rest" is.
+    /// `None` on a partial snapshot (a lower bound would draw the rest
+    /// as shrinking) and on a cache written before this field existed.
+    pub total: Option<u64>,
 }
 
 impl ScanResult {
@@ -666,6 +673,12 @@ fn snapshot(agg: Aggregates) -> ScanResult {
     } = agg;
     let (totals, children) = rollup(base, own_bytes, plain_dirs, fold);
     let (regenerable, dirs) = tables(roots, &totals, &children, fold);
+    let total = build_index.then(|| {
+        roots
+            .iter()
+            .map(|root| totals.get(root).copied().unwrap_or(0))
+            .sum()
+    });
     files.sort_by_key(|f| Reverse(f.bytes));
     // Suggestions only on the finished result: a partial's lower-bound
     // set would invite trashing while the walker is inside the trees.
@@ -705,6 +718,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
         files,
         suggestions,
         index,
+        total,
     }
 }
 
@@ -807,6 +821,7 @@ pub fn drill(parent: &ScanResult, root: &Path) -> Option<ScanResult> {
             .filter(|d| d.path.starts_with(root))
             .cloned()
             .collect(),
+        total: index.totals.get(root).copied(),
         index: Some(index.clone()),
     })
 }
@@ -1152,6 +1167,9 @@ fn serialise(result: &ScanResult) -> String {
         clamp(result.skipped_dataless as u64),
     );
     doc.insert("shared_links".into(), clamp(result.shared_links as u64));
+    if let Some(total) = result.total {
+        doc.insert("total_bytes".into(), clamp(total));
+    }
     doc.insert(
         "excluded".into(),
         Value::Array(
@@ -1314,6 +1332,12 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
         files,
         suggestions: dirs_of("suggestion"),
         index: None,
+        // Optional on purpose: a cache from before this field must read
+        // as "no whole known", not as a zero-byte scope.
+        total: doc
+            .get("total_bytes")
+            .and_then(toml::Value::as_integer)
+            .map(|v| v.max(0) as u64),
     })
 }
 
@@ -1708,9 +1732,12 @@ mod tests {
                 fold,
                 files,
             })),
+            total: Some(mb(300)),
         };
 
         let lib = drill(&parent, &p("/r/Library")).expect("the index covers Library");
+        // A drilled level's whole is its own subtree's, from the index.
+        assert_eq!(lib.total, Some(mb(200)));
         let dir_paths: Vec<&Path> = lib.dirs.iter().map(|d| d.path.as_path()).collect();
         assert_eq!(
             dir_paths,
@@ -1843,6 +1870,7 @@ mod tests {
                 asset: None,
             }],
             index: None,
+            total: Some(7_000),
         };
         save_cache_in(&dir, &result, true);
 
@@ -1850,6 +1878,7 @@ mod tests {
         assert_eq!(loaded.scanned_at, result.scanned_at);
         assert_eq!(loaded.took, result.took);
         assert_eq!(loaded.dirs_seen, 42);
+        assert_eq!(loaded.total, Some(7_000), "the whole survives the cache");
         assert_eq!(loaded.skipped_protected, 2);
         assert_eq!(loaded.regenerable.len(), 1);
         assert_eq!(loaded.regenerable[0].kind, HitKind::Tag);
@@ -1906,6 +1935,7 @@ mod tests {
             }],
             suggestions: vec![],
             index: None,
+            total: None,
         }
     }
 
@@ -2019,6 +2049,8 @@ mod tests {
         fs::write(cache_path_in(&dir, &[p("/r")]), stripped).unwrap();
         let loaded = load_cache_in(&dir, &[p("/r")]).expect("legacy file loads");
         assert_eq!(loaded.roots, vec![p("/r")]);
+        // Nor does it know its whole: absent, not zero.
+        assert_eq!(loaded.total, None);
         let _ = fs::remove_dir_all(&dir);
     }
 

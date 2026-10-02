@@ -204,6 +204,23 @@ impl DupeGroup {
         self.reclaimable = freeable - kept;
     }
 
+    /// The copy changed longest ago, when exactly one is — usually the
+    /// original, and the fact a careful reader looks for before choosing
+    /// which to keep. `None` when a copy has no date or the earliest is
+    /// shared (a clone or `cp -p` keeps the original's time): then the
+    /// dates cannot tell the copies apart, and a mark would be a guess.
+    pub fn oldest(&self) -> Option<&Path> {
+        let dated: Vec<(&Path, SystemTime)> = self
+            .files
+            .iter()
+            .map(|f| f.modified.map(|at| (f.path.as_path(), at)))
+            .collect::<Option<_>>()?;
+        let earliest = dated.iter().map(|(_, at)| *at).min()?;
+        let mut at_earliest = dated.iter().filter(|(_, at)| *at == earliest);
+        let first = at_earliest.next()?;
+        at_earliest.next().is_none().then_some(first.0)
+    }
+
     /// Whether `path` may go to the Trash now: it and at least one other
     /// copy are still on disk as the search left them — same length,
     /// same modification time. Asked right before the move, because the
@@ -814,6 +831,41 @@ mod tests {
         assert!(result.reclaimable() < before);
         result.remove(&dir.join("y"));
         assert!(result.groups.is_empty(), "one copy is not a duplicate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_oldest_copy_is_named_only_when_the_dates_tell_them_apart() {
+        let dir = scratch("oldest");
+        let data = bytes(6, 90_000);
+        for name in ["a", "b", "c"] {
+            fs::write(dir.join(name), &data).unwrap();
+        }
+        let set = |name: &str, secs_ago: u64| {
+            File::options()
+                .write(true)
+                .open(dir.join(name))
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(secs_ago))
+                .unwrap();
+        };
+        set("a", 300);
+        set("b", 9_000);
+        set("c", 600);
+        let result = search(&dir);
+        assert_eq!(result.groups[0].oldest(), Some(dir.join("b").as_path()));
+        // Two copies sharing the earliest time: the dates decide nothing.
+        let shared = SystemTime::now() - Duration::from_secs(20_000);
+        for name in ["a", "b"] {
+            File::options()
+                .write(true)
+                .open(dir.join(name))
+                .unwrap()
+                .set_modified(shared)
+                .unwrap();
+        }
+        let result = search(&dir);
+        assert_eq!(result.groups[0].oldest(), None);
         let _ = fs::remove_dir_all(&dir);
     }
 
