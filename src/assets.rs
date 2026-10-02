@@ -128,7 +128,9 @@ impl From<CustomIconName> for Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use crate::cachepreset::FILE as CACHES_FILE;
+    #[cfg(target_os = "macos")]
     use crate::cleanhints::FILE as HINTS_FILE;
 
     /// Every name resolves to a file that is actually embedded. Without this

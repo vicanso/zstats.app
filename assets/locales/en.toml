@@ -437,7 +437,7 @@ hide = "Hide"
 
 [traffic]
 title = "Traffic"
-tip = "Bytes each program moved since the previous reading, fastest first. One row per program; ×N is how many of its processes moved bytes. The counters are cumulative, so the first reading has no rate. These are the kernel's socket counters and will not add up to the interface totals. The line is ↓+↑ over recent readings, up to 10 minutes. Sampling continues every 10s while this tab is closed and every 2s while it is open. A break in the line is a reading with no rate."
+tip = "Bytes each program moved since the previous reading, fastest first. Programs averaging under 10 kB/s over the last minute wait behind Show more, though at least three rows are shown. One row per program; ×N is how many of its processes moved bytes. The counters are cumulative, so the first reading has no rate. These are the kernel's socket counters and will not add up to the interface totals. The line is ↓+↑ over recent readings, up to 10 minutes. Sampling continues every 10s while this tab is closed and every 2s while it is open. A break in the line is a reading with no rate."
 tip_macos = "Received bytes are macOS rxbytes, which counts more than the payload recv returned."
 tip_linux = "TCP only. A program that only speaks UDP has no row — the kernel publishes no cumulative UDP total."
 tip_partial = "Other users' processes could not be named, so their traffic is missing."

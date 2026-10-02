@@ -215,6 +215,7 @@ pub fn lookup(path: &Path) -> Option<CleanHint> {
 
 /// Name the list was overridden under before the per-OS split. Kept only
 /// to adopt it once; nothing reads it as a fallback.
+#[cfg(target_os = "macos")]
 const LEGACY_USER_FILE: &str = "cleanhints.toml";
 
 /// Take over a pre-split override. That file can only have been written
@@ -320,6 +321,7 @@ fn parse(content: &str, home: &Path) -> Vec<CleanHint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use std::process;
 
     fn p(s: &str) -> PathBuf {

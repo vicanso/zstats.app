@@ -61,6 +61,7 @@ static LAST_ACTIVE: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
 /// oldest entries are dropped past it. A day of activations on a busy
 /// machine is dozens, not hundreds, and the map is only read for trees
 /// that are already producing a banner.
+#[cfg(any(target_os = "macos", test))]
 const MAX_TRACKED: usize = 256;
 
 /// How long an app must have gone untouched before a banner says so.
@@ -76,7 +77,11 @@ fn table() -> &'static Mutex<HashMap<u32, Instant>> {
 }
 
 /// Record that `pid` came forward. Called from the workspace observer,
-/// and directly by tests.
+/// and directly by tests. The writing half exists where something writes:
+/// macOS has the observer, Linux has no activation source yet (the
+/// Hyprland arm is still open in docs/omarchy-port.md), and the tests
+/// run everywhere.
+#[cfg(any(target_os = "macos", test))]
 fn note_active(pid: u32, at: Instant) {
     if let Ok(mut map) = table().lock() {
         insert_bounded(&mut map, pid, at);
@@ -86,6 +91,7 @@ fn note_active(pid: u32, at: Instant) {
 /// The bounded insert, kept free of the global so its own test needs
 /// no shared state — the tests run in one process, and one that reset
 /// the real table would pull the ground out from the others.
+#[cfg(any(target_os = "macos", test))]
 fn insert_bounded(map: &mut HashMap<u32, Instant>, pid: u32, at: Instant) {
     if map.len() >= MAX_TRACKED && !map.contains_key(&pid) {
         // Drop the least recently active rather than clearing: the
@@ -151,6 +157,7 @@ fn frontmost_pid() -> Option<u32> {
 /// banner would claim hours of disuse for a process minutes old. Same
 /// reasoning as the alert cards' `SeenAlert::live` gate: a pid is only
 /// an identity while its process is alive.
+#[cfg(any(target_os = "macos", test))]
 fn forget(pid: u32) {
     if let Ok(mut map) = table().lock() {
         map.remove(&pid);

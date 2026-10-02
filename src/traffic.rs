@@ -273,7 +273,9 @@ fn add_dir(slot: &mut Option<u64>, add: Option<u64>) {
     }
 }
 
-fn total(row: &ProgramRate) -> u64 {
+/// A program's ↓+↑ on the reading that ranked it; a direction that fell
+/// adds nothing.
+pub fn total(row: &ProgramRate) -> u64 {
     row.received_per_sec
         .unwrap_or(0)
         .saturating_add(row.transmitted_per_sec.unwrap_or(0))
@@ -449,6 +451,27 @@ pub fn span_label(span: Duration) -> String {
     } else {
         format!("{secs}s")
     }
+}
+
+/// The mean of a curve's readings over the last `window` — the traffic
+/// card's cut for which programs get a row before "show more".
+///
+/// A mean of readings, not of time. On screen they are 2s apart, and a
+/// hidden 10s reading already is the average of its own ten seconds, so
+/// the only skew is the minute after the tab opens, which leans toward
+/// the newer readings. A line younger than the window is averaged over
+/// the readings it has: the stretch before its first moved byte is not
+/// a reading, and padding it with zeros would hide a download that has
+/// just started. `None` when no reading falls inside the window.
+pub fn recent_average(points: &[CurvePoint], now: Instant, window: Duration) -> Option<u64> {
+    let (sum, count) = points
+        .iter()
+        .filter(|point| now.saturating_duration_since(point.at) <= window)
+        .filter_map(|point| point.bytes_per_sec)
+        .fold((0u128, 0u128), |(sum, count), rate| {
+            (sum + u128::from(rate), count + 1)
+        });
+    (count > 0).then(|| u64::try_from(sum / count).unwrap_or(u64::MAX))
 }
 
 /// Runs the stroke can draw. A break, or a gap past [`CURVE_GAP`], ends
@@ -1029,6 +1052,38 @@ mod tests {
             "the span is every row's axis, so it stays real"
         );
         assert_eq!(span_label(book.span(full).unwrap()), "10m");
+    }
+
+    #[test]
+    fn the_recent_average_is_the_mean_of_the_readings_in_the_window() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let reading = |secs_ago: u64, bytes: Option<u64>| CurvePoint {
+            at: now - Duration::from_secs(secs_ago),
+            bytes_per_sec: bytes,
+        };
+        let window = Duration::from_secs(60);
+        let points = [
+            reading(300, Some(9_000_000)),
+            reading(60, Some(30_000)),
+            reading(40, None),
+            reading(20, Some(0)),
+            reading(0, Some(3_000)),
+        ];
+        assert_eq!(
+            recent_average(&points, now, window),
+            Some(11_000),
+            "a burst five minutes ago is outside the minute; a hole is not a zero"
+        );
+        assert_eq!(
+            recent_average(&points[..1], now, window),
+            None,
+            "nothing inside the window"
+        );
+        assert_eq!(
+            recent_average(&points[3..], now, window),
+            Some(1_500),
+            "a young line is averaged over what it has"
+        );
     }
 
     #[test]

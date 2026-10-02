@@ -5,6 +5,10 @@
 //! format. A row is a program, ranked by ↓+↑, and a program that moved
 //! nothing is not a row — a machine has dozens of processes holding an
 //! idle socket, and listing them is how the two that matter get buried.
+//! The same reasoning sets the preview: only programs averaging over
+//! 10 kB/s across the last minute, never fewer than three, the rest one
+//! chip away. A few kB/s is keep-alives and telemetry, and a fixed six
+//! filled up with them whenever nothing bigger was running.
 //!
 //! Under the numbers, one line of ↓+↑. Its height is that row's own
 //! peak, but never below 64 KiB/s: a few hundred bytes a second must
@@ -28,14 +32,27 @@ use gpui::{
 };
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
+use std::cmp::Reverse;
 use std::time::{Duration, Instant};
 use zstats::OwnerCoverage;
 use zstats::snapshot::Capabilities;
 
-/// Busiest programs before "show more". The listening card's cap: six
-/// is a screenful at 320px, and the rest stay one chip away. Idle
-/// programs are not in this list.
-const PREVIEW_ROWS: usize = 6;
+/// A program averaging more than this over [`AVERAGE_WINDOW`] gets a
+/// row before "show more". 10 kB/s as the card prints it — `format::rate`
+/// is binary — so a row reading "9.8 kB/s" all minute is not one. Below
+/// it is housekeeping. No cap above it: every program over the floor is
+/// what the card is for, and the floor is already the cut.
+const SHOWN_FLOOR: u64 = 10 * 1024;
+
+/// The last minute of each row's curve. Long enough that a row does not
+/// come and go with each 2s reading, short enough that a download which
+/// finished minutes ago stops holding a row its live rate no longer earns.
+const AVERAGE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Rows shown even when fewer programs clear the floor, filled by the
+/// highest averages. A quiet machine still says who is talking at all,
+/// rather than collapsing to a chip.
+const MIN_ROWS: usize = 3;
 
 /// Floor for a row's curve. Same value as the interface card's bars:
 /// below 64 KiB/s the line stays on the axis, and a few kB/s of
@@ -102,28 +119,55 @@ fn ready_card(state: &ZStatsAppState, ready: &TrafficReady) -> AnyElement {
             .child(note_line(text))
             .into_any_element();
     }
-    let hidden = rows.len().saturating_sub(PREVIEW_ROWS);
+    // One `now` for every row, so a point sits on the same x in each.
+    let now = Instant::now();
+    let curves: Vec<&[CurvePoint]> = rows.iter().map(|row| state.traffic_curve(row)).collect();
+    // Every row moved bytes on the reading that ranked it, and that
+    // reading is on its curve; the row's own rate covers a curve that
+    // somehow has nothing in the window.
+    let averages: Vec<u64> = rows
+        .iter()
+        .zip(&curves)
+        .map(|(row, points)| {
+            traffic::recent_average(points, now, AVERAGE_WINDOW)
+                .unwrap_or_else(|| traffic::total(row))
+        })
+        .collect();
+    let preview = preview(&averages);
+    let hidden = rows.len() - preview.len();
     let show_all = state.show_all_traffic();
-    let shown = if show_all {
-        rows.as_slice()
+    let shown: Vec<usize> = if show_all {
+        (0..rows.len()).collect()
     } else {
-        &rows[..rows.len().min(PREVIEW_ROWS)]
+        preview
     };
     // The chip stays a toggle once expanded, including the sample where
     // the extras have gone quiet and `hidden` drops to zero.
     let chip = (hidden > 0 || show_all).then(|| more_chip(hidden, show_all));
-    // One `now` for every row, so a point sits on the same x in each.
-    let now = Instant::now();
     let span = state.traffic_span(now);
     let last = shown.len() - 1;
     widgets::list_shell()
         .child(header(trailing(span, chip), Some(ready.coverage)))
         .children(
-            shown.iter().enumerate().map(|(i, row)| {
-                row_element(i, row, state.traffic_curve(row), span, now, i != last)
+            shown.iter().enumerate().map(|(i, &index)| {
+                row_element(i, &rows[index], curves[index], span, now, i != last)
             }),
         )
         .into_any_element()
+}
+
+/// Which rows show before "show more", as indices in ranking order:
+/// every program over [`SHOWN_FLOOR`], then the next-highest averages
+/// until there are [`MIN_ROWS`]. The minute's average picks the rows;
+/// the live ranking still orders them, as it orders the expanded list.
+fn preview(averages: &[u64]) -> Vec<usize> {
+    let over = averages.iter().filter(|&&avg| avg > SHOWN_FLOOR).count();
+    let mut by_average: Vec<usize> = (0..averages.len()).collect();
+    // Stable, so a tie goes to the busier row in the live ranking.
+    by_average.sort_by_key(|&index| Reverse(averages[index]));
+    by_average.truncate(over.max(MIN_ROWS));
+    by_average.sort_unstable();
+    by_average
 }
 
 /// The real span, dim, beside the show-more chip. Absent until the book
@@ -431,6 +475,37 @@ mod tests {
             at: Instant::now(),
             bytes_per_sec: Some(bytes),
         }
+    }
+
+    #[test]
+    fn the_preview_is_every_row_over_the_floor_in_ranking_order() {
+        let busy = SHOWN_FLOOR + 1;
+        assert_eq!(
+            preview(&[busy, 0, busy, busy, 10, busy]),
+            vec![0, 2, 3, 5],
+            "no cap above the floor; quiet rows wait behind the chip"
+        );
+        assert_eq!(
+            preview(&[SHOWN_FLOOR, busy]),
+            vec![0, 1],
+            "exactly at the floor is not over it, but two rows are under three"
+        );
+    }
+
+    #[test]
+    fn fewer_than_three_over_the_floor_are_filled_by_the_highest_averages() {
+        let busy = SHOWN_FLOOR * 4;
+        assert_eq!(
+            preview(&[200, 9_000, busy, 0, 5_000]),
+            vec![1, 2, 4],
+            "the minute's average picks, the live ranking orders"
+        );
+        assert_eq!(
+            preview(&[100, 100, 100, 100]),
+            vec![0, 1, 2],
+            "a tie goes to the busier row right now"
+        );
+        assert_eq!(preview(&[0]), vec![0]);
     }
 
     #[test]

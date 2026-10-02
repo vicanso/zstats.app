@@ -186,6 +186,7 @@ fn expand(raw: &str, home: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use std::process;
 
     fn p(s: &str) -> PathBuf {
