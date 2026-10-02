@@ -587,6 +587,23 @@ const TRAFFIC_REFRESH: Duration = Duration::from_secs(2);
 /// enough to notice a 10s gate.
 const TRAFFIC_BACKGROUND: Duration = Duration::from_secs(10);
 
+/// How early a read may run against its clock. The read rides the
+/// collector tick (5s hidden, 2s with the card on screen), and
+/// `traffic_at` is when the last read *finished*, a few ms after its
+/// tick — so the tick exactly one interval later saw 9.99s of a 10s
+/// wait, skipped, and the next read landed on the tick after: every
+/// background read 15s apart instead of 10 (measured on the installed
+/// app: CPU bursts at 15–16s), and on the curve's old 15s gap a few ms
+/// over broke the line. Under the shortest tick, so it never lets two
+/// ticks in a row read.
+const TRAFFIC_SLACK: Duration = Duration::from_secs(1);
+
+/// Whether a read is due: never read yet, or `wait` has passed since
+/// the last one, give or take [`TRAFFIC_SLACK`].
+fn traffic_due(last: Option<Instant>, now: Instant, wait: Duration) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) + TRAFFIC_SLACK >= wait)
+}
+
 /// Which clock the next `process_traffic()` call is on.
 ///
 /// A refusal, or a failure that replaced the card, does not heal in two
@@ -1239,7 +1256,7 @@ impl ZStatsAppState {
             self.traffic.as_ref(),
             self.tab == Tab::Net && panel_visible(cx),
         );
-        if self.traffic_inflight || self.traffic_at.is_some_and(|at| at.elapsed() < wait) {
+        if self.traffic_inflight || !traffic_due(self.traffic_at, Instant::now(), wait) {
             return;
         }
         self.traffic_inflight = true;
@@ -3468,6 +3485,21 @@ mod tests {
         assert!(reloaded.alerts.cpu_overrides.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_read_is_due_on_the_tick_that_completes_its_wait() {
+        let t0 = Instant::now();
+        let after = |ms: u64| t0 + Duration::from_millis(ms);
+        assert!(traffic_due(None, t0, TRAFFIC_BACKGROUND));
+        // The last read finished a few ms after its tick; the tick one
+        // interval later is a hair short of 10s and still reads.
+        assert!(traffic_due(Some(t0), after(9_990), TRAFFIC_BACKGROUND));
+        // The hidden tick before it does not.
+        assert!(!traffic_due(Some(t0), after(4_990), TRAFFIC_BACKGROUND));
+        // On screen: every 2s tick reads, the same way.
+        assert!(traffic_due(Some(t0), after(1_995), TRAFFIC_REFRESH));
+        assert!(!traffic_due(Some(t0), after(500), TRAFFIC_REFRESH));
     }
 
     #[test]

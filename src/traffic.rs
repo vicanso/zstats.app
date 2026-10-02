@@ -28,9 +28,11 @@
 //!
 //! The curve is that same diff, kept. One point per program per sample,
 //! ↓ and ↑ added. A true zero is a point, so a program that goes idle
-//! draws down to the axis. A counter that fell and left nothing
-//! measurable is a break, and so is a gap longer than [`CURVE_GAP`]:
-//! the line does not invent the rates in between. A program that has
+//! draws down to the axis, and so does any sample that cannot price a
+//! program which already has a line (a counter that fell, a new pid,
+//! the program gone from the table). Only a gap longer than
+//! [`CURVE_GAP`] breaks it: the line does not invent the rates across a
+//! stretch nobody sampled. A program that has
 //! only ever been quiet never starts a series — idle socket owners are
 //! most of the table.
 
@@ -46,13 +48,21 @@ pub const MIN_WINDOW: Duration = Duration::from_millis(500);
 /// with no positive rate left is dropped.
 pub const CURVE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
-/// A gap wider than this is a missed sample, not a line between two
-/// rates that were never neighbours. The background read is 10s and the
-/// hidden tick is 5s, so a step that landed on the next tick is still
-/// under this; one missed 10s sample is 20s and breaks. A sleep is the
-/// same shape — `Instant` does not advance while the machine is asleep,
-/// and the first reading after wake is this far from the last.
-pub const CURVE_GAP: Duration = Duration::from_secs(15);
+/// A gap wider than this is a stretch with no samples, not a line
+/// between two rates that were never neighbours. The background read is
+/// 10s, gated on the 5s hidden tick: a read one tick late is 15s, one
+/// missed read is 20s, and both connect. It was 15s, which a read one
+/// tick late overshot by milliseconds — and every background read was
+/// one tick late (`state::traffic_due`) — so a hidden panel's curves
+/// came back as dashes. Two missed reads (30s), or a sleep at its real
+/// width, break.
+pub const CURVE_GAP: Duration = Duration::from_secs(25);
+
+/// How far short of [`CURVE_WINDOW`] a book still labels as full. A full
+/// book's oldest point is at most one read younger than the window —
+/// 10s, 15s when the read landed a tick late. Not [`CURVE_GAP`]: that is
+/// how long a line may go unsampled, a different question.
+const FULL_SLACK: Duration = Duration::from_secs(15);
 
 /// `run_time_secs` is whole seconds. The same process's age should
 /// advance by about the wall clock between the two calls; each reading
@@ -427,12 +437,12 @@ impl CurveBook {
 /// `10m` once the window is full, otherwise the real length: `9m`, `40s`.
 /// Under a minute stays in seconds — [`crate::format::uptime_short`]
 /// collapses that to `0m`, which would label a fresh curve as empty.
-/// Full means within [`CURVE_GAP`] of the window: pruning keeps only
+/// Full means within [`FULL_SLACK`] of the window: pruning keeps only
 /// points at most that old, so a full book's oldest is a sample younger
 /// and an exact comparison labelled it "9m" for good.
 pub fn span_label(span: Duration) -> String {
     let secs = span.as_secs();
-    if span + CURVE_GAP >= CURVE_WINDOW {
+    if span + FULL_SLACK >= CURVE_WINDOW {
         format!("{}m", CURVE_WINDOW.as_secs() / 60)
     } else if secs >= 60 {
         format!("{}m", secs / 60)
@@ -914,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_past_fifteen_seconds_splits_and_a_ten_second_step_does_not() {
+    fn one_missed_read_connects_and_two_split() {
         let t0 = Instant::now();
         let steady = vec![
             CurvePoint {
@@ -947,21 +957,41 @@ mod tests {
                 bytes_per_sec: Some(40),
             },
         ];
-        let runs = segments(&missed);
-        assert_eq!(runs.len(), 1, "the lone point after the gap is not a line");
-        assert_eq!(runs[0].len(), 2);
+        // 10s then 20s: one read missed, still one line.
+        assert_eq!(segments(&missed).len(), 1);
+        assert_eq!(segments(&missed)[0].len(), 3);
 
-        let exactly = vec![
+        // A read one tick late, a few ms past 15s: one line. The old 15s
+        // gap split exactly this.
+        let late = vec![
             CurvePoint {
                 at: t0,
                 bytes_per_sec: Some(100),
             },
             CurvePoint {
-                at: at(t0, 15),
+                at: t0 + Duration::from_millis(15_004),
                 bytes_per_sec: Some(80),
             },
         ];
-        assert_eq!(segments(&exactly).len(), 1, "15s is still one step");
+        assert_eq!(segments(&late).len(), 1);
+
+        let two_missed = vec![
+            CurvePoint {
+                at: t0,
+                bytes_per_sec: Some(100),
+            },
+            CurvePoint {
+                at: at(t0, 10),
+                bytes_per_sec: Some(80),
+            },
+            CurvePoint {
+                at: at(t0, 40),
+                bytes_per_sec: Some(40),
+            },
+        ];
+        let runs = segments(&two_missed);
+        assert_eq!(runs.len(), 1, "the lone point after the gap is not a line");
+        assert_eq!(runs[0].len(), 2);
     }
 
     #[test]
