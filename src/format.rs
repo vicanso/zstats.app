@@ -282,12 +282,18 @@ pub fn capacity(bytes: u64) -> String {
 }
 
 /// Throughput. `None` means the collector had no previous sample.
+///
+/// GB/s exists for the loopback row and a fast disk: programs talking
+/// over 127.0.0.1 move at memory speed, and "15131.3 MB/s" made a reader
+/// count digits to learn it was fifteen gigabytes.
 pub fn rate(bytes_per_sec: Option<u64>) -> String {
     let Some(b) = bytes_per_sec else {
         return PLACEHOLDER.to_string();
     };
     let v = b as f64;
-    if v >= MIB {
+    if v >= GIB {
+        format!("{:.1} GB/s", v / GIB)
+    } else if v >= MIB {
         format!("{:.1} MB/s", v / MIB)
     } else if v >= KIB {
         format!("{:.0} kB/s", v / KIB)
@@ -665,6 +671,8 @@ mod tests {
         assert_eq!(rate(None), PLACEHOLDER);
         assert_eq!(rate(Some(0)), "0 B/s");
         assert_eq!(rate(Some((8.4 * MIB) as u64)), "8.4 MB/s");
+        assert_eq!(rate(Some((14.8 * GIB) as u64)), "14.8 GB/s");
+        assert_eq!(rate(Some((1023.0 * MIB) as u64)), "1023.0 MB/s");
         assert_eq!(rate(Some((420.0 * KIB) as u64)), "420 kB/s");
     }
 

@@ -670,6 +670,7 @@ mod tests {
     fn iface(name: &str, rx: u64) -> NetworkSnapshot {
         NetworkSnapshot {
             interface: name.into(),
+            is_loopback: false,
             received_bytes_per_sec: rx,
             transmitted_bytes_per_sec: 0,
             received_packets_per_sec: None,

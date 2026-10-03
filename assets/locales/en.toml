@@ -58,7 +58,7 @@ watts_tip = "Live power draw. Pairs with CPU%: the same 150% on the charger at 2
 io_title = "Throughput"
 io_disk = "Disk"
 io_net = "Network"
-net_curve_tip = "The bright line is download and the dim line is upload, across 30 minutes, on one scale. Until that fills, the lines stay on the right and the stretch before the first sample stays empty; the faint marks are 10 and 20 minutes ago. Each point is a 20-second average, at most 90 of them. The bottom is 0. The top is 1 MB/s while every point stays at or under that, and the next doubling above the highest point once one goes over it (2, 4, 8 MB/s…); the figure in the top-left corner is that top. Under the lines: the highest point of each, and how long the window has been collecting. The panel records a point every 5s in the tray and every 2s while open; the interface rates themselves refresh about every 15s. A break in a line is a reading with no rate."
+net_curve_tip = "The bright line is download and the dim line is upload, across 30 minutes, on one scale. Until that fills, the lines stay on the right and the stretch before the first sample stays empty; the faint marks are 10 and 20 minutes ago. Each point is a 20-second average, at most 90 of them. The bottom is 0. The top is 1 MB/s while every point stays at or under that, and the next doubling above the highest point once one goes over it (2, 4, 8 MB/s…); the figure in the top-left corner is that top. Under the lines: the highest point of each, and how long the window has been collecting. The panel records a point every 5s in the tray and every 2s while open; the interface rates themselves refresh about every 15s. Traffic between programs on this machine (loopback) is not counted. A break in a line is a reading with no rate."
 io_off_body = "Disk and network collection are both off, or the first sample has nothing to diff against yet."
 pressure_critical = "Critical"
 pressure_warning = "Warning"
@@ -416,6 +416,8 @@ all_shown = "all"
 idle_compact = "Idle · %{names}"
 errors = "err ↓ %{rx}/s · ↑ %{tx}/s"
 packets_tip = "↓ %{rx} pkt/s · ↑ %{tx} pkt/s"
+local = "local"
+local_tip = "Loopback: programs on this machine talking to each other — a local proxy, a build cache, a database on 127.0.0.1. None of it leaves the machine and it moves at memory speed, so Overview's network figures leave it out and it does not set the scale of the bars here."
 
 [listen]
 title = "Listening"

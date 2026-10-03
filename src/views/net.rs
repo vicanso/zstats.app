@@ -4,6 +4,15 @@
 //! dozens (unused Ethernet, tunnels, bridges, VM adapters) and they bury the
 //! two or three that matter. Measured here: 32 reported, 5 actually moving
 //! bytes. A header chip says how many are hidden and reveals them.
+//!
+//! Loopback (`NetworkSnapshot::is_loopback`, zstats ≥ 0.7.1) is listed and
+//! labelled "local", after the interfaces that reach a wire, and never
+//! sets the bars' scale. It is programs on this machine talking to each
+//! other at memory-copy speed — measured here, 628 GB against the Wi-Fi's
+//! 0.88 GB over one uptime — so ranked by throughput it was always the
+//! first row and every real interface's bar beside it was empty. zstats
+//! leaves it out of the totals Overview shows; hiding the row here too
+//! would leave no place that says where a local proxy's traffic went.
 
 use super::widgets;
 use crate::font;
@@ -88,11 +97,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .into_any_element(),
         ];
     }
-    rows.sort_by(|a, b| {
-        (b.received_bytes_per_sec + b.transmitted_bytes_per_sec)
-            .cmp(&(a.received_bytes_per_sec + a.transmitted_bytes_per_sec))
-            .then_with(|| a.interface.cmp(&b.interface))
-    });
+    rank(&mut rows);
 
     let scale = scale_for(&rows);
     // Expanding used to dump every silent bridge and VM adapter as a
@@ -124,12 +129,35 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     vec![list.into_any_element()]
 }
 
+/// Busiest first among the interfaces that reach a wire, then loopback.
+fn rank(rows: &mut [&zstats::snapshot::NetworkSnapshot]) {
+    let total = |n: &zstats::snapshot::NetworkSnapshot| {
+        n.received_bytes_per_sec
+            .saturating_add(n.transmitted_bytes_per_sec)
+    };
+    rows.sort_by(|a, b| {
+        a.is_loopback
+            .cmp(&b.is_loopback)
+            .then_with(|| total(b).cmp(&total(a)))
+            .then_with(|| a.interface.cmp(&b.interface))
+    });
+}
+
 fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> AnyElement {
     let active = n.received_bytes_per_sec + n.transmitted_bytes_per_sec > 0;
-    let fg = if active {
-        theme::text()
-    } else {
+    // Loopback's figures are real and stay, a step back: they are not
+    // the wire's, and beside it they are usually the largest on the card.
+    let fg = if !active {
         theme::text_faint()
+    } else if n.is_loopback {
+        theme::text_muted()
+    } else {
+        theme::text()
+    };
+    let (down_fill, up_fill) = if n.is_loopback {
+        (theme::border(), theme::border())
+    } else {
+        (theme::ink(), theme::text_dim())
     };
     h_flex()
         .items_center()
@@ -140,7 +168,11 @@ fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> A
             d.border_b(px(1.)).border_color(theme::border_subtle())
         })
         .child(
-            div()
+            v_flex()
+                .id(gpui::SharedString::from(format!(
+                    "net-name-{}",
+                    n.interface
+                )))
                 // 64, not 42: `vmenet0` needs 43 and `bridge100`
                 // needs ~58, so the old width turned three distinct
                 // VM adapters into three rows all reading `vmen…`.
@@ -148,11 +180,25 @@ fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> A
                 // rows is worse than a narrower bar beside it.
                 .w(px(64.))
                 .flex_none()
-                .text_size(px(11.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(fg)
-                .truncate()
-                .child(n.interface.clone()),
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(fg)
+                        .truncate()
+                        .child(n.interface.clone()),
+                )
+                // Under the name, inside the row's two lines: the word
+                // that says why this row is missing from Overview's total.
+                .when(n.is_loopback, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(theme::text_dim())
+                            .child(i18n::tr("net.local")),
+                    )
+                    .tooltip(widgets::wrap_tooltip(i18n::tr("net.local_tip")))
+                }),
         )
         .child({
             let rates = v_flex()
@@ -177,8 +223,8 @@ fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> A
                     h_flex()
                         .gap(px(3.))
                         .mt(px(5.))
-                        .child(bar(n.received_bytes_per_sec, scale, theme::ink()))
-                        .child(bar(n.transmitted_bytes_per_sec, scale, theme::text_dim())),
+                        .child(bar(n.received_bytes_per_sec, scale, down_fill))
+                        .child(bar(n.transmitted_bytes_per_sec, scale, up_fill)),
                 )
                 .children(errors_line(n));
             match packets_tip(n) {
@@ -315,6 +361,9 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
 /// other as well as against the other rows.
 fn scale_for(rows: &[&zstats::snapshot::NetworkSnapshot]) -> f32 {
     rows.iter()
+        // Loopback does not get to define "full": at memory-copy speed
+        // it would empty every bar that measures a real link.
+        .filter(|n| !n.is_loopback)
         .flat_map(|n| [n.received_bytes_per_sec, n.transmitted_bytes_per_sec])
         .max()
         .map_or(SCALE_FLOOR_BYTES, |peak| {
@@ -347,6 +396,7 @@ mod tests {
     fn net(rx: u64, tx: u64) -> NetworkSnapshot {
         NetworkSnapshot {
             interface: "en0".into(),
+            is_loopback: false,
             received_bytes_per_sec: rx,
             transmitted_bytes_per_sec: tx,
             received_packets_per_sec: None,
@@ -372,6 +422,27 @@ mod tests {
 
         // An empty page still divides by something.
         assert_eq!(scale_for(&[]), SCALE_FLOOR_BYTES);
+    }
+
+    /// A build cache talking to itself over 127.0.0.1 is the busiest
+    /// thing on the card and no part of the network: it goes last, and
+    /// the real link beside it keeps a bar it can be read from.
+    #[test]
+    fn loopback_goes_last_and_does_not_set_the_scale() {
+        let mut local = net(5_000_000_000, 5_000_000_000);
+        local.interface = "lo0".into();
+        local.is_loopback = true;
+        let mut wifi = net(2 * 1024 * 1024, 100_000);
+        wifi.interface = "en0".into();
+        let mut tunnel = net(300_000, 50_000);
+        tunnel.interface = "utun10".into();
+
+        let mut rows = vec![&local, &tunnel, &wifi];
+        rank(&mut rows);
+        let names: Vec<&str> = rows.iter().map(|n| n.interface.as_str()).collect();
+        assert_eq!(names, ["en0", "utun10", "lo0"]);
+        assert_eq!(scale_for(&rows), 2.0 * 1024.0 * 1024.0, "en0 is full");
+        assert_eq!(scale_for(&[&local]), SCALE_FLOOR_BYTES);
     }
 
     #[test]
