@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.2](https://github.com/vicanso/zstats.app/compare/v0.4.1..v0.4.2) - 2026-10-03
+
+### ⛰️  Features
+
+- The disk-space window opens filling the screen and shows the analysis as a directory map — a squarified treemap you click into, coloured from five theme hues so no two neighbouring folders match — in place of the big-directories table and the composition bar - ([8426794](https://github.com/vicanso/zstats.app/commit/8426794f8d893ca44fceabaefd1318273730c324))
+
+### 🐛 Bug Fixes
+
+- Network figures no longer count loopback — zstats 0.7.1 leaves it out of the totals, the interface list labels it "local", ranks it last and keeps it off the bar scale, and rates of 1 GB/s and up read in GB/s - ([1a5f7a0](https://github.com/vicanso/zstats.app/commit/1a5f7a0f0dbd9aa4ea600df894351d524c141758))
+
 ## [0.4.1](https://github.com/vicanso/zstats.app/compare/v0.4.0..v0.4.1) - 2026-10-02
 
 ### ⛰️  Features
