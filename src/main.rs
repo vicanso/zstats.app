@@ -51,6 +51,7 @@ mod procscan;
 mod proxy;
 mod series;
 mod spaceinfo;
+mod squarify;
 mod state;
 mod terminate;
 mod theme;
@@ -67,6 +68,8 @@ mod window_ext;
 use crate::assets::Assets;
 use crate::placement::{DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
@@ -216,16 +219,16 @@ const AUX_BODY_PAD: f32 = 14.;
 /// sizes read as an accident. Still resizable — this is where it opens,
 /// not where it must stay.
 const SETTINGS_WINDOW_SIZE: (f32, f32) = (507., 620.);
-/// Where the disk-space window opens: wide rather than tall. At 507 a
-/// path got what was left after its size, pills and two buttons; 720
-/// reads `Library/Application Support/GIMP/2.10/cache/fontconfig` whole.
-/// 840 tall was tried and stood nearly the full height of a 14-inch
-/// screen — a window you open to look something up, not a document to
-/// live in. 480 keeps about six list rows under the tabs and the card's
-/// header, and every tab scrolls. Sizing to the content was weighed
-/// and dropped: once run, every tab's list outgrows any cap, so the
-/// window would only move in the empty and running states — growing
-/// when a walk lands, shrinking on a tab switch.
+/// The disk-space window's size before it zooms to fill the screen, and
+/// the size the zoom button returns it to. It opens zoomed because the
+/// analysis tab is a directory map beside its lists, and a map is read
+/// by area — 720×480 left it a postcard. Wide rather than tall when
+/// un-zoomed: at 507 a path got what was left after its size, pills and
+/// two buttons; 720 reads `Library/Application Support/GIMP/2.10/cache/
+/// fontconfig` whole. Sizing to the content was weighed and dropped:
+/// once run, every tab's list outgrows any cap, so the window would only
+/// move in the empty and running states — growing when a walk lands,
+/// shrinking on a tab switch.
 const STORAGE_WINDOW_SIZE: (f32, f32) = (720., 480.);
 /// Floor for both auxiliary windows. Has to stay under both opening
 /// sizes: a minimum wider than the opening width would silently widen
@@ -1245,6 +1248,9 @@ struct StorageWindow {
     /// Committed on Enter, never on a keystroke — half a path is a path
     /// that excludes the wrong thing.
     exclude_input: gpui::Entity<gpui_kit::component::input::InputState>,
+    /// The directory map's box as last laid out: the map places its
+    /// tiles in pixels and only learns its size after layout.
+    map_box: Rc<Cell<Option<gpui::Size<gpui::Pixels>>>>,
 }
 
 impl StorageWindow {
@@ -1293,19 +1299,25 @@ impl StorageWindow {
                 ScrollHandle::new(),
             ],
             exclude_input,
+            map_box: Rc::new(Cell::new(None)),
         }
     }
 }
 
 impl Render for StorageWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Every trash control in here raises `confirm::ask`; since gpui-kit
         // 0.7 the Root hosts the sheet on this window by itself.
         let bg = cx.theme().background;
         let fg = cx.theme().foreground;
         let state = cx.global::<ZStatsGlobalStore>().read(cx);
-        let scroll = &self.scrolls[state.storage_tab().index()];
-        let cards = views::storage::render(state, &self.exclude_input, scroll);
+        let frame = views::storage::Frame {
+            exclude: &self.exclude_input,
+            scroll: &self.scrolls[state.storage_tab().index()],
+            map_box: self.map_box.clone(),
+            wide: window.viewport_size().width >= px(views::storage::SIDE_BY_SIDE_MIN_W),
+        };
+        let cards = views::storage::render(state, &frame);
         gpui_kit::component::v_flex()
             .relative()
             .size_full()
@@ -1460,6 +1472,9 @@ pub fn open_storage_window(cx: &mut App) {
         }),
         |window, cx| {
             window.activate_window();
+            // Fills the screen's visible area — menu bar and Dock stay —
+            // and the zoom button brings back STORAGE_WINDOW_SIZE.
+            window.zoom_window();
             let view = cx.new(|cx| StorageWindow::new(window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         },

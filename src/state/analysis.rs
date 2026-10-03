@@ -165,7 +165,12 @@ pub(crate) struct Analysis {
     expand_cancel: Option<Arc<AtomicBool>>,
     disk_analysis_root: Option<ScanScope>,
     analysis_diff: Option<DiffBaseline>,
-    analysis_show_all_dirs: bool,
+    /// Where the directory map stands: each directory opened from the
+    /// result's root down, with the size its tile had. Empty is the root.
+    /// The sizes ride along because a result restored from its cache has
+    /// no index to look a total up in, and the map still needs one to say
+    /// what part of a folder its subfolders are.
+    map_trail: Vec<(PathBuf, u64)>,
     /// Every cleanup suggestion listed, not just the first few.
     analysis_show_all_sugs: bool,
     /// The excluded-folders drawer under the toolbar is open.
@@ -251,7 +256,7 @@ impl Default for Analysis {
                 .then(|| diskscan::load_prev_cache(&launch_roots))
                 .flatten()
                 .map(|prev| DiffBaseline::from_result(&prev)),
-            analysis_show_all_dirs: false,
+            map_trail: Vec::new(),
             analysis_show_all_sugs: false,
             analysis_exclude_open: false,
             trashed: 0,
@@ -475,17 +480,62 @@ impl ZStatsAppState {
     }
 
     /// Every open row closes when the result they describe goes away —
-    /// a new walk, a cleared card. Children of a replaced result would
-    /// be figures from a scan that is no longer on screen.
+    /// a new walk, a cleared card — and the map goes back to the root.
+    /// Children of a replaced result would be figures from a scan that is
+    /// no longer on screen.
     fn drop_expansions(&mut self) {
         self.analysis.expanded.clear();
+        self.analysis.map_trail.clear();
         if let Some(cancel) = self.analysis.expand_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
     }
 
-    pub fn analysis_show_all_dirs(&self) -> bool {
-        self.analysis.analysis_show_all_dirs
+    /// The directory map's way down from the root; empty is the root.
+    pub fn map_trail(&self) -> &[(PathBuf, u64)] {
+        &self.analysis.map_trail
+    }
+
+    /// Open `chain` in the map — one tile, or a tile and the parent tile
+    /// it sits in, outermost first. Where the index has nothing recorded
+    /// under the new level, the same one-at-a-time walk a row's
+    /// expansion takes measures it, and the map says so until it lands.
+    pub fn open_in_map(&mut self, chain: Vec<(PathBuf, u64)>, cx: &mut Context<Self>) {
+        if chain.is_empty() || !matches!(self.analysis.disk_analysis, DiskAnalysis::Ready(_)) {
+            return;
+        }
+        self.analysis.map_trail.extend(chain);
+        self.measure_map_level(cx);
+        cx.notify();
+    }
+
+    /// Back up the map to `depth` levels below the root (0 is the root).
+    pub fn map_back_to(&mut self, depth: usize, cx: &mut Context<Self>) {
+        self.analysis.map_trail.truncate(depth);
+        cx.notify();
+    }
+
+    /// Walk the map's current level when neither the index nor an earlier
+    /// walk can say what is in it — also the map's retry after a failure.
+    pub fn measure_map_level(&mut self, cx: &mut Context<Self>) {
+        let Some((path, _)) = self.analysis.map_trail.last().cloned() else {
+            return;
+        };
+        let DiskAnalysis::Ready(current) = &self.analysis.disk_analysis else {
+            return;
+        };
+        let indexed = current
+            .index
+            .as_ref()
+            .and_then(|index| index.children_of(&path))
+            .is_some_and(|kids| !kids.is_empty());
+        let measured = matches!(
+            self.analysis.expanded.get(&path),
+            Some(Expansion::Ready(_) | Expansion::Walking)
+        );
+        if !indexed && !measured {
+            self.walk_expansion(path, cx);
+        }
     }
 
     pub fn analysis_show_all_sugs(&self) -> bool {
@@ -503,11 +553,6 @@ impl ZStatsAppState {
 
     pub fn toggle_analysis_exclude(&mut self, cx: &mut Context<Self>) {
         self.analysis.analysis_exclude_open = !self.analysis.analysis_exclude_open;
-        cx.notify();
-    }
-
-    pub fn set_analysis_show_all_dirs(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.analysis.analysis_show_all_dirs = show;
         cx.notify();
     }
 
@@ -1016,7 +1061,6 @@ impl ZStatsAppState {
     /// how old it is.
     pub fn reset_storage_views(&mut self, cx: &mut Context<Self>) {
         self.analysis.big_files = BigFiles::Off;
-        self.analysis.analysis_show_all_dirs = false;
         self.analysis.analysis_show_all_sugs = false;
         self.analysis.analysis_exclude_open = false;
         // Opened rows are questions too — a window opened tomorrow should

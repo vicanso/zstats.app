@@ -42,17 +42,10 @@ const DOMINANCE_PERCENT: u64 = 90;
 /// Rows kept per table. Three tables share a 320px card; the tail is
 /// noise the skip counters still account for.
 pub const TABLE_CAP: usize = 8;
-/// The big-directory and big-file tables may grow past `TABLE_CAP` up to
-/// this by default, but only while every extra row still exceeds
-/// `TABLE_EXTEND_MIN` — a tail that heavy is exactly what the reader
-/// came for; a lighter one is the noise the cap exists to cut.
-const TABLE_CAP_EXTENDED: usize = 10;
-/// Rows *retained* per table — what the dirs section's "show more"
-/// control can reveal. Display defaults stay at `TABLE_CAP`(+2); this
-/// only bounds the data (and the P2b cache rows).
+/// Rows *retained* per table — what a list's "show more" can reveal,
+/// and the directory map's level for a result restored without its
+/// index. Bounds the data (and the P2b cache rows).
 pub const TABLE_KEEP: usize = 20;
-/// Binary 500 MB, the same convention as `bigfiles`' thresholds.
-const TABLE_EXTEND_MIN: u64 = 500 * 1024 * 1024;
 /// Directories below this never reach any table, so the retained index
 /// drops them: ~10 MiB keeps a home tree's index at a few thousand
 /// entries (low MBs resident) instead of the walk's tens of MB.
@@ -231,6 +224,61 @@ pub struct DirIndex {
     totals: HashMap<PathBuf, u64>,
     fold: HashMap<PathBuf, HitKind>,
     files: Vec<FileHit>,
+    /// Each recorded directory's recorded subdirectories, largest first.
+    /// Built once with the index: the directory map asks for a level and
+    /// the level under each of its tiles on every paint, and a scan of
+    /// `totals` per ask was a whole-disk index walked forty times a frame.
+    children: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl DirIndex {
+    fn new(
+        totals: HashMap<PathBuf, u64>,
+        fold: HashMap<PathBuf, HitKind>,
+        files: Vec<FileHit>,
+    ) -> Self {
+        let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for path in totals.keys() {
+            if let Some(parent) = path.parent()
+                && totals.contains_key(parent)
+            {
+                children
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+        for kids in children.values_mut() {
+            kids.sort_by_key(|kid| Reverse(totals.get(kid).copied().unwrap_or(0)));
+        }
+        Self {
+            totals,
+            fold,
+            files,
+            children,
+        }
+    }
+
+    /// `dir`'s recorded subdirectories with their totals, largest first.
+    /// `None` where the index cannot say: a folded tree (its interior was
+    /// never recorded) or a directory with nothing over `INDEX_FLOOR`
+    /// under it — the caller walks it, as a drill-down would.
+    pub fn children_of(&self, dir: &Path) -> Option<Vec<(PathBuf, u64)>> {
+        if self.fold.contains_key(dir) {
+            return None;
+        }
+        let kids = self.children.get(dir)?;
+        Some(
+            kids.iter()
+                .map(|kid| (kid.clone(), self.totals.get(kid).copied().unwrap_or(0)))
+                .collect(),
+        )
+    }
+
+    /// The subtree total the walk recorded for `dir`.
+    pub fn total_of(&self, dir: &Path) -> Option<u64> {
+        self.totals.get(dir).copied()
+    }
 }
 
 pub enum ScanEvent {
@@ -692,14 +740,14 @@ fn snapshot(agg: Aggregates) -> ScanResult {
     // The index keeps the FULL blind-spot file list; the retention cap
     // below only trims what a card (after "show more") can show.
     let index = build_index.then(|| {
-        Arc::new(DirIndex {
-            totals: totals
+        Arc::new(DirIndex::new(
+            totals
                 .into_iter()
                 .filter(|(p, b)| *b >= INDEX_FLOOR || fold.contains_key(p))
                 .collect(),
-            fold: fold.clone(),
-            files: files.clone(),
-        })
+            fold.clone(),
+            files.clone(),
+        ))
     });
     files.truncate(TABLE_KEEP);
     ScanResult {
@@ -1392,17 +1440,6 @@ impl DiffBaseline {
     }
 }
 
-/// Default rows shown for a descending-sorted table: `TABLE_CAP`, rows
-/// 9–10 admitted only while each still exceeds `TABLE_EXTEND_MIN` on
-/// its own. The rest (up to `TABLE_KEEP`) hides behind "show more".
-pub fn default_rows<T>(items: &[T], bytes: impl Fn(&T) -> u64) -> usize {
-    let mut keep = items.len().min(TABLE_CAP_EXTENDED);
-    while keep > TABLE_CAP && bytes(&items[keep - 1]) <= TABLE_EXTEND_MIN {
-        keep -= 1;
-    }
-    keep
-}
-
 /// Follow single-child dominance down to the first real fork: a chain of
 /// wrappers each ≥ `DOMINANCE_PERCENT` of its parent is represented by
 /// its end, which is the directory a person would actually act on.
@@ -1727,13 +1764,22 @@ mod tests {
             dirs: Vec::new(),
             files: Vec::new(),
             suggestions: Vec::new(),
-            index: Some(Arc::new(DirIndex {
-                totals,
-                fold,
-                files,
-            })),
+            index: Some(Arc::new(DirIndex::new(totals, fold, files))),
             total: Some(mb(300)),
         };
+        let index = parent.index.as_ref().unwrap();
+        assert_eq!(
+            index.children_of(&p("/r")),
+            Some(vec![(p("/r/Library"), mb(200)), (p("/r/docs"), mb(90))]),
+            "a level, largest first, for the directory map"
+        );
+        assert_eq!(
+            index.children_of(&p("/r/Library/Caches/big")),
+            None,
+            "a folded tree's interior was never recorded"
+        );
+        assert_eq!(index.children_of(&p("/r/docs")), None, "nothing under it");
+        assert_eq!(index.total_of(&p("/r/Library")), Some(mb(200)));
 
         let lib = drill(&parent, &p("/r/Library")).expect("the index covers Library");
         // A drilled level's whole is its own subtree's, from the index.
@@ -2106,21 +2152,5 @@ mod tests {
         // Absent ≠ new: the path may have fallen below retention.
         assert_eq!(base.bytes_for(&p("/r/unseen")), None);
         assert_eq!(base.roots(), [p("/r")]);
-    }
-
-    #[test]
-    fn cap_table_extends_only_while_the_tail_stays_heavy() {
-        let mb = |n: u64| n * 1024 * 1024;
-        let capped = |sizes: Vec<u64>| default_rows(&sizes, |b| *b);
-        // Rows 9 and 10 both exceed 500 MB → the full extended cap.
-        assert_eq!(capped((0..12).map(|i| mb(2000 - i * 100)).collect()), 10);
-        // Row 9 heavy, row 10 light → nine rows, not a padded ten.
-        let mut mixed: Vec<u64> = (0..8).map(|i| mb(9000 - i * 1000)).collect();
-        mixed.extend([mb(600), mb(100), mb(90)]);
-        assert_eq!(capped(mixed), 9);
-        // A light tail keeps the default cap.
-        assert_eq!(capped((0..12).map(|i| mb(400 - i * 10)).collect()), 8);
-        // Fewer rows than the cap pass through untouched.
-        assert_eq!(capped(vec![mb(1000), mb(20)]), 2);
     }
 }

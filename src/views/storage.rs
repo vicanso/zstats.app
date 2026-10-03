@@ -60,10 +60,13 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
-use std::cmp::Reverse;
+use std::cell::Cell;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
+
+mod dirmap;
 
 /// The selected tab's body. Once anything has moved to the Trash this
 /// session, one line above it says the space comes back only when the
@@ -75,25 +78,41 @@ use std::time::Duration;
 /// does not move after a cleanup anyway — trashed files stay on the
 /// disk until the Trash is emptied, which this window never does.
 ///
-/// `scroll` is the selected tab's: the card scrolls inside itself
-/// ([`tab_card`]), so this returns what sits in the window's fixed frame.
-pub fn render(
-    state: &ZStatsAppState,
-    exclude: &Entity<InputState>,
-    scroll: &ScrollHandle,
-) -> Vec<AnyElement> {
+/// The card scrolls inside itself ([`tab_card`]), so this returns what
+/// sits in the window's fixed frame.
+pub fn render(state: &ZStatsAppState, frame: &Frame) -> Vec<AnyElement> {
     let mut cards = Vec::new();
     cards.extend(
         trashed_note(state.trashed_this_session())
             .map(|note| div().flex_none().child(note).into_any_element()),
     );
     cards.push(match state.storage_tab() {
-        StorageTab::Analysis => analysis_card(state, exclude, scroll),
-        StorageTab::LargeFiles => big_files_card(state, scroll),
-        StorageTab::Duplicates => dupes_card(state, scroll),
+        StorageTab::Analysis => analysis_card(state, frame),
+        StorageTab::LargeFiles => big_files_card(state, frame.scroll),
+        StorageTab::Duplicates => dupes_card(state, frame.scroll),
     });
     cards
 }
+
+/// What the window hands the tabs beside the store.
+pub struct Frame<'a> {
+    /// Where a directory to leave out of the analysis is typed.
+    pub exclude: &'a Entity<InputState>,
+    /// The selected tab's scroll position.
+    pub scroll: &'a ScrollHandle,
+    /// The directory map's box as last laid out (`dirmap::Map::frame`).
+    pub map_box: Rc<Cell<Option<gpui::Size<gpui::Pixels>>>>,
+    /// Room for the map beside the lists rather than above them.
+    pub wide: bool,
+}
+
+/// Width of the lists beside the map: the suggestions' rows — path,
+/// pills, size, two buttons — at the width they had in the 507pt window.
+const SIDE_W: f32 = 440.;
+
+/// Window width from which the map sits beside the lists. Under it the
+/// map would be narrower than the lists beside it, so it goes above them.
+pub const SIDE_BY_SIDE_MIN_W: f32 = 1000.;
 
 /// A tab's card: `head` stays put, `body` scrolls inside the card under
 /// an overlay scrollbar. The card keeps its natural height while it fits
@@ -445,54 +464,25 @@ fn empty_state(lead: String, cost: String, tip: String, button: AnyElement) -> A
 /// the first result row sat at 38% and the big-directory table at 87%,
 /// below rows used once a month. They are one line now; the exclusions
 /// open as a drawer from it.
-fn analysis_card(
-    state: &ZStatsAppState,
-    exclude: &Entity<InputState>,
-    scroll: &ScrollHandle,
-) -> AnyElement {
+fn analysis_card(state: &ZStatsAppState, frame: &Frame) -> AnyElement {
     let running = matches!(state.disk_analysis(), DiskAnalysis::Running { .. });
     let mismatch = analysis_mismatch(state);
-    let body =
-        match state.disk_analysis() {
-            DiskAnalysis::Off => analysis_empty(state),
-            // Partial tables, same renderer as the final result: figures are
-            // lower bounds that only grow. No delete controls mid-walk (the
-            // walker may still be inside any of these trees), no deltas (a
-            // lower bound against a finished run reads as shrinkage).
-            DiskAnalysis::Running { partial, .. } => div()
-                .children(partial.as_ref().map(|r| {
-                    analysis_tables(state, r, false, state.analysis_show_all_dirs(), None)
-                }))
-                .into_any_element(),
-            DiskAnalysis::Failed(_) => div()
-                .px(px(13.))
-                .pb(px(12.))
-                .child(widgets::note(i18n::tr("disk.ana_failed_body")))
-                .into_any_element(),
-            // Dimmed — paint only — when it is not the scope now selected,
-            // so the table cannot pass for the answer to the chip that is lit.
-            DiskAnalysis::Ready(result) => div()
-                .when(mismatch.is_some(), |d| d.opacity(0.5))
-                .child(analysis_tables(
-                    state,
-                    result,
-                    true,
-                    state.analysis_show_all_dirs(),
-                    state.analysis_diff_for(result),
-                ))
-                .into_any_element(),
-        };
     // The drawer stays with the toolbar that opens it: inside the scroll
     // it would open above a table read halfway down, out of sight.
     let mut head: Vec<AnyElement> = analysis_header(state).into_iter().collect();
     head.push(analysis_toolbar(state, running));
     head.extend(
-        (state.analysis_exclude_open() && !running).then(|| analysis_exclude_drawer(exclude)),
+        (state.analysis_exclude_open() && !running).then(|| analysis_exclude_drawer(frame.exclude)),
     );
-    let body = div()
-        .children(fda_hint(state).map(|hint| div().px(px(13.)).pb(px(8.)).child(hint)))
-        .children(mismatch.map(|(shown, ago, selected)| {
-            div().px(px(13.)).pb(px(8.)).child(widgets::note(
+    let mut notes: Vec<AnyElement> = Vec::new();
+    notes.extend(
+        fda_hint(state).map(|hint| div().px(px(13.)).pb(px(8.)).child(hint).into_any_element()),
+    );
+    notes.extend(mismatch.as_ref().map(|(shown, ago, selected)| {
+        div()
+            .px(px(13.))
+            .pb(px(8.))
+            .child(widgets::note(
                 t!(
                     "disk.ana_showing",
                     shown = shown,
@@ -501,10 +491,132 @@ fn analysis_card(
                 )
                 .to_string(),
             ))
-        }))
-        .child(body)
+            .into_any_element()
+    }));
+    let body = match state.disk_analysis() {
+        // Dimmed — paint only — when it is not the scope now selected, so
+        // the map cannot pass for the answer to the chip that is lit.
+        DiskAnalysis::Ready(result) => {
+            return analysis_result(
+                state,
+                frame,
+                Shown {
+                    head,
+                    notes,
+                    result,
+                    finished: true,
+                    dim: mismatch.is_some(),
+                },
+            );
+        }
+        // Partial tables and a partial map, same renderers as the final
+        // result: figures are lower bounds that only grow. No delete
+        // controls mid-walk (the walker may still be inside any of these
+        // trees), no deltas (a lower bound against a finished run reads as
+        // shrinkage), nothing to open yet.
+        DiskAnalysis::Running {
+            partial: Some(result),
+            ..
+        } => {
+            return analysis_result(
+                state,
+                frame,
+                Shown {
+                    head,
+                    notes,
+                    result,
+                    finished: false,
+                    dim: false,
+                },
+            );
+        }
+        DiskAnalysis::Running { partial: None, .. } => div().into_any_element(),
+        DiskAnalysis::Off => analysis_empty(state),
+        DiskAnalysis::Failed(_) => div()
+            .px(px(13.))
+            .pb(px(12.))
+            .child(widgets::note(i18n::tr("disk.ana_failed_body")))
+            .into_any_element(),
+    };
+    let body = div().children(notes).child(body).into_any_element();
+    tab_card(head, body, frame.scroll)
+}
+
+/// A result on screen: the card's fixed head, the notes about it, and
+/// whether it is finished (actions, the map opens) or a partial.
+struct Shown<'a> {
+    head: Vec<AnyElement>,
+    notes: Vec<AnyElement>,
+    result: &'a ScanResult,
+    finished: bool,
+    dim: bool,
+}
+
+/// The map and the lists. With room, side by side and the card filling
+/// the window: the map takes what the lists leave and the lists scroll on
+/// their own. Without (the window un-zoomed), the map above the lists in
+/// the card's one scroll, at a fixed height.
+fn analysis_result(state: &ZStatsAppState, frame: &Frame, shown: Shown) -> AnyElement {
+    let Shown {
+        head,
+        notes,
+        result,
+        finished,
+        dim,
+    } = shown;
+    let map = dirmap::map(dirmap::Map {
+        state,
+        result,
+        interactive: finished,
+        frame: frame.map_box.clone(),
+        fill: frame.wide,
+    });
+    let diff = finished.then(|| state.analysis_diff_for(result)).flatten();
+    let lists = div()
+        .when(dim, |d| d.opacity(0.5))
+        .child(analysis_lists(state, result, finished, diff))
         .into_any_element();
-    tab_card(head, body, scroll)
+    let map = div()
+        .when(dim, |d| d.opacity(0.5))
+        .when(frame.wide, |d| d.flex().flex_col().flex_1().min_h_0())
+        .px(px(13.))
+        .pb(px(13.))
+        .child(map)
+        .into_any_element();
+    if !frame.wide {
+        let body = div()
+            .children(notes)
+            .child(map)
+            .child(lists)
+            .into_any_element();
+        return tab_card(head, body, frame.scroll);
+    }
+    widgets::list_shell()
+        .flex_1()
+        .min_h_0()
+        .pt(px(4.))
+        .children(head.into_iter().map(|part| div().flex_none().child(part)))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h_0()
+                .child(div().flex().flex_col().flex_1().min_w_0().child(map))
+                .child(
+                    div()
+                        .id("storage-tab-scroll")
+                        .track_scroll(frame.scroll)
+                        .flex_none()
+                        .w(px(SIDE_W))
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .vertical_scrollbar(frame.scroll)
+                        .children(notes)
+                        .child(lists),
+                ),
+        )
+        .into_any_element()
 }
 
 /// The scope a person would call it: "Home", "Caches", "Whole disk", or
@@ -1449,11 +1561,10 @@ fn scope_display(roots: &[PathBuf], base: &Path, home: &str) -> String {
     }
 }
 
-fn analysis_tables(
+fn analysis_lists(
     state: &ZStatsAppState,
     result: &ScanResult,
     actions: bool,
-    show_all_dirs: bool,
     diff: Option<&DiffBaseline>,
 ) -> AnyElement {
     let root = result.root.clone();
@@ -1552,7 +1663,6 @@ fn analysis_tables(
     // for any other scope says nothing about it.
     let home_result = diskscan::default_root().is_some_and(|home| result.roots == [home]);
     div()
-        .children(actions.then(|| composition_bar(result)).flatten())
         .children(
             state
                 .disk_growth()
@@ -1592,32 +1702,6 @@ fn analysis_tables(
                     .into_any_element()
             }),
         ))
-        .children({
-            // Suggestions already name the trashable caches. Repeating
-            // them under Big directories (same path, same bytes, no
-            // trash control) reads as a double render — cargo-target
-            // at 46.8 GB twice in the screenshot. Drop those paths
-            // here; the ranking of everything else stays.
-            let dirs: Vec<DirHit> = result
-                .dirs
-                .iter()
-                .filter(|d| result.suggestions.iter().all(|s| s.path != d.path))
-                .cloned()
-                .collect();
-            // Default 8–10 rows; "show more" reveals everything retained
-            // (up to TABLE_KEEP). The chip states how many are hidden.
-            let shown = if show_all_dirs {
-                dirs.len()
-            } else {
-                diskscan::default_rows(&dirs, |d| d.bytes)
-            };
-            let hidden = dirs.len() - shown;
-            section(
-                section_heading(i18n::tr("disk.ana_dirs"), None, None),
-                dir_rows(&dirs[..shown], "ana-dir", false),
-                (hidden > 0 || show_all_dirs).then(|| more_chip(hidden, show_all_dirs)),
-            )
-        })
         .children(section(
             section_heading(i18n::tr("disk.ana_files"), None, None),
             file_rows(&result.files),
@@ -1632,140 +1716,16 @@ fn analysis_tables(
         .into_any_element()
 }
 
+/// Suggestions listed before "show more". Enough to see the shape of
+/// it — the largest usually dwarf the rest — without pushing the rest
+/// of the lists below the fold.
+const SUG_ROWS: usize = 5;
+
 /// "Trash all" for the suggestion set — acts on the FULL set (TAG trees
 /// plus hint-trashable caches), not just the rendered head. The confirm
 /// lists every row with its size and a tick, so what moves is what the
 /// reader saw, and a row can be kept back; a cache whose app is running
 /// starts unticked, because moving it frees nothing until the app quits.
-/// Directories the composition bar draws before the rest becomes
-/// "other". Six is where a 449pt bar's segments stop being readable as
-/// shares — the seventh is a sliver.
-const COMPOSITION_SEGMENTS: usize = 6;
-
-/// Each segment's share of the ink, largest first — one hue, stepped
-/// down, because accent is for crossed lines and a ranking is not one.
-const COMPOSITION_INK: [f32; COMPOSITION_SEGMENTS] = [0.85, 0.66, 0.52, 0.42, 0.34, 0.27];
-
-/// The scope as one bar: its largest directories as segments, the rest
-/// as "other", and under it the top three named with their shares — the
-/// answer to "where did it go" before any row is read (Library was 60%
-/// of a home folder, which the table never says). Every figure is the
-/// walk's own; the whole is `ScanResult::total`, so a result cached
-/// before that field existed draws no bar until the next walk.
-fn composition_bar(result: &ScanResult) -> Option<AnyElement> {
-    let total = result.total.filter(|t| *t > 0)? as f64;
-    let mut parts: Vec<&DirHit> = result.dirs.iter().collect();
-    parts.sort_by_key(|d| Reverse(d.bytes));
-    parts.truncate(COMPOSITION_SEGMENTS);
-    if parts.is_empty() {
-        return None;
-    }
-    let label = |hit: &DirHit| {
-        hit.path
-            .strip_prefix(&result.root)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| format::tilde(&hit.path))
-    };
-    let share = |bytes: u64| (bytes as f64 / total).min(1.0);
-    let pct = |frac: f64| {
-        if frac < 0.01 {
-            "<1%".to_string()
-        } else {
-            format!("{:.0}%", frac * 100.0)
-        }
-    };
-    let shown: u64 = parts.iter().map(|d| d.bytes).sum();
-    let other = (total as u64).saturating_sub(shown);
-    let ink = theme::ink();
-    let segment = |id: SharedString, frac: f64, fill: Hsla, tip: String| {
-        div()
-            .id(id)
-            .h_full()
-            .flex_shrink(1.)
-            .w(relative(frac as f32))
-            .bg(fill)
-            .tooltip(widgets::wrap_tooltip(tip))
-    };
-    let scope = scope_word(&result.roots, &result.root);
-    let bar = h_flex()
-        .h(px(8.))
-        .w_full()
-        .gap(px(1.5))
-        .rounded(px(4.))
-        .overflow_hidden()
-        .bg(theme::inset())
-        .children(parts.iter().enumerate().map(|(i, hit)| {
-            segment(
-                row_key("comp", &hit.path),
-                share(hit.bytes),
-                Hsla::from(gpui::Rgba {
-                    a: ink.a * COMPOSITION_INK[i],
-                    ..ink
-                }),
-                t!(
-                    "disk.comp_tip",
-                    name = label(hit),
-                    bytes = format::memory(hit.bytes),
-                    pct = pct(share(hit.bytes)),
-                    scope = scope.clone()
-                )
-                .to_string(),
-            )
-        }))
-        .when(other > 0, |bar| {
-            bar.child(segment(
-                SharedString::from("comp-other"),
-                share(other),
-                Hsla::from(theme::border()),
-                t!(
-                    "disk.comp_tip",
-                    name = i18n::tr("disk.comp_other"),
-                    bytes = format::memory(other),
-                    pct = pct(share(other)),
-                    scope = scope.clone()
-                )
-                .to_string(),
-            ))
-        });
-    // The three largest by name; everything past them is one figure.
-    let named: Vec<String> = parts
-        .iter()
-        .take(3)
-        .map(|hit| format!("{} {}", label(hit), pct(share(hit.bytes))))
-        .collect();
-    let rest = (total as u64).saturating_sub(parts.iter().take(3).map(|d| d.bytes).sum());
-    let mut caption = named.join(" · ");
-    if rest > 0 {
-        caption.push_str(&format!(
-            " · {} {}",
-            i18n::tr("disk.comp_other"),
-            pct(share(rest))
-        ));
-    }
-    Some(
-        div()
-            .px(px(13.))
-            .pt(px(2.))
-            .pb(px(8.))
-            .child(bar)
-            .child(
-                div()
-                    .mt(px(5.))
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(META_PT))
-                    .text_color(theme::text_dim())
-                    .child(caption),
-            )
-            .into_any_element(),
-    )
-}
-
-/// Suggestions listed before "show more". Enough to see the shape of
-/// it — the largest usually dwarf the rest — without pushing the big
-/// directories, the real answer to "where did it go", below the fold.
-const SUG_ROWS: usize = 5;
-
 fn suggest_clear_button(hits: &[DirHit], running: &[String]) -> AnyElement {
     let home = env::var("HOME").unwrap_or_default();
     let paths: Vec<PathBuf> = hits.iter().map(|h| h.path.clone()).collect();
@@ -2129,24 +2089,6 @@ fn more_pill(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .text_size(px(9.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme::text_dim())
-}
-
-/// The dirs section's fold: "show more · N" ↔ "show less".
-fn more_chip(hidden: usize, show_all: bool) -> AnyElement {
-    more_pill("ana-dirs-more")
-        .child(if show_all {
-            i18n::tr("disk.ana_less")
-        } else {
-            t!("disk.ana_more", count = hidden).to_string()
-        })
-        .on_click(move |_, _window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| {
-                    state.set_analysis_show_all_dirs(!show_all, cx)
-                });
-        })
-        .into_any_element()
 }
 
 /// One ranked row's inputs, named — a struct rather than a dozen

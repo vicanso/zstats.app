@@ -152,6 +152,8 @@ struct OmarchyTokens {
     accent_light: Rgba,
     mark: Rgba,
     on_mark: Rgba,
+    map_hues: [Rgba; 3],
+    map_rest: Rgba,
 }
 
 impl OmarchyTokens {
@@ -185,6 +187,12 @@ impl OmarchyTokens {
             accent_light: if p.dark { p.bright_red } else { p.red },
             mark: p.accent,
             on_mark,
+            // The theme's own non-alarm hues. Not validated the way the
+            // fixed schemes' are — a palette whose accent is its green
+            // gives two of them one colour, and the labels still tell
+            // the tiles apart.
+            map_hues: [p.accent, p.yellow, p.green],
+            map_rest: toward_ink(0.12),
         }
     }
 }
@@ -568,6 +576,52 @@ fn hex(color: Rgba) -> String {
     } else {
         format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
     }
+}
+
+/// The directory map's hues. Every folder tile wears one, and no two
+/// tiles sharing an edge wear the same (`squarify::colour`); the largest
+/// takes the first.
+///
+/// The names on the tiles say which folder, so a hue only has to keep
+/// neighbours apart — but any two of these can end up neighbours, so
+/// every pair is checked against the dataviz rules on the scheme's own
+/// surface: ΔE ≥ 15 for normal vision and ≥ 8 under protan, deutan and
+/// tritan simulation. Five, because five always colour a map and the
+/// stock fourth and fifth (violet, magenta) failed beside blue and teal
+/// — 1.9 and 1.6 ΔE to a colour-blind eye — so each scheme's last two
+/// were searched for in OKLCH, which put them off the usual lightness
+/// band: a lighter pink and lavender on dark, a deeper berry and indigo
+/// on light. Labels pick their ink per tile, so that costs nothing. No
+/// red or orange: the alarm is red, and an orange tile (6.1 ΔE from it)
+/// would read as one; the berries clear it by 16 and more. It replaced
+/// the chart ramp (five steps of one blue, two of them 5.8 ΔE apart, and
+/// a darker step read as a bigger folder) and then a three-hue version
+/// that greyed every other folder, which read as unfinished. Omarchy
+/// lends its palette's accent, yellow and green, unvalidated; a map three
+/// cannot colour falls back to the fewest same-hue neighbours.
+pub fn map_hues() -> Vec<Rgba> {
+    let hex = |codes: [u32; 5]| codes.into_iter().map(rgb).collect();
+    match scheme() {
+        Scheme::ClassicDark => hex([0x3987e5, 0xc98500, 0x199e70, 0xe97ab2, 0xb0aff5]),
+        Scheme::ClassicLight => hex([0x2a78d6, 0xeda100, 0x1baf7a, 0x841c58, 0x483e90]),
+        Scheme::GoldenDark => hex([0xb07a20, 0x5279c1, 0x36a980, 0xa53c75, 0xc49bf3]),
+        Scheme::GoldenLight => hex([0xb07a20, 0x4c73ba, 0x16b09b, 0x841c58, 0xc49bf3]),
+        Scheme::Omarchy => omarchy_tokens().map_or_else(
+            || hex([0x3987e5, 0xc98500, 0x199e70, 0xe97ab2, 0xb0aff5]),
+            |t| t.map_hues.to_vec(),
+        ),
+    }
+}
+
+/// The map's "files and small folders": an opaque grey, the one tile with
+/// no hue, for the part of a level no folder of its own accounts for.
+/// Opaque so its label can pick black or white from it — a translucent
+/// lift gave the luminance of white over a dark card, and black text on
+/// what painted as dark grey.
+pub fn map_rest() -> Rgba {
+    tone(0x323237ff, 0xdcdce0ff, 0x36312bff, 0xe0d7c9ff, |t| {
+        t.map_rest
+    })
 }
 
 /// The single rule the design applies everywhere: a bar, meter or number is
