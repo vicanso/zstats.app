@@ -801,6 +801,10 @@ pub struct ZStatsAppState {
     /// one sees a sleep (`series::slept`) and moves every chart's
     /// earlier points back by it, so the windows are wall-clock time.
     chart_clock: Option<(Instant, SystemTime)>,
+    /// When the current awake stretch began: the first tick after the
+    /// last sleep. `None` until a sleep has been seen — the stretch the
+    /// app launched into began before it could tell.
+    awake_since: Option<Instant>,
     /// Trees whose climb has been announced within the last
     /// [`trend::CREEP_REARM`] — the re-arm set, pruned by that clock
     /// and never by the figure, so a creep is one banner an hour, not
@@ -940,6 +944,7 @@ impl Default for ZStatsAppState {
             net_down_series: series::Series::default(),
             net_up_series: series::Series::default(),
             chart_clock: None,
+            awake_since: None,
             creep_notified: HashMap::new(),
             history: None,
             history_loaded_at: None,
@@ -1095,16 +1100,33 @@ impl ZStatsAppState {
             && let Some(asleep) = series::slept(prev, (now, wall))
         {
             let before = prev.0;
+            // The stretch that just ended in this sleep: if the machine
+            // only woke itself for maintenance, its readings are not
+            // part of what anyone was there for (`series::BRIEF_WAKE`).
+            let stub = self
+                .awake_since
+                .filter(|_| series::brief_wake(self.awake_since, before));
             for ring in [
                 &mut self.cpu_series,
                 &mut self.mem_series,
                 &mut self.net_down_series,
                 &mut self.net_up_series,
             ] {
+                if let Some(since) = stub {
+                    ring.forget_from(since);
+                }
                 ring.shift(before, asleep);
             }
+            if let Some(since) = stub {
+                self.traffic_curves.forget_from(since);
+            }
             self.traffic_curves.shift(before, asleep);
-            tracing::debug!("charts: {}s asleep since the last tick", asleep.as_secs());
+            self.awake_since = Some(now);
+            tracing::debug!(
+                dropped_brief_wake = stub.is_some(),
+                "charts: {}s asleep since the last tick",
+                asleep.as_secs()
+            );
         }
         self.chart_clock = Some((now, wall));
 

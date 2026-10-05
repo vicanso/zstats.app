@@ -368,6 +368,16 @@ impl CurveBook {
         }
     }
 
+    /// Drop every point recorded at or after `since` — a maintenance
+    /// wake's readings (`series::brief_wake`), as the Overview rings drop
+    /// theirs. A series left with no moved byte goes at the next
+    /// [`Self::record`].
+    pub fn forget_from(&mut self, since: Instant) {
+        for points in self.series.values_mut() {
+            points.retain(|point| point.at < since);
+        }
+    }
+
     /// Fold one sample into the book.
     ///
     /// `deltas` is [`deltas`] of the baseline and `next`. Any pid that
@@ -1107,5 +1117,33 @@ mod tests {
         // A point recorded after the wake is already on the real clock.
         book.shift(moved - Duration::from_secs(1), Duration::from_secs(600));
         assert_eq!(book.series(&key("redis"))[0].at, moved);
+    }
+
+    #[test]
+    fn a_maintenance_wake_leaves_no_points_on_a_curve() {
+        let t0 = Instant::now() + Duration::from_secs(3600);
+        let mut book = CurveBook::default();
+        // The evening: redis moves bytes.
+        record_step(
+            &mut book,
+            t0,
+            10,
+            vec![row(1, "redis", 10, 0, 0)],
+            vec![row(1, "redis", 20, 100_000, 0)],
+        );
+        // A DarkWake's one read, 20s later on the awake clock.
+        let dark = at(t0, 30);
+        record_step(
+            &mut book,
+            at(t0, 20),
+            10,
+            vec![row(1, "redis", 30, 100_000, 0)],
+            vec![row(1, "redis", 40, 150_000, 0)],
+        );
+        assert_eq!(book.series(&key("redis")).len(), 2);
+        book.forget_from(dark);
+        let left = book.series(&key("redis"));
+        assert_eq!(left.len(), 1, "the evening's point stays");
+        assert_eq!(left[0].at, at(t0, 10));
     }
 }

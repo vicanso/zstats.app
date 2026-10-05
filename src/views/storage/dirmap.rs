@@ -83,6 +83,25 @@ const SIZE_MIN_W: f32 = 58.;
 /// the card's head, so the map is whole before the lists begin.
 pub(super) const NARROW_MAP_H: f32 = 240.;
 
+/// The widest a crumb of the path may grow before it truncates — a
+/// profile directory's 32-character id is one crumb, and at full length
+/// it alone pushed four others off the row. The level on screen gets
+/// more: it is the one being read.
+const CRUMB_MAX_W: f32 = 170.;
+const CRUMB_HERE_MAX_W: f32 = 260.;
+
+/// What a crumb costs beside its text (its padding), and a separator
+/// with the gaps either side of it.
+const CRUMB_PAD_W: f32 = 10.;
+const CRUMB_SEP_W: f32 = 14.;
+
+/// The "…" crumb that stands for the folded levels.
+const CRUMB_FOLD_W: f32 = 22.;
+
+/// What the path row keeps for the level's size, the reveal button and
+/// the hint beside the path.
+const CRUMB_ROW_RESERVE: f32 = 120.;
+
 /// Lightness steps for the subfolders inside a tile: its colour, nudged,
 /// so a group reads as one folder and its parts still separate.
 const INNER_SHADE: [f32; 5] = [0.0, 0.07, -0.06, 0.12, -0.1];
@@ -178,53 +197,91 @@ fn hits(result: &ScanResult) -> Vec<(PathBuf, u64)> {
 
 /// The way down as a path to click back along, and on the right the
 /// level's size and its reveal.
+///
+/// Every crumb says its whole path on hover. When the path is too long
+/// for the row the middle folds into one "…" — the root, the level on
+/// screen and as many of its parents as fit stay whole. Letting every
+/// crumb shrink instead cut all of them at once: ten levels down the row
+/// read "Ho… › Libr… › Contai… › D…", eleven names and none legible.
 fn crumbs(m: &Map, path: &Path, total: Option<u64>) -> AnyElement {
     let trail = m.state.map_trail();
-    let mut names = vec![scope_word(&m.result.roots, &m.result.root)];
-    let mut parent = m.result.root.as_path();
+    // Each level: its name as seen from the level above, and its path.
+    let mut levels: Vec<(String, &Path)> = vec![(
+        scope_word(&m.result.roots, &m.result.root),
+        m.result.root.as_path(),
+    )];
     for (step, _) in trail {
-        names.push(relative_name(step, parent));
-        parent = step.as_path();
+        let parent = levels.last().map_or(m.result.root.as_path(), |(_, p)| *p);
+        levels.push((relative_name(step, parent), step.as_path()));
     }
-    let last = names.len() - 1;
+    let last = levels.len() - 1;
+    let widths: Vec<f32> = levels
+        .iter()
+        .enumerate()
+        .map(|(depth, (name, _))| crumb_width(name, depth == last))
+        .collect();
+    // The row is as wide as the map under it; before the first layout
+    // there is no width to fold against.
+    let room = m.frame.get().map_or(f32::INFINITY, |size| {
+        f32::from(size.width) - CRUMB_ROW_RESERVE
+    });
+    let tail = tail_start(&widths, room);
+    let separator = || {
+        div()
+            .flex_none()
+            .text_size(px(ROW_PT))
+            .text_color(theme::text_dim())
+            .child("›")
+            .into_any_element()
+    };
+    let crumb = |depth: usize, label: String, tip: String, here: bool| {
+        div()
+            .id(("map-crumb", depth))
+            .min_w_0()
+            .max_w(px(if here { CRUMB_HERE_MAX_W } else { CRUMB_MAX_W }))
+            .truncate()
+            .px(px(CRUMB_PAD_W / 2.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .text_size(px(ROW_PT))
+            .when(here, |d| {
+                d.font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+            })
+            .when(!here, |d| d.text_color(theme::text_muted()))
+            .when(!here && m.interactive, |d| {
+                d.hover(|s| s.bg(theme::surface_raised()).text_color(theme::text()))
+                    .on_click(move |_, _window, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.map_back_to(depth, cx));
+                    })
+            })
+            .tooltip(widgets::wrap_tooltip(tip))
+            .child(label)
+            .into_any_element()
+    };
     let mut parts: Vec<AnyElement> = Vec::new();
-    for (depth, name) in names.into_iter().enumerate() {
-        if depth > 0 {
-            parts.push(
-                div()
-                    .flex_none()
-                    .text_size(px(ROW_PT))
-                    .text_color(theme::text_dim())
-                    .child("›")
-                    .into_any_element(),
-            );
+    for (depth, (name, level)) in levels.iter().enumerate() {
+        if depth > 0 && depth < tail {
+            continue;
         }
-        let here = depth == last;
-        parts.push(
-            div()
-                .id(("map-crumb", depth))
-                .min_w_0()
-                .truncate()
-                .px(px(5.))
-                .py(px(1.))
-                .rounded(px(4.))
-                .text_size(px(ROW_PT))
-                .when(here, |d| {
-                    d.font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                })
-                .when(!here, |d| d.text_color(theme::text_muted()))
-                .when(!here && m.interactive, |d| {
-                    d.hover(|s| s.bg(theme::surface_raised()).text_color(theme::text()))
-                        .on_click(move |_, _window, cx| {
-                            cx.global::<ZStatsGlobalStore>()
-                                .clone()
-                                .update(cx, |state, cx| state.map_back_to(depth, cx));
-                        })
-                })
-                .child(name)
-                .into_any_element(),
-        );
+        if depth > 0 {
+            parts.push(separator());
+        }
+        if depth == tail && tail > 1 {
+            // The folded levels as one crumb: it names the deepest of
+            // them and a click goes there, where more of the path fits.
+            let folded = levels[tail - 1].1;
+            parts.push(crumb(tail - 1, "…".into(), format::tilde(folded), false));
+            parts.push(separator());
+        }
+        parts.push(crumb(
+            depth,
+            name.clone(),
+            format::tilde(level),
+            depth == last,
+        ));
     }
     let reveal = path.to_path_buf();
     h_flex()
@@ -261,6 +318,52 @@ fn crumbs(m: &Map, path: &Path, total: Option<u64>) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+/// A crumb's width, near enough to decide what fits, capped where the
+/// crumb itself truncates. Measured off the row at its 12pt: lower case
+/// runs about 6.2px a character ("Application Support", 112px), capitals
+/// and digits about 7.8 ("QQMusicMac", 76px), and anything outside ASCII
+/// — CJK — a full em. Erring wide only folds a level early; erring narrow
+/// would bring back the row where every crumb is cut.
+fn crumb_width(name: &str, here: bool) -> f32 {
+    let text: f32 = name
+        .chars()
+        .map(|c| {
+            if !c.is_ascii() {
+                ROW_PT
+            } else if c.is_ascii_uppercase() || c.is_ascii_digit() {
+                7.8
+            } else {
+                6.2
+            }
+        })
+        .sum();
+    let cap = if here { CRUMB_HERE_MAX_W } else { CRUMB_MAX_W };
+    (text + CRUMB_PAD_W).min(cap)
+}
+
+/// Where the path's visible tail starts: crumbs `1..start` fold into
+/// "…", and `1` folds nothing. The root and the level on screen always
+/// stay; parents are added back from the nearest one while they fit.
+fn tail_start(widths: &[f32], room: f32) -> usize {
+    let count = widths.len();
+    let all: f32 = widths.iter().sum::<f32>() + CRUMB_SEP_W * count.saturating_sub(1) as f32;
+    if count <= 2 || all <= room {
+        return 1;
+    }
+    let mut used = widths[0] + CRUMB_SEP_W + CRUMB_FOLD_W + CRUMB_SEP_W + widths[count - 1];
+    let mut start = count - 1;
+    while start > 1 {
+        let parent = widths[start - 1] + CRUMB_SEP_W;
+        if used + parent > room {
+            break;
+        }
+        used += parent;
+        start -= 1;
+    }
+    // Folding one level into "…" shows no more than the level would.
+    if start == 2 { 1 } else { start }
 }
 
 fn map_box(m: &Map, path: &Path, total: Option<u64>, kids: Kids) -> AnyElement {
@@ -664,6 +767,38 @@ mod tests {
         let grey = gpui::rgb(0x46464c);
         assert!(ink_on(amber.into()).l < 0.5, "dark ink on the amber");
         assert!(ink_on(grey.into()).l > 0.5, "white ink on the grey");
+    }
+
+    #[test]
+    fn a_long_path_folds_its_middle_and_keeps_both_ends() {
+        // Eleven levels of about 80px each: far more than fits in 500.
+        let widths = vec![80.; 11];
+        let start = tail_start(&widths, 500.);
+        assert!(start > 2, "several levels fold");
+        let shown = 1 + (widths.len() - start);
+        let used = 80. * shown as f32 + CRUMB_FOLD_W + CRUMB_SEP_W * shown as f32;
+        assert!(used <= 500., "what stays fits: {used}");
+        assert!(
+            used + 80. + CRUMB_SEP_W > 500.,
+            "and one more parent would not"
+        );
+        // Room for everything folds nothing; so does a two-level path.
+        assert_eq!(tail_start(&widths, 2000.), 1);
+        assert_eq!(tail_start(&[400., 400.], 100.), 1);
+        // No room at all still keeps the root and the level on screen.
+        assert_eq!(tail_start(&widths, 0.), widths.len() - 1);
+    }
+
+    #[test]
+    fn a_crumb_is_measured_up_to_where_it_truncates() {
+        assert!(crumb_width("data", false) < crumb_width("DATA", false));
+        assert_eq!(crumb_width("大佬", false), 2. * ROW_PT + CRUMB_PAD_W);
+        // A profile directory's id: wider than any crumb is allowed to be.
+        let id = "1C621EFDC92004CCA1CE612C5AB01234";
+        assert_eq!(crumb_width(id, false), CRUMB_MAX_W);
+        // The level on screen is allowed more of it.
+        let here = crumb_width(id, true);
+        assert!(here > CRUMB_MAX_W && here <= CRUMB_HERE_MAX_W);
     }
 
     #[test]

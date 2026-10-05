@@ -36,6 +36,15 @@
 //! moved back by the sleep ([`Series::shift`]), so the sleep takes its
 //! real width — a break — and anything it pushed past [`WINDOW`] falls
 //! off at the next record.
+//!
+//! A closed laptop does not stay asleep: it wakes itself every quarter
+//! of an hour for a few seconds of maintenance, and the collector ticks
+//! through those like any others. A stretch awake for less than
+//! [`BRIEF_WAKE`] with a sleep on both sides is that, and its readings
+//! are dropped once the sleep after it is seen ([`brief_wake`],
+//! [`Series::forget_from`]) — otherwise the morning's chart opened on a
+//! two-point stub, a dotted gap, and then the readings someone was there
+//! for.
 
 #[cfg(test)]
 use std::mem;
@@ -54,6 +63,28 @@ pub const WINDOW: Duration = Duration::from_secs(30 * 60);
 /// is not one ([`slept`]), and a ring whose oldest point is within it
 /// of [`WINDOW`] is full ([`Series::span`]).
 pub const GAP: Duration = Duration::from_secs(15);
+
+/// An awake stretch shorter than this, with a sleep on both sides, is
+/// the machine's own maintenance wake and is not drawn.
+///
+/// A closed laptop keeps waking itself — DarkWake, screen off, for
+/// Power Nap and TCP keep-alives — and the collector runs for those few
+/// seconds like any other. Each wake left a two-point stub on the chart,
+/// a sleep's dotted gap away from the readings a person was there for.
+/// The power log of the machine this was written on had 458 of them:
+/// median 10s, 95% within 61s, 99% within 181s, one every quarter of an
+/// hour all night; and of 35 real wakes none was shorter than this. A
+/// lid opened for under two minutes is dropped with them, which loses
+/// nothing a half-hour chart is read for.
+pub const BRIEF_WAKE: Duration = Duration::from_secs(120);
+
+/// Whether the awake stretch that ran from `since` to `until` — the last
+/// tick before a sleep — was a [`BRIEF_WAKE`]. `since` is `None` for the
+/// stretch the app was launched into: it began before the app could see
+/// it, so its length is unknown and it is kept.
+pub fn brief_wake(since: Option<Instant>, until: Instant) -> bool {
+    since.is_some_and(|since| until.saturating_duration_since(since) < BRIEF_WAKE)
+}
 
 /// How long the machine slept between two ticks, each stamped with
 /// `Instant` and the wall clock: the wall clock's progress less
@@ -122,6 +153,12 @@ impl Series {
                 None => false,
             }
         });
+    }
+
+    /// Drop every point recorded at or after `since` — the readings of a
+    /// [`brief_wake`], once the next sleep has shown how short it was.
+    pub fn forget_from(&mut self, since: Instant) {
+        self.points.retain(|point| point.at < since);
     }
 
     /// Append one reading and drop whatever has aged out of [`WINDOW`].
@@ -209,6 +246,40 @@ mod tests {
 
     fn point(at: Instant, value: Option<f64>) -> Point {
         Point { at, value }
+    }
+
+    /// A closed lid's night: the evening's readings, a sleep, a 19s
+    /// DarkWake, another sleep, the morning. The DarkWake's points go
+    /// once the sleep after it shows how short it was; the evening and
+    /// the morning stay.
+    #[test]
+    fn a_maintenance_wake_between_two_sleeps_is_not_drawn() {
+        let t0 = Instant::now() + Duration::from_secs(3600);
+        let mut series = Series::default();
+        series.record(t0, Some(20.0));
+        series.record(at(t0, 5), Some(21.0));
+        // The app was launched into the first stretch: its length is
+        // not known, so it is never the one dropped.
+        assert!(!brief_wake(None, at(t0, 5)));
+
+        // DarkWake: three hidden ticks, 5s apart.
+        let dark = at(t0, 10);
+        for step in 0..3 {
+            series.record(at(dark, step * 5), Some(15.0));
+        }
+        let last_dark_tick = at(dark, 10);
+        assert!(brief_wake(Some(dark), last_dark_tick), "10s awake");
+        series.forget_from(dark);
+        assert_eq!(series.points().len(), 2, "only the evening is left");
+        assert!(series.points().iter().all(|p| p.at < dark));
+
+        // A stretch someone was there for is kept at any later sleep.
+        let morning = at(dark, 20);
+        assert!(!brief_wake(Some(morning), morning + BRIEF_WAKE));
+        assert!(brief_wake(
+            Some(morning),
+            morning + BRIEF_WAKE - Duration::from_secs(1)
+        ));
     }
 
     #[test]

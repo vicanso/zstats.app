@@ -30,18 +30,18 @@ short_description = "A menu bar metrics panel written in Rust and GPUI."
 # crate names the source uses (`gpui::`, `gpui_platform::`) and must stay on
 # the exact family gpui-kit's own manifest pins, or two GPUIs end up in the
 # tree — `cargo tree -i gpui-pre` must show one.
-gpui = { package = "gpui-pre", version = "0.3.7" }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.7", features = [
+gpui = { package = "gpui-pre", version = "0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.8", features = [
     "font-kit",
     "x11",
     "wayland",
     "runtime_shaders",
 ] }
-gpui_macros = { package = "gpui-pre-macros", version = "0.3.7" }
+gpui_macros = { package = "gpui-pre-macros", version = "0.3.8" }
 # gpui-kit bundles gpui-base + gpui-component (`gpui_kit::component::*`) and
 # the component icon assets (`gpui_kit::assets::Assets`). No `tree-sitter`:
 # that feature is LanguageConfig / the highlighter, which nothing here uses.
-gpui-kit = "0.7.0"
+gpui-kit = "0.7.1"
 # tinyvec 1.13.0 (crates.io, 2026-09-03) does not compile on rustc 1.98:
 # `use alloc::vec::{self, Vec}` shadows the `vec!` macro (Lokathor/tinyvec#225).
 # 1.13.1 restored `vec!`; keep a floor so `cargo update` cannot pick 1.13.0.
