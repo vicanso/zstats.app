@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.3](https://github.com/vicanso/zstats.app/compare/v0.4.2..v0.4.3) - 2026-10-05
+
+### ⚙️ Miscellaneous Tasks
+
+- Gpui-kit 0.7.1 on gpui 0.3.8 with the Linux layer-surface patch re-vendored; the directory map's path gets tooltips and folds its middle instead of truncating every level; charts drop the readings of a laptop's brief maintenance wakes - ([9ce316f](https://github.com/vicanso/zstats.app/commit/9ce316f28afb9de1da1c64268617833e93508d65))
+
 ## [0.4.2](https://github.com/vicanso/zstats.app/compare/v0.4.1..v0.4.2) - 2026-10-03
 
 ### ⛰️  Features
