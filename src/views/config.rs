@@ -961,7 +961,6 @@ fn interface_card(
         ))
         .child(notifications_row())
         .child(autostart_row())
-        .child(keep_awake_row())
         .child(proxy_row(proxy_input, proxy_valid))
         .child(opacity_row())
         .into_any_element()
@@ -1000,55 +999,6 @@ fn notifications_row() -> AnyElement {
                 .small()
                 .checked(prefs::notifications())
                 .on_click(|checked, _window, cx| crate::set_notifications_pref(*checked, cx)),
-        )
-        .into_any_element()
-}
-
-/// Keep the Mac awake: one IOKit assertion against idle *system* sleep
-/// (`awake.rs`), held while this is on and dropped the moment it is
-/// off. The tooltip carries the two limits, because both look like
-/// bugs otherwise: the display still sleeps, and closing the lid still
-/// sleeps the machine. While it is on the panel's footer wears the
-/// indicator — a machine that will not sleep must be able to say why.
-fn keep_awake_row() -> AnyElement {
-    h_flex()
-        .items_center()
-        .justify_between()
-        .px(px(13.))
-        .py(px(8.))
-        .border_b(px(1.))
-        .border_color(theme::border_subtle())
-        .child(
-            h_flex()
-                .items_center()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme::ink())
-                        // "the Mac" on macOS; the machine has no such
-                        // name elsewhere, and the mechanism the tip
-                        // describes is a different one.
-                        .child(i18n::tr(if cfg!(target_os = "macos") {
-                            "config.keep_awake"
-                        } else {
-                            "config.keep_awake_linux"
-                        })),
-                )
-                .child(widgets::info_icon(
-                    "pref-keep-awake-info",
-                    i18n::tr(if cfg!(target_os = "macos") {
-                        "config.keep_awake_tip"
-                    } else {
-                        "config.keep_awake_tip_linux"
-                    }),
-                )),
-        )
-        .child(
-            Switch::new("pref-keep-awake")
-                .small()
-                .checked(prefs::keep_awake())
-                .on_click(|checked, _window, cx| crate::set_keep_awake_pref(*checked, cx)),
         )
         .into_any_element()
 }

@@ -40,17 +40,21 @@ mod traffic;
 pub mod widgets;
 
 use crate::assets::CustomIconName;
+use crate::awake;
+use crate::format;
 use crate::i18n;
 use crate::prefs;
 use crate::state::{Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Hsla, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, div, px,
+    Anchor, AnyElement, App, Div, Hsla, InteractiveElement, Interactivity, IntoElement,
+    ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement,
+    Styled, Window, div, px,
 };
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, Selectable, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 
 /// Height of the tab strip: 14 top pad + a 34-tall well (3 + 28 + 3) + 8 gap.
@@ -273,42 +277,168 @@ fn content(state: &ZStatsAppState) -> AnyElement {
 
 const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
 
-/// Config, GitHub and Quit sit together on the right — a lone icon on
-/// the left read as an unfinished row. Quit stays last so it is the
-/// edge action.
-/// Shown only while the Mac is being held awake. An indicator rather
-/// than a fourth permanent control: the switch lives on the Interface
-/// page, and this exists so "why will this Mac not sleep" has an answer
-/// on screen. Clicking it turns the hold off — the way out must not
-/// require finding the page that turned it on.
-fn keep_awake_chip() -> Option<AnyElement> {
-    if !prefs::keep_awake() {
-        return None;
+/// The footer's keep-awake control: a cup that opens a menu of lengths.
+///
+/// A type of its own because gpui-kit's dropdown wants a trigger it can
+/// mark open ([`Selectable`]) and implements that for its own `Button`
+/// only. A `Button` here would be the one footer control wearing the
+/// kit's size, ink and hover fill — its icon size is derived, not set —
+/// beside four hand-built neighbours; this is those four's box with the
+/// two traits the dropdown asks for.
+#[derive(IntoElement)]
+struct AwakeTrigger {
+    base: Stateful<Div>,
+    /// A hold is running: the cup is lit the way a set pin is.
+    held: bool,
+    /// Its menu is open. Set by the dropdown, not by us.
+    open: bool,
+    tip: SharedString,
+}
+
+impl Styled for AwakeTrigger {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.base.style()
     }
-    let tip = i18n::tr(if cfg!(target_os = "macos") {
-        "common.keep_awake_on"
-    } else {
-        "common.keep_awake_on_linux"
-    });
-    Some(
-        div()
-            .id("keep-awake")
+}
+
+impl InteractiveElement for AwakeTrigger {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.base.interactivity()
+    }
+}
+
+impl Selectable for AwakeTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.open
+    }
+}
+
+impl DropdownMenu for AwakeTrigger {}
+
+impl RenderOnce for AwakeTrigger {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let (held, open, tip) = (self.held, self.open, self.tip);
+        self.base
             .flex_none()
             .p(px(4.))
             .rounded(px(6.))
-            .bg(theme::chip())
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            // Lit while it holds; the hover fill kept while its menu is
+            // open, so the menu visibly belongs to this button.
+            .when(held, |d| d.bg(theme::chip()))
+            .when(open && !held, |d| d.bg(theme::surface_raised()))
+            // No tooltip under an open menu: it would come up over the
+            // items it describes.
+            .when(!open, |d| d.tooltip(widgets::wrap_tooltip(tip)))
             .hover(|d| d.bg(theme::surface_raised()))
             .child(
                 Icon::from(CustomIconName::Coffee)
                     .with_size(Size::Size(px(14.)))
-                    .text_color(Hsla::from(theme::text())),
+                    .text_color(Hsla::from(if held {
+                        theme::text()
+                    } else {
+                        theme::text_dim()
+                    })),
             )
-            .on_click(|_, _window, cx| crate::set_keep_awake_pref(false, cx))
-            .into_any_element(),
-    )
+    }
 }
 
+/// A length as the menu words it. Whole words rather than the chips'
+/// "30m": a menu has the width, and under "Keep awake for" a bare
+/// "30m" reads as a code.
+fn hold_label(minutes: u32) -> String {
+    match minutes {
+        m if m < 60 => t!("common.keep_awake_minutes", n = m).to_string(),
+        60 => i18n::tr("common.keep_awake_hour"),
+        m => t!("common.keep_awake_hours", n = m / 60).to_string(),
+    }
+}
+
+/// Keep the Mac awake for a while (`awake.rs`): click the cup, pick a
+/// length. Here rather than on the Interface page, where it was a row of
+/// chips: it is an act with an end, not a setting, and the moment
+/// someone wants it is the moment they are looking at the panel — not
+/// two clicks into a window about preferences. The cup is always there
+/// (a control that appears only once it is on cannot be how it is turned
+/// on), lit while a hold runs, and its tooltip then says until when; the
+/// menu's first line says the same, the running length wears the check,
+/// and "Off" ends it. The tooltip also carries what a hold does not
+/// stop — the lid, a lock or sleep someone asks for — because each
+/// otherwise reads as a bug.
+fn keep_awake_menu(state: &ZStatsAppState) -> impl IntoElement {
+    let hold = awake::held();
+    let mac = cfg!(target_os = "macos");
+    let tip = match hold {
+        Some(hold) => t!(
+            if mac {
+                "common.keep_awake_on"
+            } else {
+                "common.keep_awake_on_linux"
+            },
+            time = format::clock(hold.until)
+        )
+        .to_string(),
+        None => i18n::tr(if mac {
+            "common.keep_awake"
+        } else {
+            "common.keep_awake_linux"
+        }),
+    };
+    AwakeTrigger {
+        // Keyed by the visit, so a menu left open by a hide is not
+        // still open when the panel comes back (`panel_visit`).
+        base: div().id(("keep-awake", state.panel_visit())),
+        held: hold.is_some(),
+        open: false,
+        tip: tip.into(),
+    }
+    // Upward and right-aligned: the footer is the panel's bottom edge
+    // and the cup sits in its right-hand cluster.
+    .dropdown_menu_with_anchor(Anchor::BottomRight, |menu, _, _| {
+        // Read when the menu opens, not when the footer was built.
+        let hold = awake::held();
+        let current = hold.map_or(0, |hold| hold.minutes);
+        let heading = match hold {
+            Some(hold) => {
+                t!("common.keep_awake_until", time = format::clock(hold.until)).to_string()
+            }
+            None => i18n::tr("common.keep_awake_for"),
+        };
+        let pick = |label: String, minutes: u32| {
+            menu_text(label)
+                .checked(minutes == current)
+                .on_click(move |_, _, cx| crate::set_keep_awake(minutes, cx))
+        };
+        awake::HOLD_MINUTES
+            .iter()
+            .fold(
+                menu.item(menu_text(heading).disabled(true)),
+                |menu, &minutes| menu.item(pick(hold_label(minutes), minutes)),
+            )
+            .separator()
+            .item(pick(i18n::tr("common.keep_awake_off"), 0))
+    })
+}
+
+/// A menu line at the panel's own type size. gpui-kit's menu items are
+/// 14px with no setter for it, which beside the panel's 10–12px read as
+/// a menu from a larger app — the same reason [`widgets::wrap_tooltip`]
+/// does not use the kit's default tooltip. An item built from an element
+/// carries its own text; a disabled one is the kit's muted heading.
+fn menu_text(label: String) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| div().text_size(px(MENU_PT)).child(label.clone()))
+}
+
+/// Type size of the footer menu's lines — the panel's row text.
+const MENU_PT: f32 = 12.;
+
+/// Keep-awake, Pin, Config, GitHub and Quit sit together on the right —
+/// a lone icon on the left read as an unfinished row. Quit stays last so
+/// it is the edge action.
 fn footer(state: &ZStatsAppState) -> AnyElement {
     let github_tip = i18n::tr("common.github");
     let nudge = state.update_nudge().map(str::to_string);
@@ -323,7 +453,7 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
         .pb(px(6.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
-        .children(keep_awake_chip())
+        .child(keep_awake_menu(state))
         .child({
             // Stays with the right-hand cluster: a lone icon on the
             // left read as an unfinished row. Pin only stops auto-hide

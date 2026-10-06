@@ -738,16 +738,20 @@ pub fn set_notifications_pref(on: bool, cx: &mut App) {
     repaint(cx);
 }
 
-/// The Interface page's keep-awake switch: persist, then hold or drop
-/// the assertion. The repaint is what flips the footer's indicator —
-/// the only place the panel says the Mac is being held awake.
+/// The footer cup's menu: keep the Mac awake — screen on, no idle
+/// sleep — for `minutes` from now, or end the hold with `0`. Nothing is
+/// persisted: a hold is an act with an end time, not a preference. The
+/// notify is what lights the cup — the only place the panel says the
+/// Mac is being held awake — without waiting for the next tick; it is
+/// not [`repaint`], because no other window shows a hold.
 ///
 /// Nothing releases it on quit: the kernel drops an assertion when its
 /// holder exits, so a crash cannot leave a Mac awake either.
-pub fn set_keep_awake_pref(on: bool, cx: &mut App) {
-    prefs::set_keep_awake(on);
-    awake::apply(on);
-    repaint(cx);
+pub fn set_keep_awake(minutes: u32, cx: &mut App) {
+    awake::hold_for(minutes);
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |_, cx| cx.notify());
 }
 
 /// The Config tab's theme picker: persist, re-pin AppKit, restyle, repaint.
@@ -1989,11 +1993,6 @@ fn main() {
         // Feeds both the theme resolution and the locale pin below, so it
         // has to precede them.
         prefs::load();
-        // The keep-awake switch is the one preference that acts on the
-        // machine rather than on the panel, so a restart has to put it
-        // back in force — a switch left on that quietly lapsed would be
-        // a Mac sleeping through the job it was left awake for.
-        awake::apply(prefs::keep_awake());
         // Pin AppKit before the first frame, so a forced theme's vibrancy
         // material never briefly renders in the system appearance.
         #[cfg(target_os = "macos")]

@@ -24,6 +24,7 @@ use analysis::Analysis;
 use dupes::Dupes;
 
 use crate::alerttpl;
+use crate::awake;
 use crate::cachepreset;
 use crate::cleanhints;
 use crate::fullscan::{self, GroupScan, Scan};
@@ -765,6 +766,13 @@ pub struct ZStatsAppState {
     /// Prefs live in `app.toml`, not this struct, so a collector tick
     /// must not look like a chip click to the settings window's observer.
     ui_epoch: u64,
+    /// Which showing of the panel this is — bumped on every hide. It
+    /// keys the footer's keep-awake menu: gpui-kit keeps a dropdown open
+    /// until it is dismissed from inside its window, a hide comes from
+    /// outside, and the panel is hidden rather than destroyed — so a
+    /// menu open when the panel went away was still open, an hour later,
+    /// on the frame it came back.
+    panel_visit: u32,
     /// Volumes this session has successfully ejected, and when. They
     /// are hidden from the Hardware tab until the snapshot stops
     /// listing them — see [`Self::mark_ejected`].
@@ -931,6 +939,7 @@ impl Default for ZStatsAppState {
             settings_window: None,
             storage_window: None,
             ui_epoch: 0,
+            panel_visit: 0,
             ejected: HashMap::new(),
             proc_sort: ProcSort::default(),
             app_sort: AppSort::default(),
@@ -1129,6 +1138,12 @@ impl ZStatsAppState {
             );
         }
         self.chart_clock = Some((now, wall));
+
+        // A keep-awake hold whose time is up ends here, on the wall
+        // clock — macOS's own timeout is the backstop. Nothing to tell
+        // anyone: the footer's cup is the one surface that shows a hold,
+        // and it repaints with this tick.
+        awake::expire();
 
         // Overview's half-hour lines. These three are already on the
         // tick while the panel is hidden; the ring is what makes that
@@ -1870,6 +1885,12 @@ impl ZStatsAppState {
         self.ui_epoch = self.ui_epoch.wrapping_add(1);
     }
 
+    /// See the field: an element id for whatever must not outlive the
+    /// showing it was opened in.
+    pub fn panel_visit(&self) -> u32 {
+        self.panel_visit
+    }
+
     /// What the settings window actually paints from this store. A
     /// collector tick changes `latest` and must not match; an update
     /// download, a template fetch, a config.toml write, or a pref chip
@@ -1955,6 +1976,8 @@ impl ZStatsAppState {
         // hours-old list shown for a frame reads as current.
         self.listeners = None;
         self.listeners_at = None;
+        // An open footer menu goes with the visit too.
+        self.panel_visit = self.panel_visit.wrapping_add(1);
         // Traffic is not a photograph of the visit. The sampler keeps
         // running while the panel is hidden, so the baseline and the
         // ten-minute curve stay; clearing them is what made a reopened

@@ -178,10 +178,6 @@ static ANALYSIS_EXCLUDE: RwLock<Vec<String>> = RwLock::new(Vec::new());
 /// for the installed build, when you need the panel next to another
 /// window.
 static PINNED: AtomicBool = AtomicBool::new(false);
-/// Hold an IOKit assertion against idle system sleep (`awake.rs`).
-/// Absent key is off: a preference that keeps a Mac awake has to be
-/// asked for, never inherited from a default.
-static KEEP_AWAKE: AtomicBool = AtomicBool::new(false);
 /// The daily background disk check (`diskwatch.rs`). On unless the file
 /// says `disk_watch = false`: it only runs once a home analysis has
 /// been done by hand, and it is the one thing that can warn before a
@@ -481,7 +477,6 @@ pub fn load() {
         .write()
         .expect("analysis exclude pref lock poisoned") = prefs.analysis_exclude;
     PINNED.store(prefs.pinned, Ordering::Relaxed);
-    KEEP_AWAKE.store(prefs.keep_awake, Ordering::Relaxed);
     DISK_WATCH.store(!prefs.disk_watch_off, Ordering::Relaxed);
     *LAST_TAB.write().expect("last tab pref lock poisoned") = prefs.last_tab;
 }
@@ -535,7 +530,6 @@ fn persist() {
             .expect("analysis exclude pref lock poisoned")
             .clone(),
         pinned: PINNED.load(Ordering::Relaxed),
-        keep_awake: KEEP_AWAKE.load(Ordering::Relaxed),
         disk_watch_off: !DISK_WATCH.load(Ordering::Relaxed),
         last_tab: LAST_TAB
             .read()
@@ -577,7 +571,6 @@ struct Prefs {
     analysis_roots: Vec<String>,
     analysis_exclude: Vec<String>,
     pinned: bool,
-    keep_awake: bool,
     /// `disk_watch = false` in the file; the derived default (`false`)
     /// is the check on.
     disk_watch_off: bool,
@@ -630,10 +623,6 @@ fn read(dir: &Path) -> Prefs {
             .get("pinned")
             .and_then(toml::Value::as_bool)
             .unwrap_or(false),
-        keep_awake: table
-            .get("keep_awake")
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false),
         disk_watch_off: table
             .get("disk_watch")
             .and_then(toml::Value::as_bool)
@@ -656,20 +645,6 @@ fn parse_hours_as_minutes(value: &toml::Value) -> Option<u16> {
         return None;
     }
     u16::try_from((hours * 60.0).round() as i64).ok()
-}
-
-/// Whether the Mac is being kept awake. The preference; `awake.rs`
-/// turns it into the assertion and logs both transitions.
-pub fn keep_awake() -> bool {
-    KEEP_AWAKE.load(Ordering::Relaxed)
-}
-
-/// Remember and persist the keep-awake switch. Taking or dropping the
-/// assertion is the caller's half (`crate::set_keep_awake_pref`), so
-/// this module keeps touching nothing but the file.
-pub fn set_keep_awake(on: bool) {
-    KEEP_AWAKE.store(on, Ordering::Relaxed);
-    persist();
 }
 
 /// Whether the daily background disk check may run.
@@ -771,9 +746,6 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if prefs.pinned {
         doc.insert("pinned".into(), toml::Value::Boolean(true));
     }
-    if prefs.keep_awake {
-        doc.insert("keep_awake".into(), toml::Value::Boolean(true));
-    }
     if prefs.disk_watch_off {
         doc.insert("disk_watch".into(), toml::Value::Boolean(false));
     }
@@ -844,7 +816,6 @@ mod tests {
                 // come back out, or a theme change would eat it.
                 analysis_exclude: vec!["~/github".to_string()],
                 pinned: true,
-                keep_awake: true,
                 disk_watch_off: true,
                 last_tab: Some("alerts".into()),
             },
@@ -865,7 +836,6 @@ mod tests {
         );
         assert_eq!(back.analysis_exclude, vec!["~/github".to_string()]);
         assert!(back.pinned);
-        assert!(back.keep_awake);
         assert!(back.disk_watch_off);
         assert_eq!(back.last_tab.as_deref(), Some("alerts"));
         // The switch is stored as the off value only.
@@ -898,10 +868,6 @@ mod tests {
             "an empty exclusion list should omit the key"
         );
         assert!(!text.contains("pinned"), "unpinned should omit the key");
-        assert!(
-            !text.contains("keep_awake"),
-            "the default must not write a key that keeps a Mac awake"
-        );
         assert!(!text.contains("tab"), "Overview should omit the key");
         assert!(
             !text.contains("disk_watch"),
@@ -916,7 +882,6 @@ mod tests {
         assert!(back.analysis_roots.is_empty());
         assert!(back.analysis_exclude.is_empty());
         assert!(!back.pinned);
-        assert!(!back.keep_awake);
         assert!(back.last_tab.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
