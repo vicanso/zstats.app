@@ -506,7 +506,11 @@ pub fn omarchy_theme(p: &Palette) -> (String, String) {
         ("ring", p.accent),
         ("caret", p.foreground),
         ("link", p.accent),
-        ("accent.background", p.surface),
+        // A step off the surface, never the surface itself: gpui-kit
+        // paints a menu's hovered item in this, on the popover fill
+        // below. The same step the classic dark theme takes (≈12%
+        // toward the ink) — the chip's.
+        ("accent.background", t.chip),
         ("accent.foreground", p.foreground),
         ("primary.background", p.accent),
         ("primary.foreground", t.on_mark),
@@ -714,6 +718,24 @@ mod tests {
             }
         }
         assert!(light && dark, "the file is a pair, like macos-classic");
+    }
+
+    /// gpui-kit paints a menu's hovered item in `accent.background`, on
+    /// `popover.background`. Golden Dark had both at `#1c1814` and the
+    /// generated Omarchy theme had both at the palette's surface, so the
+    /// footer menu's highlight was drawn and could not be seen.
+    #[test]
+    fn a_hovered_menu_item_differs_from_the_menu_under_it() {
+        let mut registry = gpui_kit::component::ThemeRegistry::default();
+        registry.load_themes_from_str(GOLDEN_JSON).unwrap();
+        let (omarchy, json) = omarchy_theme(&Palette::tokyo_night());
+        registry.load_themes_from_str(&json).unwrap();
+        for name in ["Golden Light", "Golden Dark", omarchy.as_str()] {
+            let colors = &registry.themes()[name].colors;
+            let (hover, menu) = (colors.accent.as_deref(), colors.popover.as_deref());
+            assert!(hover.is_some() && menu.is_some(), "{name} sets both");
+            assert_ne!(hover, menu, "{name}: the highlight is the menu's fill");
+        }
     }
 
     #[test]
