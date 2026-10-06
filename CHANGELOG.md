@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.4](https://github.com/vicanso/zstats.app/compare/v0.4.2..v0.4.4) - 2026-10-06
+
+### ⛰️  Features
+
+- Keep the Mac awake, screen on, for 30 minutes to 8 hours from a footer menu; replaces the always-on switch in settings - ([f5b30c8](https://github.com/vicanso/zstats.app/commit/f5b30c8d7f15389b6b02d55d8ec52810d76b7794))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.4.3 - ([76d86c3](https://github.com/vicanso/zstats.app/commit/76d86c3dae9ed412f8a87d16614ac4dd96887239))
+- Gpui-kit 0.7.1 on gpui 0.3.8 with the Linux layer-surface patch re-vendored; the directory map's path gets tooltips and folds its middle instead of truncating every level; charts drop the readings of a laptop's brief maintenance wakes - ([9ce316f](https://github.com/vicanso/zstats.app/commit/9ce316f28afb9de1da1c64268617833e93508d65))
+
 ## [0.4.3](https://github.com/vicanso/zstats.app/compare/v0.4.2..v0.4.3) - 2026-10-05
 
 ### ⚙️ Miscellaneous Tasks
