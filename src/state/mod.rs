@@ -1045,10 +1045,11 @@ impl ZStatsAppState {
     pub fn ingest(&mut self, tick: Tick, cx: &mut Context<Self>) -> Vec<AlertEvent> {
         let now = Instant::now();
         let wall = SystemTime::now();
+        let own_walk = self.disk_check_explains_cpu(now);
         let fresh: Vec<AlertEvent> = tick
             .alerts
             .iter()
-            .filter(|event| keep_alert(event))
+            .filter(|event| keep_alert(event, own_walk))
             .cloned()
             .collect();
         if !fresh.is_empty() {

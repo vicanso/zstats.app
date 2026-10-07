@@ -974,7 +974,10 @@ fn exclude_toggle(state: &ZStatsAppState, running: bool) -> AnyElement {
 /// The daily background check (`diskwatch`), on or off, with its state
 /// on hover. A chip in the toolbar's neutral ink rather than a switch:
 /// the switch wore the theme's mark and was the most saturated thing in
-/// the window, for a preference set once.
+/// the window, for a preference set once. Quiet enough that it was not
+/// found by someone looking for the setting, so the Interface page has
+/// the switch too (`config::disk_watch_row`); this one stays for what
+/// only it says — when the check last ran and what it is waiting for.
 fn daily_chip(state: &ZStatsAppState, running: bool) -> AnyElement {
     let on = prefs::disk_watch();
     let status = if !on {
@@ -1001,12 +1004,7 @@ fn daily_chip(state: &ZStatsAppState, running: bool) -> AnyElement {
             i18n::tr("disk.watch_tip").into(),
         ]))
         .when(!running, |d| {
-            d.on_click(move |_, _window, cx| {
-                prefs::set_disk_watch(!on);
-                cx.global::<ZStatsGlobalStore>()
-                    .clone()
-                    .update(cx, |_, cx| cx.notify());
-            })
+            d.on_click(move |_, _window, cx| crate::set_disk_watch_pref(!on, cx))
         })
         .child(
             h_flex()

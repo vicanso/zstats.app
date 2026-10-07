@@ -738,6 +738,16 @@ pub fn set_notifications_pref(on: bool, cx: &mut App) {
     repaint(cx);
 }
 
+/// The daily disk check (`diskwatch`), on or off. One setter for its
+/// two controls — the Interface page's switch and the chip on the
+/// disk-space window's analysis toolbar — because each has to move
+/// when the other is clicked, and the settings window only repaints
+/// for the epoch [`repaint`] bumps.
+pub fn set_disk_watch_pref(on: bool, cx: &mut App) {
+    prefs::set_disk_watch(on);
+    repaint(cx);
+}
+
 /// The footer cup's menu: keep the Mac awake — screen on, no idle
 /// sleep — for `minutes` from now, or end the hold with `0`. Nothing is
 /// persisted: a hold is an act with an end time, not a preference. The

@@ -188,6 +188,10 @@ pub(crate) struct Analysis {
     watch_last: Option<SystemTime>,
     /// The daily check in flight.
     watch_cancel: Option<Arc<AtomicBool>>,
+    /// When the daily check last stopped — finished, failed or
+    /// cancelled. Its CPU outlives it in zstats' averages
+    /// (`diskwatch::explains_own_cpu`).
+    watch_ended: Option<Instant>,
     /// What grew since about a week ago (`diskwatch::latest_report`),
     /// for the disk-space window. Re-read after every home walk.
     growth: Option<Report>,
@@ -262,6 +266,7 @@ impl Default for Analysis {
             trashed: 0,
             watch_last,
             watch_cancel: None,
+            watch_ended: None,
             growth: diskwatch::latest_report(),
             growth_pending: Vec::new(),
             growth_announced: Vec::new(),
@@ -717,6 +722,7 @@ impl ZStatsAppState {
     pub(super) fn stop_disk_check(&mut self) {
         if let Some(cancel) = self.analysis.watch_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
+            self.analysis.watch_ended = Some(Instant::now());
         }
     }
 
@@ -771,6 +777,7 @@ impl ZStatsAppState {
                                 .is_some_and(|c| Arc::ptr_eq(c, &cancel))
                             {
                                 state.analysis.watch_cancel = None;
+                                state.analysis.watch_ended = Some(Instant::now());
                                 // Not retried every tick: a failing walk
                                 // waits a day like a finished one.
                                 state.analysis.watch_last = Some(SystemTime::now());
@@ -806,6 +813,7 @@ impl ZStatsAppState {
             return;
         }
         self.analysis.watch_cancel = None;
+        self.analysis.watch_ended = Some(Instant::now());
         diskscan::save_cache(&result);
         self.note_home_walk(&result);
         // The window shows the home tree: the fresh walk replaces it,
@@ -859,6 +867,16 @@ impl ZStatsAppState {
     /// Whether the daily check is walking right now.
     pub fn disk_check_running(&self) -> bool {
         self.analysis.watch_cancel.is_some()
+    }
+
+    /// Whether this process's CPU is the daily check's doing right now
+    /// (`diskwatch::explains_own_cpu`).
+    pub(super) fn disk_check_explains_cpu(&self, now: Instant) -> bool {
+        diskwatch::explains_own_cpu(
+            self.analysis.watch_cancel.is_some(),
+            self.analysis.watch_ended,
+            now,
+        )
     }
 
     /// Growth banners to post, once each.

@@ -37,6 +37,24 @@
 //! banner per directory per [`WINDOW`]. Display and a quiet banner only
 //! — not an `AlertEvent`: zstats owns alerting, and this is an observer
 //! of the same class as the memory-creep watcher.
+//!
+//! **Its own CPU is not news.** The walk is one thread working flat out.
+//! Background QoS slows it, it does not make it idle, and zstats counts
+//! CPU time: this process sits near one whole core for as long as the
+//! walk takes, which is over the default per-process bar. On the
+//! installed app (2026-10-04 to 06) every check drew a banner naming
+//! zstats about two minutes in, and the one that ran past half an hour
+//! drew the engine's 30-minute reminder as well — the app interrupting
+//! someone to report its own housekeeping. So while a check runs, and
+//! for [`CPU_TAIL`] after ([`explains_own_cpu`]), a CPU alert whose
+//! subject is this process is dropped at ingest
+//! (`state::alerts::keep_alert`), logged as skipped like the read-only
+//! volume's. Narrow on purpose: CPU only — a memory alert about us
+//! still arrives — this pid only, and the scheduled check only, since a
+//! walk someone started has that person watching it. What it costs: a
+//! real runaway in this process that begins during a check is not
+//! announced, and its row on the Processes tab is the only place it
+//! shows.
 
 use crate::alertlog;
 use crate::diskscan::ScanResult;
@@ -45,7 +63,7 @@ use jiff::civil::Date;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How old the last home walk must be before the background repeats it.
 /// A day: growth worth a warning is measured in days, and one walk a day
@@ -83,6 +101,12 @@ const DOMINANCE_PERCENT: u64 = 90;
 /// the disk more than the CPU, but a busy machine is a person working,
 /// and the check can run in the next quiet tick.
 pub const BUSY_CPU: f32 = 25.0;
+
+/// How long after a check stops its CPU can still be what zstats is
+/// reporting. The engine's slow rule is a five-minute average, and a
+/// reminder or a report that waited out its cooldown is read off the
+/// same figure — which carries a finished walk for that long.
+pub const CPU_TAIL: Duration = Duration::from_secs(5 * 60);
 
 /// A baseline younger than this says nothing about a week.
 const MIN_BASELINE_AGE: Duration = Duration::from_secs(20 * 60 * 60);
@@ -146,6 +170,12 @@ pub fn due(gate: &Gate) -> bool {
     gate.now
         .duration_since(last)
         .is_ok_and(|age| age >= CHECK_EVERY)
+}
+
+/// Whether a CPU alert about this process is the check's own doing: one
+/// is walking, or the last one stopped within [`CPU_TAIL`].
+pub fn explains_own_cpu(running: bool, ended: Option<Instant>, now: Instant) -> bool {
+    running || ended.is_some_and(|at| now.saturating_duration_since(at) <= CPU_TAIL)
 }
 
 /// `~/.zstats/disk-history`.
@@ -398,6 +428,26 @@ mod tests {
         let dir = env::temp_dir().join(format!("zstats-diskwatch-{tag}-{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// A walk in flight explains this process's CPU, and so does one
+    /// that stopped inside the engine's averaging window — not one from
+    /// before it, and not a session that never ran a check.
+    #[test]
+    fn the_check_explains_our_cpu_while_it_walks_and_for_the_tail() {
+        let ended = Instant::now();
+        let second = Duration::from_secs(1);
+        assert!(explains_own_cpu(true, None, ended));
+        assert!(!explains_own_cpu(false, None, ended), "never ran");
+        assert!(explains_own_cpu(false, Some(ended), ended + 60 * second));
+        assert!(explains_own_cpu(false, Some(ended), ended + CPU_TAIL));
+        assert!(!explains_own_cpu(
+            false,
+            Some(ended),
+            ended + CPU_TAIL + second
+        ));
+        // A stamp ahead of `now` is the same tick, not a negative age.
+        assert!(explains_own_cpu(false, Some(ended + second), ended));
     }
 
     fn gate() -> Gate {

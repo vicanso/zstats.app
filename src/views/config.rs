@@ -961,6 +961,7 @@ fn interface_card(
         ))
         .child(notifications_row())
         .child(autostart_row())
+        .child(disk_watch_row())
         .child(proxy_row(proxy_input, proxy_valid))
         .child(opacity_row())
         .into_any_element()
@@ -999,6 +1000,43 @@ fn notifications_row() -> AnyElement {
                 .small()
                 .checked(prefs::notifications())
                 .on_click(|checked, _window, cx| crate::set_notifications_pref(*checked, cx)),
+        )
+        .into_any_element()
+}
+
+/// The daily disk check (`diskwatch`), on or off. It is also a chip on
+/// the disk-space window's analysis toolbar, which is where it started
+/// and where its status lives — but the thing that makes someone look
+/// for this switch is the app working in the background, and the place
+/// they look is here, among the other things it does unasked.
+fn disk_watch_row() -> AnyElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .px(px(13.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("config.disk_watch")),
+                )
+                .child(widgets::info_icon(
+                    "pref-disk-watch-info",
+                    i18n::tr("config.disk_watch_tip"),
+                )),
+        )
+        .child(
+            Switch::new("pref-disk-watch")
+                .small()
+                .checked(prefs::disk_watch())
+                .on_click(|checked, _window, cx| crate::set_disk_watch_pref(*checked, cx)),
         )
         .into_any_element()
 }

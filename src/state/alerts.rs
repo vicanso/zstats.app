@@ -10,6 +10,7 @@ use crate::tray;
 use crate::volflag;
 use gpui::Context;
 use std::collections::{HashMap, VecDeque};
+use std::process;
 #[cfg(test)]
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant, SystemTime};
@@ -83,11 +84,28 @@ impl Episode {
     }
 }
 
-/// A disk alert the user cannot act on is not news: a read-only extra
-/// volume (an installer DMG under `/Volumes`) is full by construction.
-/// Other kinds, and the boot disk, pass. `statfs` failing is fail-open
-/// — see [`volflag`].
-pub(super) fn keep_alert(event: &AlertEvent) -> bool {
+/// Whether a report reaches the list and the banner at all. Two are
+/// dropped, both logged, and neither is a second threshold — the engine
+/// evaluated, and this refuses a condition that is not news.
+///
+/// A disk alert the user cannot act on: a read-only extra volume (an
+/// installer DMG under `/Volumes`) is full by construction. Other
+/// kinds, and the boot disk, pass. `statfs` failing is fail-open — see
+/// [`volflag`].
+///
+/// A CPU alert about this very process while the daily disk check is
+/// what it is busy with (`own_walk` — `diskwatch::explains_own_cpu`,
+/// where the measurements and the limits of this one are written down).
+pub(super) fn keep_alert(event: &AlertEvent, own_walk: bool) -> bool {
+    if own_walk && is_own_cpu(event, process::id()) {
+        tracing::info!(
+            kind = ?event.kind(),
+            subject = ?event.subject,
+            banner = "skipped",
+            "cpu alert skipped: the daily disk check is this process's own work"
+        );
+        return false;
+    }
     let AlertSubject::Volume { mount_point } = &event.subject else {
         return true;
     };
@@ -104,6 +122,19 @@ pub(super) fn keep_alert(event: &AlertEvent) -> bool {
         "disk alert skipped: volume is read-only"
     );
     false
+}
+
+/// A CPU report whose subject is the process `own_pid` — by itself, or
+/// as the tree it roots, which is how zstats names an app.
+fn is_own_cpu(event: &AlertEvent, own_pid: u32) -> bool {
+    if !matches!(event.kind(), AlertKind::Cpu | AlertKind::AppCpu) {
+        return false;
+    }
+    match &event.subject {
+        AlertSubject::Process { pid, .. } => *pid == own_pid,
+        AlertSubject::App { root_pid, .. } => *root_pid == own_pid,
+        AlertSubject::Volume { .. } | AlertSubject::System => false,
+    }
 }
 
 /// One alerting episode, with the freshest numbers it has reported.
@@ -911,15 +942,38 @@ mod tests {
 
     #[test]
     fn a_writable_disk_still_alerts_and_statfs_failure_is_fail_open() {
-        assert!(super::keep_alert(&cpu_alert(1)));
+        assert!(super::keep_alert(&cpu_alert(1), false));
         assert!(
-            super::keep_alert(&disk_alert("/")),
+            super::keep_alert(&disk_alert("/"), false),
             "the boot volume must still alert"
         );
         assert!(
-            super::keep_alert(&disk_alert("/Volumes/no-such-volume")),
+            super::keep_alert(&disk_alert("/Volumes/no-such-volume"), false),
             "a mount we cannot inspect is not silently exempted"
         );
+    }
+
+    /// The daily disk check's own CPU is the one report dropped, and
+    /// only that: our pid, a CPU kind, while the check explains it.
+    #[test]
+    fn our_own_cpu_is_dropped_only_while_the_disk_check_explains_it() {
+        let own = process::id();
+        assert!(super::keep_alert(&cpu_alert(own), false), "no check: news");
+        assert!(!super::keep_alert(&cpu_alert(own), true));
+        // The tree this process roots is the same subject by another name.
+        let mut tree = cpu_alert(own);
+        tree.subject = AlertSubject::App {
+            root_pid: own,
+            name: "zstats".into(),
+            display_name: None,
+            process_count: 1,
+        };
+        assert_eq!(tree.kind(), AlertKind::AppCpu);
+        assert!(!super::keep_alert(&tree, true));
+        // Someone else's CPU, and our own memory, still arrive.
+        assert!(super::keep_alert(&cpu_alert(own.wrapping_add(1)), true));
+        assert!(super::keep_alert(&mem_alert(own), true));
+        assert!(super::keep_alert(&disk_alert("/"), true));
     }
 
     fn disk_alert(mount: &str) -> AlertEvent {
