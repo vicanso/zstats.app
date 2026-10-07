@@ -54,6 +54,8 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 const LATEST_URL: &str = "https://api.github.com/repos/vicanso/zstats.app/releases/latest";
+/// Every release, newest first — read only by [`check_with_skipped`].
+const LIST_URL: &str = "https://api.github.com/repos/vicanso/zstats.app/releases";
 /// The Gitee mirror the release workflow copies every tagged release to,
 /// asset for asset. It exists for one audience: networks that cannot
 /// reach GitHub at all, where the check below would otherwise only ever
@@ -70,6 +72,13 @@ const GITEE_API: &str = "https://gitee.com/api/v5/repos/vicanso/zstats.app";
 /// the API they need no token — see [`gitee_download_url`].
 const GITEE_REPO_URL: &str = "https://gitee.com/vicanso/zstats.app";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many releases one read of the list asks for — the reach of
+/// [`check_with_skipped`]. One page, never followed: thirty is a month
+/// of this project at its busiest, GitHub's answer is already ~400 KB
+/// at that size (each release carries its asset table; the mirror's is
+/// ~50 KB), and someone further behind than that is not reading notes
+/// one release at a time — the newest thirty are what they get.
+const HISTORY_PAGE: usize = 30;
 /// The DMG for this build's architecture — half the bytes of the
 /// universal image (6.6 vs 13.3 MB measured on v0.1.1). `ARCH` is a
 /// compile-time constant: a universal install runs its native slice,
@@ -822,21 +831,62 @@ pub enum UpdateCheck {
     Failed(String),
 }
 
-/// Ask GitHub for the latest release and compare it to this build.
-/// Blocking — call on the background executor.
-pub fn check() -> UpdateCheck {
-    let agent = ureq::Agent::config_builder()
+fn api_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .timeout_global(Some(FETCH_TIMEOUT))
         .proxy(proxy::app_proxy())
         .build()
-        .new_agent();
+        .new_agent()
+}
+
+/// Ask GitHub for the latest release and compare it to this build.
+/// Blocking — call on the background executor.
+pub fn check() -> UpdateCheck {
+    check_latest(&api_agent())
+}
+
+/// [`check`] for someone about to read the answer: when the latest
+/// release is not the next one, the notes of the releases in between
+/// come too, newest first.
+///
+/// `releases/latest` carries one body, so a build two versions behind
+/// was shown the last step only — and the release it skipped is as
+/// likely to be the one with the change that matters. A second request
+/// reads the releases list ([`HISTORY_PAGE`], GitHub then the mirror)
+/// and [`notes_through`] stitches the bodies together; if that request
+/// fails, the latest's own notes stand, as before. The silent check
+/// stays on [`check`]: it keeps the version and throws the notes away,
+/// and must not pay for a list nobody will read.
+pub fn check_with_skipped() -> UpdateCheck {
+    let agent = api_agent();
+    let (version, notes) = match check_latest(&agent) {
+        UpdateCheck::Newer { version, notes } => (version, notes),
+        other => return other,
+    };
+    let github = format!("{LIST_URL}?per_page={HISTORY_PAGE}");
+    // Gitee lists oldest first unless told otherwise.
+    let gitee = format!("{GITEE_API}/releases?per_page={HISTORY_PAGE}&direction=desc");
+    let list = fetch_text(&agent, &github, Some("application/vnd.github+json")).or_else(|origin| {
+        fetch_text(&agent, &gitee, None).map_err(|mirror| format!("{origin}; mirror: {mirror}"))
+    });
+    let notes = match list {
+        Ok(list) => notes_through(&list, about::version(), &version, &notes),
+        Err(e) => {
+            tracing::warn!(error = %e, "release list unavailable; showing the latest notes only");
+            notes
+        }
+    };
+    UpdateCheck::Newer { version, notes }
+}
+
+fn check_latest(agent: &ureq::Agent) -> UpdateCheck {
     // Both hosts name the same two fields (`tag_name`, `body`), so the
     // parsing below does not care which answered. Gitee's `latest` is
     // also free of the nightly question: the workflow mirrors tagged
     // releases only.
-    let body = match fetch_text(&agent, LATEST_URL, Some("application/vnd.github+json")) {
+    let body = match fetch_text(agent, LATEST_URL, Some("application/vnd.github+json")) {
         Ok(body) => body,
-        Err(origin) => match fetch_text(&agent, &format!("{GITEE_API}/releases/latest"), None) {
+        Err(origin) => match fetch_text(agent, &format!("{GITEE_API}/releases/latest"), None) {
             Ok(body) => body,
             Err(mirror) => return UpdateCheck::Failed(format!("{origin}; mirror: {mirror}")),
         },
@@ -844,10 +894,7 @@ pub fn check() -> UpdateCheck {
     let Some(tag) = json_str_field(&body, "tag_name") else {
         return UpdateCheck::Failed("no tag_name in response".into());
     };
-    let notes = json_str_field(&body, "body")
-        .unwrap_or_default()
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
+    let notes = release_body(&body);
     if is_newer(&tag, about::version()) {
         UpdateCheck::Newer {
             version: tag,
@@ -856,6 +903,110 @@ pub fn check() -> UpdateCheck {
     } else {
         UpdateCheck::UpToDate
     }
+}
+
+/// A release object's notes, with the line endings GitHub's editor
+/// leaves normalised. Empty when there are none.
+fn release_body(release: &str) -> String {
+    json_str_field(release, "body")
+        .unwrap_or_default()
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+}
+
+/// The notes of every release after `current` up to `latest`, newest
+/// first, from a releases list — `latest_notes` for the newest and the
+/// list's bodies for the ones it skipped.
+///
+/// The range is closed by `latest`, the version the first request
+/// named and the one that will be downloaded: a release published
+/// between the two requests is not described as part of this update.
+/// The range is also all the filtering there is. The rolling `nightly`
+/// has no version in its tag and never compares as newer, and the
+/// mirror's `prerelease` flag is not consulted — it is set on a release
+/// still being copied, which is a statement about the mirror's assets,
+/// not about whether the notes are real.
+///
+/// With nothing in between this is `latest_notes` untouched, so the
+/// common one-step update reads exactly as it did. Otherwise each part
+/// gets a heading if it does not open with one naming its version:
+/// git-cliff's bodies do (`## [0.4.3](…) - date`), a hand-written body
+/// may not, and three bodies run together are no longer a changelog.
+fn notes_through(list: &str, current: &str, latest: &str, latest_notes: &str) -> String {
+    let mut skipped: Vec<(String, String)> = json_objects(list)
+        .into_iter()
+        .filter_map(|release| {
+            let tag = json_str_field(release, "tag_name")?;
+            (is_newer(&tag, current) && is_newer(latest, &tag))
+                .then(|| (tag, release_body(release)))
+        })
+        .filter(|(_, body)| !body.trim().is_empty())
+        .collect();
+    if skipped.is_empty() {
+        return latest_notes.to_string();
+    }
+    // Not trusted to arrive in order: the mirror's default is oldest
+    // first, and the two hosts sort by different dates.
+    skipped.sort_by(|(a, _), (b, _)| is_newer(b, a).cmp(&is_newer(a, b)));
+    skipped.dedup_by(|(a, _), (b, _)| a == b);
+    let headed = |tag: &str, body: &str| {
+        let body = body.trim();
+        let number = tag.trim_start_matches('v');
+        let opens_named = body
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with('#') && line.contains(number));
+        if opens_named {
+            body.to_string()
+        } else {
+            format!("## {tag}\n\n{body}")
+        }
+    };
+    let mut parts = Vec::with_capacity(skipped.len() + 1);
+    if !latest_notes.trim().is_empty() {
+        parts.push(headed(latest, latest_notes));
+    }
+    parts.extend(skipped.iter().map(|(tag, body)| headed(tag, body)));
+    parts.join("\n\n")
+}
+
+/// The top-level objects of a JSON array, as slices of it. The same
+/// bargain as [`json_str_field`]: the payload is a machine's, and all
+/// this needs is where one release ends and the next begins — braces
+/// counted outside strings, escapes honoured so a `\"` or a `{` in a
+/// body cannot move a boundary. Unbalanced input yields what was whole.
+fn json_objects(array: &str) -> Vec<&str> {
+    let mut objects = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for (at, c) in array.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = at;
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    objects.push(&array[start..=at]);
+                }
+            }
+            _ => {}
+        }
+    }
+    objects
 }
 
 /// Pull one string field out of the release JSON. No serde_json: the
@@ -1418,6 +1569,85 @@ mod tests {
             Some("notes mentioning \"tag_name\": \"v9.9.9\" in text")
         );
         assert_eq!(json_str_field(body, "missing"), None);
+    }
+
+    /// A releases list the way GitHub sends one, cut down: newest
+    /// first, the rolling nightly in the middle, nested objects around
+    /// the two fields that matter, and a body that quotes a brace and a
+    /// key.
+    fn release_list(tags: &[&str]) -> String {
+        let release = |tag: &str| {
+            let body = match tag {
+                "nightly" => "Rolling build".to_string(),
+                "v0.4.3" => {
+                    "## [0.4.3](c) - d\\n\\n- kit, a } and \\\"tag_name\\\": \\\"v9.9.9\\\""
+                        .to_string()
+                }
+                "v0.4.2" => "hand-written notes\\r\\n".to_string(),
+                _ => format!(
+                    "## [{}](c) - d\\n\\n- change in {tag}",
+                    tag.trim_start_matches('v')
+                ),
+            };
+            format!(
+                "{{\"url\":\"x\",\"author\":{{\"login\":\"a\",\"id\":1}},\"tag_name\":\"{tag}\",\"prerelease\":false,\"assets\":[{{\"name\":\"zstats.dmg\",\"uploader\":{{\"login\":\"a\"}}}}],\"body\":\"{body}\"}}"
+            )
+        };
+        let all: Vec<String> = tags.iter().map(|tag| release(tag)).collect();
+        format!("[{}]", all.join(","))
+    }
+
+    const LISTED: [&str; 7] = [
+        "v0.4.5", "v0.4.4", "nightly", "v0.4.3", "v0.4.2", "v0.4.1", "v0.4.0",
+    ];
+
+    #[test]
+    fn a_release_list_splits_at_its_top_level_objects() {
+        let list = release_list(&LISTED);
+        let objects = json_objects(&list);
+        assert_eq!(objects.len(), LISTED.len());
+        for (object, tag) in objects.iter().zip(LISTED) {
+            assert!(object.starts_with("{\"url\"") && object.ends_with('}'));
+            assert_eq!(json_str_field(object, "tag_name").as_deref(), Some(tag));
+        }
+        // What was whole, and nothing for what was not an array of objects.
+        assert_eq!(json_objects("[{\"a\":1},{\"b\":").len(), 1);
+        assert!(json_objects("rate limit exceeded").is_empty());
+    }
+
+    /// Two versions behind reads all three steps, newest first: the
+    /// latest from its own response, the skipped ones from the list.
+    /// Nothing at or below the running version, nothing past the
+    /// version being offered, never the nightly — and a body that does
+    /// not name its version gets a heading that does.
+    #[test]
+    fn skipped_releases_join_the_latest_notes_newest_first() {
+        let latest = "## [0.4.4](c) - d\n\n- change in v0.4.4\n";
+        let want = "## [0.4.4](c) - d\n\n- change in v0.4.4\n\n\
+                    ## [0.4.3](c) - d\n\n- kit, a } and \"tag_name\": \"v9.9.9\"\n\n\
+                    ## v0.4.2\n\nhand-written notes";
+        let list = release_list(&LISTED);
+        assert_eq!(notes_through(&list, "0.4.1", "v0.4.4", latest), want);
+        // The mirror's default order is oldest first.
+        let mut reversed = LISTED;
+        reversed.reverse();
+        let list = release_list(&reversed);
+        assert_eq!(notes_through(&list, "0.4.1", "v0.4.4", latest), want);
+    }
+
+    /// The one-step update is the common one and reads exactly as it
+    /// did; so does any update whose list could not be used.
+    #[test]
+    fn with_nothing_skipped_the_latest_notes_are_untouched() {
+        let latest = "## [0.4.4](c) - d\n\n- cup\n\n<!-- generated by git-cliff -->\n";
+        let list = release_list(&LISTED);
+        assert_eq!(notes_through(&list, "0.4.3", "v0.4.4", latest), latest);
+        assert_eq!(notes_through("[]", "0.4.1", "v0.4.4", latest), latest);
+        assert_eq!(
+            notes_through("{\"message\":\"Not Found\"}", "0.4.1", "v0.4.4", latest),
+            latest
+        );
+        assert_eq!(notes_through("", "0.4.1", "v0.4.4", latest), latest);
     }
 
     #[test]

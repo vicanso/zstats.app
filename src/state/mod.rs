@@ -2205,7 +2205,9 @@ impl ZStatsAppState {
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async { updater::check() })
+                // The notes will be read here, so the releases this
+                // build skipped come with the latest's.
+                .spawn(async { updater::check_with_skipped() })
                 .await;
             let _ = this.update(cx, |state, cx| {
                 // A manual check answers the same question: stamp the
