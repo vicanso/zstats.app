@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.5](https://github.com/vicanso/zstats.app/compare/v0.4.4..v0.4.5) - 2026-10-07
+
+### ⛰️  Features
+
+- An update that skips versions shows the release notes of every version in between - ([376c836](https://github.com/vicanso/zstats.app/commit/376c836bd029e50ee5c86a41d84f6d571fa59d5e))
+- The daily disk check has a switch in Settings, and no longer raises a CPU alert about zstats itself while it runs - ([843fbc5](https://github.com/vicanso/zstats.app/commit/843fbc5f8ad06a7a929bee15a99d06785f56585d))
+
+### 🐛 Bug Fixes
+
+- A hovered menu item is visible in the Golden dark and Omarchy themes — its highlight was the same colour as the menu under it - ([ef83f3e](https://github.com/vicanso/zstats.app/commit/ef83f3e0cbaf0df259a16ea9c89ca67bb1b2527c))
+
 ## [0.4.4](https://github.com/vicanso/zstats.app/compare/v0.4.2..v0.4.4) - 2026-10-06
 
 ### ⛰️  Features
