@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.6](https://github.com/vicanso/zstats.app/compare/v0.4.5..v0.4.6) - 2026-10-09
+
+### 🐛 Bug Fixes
+
+- Launch at login can be turned on from a fresh install — macOS reports an app that has never registered as "not found", and the row took that for a run with no .app and offered no switch - ([8bad220](https://github.com/vicanso/zstats.app/commit/8bad220c64e948f7654b7a3098385f60cad284eb))
+
 ## [0.4.5](https://github.com/vicanso/zstats.app/compare/v0.4.4..v0.4.5) - 2026-10-07
 
 ### ⛰️  Features
