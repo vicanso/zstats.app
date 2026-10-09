@@ -370,8 +370,10 @@ pub fn install(dmg: &Path) -> Result<Delivery, String> {
 /// the path recorded at exec time, so after an in-place install it
 /// names the *new* copy at the same location — exactly what a relaunch
 /// wants, and why [`replace_bundle`] may move the file it points at.
+/// Also how `autostart` tells an app that has never registered from a
+/// run with nothing to register.
 #[cfg(target_os = "macos")]
-fn running_bundle() -> Option<PathBuf> {
+pub fn running_bundle() -> Option<PathBuf> {
     bundle_root_of(&env::current_exe().ok()?)
 }
 

@@ -1082,10 +1082,12 @@ fn proxy_row(input: &Entity<InputState>, valid: bool) -> AnyElement {
 
 /// Launch at login. A Switch rather than chips when the OS will honour
 /// `register` / `unregister` — enums pick from chips, a boolean flips a
-/// switch, which is also the System Settings idiom. `requiresApproval`
-/// and `notFound` are not that boolean: the first is a revoke the
-/// switch cannot undo, the second is a run with no .app, so the row
-/// says so instead of painting a toggle that snaps back.
+/// switch, which is also the System Settings idiom. `RequiresApproval`
+/// and `NotFound` are not that boolean: the first is a revoke the
+/// switch cannot undo, the second is a run with no .app (or one the OS
+/// just refused to register), so the row says so instead of painting a
+/// toggle that snaps back. A fresh install is neither — the OS reports
+/// it as "not found" too, and `autostart::status` sorts that out.
 fn autostart_row() -> AnyElement {
     h_flex()
         .items_center()

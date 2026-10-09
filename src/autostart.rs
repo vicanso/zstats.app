@@ -33,6 +33,22 @@
 //! `cargo run` case) are sentences, because painting a toggle there is
 //! a lie. Only the installed bundle can register.
 //!
+//! **The OS's `notFound` is not our [`Status::NotFound`].** The raw
+//! status says only that the system holds no record of this service,
+//! and that is as true of an installed app that has never registered as
+//! of a bare binary: a throwaway signed bundle that had never called
+//! `register` read raw 3 (macOS 27.0.1, 2026-10-09), the same as the
+//! binary with no bundle around it. The row used to take raw 3 as "no
+//! bundle" on its own, so on a fresh install it showed the sentence and
+//! no switch — nobody who installed after that rule (2026-09-17) could
+//! turn this on, and the machine it was written on never showed it,
+//! having registered a month earlier. `notRegistered` is what the OS
+//! answers only after an `unregister`. So the sentence is now decided
+//! by what we can check ourselves ([`registrable`]): whether there is
+//! an `.app` to register, and whether the OS refused the last attempt
+//! — a copy run straight from the disk image, say, which is also not
+//! "the installed zstats.app".
+//!
 //! **Linux is the freedesktop autostart directory**, and the same
 //! stance: the file under `~/.config/autostart` IS the state, nothing is
 //! kept in `app.toml`, and the user can delete it by hand at any time.
@@ -46,6 +62,12 @@
 //! bundle-less macOS run), and the row shows a sentence instead of a
 //! switch. `install-linux.sh` makes the same decision the same way.
 
+#[cfg(target_os = "macos")]
+use crate::updater;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The last status read, as the OS's own raw value. `UNREAD` until the
@@ -54,6 +76,12 @@ static STATUS: AtomicU8 = AtomicU8::new(UNREAD);
 
 /// Distinct from every real `SMAppServiceStatus` (0–3).
 const UNREAD: u8 = u8::MAX;
+
+/// The OS turned down the last `register`. Until one succeeds the row
+/// is a sentence again: a switch that was just refused and still
+/// offers itself is the toggle that snaps back.
+#[cfg(target_os = "macos")]
+static REFUSED: AtomicBool = AtomicBool::new(false);
 
 /// macOS 13's four states. The log keeps the raw name; the Interface
 /// row branches on [`status`] so `requiresApproval` and `notFound` are
@@ -70,7 +98,8 @@ fn status_name(raw: u8) -> &'static str {
 
 /// What the Interface row can actually do. Only [`Enabled`] and
 /// [`NotRegistered`] are a switch; the other two are reasons the OS
-/// will not honour `register`.
+/// will not honour `register`. `NotFound` is ours to decide, not the
+/// raw status's — see the module doc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     NotRegistered,
@@ -129,12 +158,35 @@ pub fn refresh() {}
 /// we have not been told that `register` would fail, so the switch is
 /// still the right control. [`is_enabled`] is `Enabled` alone.
 pub fn status() -> Status {
-    match STATUS.load(Ordering::Relaxed) {
+    status_of(STATUS.load(Ordering::Relaxed), registrable())
+}
+
+/// Raw 3 is "the system has no record", which a fresh install and a
+/// bundle-less run both are; `registrable` is what tells them apart.
+fn status_of(raw: u8, registrable: bool) -> Status {
+    match raw {
         1 => Status::Enabled,
         2 => Status::RequiresApproval,
-        3 => Status::NotFound,
+        3 if !registrable => Status::NotFound,
         _ => Status::NotRegistered,
     }
+}
+
+/// Whether `register` has something to act on: this process runs from
+/// an `.app`, and the OS has not just refused it. Asked per frame while
+/// the settings window is open, so the bundle half — which cannot
+/// change under a running process — is read once.
+#[cfg(target_os = "macos")]
+fn registrable() -> bool {
+    static BUNDLED: OnceLock<bool> = OnceLock::new();
+    *BUNDLED.get_or_init(|| updater::running_bundle().is_some()) && !REFUSED.load(Ordering::Relaxed)
+}
+
+/// Linux writes raw 3 itself, and only for a session with no autostart
+/// reader — there it already means what [`Status::NotFound`] says.
+#[cfg(not(target_os = "macos"))]
+fn registrable() -> bool {
+    false
 }
 
 /// What a boolean switch would render: [`Status::Enabled`] alone.
@@ -163,14 +215,20 @@ pub fn set_enabled(enabled: bool) {
     } else {
         unsafe { service.unregisterAndReturnError() }
     };
-    if let Err(e) = result {
-        // Not fatal — the common cause is a bundle-less debug run. The
-        // refresh below still runs, so the switch shows what the system
-        // actually did rather than what was asked for.
-        tracing::warn!(
-            "launch-at-login {}: {e}",
-            if enabled { "on" } else { "off" }
-        );
+    match &result {
+        Ok(()) => REFUSED.store(false, Ordering::Relaxed),
+        Err(e) => {
+            // Not fatal. The refresh below still runs, so the row shows
+            // what the system actually did rather than what was asked
+            // for — and a refused `register` takes the switch away.
+            tracing::warn!(
+                "launch-at-login {}: {e}",
+                if enabled { "on" } else { "off" }
+            );
+            if enabled {
+                REFUSED.store(true, Ordering::Relaxed);
+            }
+        }
     }
     // The OS is the record: re-read rather than assume the write took.
     refresh();
@@ -353,6 +411,21 @@ mod xdg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The OS answers "no record" for a fresh install and for a
+    /// bundle-less run alike. Only the second is a sentence; the first
+    /// is the switch nobody could reach.
+    #[test]
+    fn no_record_is_a_switch_when_there_is_a_bundle_to_register() {
+        assert_eq!(status_of(3, true), Status::NotRegistered);
+        assert_eq!(status_of(3, false), Status::NotFound);
+        for registrable in [true, false] {
+            assert_eq!(status_of(0, registrable), Status::NotRegistered);
+            assert_eq!(status_of(1, registrable), Status::Enabled);
+            assert_eq!(status_of(2, registrable), Status::RequiresApproval);
+            assert_eq!(status_of(UNREAD, registrable), Status::NotRegistered);
+        }
+    }
 
     /// The entry has to be the login path and nothing else: an absolute
     /// `Exec` with no arguments, and no startup notification for a
