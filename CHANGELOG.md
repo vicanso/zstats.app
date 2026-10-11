@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.7](https://github.com/vicanso/zstats.app/compare/v0.4.6..v0.4.7) - 2026-10-11
+
+### ⛰️  Features
+
+- The keep-awake cup shows the time left beside it, and its tooltip says locking the screen does not stop the hold while closing the lid still sleeps the Mac - ([8aef1b6](https://github.com/vicanso/zstats.app/commit/8aef1b6f4578698b9db3a2f13e854389ab86d8a8))
+
 ## [0.4.6](https://github.com/vicanso/zstats.app/compare/v0.4.5..v0.4.6) - 2026-10-09
 
 ### 🐛 Bug Fixes
