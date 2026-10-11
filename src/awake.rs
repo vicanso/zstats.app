@@ -76,6 +76,17 @@ pub struct Hold {
     pub until: SystemTime,
 }
 
+impl Hold {
+    /// Whole minutes left at `now`, rounded up — the figure beside the
+    /// footer's cup. Up, because a hold picked a second ago is the
+    /// thirty minutes that was asked for, not "29m", and its last
+    /// minute reads "1m" until it ends rather than a minute of "0m".
+    pub fn minutes_left(&self, now: SystemTime) -> u32 {
+        let left = self.until.duration_since(now).unwrap_or_default();
+        u32::try_from(left.as_secs().div_ceil(60)).unwrap_or(u32::MAX)
+    }
+}
+
 /// What the platform handed back for a hold: an assertion id on macOS,
 /// the inhibitor's descriptor on Linux (dropping it is the release).
 #[cfg(target_os = "macos")]
@@ -247,6 +258,26 @@ mod tests {
         for minutes in HOLD_MINUTES {
             assert!(minutes > 0 && (minutes < 60 || minutes % 60 == 0));
         }
+    }
+
+    /// The countdown beside the cup never undersells what is left: the
+    /// length just picked reads whole, and the final minute is "1".
+    #[test]
+    fn minutes_left_round_up_and_stop_at_zero() {
+        let now = SystemTime::now();
+        let hold = |secs: u64| Hold {
+            minutes: 30,
+            until: now + Duration::from_secs(secs),
+        };
+        assert_eq!(hold(30 * 60).minutes_left(now), 30);
+        assert_eq!(hold(30 * 60 - 1).minutes_left(now), 30);
+        assert_eq!(hold(29 * 60).minutes_left(now), 29);
+        assert_eq!(hold(61).minutes_left(now), 2);
+        assert_eq!(hold(60).minutes_left(now), 1);
+        assert_eq!(hold(1).minutes_left(now), 1);
+        assert_eq!(hold(0).minutes_left(now), 0);
+        // Past its end — a tick before `expire` has released it.
+        assert_eq!(hold(0).minutes_left(now + Duration::from_secs(5)), 0);
     }
 
     /// The real IOKit round trip: taken with its length, replaced rather

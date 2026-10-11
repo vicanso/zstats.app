@@ -41,6 +41,7 @@ pub mod widgets;
 
 use crate::assets::CustomIconName;
 use crate::awake;
+use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs;
@@ -56,6 +57,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Selectable, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
+use std::time::SystemTime;
 
 /// Height of the tab strip: 14 top pad + a 34-tall well (3 + 28 + 3) + 8 gap.
 ///
@@ -288,8 +290,10 @@ const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
 #[derive(IntoElement)]
 struct AwakeTrigger {
     base: Stateful<Div>,
-    /// A hold is running: the cup is lit the way a set pin is.
-    held: bool,
+    /// How long the running hold has left ("42m", "1h 58m"); `None`
+    /// with no hold. While there is one the cup is lit the way a set
+    /// pin is, and wears this beside it.
+    left: Option<String>,
     /// Its menu is open. Set by the dropdown, not by us.
     open: bool,
     tip: SharedString,
@@ -322,9 +326,13 @@ impl DropdownMenu for AwakeTrigger {}
 
 impl RenderOnce for AwakeTrigger {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let (held, open, tip) = (self.held, self.open, self.tip);
+        let (left, open, tip) = (self.left, self.open, self.tip);
+        let held = left.is_some();
         self.base
+            .flex()
             .flex_none()
+            .items_center()
+            .gap(px(4.))
             .p(px(4.))
             .rounded(px(6.))
             // Lit while it holds; the hover fill kept while its menu is
@@ -344,6 +352,22 @@ impl RenderOnce for AwakeTrigger {
                         theme::text_dim()
                     })),
             )
+            // The time left, beside the cup. The tooltip and the menu
+            // say *until when*, and both take a hover or a click to
+            // read; what someone glancing at a lit cup wants is whether
+            // it will last the job, which is a length. Held to the
+            // icon's line so the footer row keeps its height, and in
+            // the figures' face so a minute ticking over does not move
+            // the four buttons beside it.
+            .children(left.map(|left| {
+                div()
+                    .pr(px(2.))
+                    .font_family(font::MONO)
+                    .text_size(px(10.))
+                    .line_height(px(14.))
+                    .text_color(theme::text())
+                    .child(left)
+            }))
     }
 }
 
@@ -364,9 +388,9 @@ fn hold_label(minutes: u32) -> String {
 /// someone wants it is the moment they are looking at the panel — not
 /// two clicks into a window about preferences. The cup is always there
 /// (a control that appears only once it is on cannot be how it is turned
-/// on), lit while a hold runs, and its tooltip then says until when; the
-/// menu's first line says the same, the running length wears the check,
-/// and "Off" ends it. The tooltip also carries what a hold does not
+/// on), lit while a hold runs with the time left beside it, and its
+/// tooltip then says until when; the menu's first line says the same,
+/// the running length wears the check, and "Off" ends it. The tooltip also carries what a hold does not
 /// stop — the lid, a lock or sleep someone asks for — because each
 /// otherwise reads as a bug.
 fn keep_awake_menu(state: &ZStatsAppState) -> impl IntoElement {
@@ -392,7 +416,7 @@ fn keep_awake_menu(state: &ZStatsAppState) -> impl IntoElement {
         // Keyed by the visit, so a menu left open by a hide is not
         // still open when the panel comes back (`panel_visit`).
         base: div().id(("keep-awake", state.panel_visit())),
-        held: hold.is_some(),
+        left: hold.map(|hold| format::uptime(u64::from(hold.minutes_left(SystemTime::now())) * 60)),
         open: false,
         tip: tip.into(),
     }
