@@ -98,8 +98,12 @@ toml = "1.1.6"
 # names and paths end up in, so escaping is not something to write by
 # hand. Already in the tree several times over (gpui, zstats); `serde`
 # itself stays an indirect dependency — the body is built with `json!`,
-# nothing here derives.
-serde_json = "1"
+# nothing here derives. `preserve_order` by name: the body's keys are
+# written in reading order and a receiver that prints it shows them in
+# that order. The feature is already on in the tree (gpui asks for it),
+# but an order somebody else's manifest happens to give is not one to
+# build on.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Parallel directory walk for the Hardware tab's analyser (docs/
 # disk-analysis.md). Same engine diskonaut uses; pinned to a dedicated
 # 3-thread rayon pool at the call site so the resident collector's 2s

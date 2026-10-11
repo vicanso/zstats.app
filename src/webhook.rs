@@ -17,17 +17,29 @@
 //! the shape depends on the kind:
 //!
 //! ```json
-//! {"hostname":"…","category":"cpu","level":"warning",
-//!  "title":"Google Chrome Helper","subtitle":"Warning · CPU",
-//!  "message":"…the banner's own sentence…",
-//!  "summary":"…zstats' one-line English rendering…",
-//!  "subject":{"type":"process","name":"…","pid":830},
-//!  "detail":{"avg_percent":215.0,"threshold_percent":200.0,"window_secs":60,"runaway":false},
-//!  "repeat_after_secs":null,"silent":false,"test":false,
-//!  "time":"2026-10-12T15:04:05+08:00","timestamp":1791788645,
-//!  "app":"zstats","version":"0.4.7","os":"macOS","os_version":"27.0.1","arch":"aarch64",
-//!  "schema":1}
+//! {
+//!   "hostname": "…",
+//!   "category": "cpu",
+//!   "level": "warning",
+//!   "title": "Google Chrome Helper",
+//!   "subtitle": "Warning · CPU",
+//!   "message": "…the banner's own sentence…",
+//!   "summary": "…zstats' one-line English rendering…",
+//!   "subject": { "type": "process", "name": "…", "display_name": null, "pid": 830 },
+//!   "detail": { "avg_percent": 215.0, "threshold_percent": 200.0, "window_secs": 60, "runaway": false },
+//!   "repeat_after_secs": null,
+//!   "silent": false,
+//!   "test": false,
+//!   "time": "2026-10-12T15:04:05+08:00",
+//!   "timestamp": 1791788645,
+//!   "app": "zstats", "version": "0.4.7",
+//!   "os": "Darwin", "os_version": "27.0.1", "arch": "aarch64",
+//!   "schema": 1
+//! }
 //! ```
+//!
+//! (On the wire every key, nested ones included, has a line of its
+//! own.)
 //!
 //! `category` is the kind — `cpu`, `app_cpu`, `memory`, `app_memory`,
 //! `disk`, `pressure` for zstats' alerts at `warning` or `critical`,
@@ -36,10 +48,18 @@
 //! (`silent` says so, for a receiver that wants to keep them quiet).
 //! `title` / `subtitle` / `message` are the banner's three lines in
 //! the interface language; every number under `detail` is the event's
-//! own field, never recomputed here. Keys are written in that order on
-//! purpose: a receiver that shows the body as text — ntfy does, for a
-//! plain POST to a topic — shows its first hundred characters, and
-//! those should be who, what and how bad, not `"app":"zstats","arch"`.
+//! own field, never recomputed here.
+//!
+//! **Written for someone reading it raw.** A receiver that shows the
+//! body as text — ntfy does, for a plain POST to a topic — shows it
+//! exactly as sent, and the first build sent one unbroken line: every
+//! field there and none findable on a phone. So three things are for
+//! that reader and cost a parser nothing. The keys keep the order
+//! above — who, what and how bad first, the build's identity last —
+//! rather than a map's alphabet, which opens on `"app": "zstats",
+//! "arch"`. The object is pretty-printed, a key to a line. And
+//! fractions are cut to two decimals: they are all percentages, and
+//! the collector's `7.55712855303729` is not a figure anyone reads.
 //!
 //! **Delivery** is one worker thread behind a bounded queue: a POST
 //! must never run on the main thread, and a dead endpoint must not
@@ -291,44 +311,58 @@ fn detail_of(detail: &AlertDetail) -> Value {
     }
 }
 
-/// The JSON body. Keys in reading order — see the module doc for why
-/// that is worth more than a map's alphabet.
+/// The JSON body: keys in reading order, pretty-printed, percentages
+/// to two decimals — see the module doc for why each of the three is
+/// for the person reading it raw. The order is `json!`'s, which holds
+/// because Cargo.toml asks serde_json for `preserve_order`; a test
+/// pins it.
 fn body(notice: &Notice, host: &Host, at: &jiff::Zoned) -> String {
-    let fields: [(&str, Value); 20] = [
-        ("hostname", json!(host.hostname)),
-        ("category", json!(notice.category)),
-        ("level", json!(notice.level)),
-        ("title", json!(notice.title)),
-        ("subtitle", json!(notice.subtitle)),
-        ("message", json!(notice.message)),
-        ("summary", json!(notice.summary)),
-        ("subject", notice.subject.clone()),
-        ("detail", notice.detail.clone()),
-        (
-            "repeat_after_secs",
-            json!(notice.repeat_after.map(|after| after.as_secs())),
-        ),
-        ("silent", json!(notice.silent)),
-        ("test", json!(notice.test)),
-        (
-            "time",
-            json!(at.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()),
-        ),
-        ("timestamp", json!(at.timestamp().as_second())),
-        ("app", json!(crate::APP_NAME)),
-        ("version", json!(about::version())),
-        ("os", json!(host.os)),
-        ("os_version", json!(host.os_version)),
-        ("arch", json!(host.arch)),
+    let envelope = json!({
+        "hostname": host.hostname,
+        "category": notice.category,
+        "level": notice.level,
+        "title": notice.title,
+        "subtitle": notice.subtitle,
+        "message": notice.message,
+        "summary": notice.summary,
+        "subject": notice.subject,
+        "detail": notice.detail,
+        "repeat_after_secs": notice.repeat_after.map(|after| after.as_secs()),
+        "silent": notice.silent,
+        "test": notice.test,
+        "time": at.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+        "timestamp": at.timestamp().as_second(),
+        "app": crate::APP_NAME,
+        "version": about::version(),
+        "os": host.os,
+        "os_version": host.os_version,
+        "arch": host.arch,
         // The envelope's version. Keys may be added under the same
         // number; renaming or removing one is what changes it.
-        ("schema", json!(1)),
-    ];
-    let pairs: Vec<String> = fields
-        .iter()
-        .map(|(key, value)| format!("{}:{value}", json!(key)))
-        .collect();
-    format!("{{{}}}", pairs.join(","))
+        "schema": 1,
+    });
+    let envelope = rounded(envelope);
+    // A `Value` of strings, numbers and maps cannot fail to serialise;
+    // the compact form is the same object if it somehow did.
+    serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| envelope.to_string())
+}
+
+/// Every fraction in the body to two decimals. They are all
+/// percentages, and `7.55712855303729` in a notification is the
+/// collector's arithmetic showing through, not precision anyone reads.
+fn rounded(value: Value) -> Value {
+    match value {
+        Value::Number(number) if number.is_f64() => number
+            .as_f64()
+            .map(|fraction| (fraction * 100.0).round() / 100.0)
+            .and_then(serde_json::Number::from_f64)
+            .map_or(Value::Null, Value::Number),
+        Value::Array(items) => Value::Array(items.into_iter().map(rounded).collect()),
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(k, v)| (k, rounded(v))).collect())
+        }
+        other => other,
+    }
 }
 
 fn body_now(notice: &Notice) -> String {
@@ -519,18 +553,53 @@ mod tests {
         );
     }
 
-    /// A receiver that prints the body shows its beginning: who, what,
-    /// how bad — in that order, whatever a JSON map would have sorted.
+    /// A receiver that prints the body shows it as sent: who, what and
+    /// how bad first, a key to a line, nested fields in the order they
+    /// were written — whatever a JSON map would have sorted. Pins
+    /// serde_json's `preserve_order`, which Cargo.toml asks for.
     #[test]
-    fn the_body_opens_with_who_what_and_how_bad() {
+    fn the_body_reads_top_down_a_key_to_a_line() {
         let notice = Notice::alert(&cpu_event(), "t", "s", "m");
         let text = body(&notice, &host(), &at());
         assert!(
             text.starts_with(
-                r#"{"hostname":"studio","category":"cpu","level":"warning","title":"t""#
+                "{\n  \"hostname\": \"studio\",\n  \"category\": \"cpu\",\n  \"level\": \"warning\",\n  \"title\": \"t\",\n"
             ),
             "{text}"
         );
+        assert!(
+            text.contains(
+                "  \"subject\": {\n    \"type\": \"process\",\n    \"name\": \"Google Chrome Helper\",\n    \"display_name\": null,\n    \"pid\": 830\n  },\n"
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with("  \"schema\": 1\n}"), "{text}");
+        // Still one JSON object to anything that parses it.
+        assert!(serde_json::from_str::<Value>(&text).is_ok());
+    }
+
+    /// The collector's long fractions are cut to two decimals wherever
+    /// they sit; whole numbers and everything else pass untouched.
+    #[test]
+    fn fractions_are_cut_to_two_decimals() {
+        let mut event = cpu_event();
+        event.detail = AlertDetail::Cpu {
+            avg_percent: 7.557_128_553_037_29,
+            threshold_percent: 3.0,
+            window: Duration::from_secs(60),
+            runaway: true,
+        };
+        let text = body(&Notice::alert(&event, "t", "s", "m"), &host(), &at());
+        assert!(text.contains("\"avg_percent\": 7.56,"), "{text}");
+        assert!(text.contains("\"threshold_percent\": 3.0,"), "{text}");
+        assert!(text.contains("\"window_secs\": 60,"), "{text}");
+        let nested =
+            rounded(json!({ "list": [{ "share_percent": 12.3456 }], "n": 5, "s": "1.23456" }));
+        assert_eq!(
+            nested,
+            json!({ "list": [{ "share_percent": 12.35 }], "n": 5, "s": "1.23456" })
+        );
+        assert_eq!(rounded(json!(f64::NAN)), Value::Null);
     }
 
     /// Names and paths are the user's: quotes, backslashes, newlines
