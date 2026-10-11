@@ -42,6 +42,7 @@ use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedRule, SustainedWatch};
+use crate::webhook;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, Focusable, Global, ListAlignment, ListState, Pixels,
     ScrollHandle, Window, px,
@@ -334,6 +335,14 @@ impl HistorySort {
             HistorySort::MemoryGrowth => "history.title_growth",
         }
     }
+}
+
+/// The Interface page's "Send test" for the notification webhook.
+pub enum WebhookTest {
+    Sending,
+    /// The endpoint answered with this 2xx status.
+    Delivered(u16),
+    Failed(String),
 }
 
 /// The version check / assisted download, for the About page.
@@ -857,6 +866,8 @@ pub struct ZStatsAppState {
     auto_check_inflight: bool,
     /// The last (or in-flight) version check.
     update_status: Option<UpdateStatus>,
+    /// The last webhook test, until the URL is edited.
+    webhook_test: Option<WebhookTest>,
     /// The whole-table listing, only ever populated on request.
     full_scan: FullScan,
     /// The whole-tree listing for the Apps tab, only ever populated on request.
@@ -964,6 +975,7 @@ impl Default for ZStatsAppState {
             caches_sync: None,
             template_sync: None,
             update_status: None,
+            webhook_test: None,
             update_nudge: updater::nudge(),
             template_nudge: alerttpl::nudge(),
             update_ignored: updater::ignored(),
@@ -1045,6 +1057,9 @@ impl ZStatsAppState {
     pub fn ingest(&mut self, tick: Tick, cx: &mut Context<Self>) -> Vec<AlertEvent> {
         let now = Instant::now();
         let wall = SystemTime::now();
+        // Who a webhook body says it is from — zstats' own host record,
+        // kept before this tick's alerts are posted.
+        webhook::note_host(&tick.snapshot.host);
         let own_walk = self.disk_check_explains_cpu(now);
         let fresh: Vec<AlertEvent> = tick
             .alerts
@@ -2188,6 +2203,48 @@ impl ZStatsAppState {
                 updater::record_outcome(SystemTime::now(), &outcome);
                 state.update_nudge = updater::nudge();
                 state.template_nudge = alerttpl::nudge();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The last webhook test's outcome, for the Interface row.
+    pub fn webhook_test(&self) -> Option<&WebhookTest> {
+        self.webhook_test.as_ref()
+    }
+
+    /// An edited URL is a different endpoint: what the last test said
+    /// about the old one no longer describes anything on screen.
+    pub fn forget_webhook_test(&mut self, cx: &mut Context<Self>) {
+        if self.webhook_test.take().is_some() {
+            self.bump_ui();
+            cx.notify();
+        }
+    }
+
+    /// POST one test notification to the configured URL, off the main
+    /// thread, and keep the answer for the row. One at a time. The
+    /// settings window does not follow ticks, hence the epoch bumps.
+    pub fn test_webhook(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.webhook_test, Some(WebhookTest::Sending)) {
+            return;
+        }
+        self.webhook_test = Some(WebhookTest::Sending);
+        self.bump_ui();
+        cx.notify();
+        let message = i18n::tr("config.webhook_test_body");
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { webhook::send_test(&message) })
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                state.webhook_test = Some(match outcome {
+                    Ok(status) => WebhookTest::Delivered(status),
+                    Err(error) => WebhookTest::Failed(error),
+                });
+                state.bump_ui();
                 cx.notify();
             });
         })

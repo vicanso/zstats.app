@@ -62,6 +62,7 @@ mod updater;
 mod views;
 mod volflag;
 mod watch;
+mod webhook;
 #[cfg(target_os = "macos")]
 mod window_ext;
 
@@ -990,6 +991,10 @@ struct SettingsWindow {
     /// Whether the field currently parses; drives the inline warning.
     /// Only valid values are persisted, so junk never reaches app.toml.
     proxy_valid: bool,
+    /// The notification webhook's URL field and whether it parses —
+    /// the proxy field's twin, same persistence rule.
+    webhook_input: gpui::Entity<gpui_kit::component::input::InputState>,
+    webhook_valid: bool,
     /// Re-reads launch-at-login when this window becomes key again —
     /// the user may have just approved or revoked it in Login Items.
     _activation: Subscription,
@@ -1057,6 +1062,30 @@ impl SettingsWindow {
             },
         )
         .detach();
+        let webhook_input = cx.new(|cx| {
+            gpui_kit::component::input::InputState::new(window, cx)
+                .placeholder(i18n::tr("config.webhook_placeholder"))
+                .default_value(prefs::webhook())
+        });
+        cx.subscribe(
+            &webhook_input,
+            |this, input, event: &gpui_kit::component::input::InputEvent, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    this.webhook_valid = webhook::valid(&value);
+                    if this.webhook_valid {
+                        // Read at each send: the next notification
+                        // goes to the new address, no restart.
+                        prefs::set_webhook(&value);
+                    }
+                    cx.global::<ZStatsGlobalStore>()
+                        .clone()
+                        .update(cx, |state, cx| state.forget_webhook_test(cx));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         Self {
@@ -1065,6 +1094,8 @@ impl SettingsWindow {
             scroll: ScrollHandle::new(),
             proxy_input,
             proxy_valid: true,
+            webhook_input,
+            webhook_valid: true,
             _activation: activation,
             paint_token,
         }
@@ -1092,8 +1123,12 @@ impl Render for SettingsWindow {
                 state,
                 section,
                 body_height,
-                &self.proxy_input,
-                self.proxy_valid,
+                &views::config::Fields {
+                    proxy: &self.proxy_input,
+                    proxy_valid: self.proxy_valid,
+                    webhook: &self.webhook_input,
+                    webhook_valid: self.webhook_valid,
+                },
             ));
         div()
             .relative()

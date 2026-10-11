@@ -41,6 +41,7 @@ use crate::active;
 use crate::format;
 use crate::i18n;
 use crate::state;
+use crate::webhook;
 use rust_i18n::t;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -439,13 +440,23 @@ pub fn start(cx: &mut gpui::App) {
 
 /// Show one system notification for a freshly fired alert.
 pub fn post(event: &AlertEvent) {
-    dispatch(Banner {
+    let banner = Banner {
         id: episode_banner_id(event),
         title: subject_title(&event.subject),
         subtitle: notify_subtitle(event),
         body: notify_body(event),
         silent: false,
-    });
+    };
+    // The same delivery by a second road (`webhook.rs`): beside the
+    // banner rather than inside `dispatch`, because the URL wants the
+    // event's fields and not just the three lines made from them.
+    webhook::send(webhook::Notice::alert(
+        event,
+        &banner.title,
+        &banner.subtitle,
+        &banner.body,
+    ));
+    dispatch(banner);
 }
 
 /// Announce a process that has been holding a low-but-real CPU share for a
@@ -456,7 +467,7 @@ pub fn post(event: &AlertEvent) {
 /// is by definition always under it. Without a banner the finding would only
 /// exist inside a panel nobody has a reason to open.
 pub fn post_sustained(notice: &state::SustainedNotice) {
-    dispatch(Banner {
+    let banner = Banner {
         id: format!("zstats-sustained-{}", notice.pid),
         title: notice.name.clone(),
         subtitle: t!(
@@ -473,7 +484,17 @@ pub fn post_sustained(notice: &state::SustainedNotice) {
         // Silent: a slow-burn finding, not something that needs attention
         // this second.
         silent: true,
-    });
+    };
+    webhook::send(webhook::Notice::finding(
+        "sustained_cpu",
+        [&banner.title, &banner.subtitle, &banner.body],
+        serde_json::json!({ "type": "process", "name": notice.name, "pid": notice.pid }),
+        serde_json::json!({
+            "avg_percent": notice.cpu_avg,
+            "duration_secs": notice.duration.as_secs(),
+        }),
+    ));
+    dispatch(banner);
 }
 
 /// " Unused for 3h." — appended to a slow-burn banner when the subject
@@ -500,7 +521,7 @@ fn unused_clause(pid: u32) -> String {
 /// late. Silent, and one per climb (`state::take_memory_creep_notices`
 /// re-arms only once the climb is gone).
 pub fn post_memory_creep(creep: &state::MemoryCreep) {
-    dispatch(Banner {
+    let banner = Banner {
         id: format!("zstats-creep-{}", creep.name),
         title: creep.name.clone(),
         subtitle: t!(
@@ -514,7 +535,17 @@ pub fn post_memory_creep(creep: &state::MemoryCreep) {
             unused_clause(creep.root_pid)
         ),
         silent: true,
-    });
+    };
+    webhook::send(webhook::Notice::finding(
+        "memory_growth",
+        [&banner.title, &banner.subtitle, &banner.body],
+        serde_json::json!({ "type": "app", "name": creep.name, "pid": creep.root_pid }),
+        serde_json::json!({
+            "climb_bytes": creep.climb_bytes,
+            "now_bytes": creep.now_bytes,
+        }),
+    ));
+    dispatch(banner);
 }
 
 /// The daily disk check found a directory that grew past
@@ -523,7 +554,7 @@ pub fn post_memory_creep(creep: &state::MemoryCreep) {
 /// worth a sound. The click lands on the Alerts tab's growth card.
 pub fn post_disk_growth(notice: &state::GrowthNotice) {
     let days = (notice.over.as_secs_f64() / 86_400.0).round().max(1.0) as u64;
-    dispatch(Banner {
+    let banner = Banner {
         id: format!("zstats-growth-{}", notice.growth.path.display()),
         title: format::tilde(&notice.growth.path),
         subtitle: t!(
@@ -538,7 +569,21 @@ pub fn post_disk_growth(notice: &state::GrowthNotice) {
         )
         .to_string(),
         silent: true,
-    });
+    };
+    webhook::send(webhook::Notice::finding(
+        "disk_growth",
+        [&banner.title, &banner.subtitle, &banner.body],
+        serde_json::json!({
+            "type": "directory",
+            "path": notice.growth.path.display().to_string(),
+        }),
+        serde_json::json!({
+            "grew_bytes": notice.growth.grew,
+            "now_bytes": notice.growth.now,
+            "over_secs": notice.over.as_secs(),
+        }),
+    ));
+    dispatch(banner);
 }
 
 fn signal_click() {

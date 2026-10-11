@@ -310,6 +310,17 @@ zedis 的 logger 原样适配：stdout + `~/.zstats/logs/zstats-app.log.<日期>
 
 告警触发时发原生横幅，macOS 走 `UNUserNotificationCenter`。点击横幅会打开 popover 并切到 Alerts 页。系统横幅的外观不能自定义。
 
+**同一批投递的第二条路：POST 到用户配置的 URL（`webhook.rs`，2026-10-11）。** 起因是「人不在这台 Mac 前」：横幅只在本机屏幕上，而 ntfy、聊天工具的 webhook 能把同一条通知送到手机。几条取舍：
+
+- **是第二种传输，不是第二套判断。** 调用点贴在每个 `notify::post*` 旁边，所以「通知」总开关、暂停提醒、自动静音挡住横幅时同样挡住 POST，日志里那条 `banner=` 的结论对两者都成立。不放进 `dispatch`，是因为 URL 要的是事件的字段，而不只是由字段拼出来的三行字。它不继承的只有横幅对 macOS 的依赖：裸 `cargo run` 没有横幅照样 POST；在系统设置里关掉 zstats 的横幅也照样 POST——想要「只推手机、桌面不弹」就这么配。
+- **发哪些。** zstats 的六类告警（`cpu` / `app_cpu` / `memory` / `app_memory` / `disk` / `pressure`，`level` 为 `warning` 或 `critical`），以及面板自己的三类观察（`sustained_cpu` / `memory_growth` / `disk_growth`，`level` 为 `info`、`silent` 为 true——它们的横幅本来就是静默的，接收端可以据此不出声）。
+- **正文是一个 JSON 对象，键按阅读顺序写。** `hostname`、`category`、`level`、`title`、`subtitle`、`message`、`summary`、`subject`、`detail`、`repeat_after_secs`、`silent`、`test`、`time`、`timestamp`、`app`、`version`、`os`、`os_version`、`arch`、`schema`。顺序是手写的而不是交给 JSON map 排序：把正文当文本显示的接收端（ntfy 对直接 POST 到 topic 的请求就是这样）只露出开头一百来个字符，那里应该是「谁、什么、多严重」，而不是按字母排出来的 `"app":"zstats","arch"`。`title` / `subtitle` / `message` 就是横幅的三行（界面语言），`summary` 是 zstats 自带的英文一句话；`detail` 里每个数都是事件自己的字段，时长统一成秒，**照抄不重算**——和视图层同一条规矩。主机信息取自 zstats 快照里的 `HostInfo`，不另问系统一遍。`schema` 是信封版本：加键不变，改名或删键才变。
+- **投递：一个工作线程、容量 32 的有界队列、只试一次、10 秒超时、走应用的代理设置。** POST 不能在主线程上跑；端点挂了也不能攒积压——队列满了就丢并记日志。不重试：晚十分钟到的通知描述的是一台已经变了的机器，而还成立的状况引擎自己会再报。
+- **URL 多半本身就是密钥**（ntfy 的 topic 即口令），所以日志只写主机名、从不写路径，错误信息里出现的 URL 也会被替换掉。正文会带上主机名和相关进程、目录名，设置项的说明里写明了这一点。
+- **设置页那一行带「发送测试」**：凭记忆敲的 URL 多半是错的，而第一条真告警不是发现这件事的好时机。测试走完整的信封（`category` 为 `test`、`test` 为 true），把端点的回答显示在行内（`Delivered · HTTP 200` / `Failed: …`）；URL 一改，上次的结论就清掉。
+- **JSON 用 `serde_json` 生成**（直接依赖里新增的唯一一项，树里本来就有）：正文里是用户的进程名和路径，转义不是该手写的东西。`updater.rs` 不引它是因为那边只读两个顶层字段，两处的理由并不冲突。
+- 实测（隔离 HOME 的 dev 构建 + 本机临时 HTTP 接收端）：测试按钮送达并显示 HTTP 200；把 CPU 阈值调到 1% 后引擎报出的两条真实告警各产生一次 POST，日志依次是 `banner="delivered"` 和 `webhook delivered … host=127.0.0.1 status=200`；端点返回 500 时行内显示 `Failed: http status: 500`。没有对公网的 ntfy 实发。
+
 **macOS 上投递走 `UNUserNotificationCenter`：fire-and-forget + 常驻 delegate。** `addNotificationRequest:` 异步返回；点击由启动时装好的 delegate 在主 run loop 上接收（gpui 本来就在泵它），任何一条横幅的点击都等于「打开 Alerts 页」，所以 delegate 无需携带 per-notification 状态；`willPresent` 回调放行 Banner|List|Sound，让面板打开（应用最前）时横幅照常出现——菜单栏应用的「最前」正是用户在看告警的时刻。fire-and-forget 是目的而不是省事：更早的 notify-rust `wait_for_action` 版本要等用户*处理掉*横幅才返回，一条躺着没人理的横幅能把投递线程停到天亮，第 17 条起静默丢弃。用户的注意力不是可以串行化的资源。
 
 **UN identifier 按 episode 稳定**（`zstats-proc-{pid}-{kind}`，与 `state::Episode` 同一把钥匙），同一条故事的 30 分钟 follow-up、以及冷却后再越线，都是更新那一行，不是并排两条时间戳。Alerts 页才是历史。曾经每条用递增序号（`zstats-banner-{n}`），Mail 在 runaway 线附近按默认 10 分钟冷却重开，通知中心就会堆成「1 分钟前」挨着「11 分钟前」。启动时清掉旧的序号行——已经堆上的不会自己合并。

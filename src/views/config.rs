@@ -35,7 +35,8 @@ use crate::omarchy;
 use crate::opener;
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
 use crate::state::{
-    CachesSync, HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore,
+    CachesSync, HintsSync, TemplateSync, UpdateStatus, WebhookTest, ZStatsAppState,
+    ZStatsGlobalStore,
 };
 use crate::theme;
 use crate::updater;
@@ -132,6 +133,16 @@ impl SettingsSection {
     }
 }
 
+/// The settings window's text fields, with whether each currently
+/// parses. They live with the window (`main.rs`), not in the store —
+/// a half-typed URL is nobody's state but the field's.
+pub struct Fields<'a> {
+    pub proxy: &'a Entity<InputState>,
+    pub proxy_valid: bool,
+    pub webhook: &'a Entity<InputState>,
+    pub webhook_valid: bool,
+}
+
 /// `body_height` is what the window can show without scrolling. Only
 /// About reads it — every other section is short enough that the body's
 /// own scroll is the right answer.
@@ -139,11 +150,10 @@ pub fn render(
     state: &ZStatsAppState,
     section: SettingsSection,
     body_height: f32,
-    proxy_input: &Entity<InputState>,
-    proxy_valid: bool,
+    fields: &Fields,
 ) -> Vec<AnyElement> {
     match section {
-        SettingsSection::Interface => vec![interface_card(state, proxy_input, proxy_valid)],
+        SettingsSection::Interface => vec![interface_card(state, fields)],
         SettingsSection::Config => render_config(state),
         #[cfg(target_os = "macos")]
         SettingsSection::Permissions => vec![permissions_card()],
@@ -855,11 +865,7 @@ fn file_note(id: &'static str, name: &'static str) -> AnyElement {
 /// Language and theme. Selection reuses the accent chips of the Alerts
 /// threshold editor — in this app a picked value is accent, like a crossed
 /// threshold, and everything else stays neutral.
-fn interface_card(
-    state: &ZStatsAppState,
-    proxy_input: &Entity<InputState>,
-    proxy_valid: bool,
-) -> AnyElement {
+fn interface_card(state: &ZStatsAppState, fields: &Fields) -> AnyElement {
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("config.interface"),
@@ -960,9 +966,10 @@ fn interface_card(
             ),
         ))
         .child(notifications_row())
+        .child(webhook_row(state, fields.webhook, fields.webhook_valid))
         .child(autostart_row())
         .child(disk_watch_row())
-        .child(proxy_row(proxy_input, proxy_valid))
+        .child(proxy_row(fields.proxy, fields.proxy_valid))
         .child(opacity_row())
         .into_any_element()
 }
@@ -1077,6 +1084,107 @@ fn proxy_row(input: &Entity<InputState>, valid: bool) -> AnyElement {
                     .child(i18n::tr("config.proxy_invalid")),
             )
         })
+        .into_any_element()
+}
+
+/// Where notifications are also POSTed (`webhook.rs`). Under the
+/// Notifications switch because it is that switch's second road, and
+/// held back by it the same way. The button sends one marked test and
+/// says what the endpoint answered: a URL typed from memory is wrong
+/// more often than not, and the first real alert is a poor moment to
+/// find out. The test's verdict is dropped as soon as the URL changes.
+fn webhook_row(state: &ZStatsAppState, input: &Entity<InputState>, valid: bool) -> AnyElement {
+    let test = state.webhook_test();
+    let sending = matches!(test, Some(WebhookTest::Sending));
+    let can_test = valid && !sending && !prefs::webhook().is_empty();
+    let verdict = match test {
+        Some(WebhookTest::Sending) => Some((i18n::tr("config.webhook_test_sending"), false)),
+        Some(WebhookTest::Delivered(status)) => Some((
+            t!("config.webhook_test_ok", status = status).to_string(),
+            false,
+        )),
+        Some(WebhookTest::Failed(error)) => Some((
+            t!("config.webhook_test_failed", error = error.as_str()).to_string(),
+            true,
+        )),
+        None => None,
+    };
+    v_flex()
+        .px(px(13.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme::ink())
+                                .child(i18n::tr("config.webhook")),
+                        )
+                        .child(widgets::info_icon(
+                            "pref-webhook-info",
+                            i18n::tr("config.webhook_tip"),
+                        )),
+                )
+                // The page's chip chrome, as the Login Items prompt
+                // wears it; dimmed with no hover while there is nothing
+                // to send to.
+                .child(
+                    div()
+                        .id("pref-webhook-test")
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::inset())
+                        .px(px(10.))
+                        .py(px(3.))
+                        .text_size(px(11.))
+                        .text_color(if can_test {
+                            theme::text()
+                        } else {
+                            theme::text_faint()
+                        })
+                        .when(can_test, |d| {
+                            d.hover(|d| d.bg(theme::surface_raised()))
+                                .on_click(|_, _window, cx| {
+                                    cx.global::<ZStatsGlobalStore>()
+                                        .clone()
+                                        .update(cx, |state, cx| state.test_webhook(cx));
+                                })
+                        })
+                        .child(i18n::tr("config.webhook_test")),
+                ),
+        )
+        .child(div().mt(px(6.)).child(Input::new(input).xsmall()))
+        .when(!valid, |d| {
+            d.child(
+                div()
+                    .mt(px(4.))
+                    .text_size(px(10.))
+                    .text_color(Hsla::from(theme::accent_light()))
+                    .child(i18n::tr("config.webhook_invalid")),
+            )
+        })
+        .children(verdict.filter(|_| valid).map(|(text, failed)| {
+            div()
+                .mt(px(4.))
+                .text_size(px(10.))
+                .text_color(if failed {
+                    Hsla::from(theme::accent_light())
+                } else {
+                    Hsla::from(theme::text_dim())
+                })
+                .child(text)
+        }))
         .into_any_element()
 }
 

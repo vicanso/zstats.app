@@ -1,7 +1,7 @@
 //! UI preferences — language, theme, the tray's face, panel opacity, the
 //! outbound proxy, the sustained-load watcher's two knobs, the
-//! notifications switch, and the analyser's last scope — persisted in
-//! `app.toml`.
+//! notifications switch and the URL notifications are also sent to, and
+//! the analyser's last scope — persisted in `app.toml`.
 //!
 //! Deliberately *not* in the shared `config.toml`: `zstats::settings::save`
 //! serialises only the sections the CLI models (`collector` / `daemon` /
@@ -165,6 +165,10 @@ static OPACITY: AtomicU8 = AtomicU8::new(0);
 /// and on every set, so the module the background fetch reads is never
 /// stale.
 static PROXY: RwLock<String> = RwLock::new(String::new());
+/// Where notifications are also POSTed (`webhook.rs`); empty is off.
+/// Read at the moment of each send, so an edit applies to the next
+/// notification without a restart.
+static WEBHOOK: RwLock<String> = RwLock::new(String::new());
 /// The analysis scope a fresh launch restores — the roots of the last
 /// finished top-level walk. Empty means the default home walk, expressed
 /// by leaving the key out (same posture as every other pref here).
@@ -364,6 +368,19 @@ pub fn set_proxy(value: &str) {
     persist();
 }
 
+/// The notification webhook's URL; empty when none is set.
+pub fn webhook() -> String {
+    WEBHOOK.read().expect("webhook pref lock poisoned").clone()
+}
+
+/// Remember and persist the webhook URL. Callers validate first
+/// (`webhook::valid`); a hand-edited file may still hold junk, which
+/// fails at send time with a line in the log.
+pub fn set_webhook(value: &str) {
+    *WEBHOOK.write().expect("webhook pref lock poisoned") = value.trim().to_string();
+    persist();
+}
+
 /// The analyser scope to restore at launch; empty = the default (~).
 pub fn analysis_roots() -> Vec<PathBuf> {
     ANALYSIS_ROOTS
@@ -470,6 +487,7 @@ pub fn load() {
     OPACITY.store(encode_opacity(prefs.opacity), Ordering::Relaxed);
     crate::proxy::set_configured_proxy(&prefs.proxy);
     *PROXY.write().expect("proxy pref lock poisoned") = prefs.proxy;
+    *WEBHOOK.write().expect("webhook pref lock poisoned") = prefs.webhook;
     *ANALYSIS_ROOTS
         .write()
         .expect("analysis roots pref lock poisoned") = prefs.analysis_roots;
@@ -521,6 +539,7 @@ fn persist() {
         muted: MUTED.load(Ordering::Relaxed),
         opacity: opacity(),
         proxy: proxy(),
+        webhook: webhook(),
         analysis_roots: ANALYSIS_ROOTS
             .read()
             .expect("analysis roots pref lock poisoned")
@@ -568,6 +587,7 @@ struct Prefs {
     muted: bool,
     opacity: Option<f32>,
     proxy: String,
+    webhook: String,
     analysis_roots: Vec<String>,
     analysis_exclude: Vec<String>,
     pinned: bool,
@@ -617,6 +637,7 @@ fn read(dir: &Path) -> Prefs {
             .is_some_and(|on| !on),
         opacity: table.get("opacity").and_then(parse_opacity),
         proxy: get("proxy").unwrap_or_default().trim().to_string(),
+        webhook: get("webhook").unwrap_or_default().trim().to_string(),
         analysis_roots: list("analysis_roots"),
         analysis_exclude: list("analysis_exclude"),
         pinned: table
@@ -743,6 +764,9 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if !prefs.proxy.is_empty() {
         doc.insert("proxy".into(), toml::Value::String(prefs.proxy.clone()));
     }
+    if !prefs.webhook.is_empty() {
+        doc.insert("webhook".into(), toml::Value::String(prefs.webhook.clone()));
+    }
     if prefs.pinned {
         doc.insert("pinned".into(), toml::Value::Boolean(true));
     }
@@ -808,6 +832,7 @@ mod tests {
                 muted: true,
                 opacity: Some(0.8),
                 proxy: "http://127.0.0.1:7890".into(),
+                webhook: "https://ntfy.sh/a-topic".into(),
                 analysis_roots: vec![
                     "/Users/x/Library".to_string(),
                     "/Users/x/.cache".to_string(),
@@ -827,6 +852,7 @@ mod tests {
         assert_eq!(back.tray, TrayPref::Memory);
         assert_eq!(back.opacity, Some(0.8));
         assert_eq!(back.proxy, "http://127.0.0.1:7890");
+        assert_eq!(back.webhook, "https://ntfy.sh/a-topic");
         assert_eq!(
             back.analysis_roots,
             vec![
@@ -855,6 +881,7 @@ mod tests {
             "unset opacity should omit the key"
         );
         assert!(!text.contains("proxy"), "empty proxy should omit the key");
+        assert!(!text.contains("webhook"), "no webhook, no key");
         assert!(
             !text.contains("notifications"),
             "banners on should omit the key"

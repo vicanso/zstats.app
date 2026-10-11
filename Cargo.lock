@@ -10072,6 +10072,7 @@ dependencies = [
  "resvg 0.46.0",
  "rust-embed",
  "rust-i18n",
+ "serde_json",
  "sha2 0.11.0",
  "smol",
  "sys-locale",

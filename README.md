@@ -40,6 +40,7 @@ The headline is **a base threshold combined with per-program ones**: one global 
 - **Two granularities**: rules watch the single **process** and, separately, the whole **application** — its process tree summed. A runaway helper trips the process line; a browser quietly holding 4 GB across 37 helpers trips the application line, though no single member ever crosses one. Each level carries its own base threshold and its own per-name overrides
 - **Slow burns get named too**: a process holding CPU for hours without ever crossing a line (25% for an hour, say) is called out by the sustained-load watcher — delivered as a silent banner, never a nag. How long counts as "sustained", and how far under the alert line the bar sits, are yours to set
 - Native notification banners; snooze an episode for 1 or 3 hours
+- Send the same notifications to a URL of your own — a phone through [ntfy](https://ntfy.sh), a chat webhook, a script — as one JSON POST each: `hostname`, `category` (`cpu`, `memory`, `disk`, `pressure`, …), `level`, `title`, `message`, the subject and its numbers, the time. Set it under Settings → Interface, where a button sends a test; it follows the Notifications switch and a snooze like the banners do
 - Every card jumps to its subject: the process, the app tree, or the disk tools for a full volume
 - Memory-pressure cards list the top consumers and offer a polite quit (⌘Q / SIGTERM — never SIGKILL)
 

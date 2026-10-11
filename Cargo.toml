@@ -94,6 +94,12 @@ sha2 = "0.11"
 rust-i18n = "4.2.3"
 sys-locale = "0.3.2"
 toml = "1.1.6"
+# The alert webhook's JSON body (webhook.rs): strings a user's process
+# names and paths end up in, so escaping is not something to write by
+# hand. Already in the tree several times over (gpui, zstats); `serde`
+# itself stays an indirect dependency — the body is built with `json!`,
+# nothing here derives.
+serde_json = "1"
 # Parallel directory walk for the Hardware tab's analyser (docs/
 # disk-analysis.md). Same engine diskonaut uses; pinned to a dedicated
 # 3-thread rayon pool at the call site so the resident collector's 2s
