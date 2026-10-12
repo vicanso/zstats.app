@@ -18,12 +18,14 @@
 use super::overview;
 use super::widgets::{self, card};
 use crate::alertlog::{self, DayLog};
+use crate::alerttpl;
 use crate::assets;
 use crate::confirm;
 use crate::diskwatch;
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::notify;
 use crate::prefs;
 use crate::state::{
     GrowthNotice, MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore,
@@ -41,7 +43,8 @@ use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
-use zstats::settings::{FileConfig, PressureAlert};
+use zstats::alerts::{ActiveThresholds, Template};
+use zstats::settings::{AlertsConfig, FileConfig, PressureAlert};
 use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity};
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
@@ -110,7 +113,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 /// and headings at one, loose text 13px to their left, and "Past 7
 /// days" read as indented against the Watching rows above it.
 fn on_content_line(el: AnyElement) -> AnyElement {
-    div().px(px(13.)).child(el).into_any_element()
+    div().px(px(widgets::CARD_PAD)).child(el).into_any_element()
 }
 
 fn empty_card(state: &ZStatsAppState) -> AnyElement {
@@ -177,7 +180,7 @@ fn watch_cards_at(live_ages: &[Duration], noticed_agos: &[Duration]) -> Vec<usiz
 
 fn earlier_heading() -> AnyElement {
     div()
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .text_size(px(10.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme::text_dim())
@@ -259,9 +262,14 @@ fn past_day_card(day: &DayLog) -> AnyElement {
                 .map(|(i, group)| past_row(i, group, i + 1 == shown && hidden == 0)),
         )
         .when(hidden > 0, |d| {
-            d.child(div().px(px(13.)).py(px(6.)).child(widgets::note(
-                t!("alerts.past_more", count = hidden).to_string(),
-            )))
+            d.child(
+                div()
+                    .px(px(widgets::CARD_PAD))
+                    .py(px(6.))
+                    .child(widgets::note(
+                        t!("alerts.past_more", count = hidden).to_string(),
+                    )),
+            )
         })
         .into_any_element()
 }
@@ -286,7 +294,7 @@ fn past_groups(episodes: &[alertlog::Restored]) -> Vec<Vec<&alertlog::Restored>>
 }
 
 /// A subject without its pid — what makes two episodes the same story.
-fn subject_name(subject: &AlertSubject) -> String {
+pub(super) fn subject_name(subject: &AlertSubject) -> String {
     match subject {
         AlertSubject::Process {
             name, display_name, ..
@@ -325,7 +333,7 @@ fn past_row(index: usize, group: &[&alertlog::Restored], last: bool) -> AnyEleme
     h_flex()
         .items_center()
         .gap(px(8.))
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .py(px(5.))
         .when(!last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
@@ -333,7 +341,7 @@ fn past_row(index: usize, group: &[&alertlog::Restored], last: bool) -> AnyEleme
         .child(
             div()
                 .flex_none()
-                .font_family(font::MONO)
+                .font_features(font::tnum())
                 .text_size(px(10.))
                 .text_color(theme::text_dim())
                 .child(format::clock(e.at)),
@@ -424,6 +432,17 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
                 .text_color(theme::tiny_label(theme::text_muted()))
                 .child(alert_sentence(&seen.event)),
         )
+        // What to do about it, in a sentence — the card said what
+        // crossed and by how much, and left the reader there. Live
+        // cards only: a restored one is a record, and its subject may
+        // be gone.
+        .when(seen.live, |d| {
+            d.child(
+                div()
+                    .mt(px(4.))
+                    .child(widgets::note(i18n::tr(advice_key(seen.event.kind())))),
+            )
+        })
         .children(consumer_rows(i, &seen.event, seen.live))
         .when_some(seen.event.repeat_after, |d, after| {
             d.child(div().mt(px(8.)).child(widgets::note(
@@ -435,6 +454,18 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
                 .child(snooze_row(i, &seen.event, state))
         })
         .into_any_element()
+}
+
+/// The one thing a reader can do about each kind of alert. Keyed on
+/// the kind zstats reported and nothing else: this is copy, not a
+/// second opinion about the condition.
+fn advice_key(kind: AlertKind) -> &'static str {
+    match kind {
+        AlertKind::Cpu | AlertKind::AppCpu => "alerts.do_cpu",
+        AlertKind::Memory | AlertKind::AppMemory => "alerts.do_mem",
+        AlertKind::Disk => "alerts.do_disk",
+        AlertKind::Pressure => "alerts.do_pressure",
+    }
 }
 
 fn alert_when(seen: &SeenAlert) -> AnyElement {
@@ -511,7 +542,7 @@ fn sustained_from(active: &[SustainedNotice]) -> Option<AnyElement> {
                     .child(
                         div()
                             .mt(px(2.))
-                            .font_family(font::MONO)
+                            .font_features(font::tnum())
                             .text_size(px(10.))
                             .text_color(theme::text_muted())
                             .child(
@@ -582,7 +613,7 @@ fn creep_from(creeps: &[(MemoryCreep, Duration)]) -> Option<AnyElement> {
                     .child(
                         div()
                             .flex_none()
-                            .font_family(font::MONO)
+                            .font_features(font::tnum())
                             .text_size(px(10.))
                             .text_color(theme::text_muted())
                             .child(
@@ -661,7 +692,7 @@ fn growth_from(growth: &[(GrowthNotice, Duration)]) -> Option<AnyElement> {
                     .child(
                         div()
                             .flex_none()
-                            .font_family(font::MONO)
+                            .font_features(font::tnum())
                             .text_size(px(10.))
                             .text_color(theme::text_muted())
                             .child(
@@ -686,9 +717,10 @@ fn growth_from(growth: &[(GrowthNotice, Duration)]) -> Option<AnyElement> {
 /// line wrapped mid-token at 320px (`CPU 30 Memory:`). `None` with no
 /// readable config: the empty body already covers the waiting state.
 ///
-/// The third field marks a wide row — a watcher's sentence ("≥2.0 GB in
-/// an hour") that does not fit half the card; the thresholds are a few
-/// characters and go two to a row ([`armed_block`]).
+/// The third field marks a wide row — a watcher's sentence ("in an hour
+/// · ≥2.0 GB") that does not fit half the card; the thresholds are a few
+/// characters and go two to a row ([`armed_block`]). The figure is the
+/// last token, so it ends on the same edge as the right-hand column.
 fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String, bool)>> {
     let file = state.settings()?;
     let eff = zstats::alerts::ActiveThresholds::from_config(&file.alerts);
@@ -813,7 +845,11 @@ fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
         .collect();
     lines.extend(wide.into_iter().map(|(k, v, _)| (vec![(k, v)], false)));
     let last = lines.len().saturating_sub(1);
-    let cell = |(k, v): (String, String)| {
+    // `wide`: one sentence across the card. The label yields, and the
+    // sentence stays whole at the right edge — the same edge the column
+    // above ends on. A truncated value used to start beside the label
+    // and lose its tail, so the figure never reached that column.
+    let cell = |(k, v): (String, String), wide: bool| {
         h_flex()
             .flex_1()
             .min_w_0()
@@ -821,18 +857,19 @@ fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
             .gap(px(8.))
             .child(
                 div()
-                    .flex_none()
                     .text_size(px(10.))
                     .text_color(theme::text_dim())
+                    .when(wide, |d| d.min_w_0().truncate().flex_1())
+                    .when(!wide, |d| d.flex_none())
                     .child(k),
             )
             .child(
                 div()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(font::MONO)
+                    .font_features(font::tnum())
                     .text_size(px(10.))
                     .text_color(theme::text_muted())
+                    .when(wide, |d| d.flex_none())
+                    .when(!wide, |d| d.min_w_0().truncate())
                     .child(v),
             )
     };
@@ -861,12 +898,13 @@ fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
             )
             .children(lines.into_iter().enumerate().map(|(i, (line, half))| {
                 let lone = half && line.len() == 1;
+                let wide = !half;
                 h_flex()
                     .w_full()
                     .gap(px(16.))
                     .pt(px(4.))
                     .when(i != last, |d| d.pb(px(4.)))
-                    .children(line.into_iter().map(cell))
+                    .children(line.into_iter().map(|pair| cell(pair, wide)))
                     // A threshold left alone on the last short row keeps
                     // half the width, so its value lines up with the
                     // column above instead of the card's right edge.
@@ -962,15 +1000,32 @@ fn alert_head(
                 widgets::with_wrap_tooltip(
                     ("edit-threshold-tip", index),
                     i18n::tr("alerts.set_hint"),
-                    Button::new(("edit-threshold", index))
-                        .icon(IconName::Settings2)
-                        .ghost()
-                        .xsmall()
+                    // A word, not the sliders glyph: that glyph is the
+                    // footer's Settings, two inches below, and here it
+                    // opened something else.
+                    // Built by hand at the pills' size: the kit's
+                    // smallest button sets its label at 14px, which
+                    // beside a 10px "WARNING" was the loudest word on
+                    // the card.
+                    div()
+                        .id(("edit-threshold", index))
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme::border())
+                        .bg(theme::inset())
+                        .px(px(8.))
+                        .py(px(2.))
+                        .text_size(px(10.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                        .hover(|d| d.bg(theme::surface_raised()))
                         .on_click(move |_, _window, cx| {
                             cx.global::<ZStatsGlobalStore>()
                                 .clone()
                                 .update(cx, |state, cx| state.toggle_alert(tgt.key, &tgt.name, cx));
-                        }),
+                        })
+                        .child(i18n::tr("alerts.adjust")),
                 )
             }))
             .child({
@@ -1223,9 +1278,7 @@ fn subject_label(subject: &AlertSubject) -> String {
             count = *process_count
         )
         .to_string(),
-        AlertSubject::Volume { mount_point } => {
-            t!("alerts.volume", mount = mount_point.clone()).to_string()
-        }
+        AlertSubject::Volume { mount_point } => notify::volume_title(mount_point),
         AlertSubject::System => i18n::tr("alerts.system"),
     }
 }
@@ -1373,7 +1426,7 @@ fn consumer_rows(index: usize, event: &AlertEvent, live: bool) -> Option<AnyElem
                             .gap(px(4.))
                             .child(
                                 div()
-                                    .font_family(font::MONO)
+                                    .font_features(font::tnum())
                                     .text_size(px(10.))
                                     .text_color(theme::text_muted())
                                     .child(format::memory(c.bytes)),
@@ -1500,16 +1553,26 @@ fn threshold_editor(
     target: &OverrideTarget,
     settings: Option<&FileConfig>,
 ) -> AnyElement {
-    let current = configured_value(settings, target);
-    let overridden = is_overridden(settings, target);
-    let caption = match (&current, overridden) {
-        (Some(v), true) => {
-            t!("alerts.override_at", value = display_value(target.key, v)).to_string()
+    // The caption names the layer and the chips light its value, both
+    // from the one resolution ([`in_force`]) the bar itself comes from.
+    let held = settings.map(|s| in_force(s, target));
+    let current = held.as_ref().and_then(|h| h.lit.clone());
+    let caption = match &held {
+        Some(InForce {
+            lit: Some(v),
+            source,
+        }) => {
+            let value = display_value(target.key, v);
+            match source {
+                BarSource::Yours => t!("alerts.override_at", value = value).to_string(),
+                BarSource::Table => t!("alerts.table_at", value = value).to_string(),
+                BarSource::Base => t!("alerts.default_at", value = value).to_string(),
+            }
         }
-        (Some(v), false) => {
-            t!("alerts.default_at", value = display_value(target.key, v)).to_string()
-        }
-        (None, _) => i18n::tr("alerts.threshold_unknown"),
+        // A global memory bar is the lower of a share and a ceiling,
+        // which no single preset stands for.
+        Some(_) => i18n::tr("alerts.default_plain"),
+        None => i18n::tr("alerts.threshold_unknown"),
     };
 
     div()
@@ -1608,10 +1671,143 @@ pub(super) fn presets(key: &str) -> Vec<(String, &'static str)> {
     }
 }
 
-pub(super) fn configured_value(
-    settings: Option<&FileConfig>,
-    target: &OverrideTarget,
-) -> Option<String> {
+/// Which layer zstats took one subject's alert bar from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BarSource {
+    /// An entry of the user's own under `[alerts.*_overrides]`.
+    Yours,
+    /// A row of the alert table (compiled in, or `template.toml`).
+    Table,
+    /// No per-name entry: the global value.
+    Base,
+}
+
+/// One subject's bar the way zstats resolved it: the preset chip that
+/// stands for it, when one does, and the layer that decided it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct InForce {
+    pub(super) lit: Option<String>,
+    pub(super) source: BarSource,
+}
+
+/// zstats' resolution of the per-name bars, held for one paint.
+///
+/// The chips under a bar used to light [`configured_value`] — the
+/// user's entry, else the global value, else the default — which leaves
+/// the alert table out, while the bar above them is `ActiveThresholds`
+/// with the table in. For every program the table names the two
+/// disagreed: "CPU alert off" over a lit 200%. And a lit global memory
+/// share was not the bar either — that is the lower of the share and
+/// the ceiling — so clicking the lit 25% moved the bar from 4 GB to
+/// 6 GB.
+///
+/// Both read this now. zstats is asked twice: as the engine armed
+/// itself, and against an empty table, which leaves only the user's
+/// entries. The layer is then zstats' own answer — a name the second
+/// matches was decided by the user (its doc: "a user override always
+/// beats a matching template entry"), one only the first matches by the
+/// table — and nothing here matches a name itself. A user key may be a
+/// pattern (`name*`), which a `contains_key` on the file would miss.
+pub(super) struct Resolved {
+    eff: ActiveThresholds,
+    own: ActiveThresholds,
+}
+
+impl Resolved {
+    pub(super) fn of(settings: &FileConfig) -> Self {
+        Self::against(&settings.alerts, &alerttpl::info().template)
+    }
+
+    fn against(alerts: &AlertsConfig, table: &Template) -> Self {
+        Self {
+            eff: ActiveThresholds::from_config_with_template(alerts, table),
+            own: ActiveThresholds::from_config_with_template(alerts, &Template::default()),
+        }
+    }
+
+    /// The bars the engine is running with.
+    pub(super) fn eff(&self) -> &ActiveThresholds {
+        &self.eff
+    }
+
+    /// `None` for a key with no per-name table layer (disk, pressure).
+    pub(super) fn in_force(&self, key: &str, name: &str) -> Option<InForce> {
+        // The bar as a percent, whether an entry of the user's set it,
+        // and the global value where a chip can stand for it.
+        let (matched, yours, base) = match key {
+            "alert-cpu" => (
+                self.eff.cpu.override_for(name).map(|v| v.map(f64::from)),
+                self.own.cpu.override_for(name).is_some(),
+                Some(self.eff.cpu.base().map(f64::from)),
+            ),
+            "alert-app-cpu" => (
+                self.eff
+                    .app_cpu
+                    .override_for(name)
+                    .map(|v| v.map(f64::from)),
+                self.own.app_cpu.override_for(name).is_some(),
+                Some(self.eff.app_cpu.base().map(f64::from)),
+            ),
+            // A global memory bar is the lower of the share and the
+            // ceiling: no chip is that figure, unless the rule is off.
+            "alert-mem" => (
+                self.eff
+                    .memory
+                    .override_for(name)
+                    .map(|v| v.map(|share| share * 100.0)),
+                self.own.memory.override_for(name).is_some(),
+                self.eff.memory.base().is_none().then_some(None),
+            ),
+            "alert-app-mem" => (
+                self.eff
+                    .app_memory
+                    .override_for(name)
+                    .map(|v| v.map(|share| share * 100.0)),
+                self.own.app_memory.override_for(name).is_some(),
+                self.eff.app_memory.base().is_none().then_some(None),
+            ),
+            _ => return None,
+        };
+        let source = match (yours, matched.is_some()) {
+            (true, _) => BarSource::Yours,
+            (false, true) => BarSource::Table,
+            (false, false) => BarSource::Base,
+        };
+        Some(InForce {
+            lit: lit_value(matched, base),
+            source,
+        })
+    }
+}
+
+/// The preset value (`apply_add`'s spelling, `0` for off) a bar reads
+/// as. `matched` is zstats' per-name answer; `base` is the global value
+/// when a chip may stand for it, absent when none can.
+fn lit_value(matched: Option<Option<f64>>, base: Option<Option<f64>>) -> Option<String> {
+    let spell = |bar: Option<f64>| bar.map_or_else(|| "0".to_string(), fmt_pct_f64);
+    match matched {
+        Some(bar) => Some(spell(bar)),
+        None => base.map(spell),
+    }
+}
+
+/// What one target's chips light and which layer its caption names.
+pub(super) fn in_force(settings: &FileConfig, target: &OverrideTarget) -> InForce {
+    Resolved::of(settings)
+        .in_force(target.key, &target.name)
+        // Disk and pressure have no table layer and no ceiling: the
+        // file is the whole answer.
+        .unwrap_or_else(|| InForce {
+            lit: configured_value(Some(settings), target),
+            source: if is_overridden(Some(settings), target) {
+                BarSource::Yours
+            } else {
+                BarSource::Base
+            },
+        })
+}
+
+fn configured_value(settings: Option<&FileConfig>, target: &OverrideTarget) -> Option<String> {
     let a = &settings?.alerts;
     match target.key {
         "alert-cpu" => a
@@ -1891,5 +2087,89 @@ mod tests {
         let t = override_target(&event).expect("target");
         assert_eq!(t.key, "alert-pressure");
         assert!(t.name.is_empty());
+    }
+
+    fn held(lit: Option<&str>, source: BarSource) -> Option<InForce> {
+        Some(InForce {
+            lit: lit.map(str::to_string),
+            source,
+        })
+    }
+
+    /// The chips light what the bar reads, and the word beside the bar
+    /// names the layer — both from the one resolution. The table's
+    /// "off" over a lit 200% was the bug this replaced.
+    #[test]
+    fn the_chips_light_the_bar_zstats_resolved() {
+        let mut table = Template::default();
+        table.app_cpu.insert("claude".into(), 0.0);
+        table.mem.insert("Xcode".into(), 60.0);
+        let mut alerts = AlertsConfig {
+            app_cpu: Some(200.0),
+            ..Default::default()
+        };
+
+        let bars = Resolved::against(&alerts, &table);
+        // The table switched it off: the Off chip, and not the user's.
+        assert_eq!(
+            bars.in_force("alert-app-cpu", "claude"),
+            held(Some("0"), BarSource::Table)
+        );
+        assert_eq!(
+            bars.in_force("alert-mem", "Xcode"),
+            held(Some("60"), BarSource::Table)
+        );
+        // No entry: a CPU bar is the global value, which is a chip.
+        assert_eq!(
+            bars.in_force("alert-app-cpu", "Finder"),
+            held(Some("200"), BarSource::Base)
+        );
+        // A global memory bar is the lower of the share and the ceiling,
+        // so no chip is it — lighting the share made a click on the lit
+        // chip move the bar.
+        assert_eq!(
+            bars.in_force("alert-mem", "Finder"),
+            held(None, BarSource::Base)
+        );
+        assert_eq!(
+            bars.in_force("alert-app-mem", "Finder"),
+            held(None, BarSource::Base)
+        );
+
+        // The user's entry wins over the table's — a pattern included,
+        // which is why the file's keys are not searched for the name.
+        alerts.app_cpu_overrides.insert("clau*".into(), 800.0);
+        alerts.mem_overrides.insert("Finder".into(), 40.0);
+        let bars = Resolved::against(&alerts, &table);
+        assert_eq!(
+            bars.in_force("alert-app-cpu", "claude"),
+            held(Some("800"), BarSource::Yours)
+        );
+        assert_eq!(
+            bars.in_force("alert-mem", "Finder"),
+            held(Some("40"), BarSource::Yours)
+        );
+        // Disk and pressure have no table layer to resolve.
+        assert_eq!(bars.in_force("alert-disk", "/"), None);
+    }
+
+    /// With the global rule off the bar reads "off" for every name, and
+    /// the chip that says so is the one lit.
+    #[test]
+    fn a_disabled_rule_lights_off() {
+        let alerts = AlertsConfig {
+            cpu: Some(0.0),
+            mem: Some(0.0),
+            ..Default::default()
+        };
+        let bars = Resolved::against(&alerts, &Template::default());
+        assert_eq!(
+            bars.in_force("alert-cpu", "Finder"),
+            held(Some("0"), BarSource::Base)
+        );
+        assert_eq!(
+            bars.in_force("alert-mem", "Finder"),
+            held(Some("0"), BarSource::Base)
+        );
     }
 }

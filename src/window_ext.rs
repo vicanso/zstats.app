@@ -11,6 +11,7 @@
 //! no views still accounts for half of that. So this reaches past gpui to the
 //! `NSWindow` and drives it directly, and the window is built exactly once.
 
+use crate::placement;
 use gpui::{Bounds, Pixels, Point, Size, Window, px};
 use objc2::Message;
 use objc2::rc::Retained;
@@ -98,6 +99,44 @@ pub fn show_retained_at(ns: &NSWindow, origin: Point<Pixels>) {
         ns.setFrameOrigin(NSPoint::new(f64::from(origin.x), flipped));
     }
     ns.makeKeyAndOrderFront(None);
+}
+
+/// Give a retained panel a new height, keeping its top edge where it is
+/// while the screen has room for that.
+///
+/// AppKit sizes a window from its bottom-left corner, so a plain resize
+/// would move the edge the panel hangs from: shrinking it would leave a
+/// gap under the menu bar. The frame's origin moves down by what the
+/// height loses instead.
+///
+/// When the new height does not fit under the top edge, the panel rises
+/// first — as far as `gap` under the top of the screen's usable area —
+/// and only then gives up height: the footer has to stay reachable, and
+/// the body scrolls. [`placement::resized`] is that rule and says what
+/// it is for.
+///
+/// Fires `windowDidResize` synchronously, like [`show_retained_at`]'s
+/// move — callers hop it off gpui's App borrow.
+pub fn set_height_keeping_top(ns: &NSWindow, height: f32, gap: f32) {
+    let frame = ns.frame();
+    let top = frame.origin.y + frame.size.height;
+    let height = f64::from(height);
+    let (top, height) = match ns.screen() {
+        Some(screen) => {
+            let visible = screen.visibleFrame();
+            let floor = visible.origin.y;
+            let ceiling = floor + visible.size.height - f64::from(gap);
+            placement::resized(top, height, floor, ceiling)
+        }
+        None => (top, height),
+    };
+    ns.setFrame_display(
+        objc2_foundation::NSRect::new(
+            NSPoint::new(frame.origin.x, top - height),
+            objc2_foundation::NSSize::new(frame.size.width, height),
+        ),
+        true,
+    );
 }
 
 /// Height of the display that owns the menu bar.

@@ -67,10 +67,11 @@ mod webhook;
 mod window_ext;
 
 use crate::assets::Assets;
-use crate::placement::{DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, bounds_below_tray};
+use crate::placement::{MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
@@ -501,11 +502,10 @@ impl Render for ZStatsApp {
         #[cfg(target_os = "linux")]
         self.dismiss_when_pointer_leaves(window, cx);
 
-        let tint = prefs::opacity().unwrap_or(if theme::is_dark() {
-            BACKGROUND_OPACITY_DARK
-        } else {
-            BACKGROUND_OPACITY_LIGHT
-        });
+        let tint = prefs::opacity().unwrap_or(theme::default_opacity(
+            BACKGROUND_OPACITY_DARK,
+            BACKGROUND_OPACITY_LIGHT,
+        ));
         div()
             .relative()
             .size_full()
@@ -747,6 +747,97 @@ pub fn set_notifications_pref(on: bool, cx: &mut App) {
 pub fn set_disk_watch_pref(on: bool, cx: &mut App) {
     prefs::set_disk_watch(on);
     repaint(cx);
+}
+
+/// Overview's form, short or full. One setter for its two controls —
+/// the footer's toggle and the Interface page's switch.
+///
+/// The two forms have different heights and the panel is fitted to
+/// each, so this is the one preference that resizes the window (the
+/// short form's notice row is the other thing that does,
+/// [`sync_panel_notice`]). The resize is deferred: the toggle's click
+/// runs inside the panel's own update, where a second `update` on that
+/// window fails.
+pub fn set_overview_detail_pref(on: bool, cx: &mut App) {
+    prefs::set_overview_detail(on);
+    cx.defer(fit_panel_to_overview);
+    repaint(cx);
+}
+
+/// Whether the panel's height includes the short Overview's notice row
+/// (`views::overview_has_notice`), as of the last time this file sized
+/// it. Window bookkeeping, not app state: it is what
+/// [`sync_panel_notice`] compares the page against.
+static NOTICE_FITTED: AtomicBool = AtomicBool::new(false);
+
+fn overview_has_notice(cx: &App) -> bool {
+    views::overview_has_notice(cx.global::<ZStatsGlobalStore>().read(cx))
+}
+
+/// Give the panel the height of Overview's current form, top edge held.
+fn fit_panel_to_overview(cx: &mut App) {
+    let notice = overview_has_notice(cx);
+    NOTICE_FITTED.store(notice, Ordering::Relaxed);
+    let (width, height) = placement::window_size(prefs::overview_detail(), notice);
+    set_panel_size(width, height, cx);
+}
+
+/// Follow the short Overview's notice row with the panel's height: the
+/// row is there only while an alert or a watcher has something to say,
+/// and a page fitted without it would scroll by exactly that row when
+/// it came. Called after every tick, and does nothing on all but the
+/// few where the answer changed — every source of the row has a memory
+/// (`overview::notice`), so that is minutes or hours apart.
+///
+/// A step from the height the panel has, not the form's own figure
+/// (`placement::notice_step`): a panel someone dragged taller keeps
+/// what they added. The long form has no such row — the question is
+/// always answered "no" there — and the switch between forms fits the
+/// whole height afresh ([`fit_panel_to_overview`]).
+pub fn sync_panel_notice(cx: &mut App) {
+    let notice = overview_has_notice(cx);
+    if NOTICE_FITTED.swap(notice, Ordering::Relaxed) == notice {
+        return;
+    }
+    let Some(handle) = cx.global::<ZStatsGlobalStore>().read(cx).panel_window() else {
+        return;
+    };
+    let Ok(bounds) = handle.update(cx, |_, window, _| window.bounds()) else {
+        return;
+    };
+    let height = placement::notice_step(f32::from(bounds.size.height), notice);
+    set_panel_size(f32::from(bounds.size.width), height, cx);
+}
+
+/// Resize the panel with its top edge held.
+fn set_panel_size(width: f32, height: f32, cx: &mut App) {
+    let Some(handle) = cx.global::<ZStatsGlobalStore>().read(cx).panel_window() else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let _ = width;
+        let ns = handle
+            .update(cx, |_, window, _| window_ext::retain(window))
+            .ok()
+            .flatten();
+        // `setFrame` fires `windowDidResize` synchronously, and gpui's
+        // handler borrows the App — the same hop `reveal_main_window`
+        // makes for `setFrameOrigin`.
+        if let Some(ns) = ns {
+            after_app_borrow(cx, move || {
+                window_ext::set_height_keeping_top(&ns, height, placement::TRAY_GAP)
+            });
+        }
+    }
+    // A layer surface is anchored by its top edge, so the compositor
+    // keeps it there. Compiled, never seen: see CLAUDE.md on Linux.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = handle.update(cx, |_, window, _| {
+            window.resize(size(px(width), px(height)))
+        });
+    }
 }
 
 /// The footer cup's menu: keep the Mac awake — screen on, no idle
@@ -1590,7 +1681,9 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     refresh_omarchy_palette(cx);
     let saved = cx.global::<ZStatsGlobalStore>().read(cx).window_bounds();
     let default_size = {
-        let (w, h) = DEFAULT_WINDOW_SIZE;
+        let notice = overview_has_notice(cx);
+        NOTICE_FITTED.store(notice, Ordering::Relaxed);
+        let (w, h) = placement::window_size(prefs::overview_detail(), notice);
         size(px(w), px(h))
     };
     let bounds = match anchor {

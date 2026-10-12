@@ -15,9 +15,10 @@ use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore}
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px, relative,
+    Anchor, AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, div, px, relative,
 };
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
@@ -47,7 +48,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 ))
                 .child(
                     div()
-                        .px(px(13.))
+                        .px(px(widgets::CARD_PAD))
                         .pb(px(11.))
                         .child(widgets::note(i18n::tr("history.empty_body"))),
                 )
@@ -106,7 +107,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .items_center()
                 .gap(px(4.))
                 .min_w_0()
-                .child(lens_title(sort, title))
+                .child(lens_title(sort, title, state.panel_visit()))
                 .child(widgets::info_icon(
                     "history-basis",
                     i18n::tr("history.about_body"),
@@ -131,7 +132,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     let name = s.name.clone();
                     v_flex()
                         .id(row_id(pid, &name))
-                        .px(px(13.))
+                        .px(px(widgets::CARD_PAD))
                         .py(px(9.))
                         .when(i != last, |d| {
                             d.border_b(px(1.)).border_color(theme::border_subtle())
@@ -196,9 +197,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         .gap(px(3.))
                                         .child(
                                             div()
-                                                .font_family(font::MONO)
+                                                .font_features(font::tnum())
                                                 .text_size(px(12.))
-                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .text_color(theme::text())
                                                 .child(match sort {
                                                     HistorySort::CpuTime => {
@@ -283,23 +284,17 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                 // large total is exactly the process this view exists
                                 // to find, and the pairing is what makes that legible.
                                 .child(
-                                    // Same as the volume card's R/W
-                                    // line: zh spells this "峰值 … ·
-                                    // … 分钟", Han characters the
-                                    // bundled mono face has no glyph
-                                    // for.
-                                    font::mono_unless_cjk(div())
-                                        .flex_none()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(
-                                            t!(
-                                                "history.peak",
-                                                cpu = format::pct(s.peak_cpu_percent),
-                                                minutes = s.minutes
-                                            )
-                                            .to_string(),
-                                        ),
+                                    // A sentence with two figures in
+                                    // it, neither of which moves while
+                                    // it is read: the page's face.
+                                    font::tabular(div()).flex_none().min_w_0().truncate().child(
+                                        t!(
+                                            "history.peak",
+                                            cpu = format::pct(s.peak_cpu_percent),
+                                            minutes = s.minutes
+                                        )
+                                        .to_string(),
+                                    ),
                                 ),
                         )
                         .child(div().mt(px(6.)).child(match &s.band {
@@ -334,7 +329,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .when(hidden > 0, |rows| {
                     rows.child(
                         h_flex()
-                            .px(px(13.))
+                            .px(px(widgets::CARD_PAD))
                             .py(px(8.))
                             .child(more_chip(hidden, show_all)),
                     )
@@ -346,31 +341,41 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
 /// The title names the lens and is the control that switches it: a
 /// separate "CPU" chip beside Today / 7d / 30d read as a fourth range.
-fn lens_title(sort: HistorySort, title: String) -> AnyElement {
-    h_flex()
-        .id("history-sort")
-        .items_center()
-        .gap(px(3.))
-        .min_w_0()
-        .rounded(px(4.))
-        // Padded for the hover fill, pulled back so the title still
-        // starts on the card's text line.
-        .px(px(4.))
-        .ml(px(-4.))
-        .hover(|d| d.bg(theme::surface_raised()))
-        .tooltip(widgets::wrap_tooltip(i18n::tr(sort.tip_key())))
-        .on_click(|_, _window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.cycle_history_sort(cx));
+/// Its chevron opens the three lenses as a menu ([`super::MenuTrigger`]).
+fn lens_title(sort: HistorySort, title: String, visit: u32) -> AnyElement {
+    super::menu_trigger(
+        ("history-sort", visit),
+        i18n::tr(sort.tip_key()),
+        h_flex()
+            .items_center()
+            .gap(px(3.))
+            .min_w_0()
+            .child(div().min_w_0().truncate().child(title))
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .with_size(Size::Size(px(10.)))
+                    .text_color(Hsla::from(theme::text_dim())),
+            ),
+    )
+    .min_w_0()
+    // Padded for the hover fill, pulled back so the title still
+    // starts on the card's text line.
+    .px(px(4.))
+    .ml(px(-4.))
+    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+        HistorySort::ALL.iter().fold(menu, |menu, &lens| {
+            menu.item(
+                super::menu_text(i18n::tr(lens.title_key()))
+                    .checked(lens == sort)
+                    .on_click(move |_, _, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.set_history_sort(lens, cx));
+                    }),
+            )
         })
-        .child(div().min_w_0().truncate().child(title))
-        .child(
-            Icon::new(IconName::ChevronDown)
-                .with_size(Size::Size(px(10.)))
-                .text_color(Hsla::from(theme::text_dim())),
-        )
-        .into_any_element()
+    })
+    .into_any_element()
 }
 
 fn more_chip(hidden: usize, showing: bool) -> AnyElement {
@@ -412,7 +417,7 @@ fn band_axis() -> AnyElement {
     let lived = (lived_minutes / history::BAND_BUCKET_MINUTES + 1).min(history::BAND_BUCKETS);
     let label = |text: String| {
         div()
-            .font_family(font::MONO)
+            .font_features(font::tnum())
             .text_size(px(9.))
             .text_color(theme::text_dim())
             .child(text)

@@ -73,7 +73,17 @@ pub enum SettingsSection {
     /// Language and theme — `app.toml`, not shared with the CLI.
     #[default]
     Interface,
-    Config,
+    /// When zstats alerts: the thresholds and the per-program rules.
+    /// Half of what was the Config page until 2026-10-12 — the half
+    /// someone opens Settings *for* ("stop telling me about Chrome"),
+    /// which sat under collector cadences and above three "Update from
+    /// GitHub" cards.
+    Alerts,
+    /// The other half, plus the four Interface rows that asked a
+    /// question nobody arrives with: the sustained-load pair, the
+    /// webhook and the proxy. Still everything `config.toml` holds that
+    /// is not a threshold.
+    Advanced,
     /// Full Disk Access: live status plus a deep link into System
     /// Settings. Status only — granting stays a user act there. macOS
     /// only, and the variant itself is gated rather than merely left
@@ -96,35 +106,40 @@ impl SettingsSection {
     /// control opens `x-apple.systempreferences:` would be a page about
     /// another operating system.
     #[cfg(target_os = "macos")]
-    pub const ALL: [SettingsSection; 4] = [
+    pub const ALL: [SettingsSection; 5] = [
         SettingsSection::Interface,
-        SettingsSection::Config,
+        SettingsSection::Alerts,
+        SettingsSection::Advanced,
         SettingsSection::Permissions,
         SettingsSection::About,
     ];
     #[cfg(not(target_os = "macos"))]
-    pub const ALL: [SettingsSection; 3] = [
+    pub const ALL: [SettingsSection; 4] = [
         SettingsSection::Interface,
-        SettingsSection::Config,
+        SettingsSection::Alerts,
+        SettingsSection::Advanced,
         SettingsSection::About,
     ];
 
     pub fn label_key(self) -> &'static str {
         match self {
             SettingsSection::Interface => "config.nav_interface",
-            SettingsSection::Config => "config.nav_config",
+            SettingsSection::Alerts => "config.nav_alerts",
+            SettingsSection::Advanced => "config.nav_advanced",
             #[cfg(target_os = "macos")]
             SettingsSection::Permissions => "config.nav_permissions",
             SettingsSection::About => "config.nav_about",
         }
     }
 
-    /// The nav row's icon. Settings2 on Config is the config.toml page;
-    /// the footer gear that opens this window is the same glyph.
+    /// The nav row's icon. Settings2 on Advanced is where config.toml's
+    /// own knobs are; the footer gear that opens this window is the same
+    /// glyph. Alerts wears the panel's Alerts tab's bell.
     pub fn icon(self) -> Icon {
         match self {
             SettingsSection::Interface => Icon::new(IconName::Palette),
-            SettingsSection::Config => Icon::new(IconName::Settings2),
+            SettingsSection::Alerts => Icon::new(IconName::Bell),
+            SettingsSection::Advanced => Icon::new(IconName::Settings2),
             // gpui-kit ships no shield; ours rides CustomIconName.
             #[cfg(target_os = "macos")]
             SettingsSection::Permissions => assets::CustomIconName::Shield.into(),
@@ -153,8 +168,9 @@ pub fn render(
     fields: &Fields,
 ) -> Vec<AnyElement> {
     match section {
-        SettingsSection::Interface => vec![interface_card(state, fields)],
-        SettingsSection::Config => render_config(state),
+        SettingsSection::Interface => vec![interface_card()],
+        SettingsSection::Alerts => render_alerts(state),
+        SettingsSection::Advanced => render_advanced(state, fields),
         #[cfg(target_os = "macos")]
         SettingsSection::Permissions => vec![permissions_card()],
         SettingsSection::About => vec![about_card(state, body_height)],
@@ -257,7 +273,8 @@ fn probe_full_disk_access() -> bool {
         .is_ok()
 }
 
-fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
+/// The thresholds, and the per-subject rules written from alert cards.
+fn render_alerts(state: &ZStatsAppState) -> Vec<AnyElement> {
     let mut cards = Vec::new();
     match state.settings() {
         None => cards.push(widgets::empty_card(
@@ -265,17 +282,26 @@ fn render_config(state: &ZStatsAppState) -> Vec<AnyElement> {
             i18n::tr("config.unavailable_body"),
         )),
         Some(file) => {
-            let collector = file.collector.clone().unwrap_or_default();
-            cards.push(collection_card(&collector));
             cards.push(thresholds_card(file));
             // Right under the counts it explains: the thresholds card
             // says twelve programs are tuned, this one says which.
             cards.extend(overrides_card(state));
-            // Directly under the thresholds it sits between: the table
-            // is the layer below a hand-written override and above the
-            // base rule.
-            cards.push(template_card(state));
         }
+    }
+    cards
+}
+
+/// Everything that is not a threshold: the watcher's two knobs, the
+/// webhook and the proxy, the collector's cadences, the three tables
+/// that update from GitHub, and the reset.
+fn render_advanced(state: &ZStatsAppState, fields: &Fields) -> Vec<AnyElement> {
+    let mut cards = vec![advanced_card(state, fields)];
+    if let Some(file) = state.settings() {
+        let collector = file.collector.clone().unwrap_or_default();
+        cards.push(collection_card(&collector));
+        // The layer below a hand-written override and above the base
+        // rule; the Alerts page's thresholds note names it.
+        cards.push(template_card(state));
     }
     cards.push(hints_card(state));
     cards.push(caches_card(state));
@@ -741,6 +767,48 @@ fn about_card(state: &ZStatsAppState, body_height: f32) -> AnyElement {
                         )
                 })
         })
+        // The project page. It was a button in the panel's footer, one
+        // of five glyphs in a row of things the panel does; a link out
+        // of the app belongs with what the app is. Still the one
+        // control that wears the hand cursor, for the reason it always
+        // was: it is the only one that opens something outside.
+        .child(
+            h_flex()
+                .id("about-github")
+                .cursor_pointer()
+                .flex_none()
+                .items_center()
+                .justify_between()
+                .px(px(13.))
+                .py(px(8.))
+                .border_t(px(1.))
+                .border_color(theme::border_subtle())
+                .hover(|d| d.bg(theme::surface_raised()))
+                .on_click(|_, _window, cx| cx.open_url(super::REPO_URL))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("common.github")),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .font_family(font::MONO)
+                                .text_size(px(11.))
+                                .text_color(theme::text_muted())
+                                .child(super::REPO_URL.trim_start_matches("https://")),
+                        )
+                        .child(
+                            Icon::new(IconName::ExternalLink)
+                                .with_size(gpui_kit::component::Size::Size(px(11.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        ),
+                ),
+        )
         .child(update_row(state))
         .into_any_element()
 }
@@ -865,7 +933,7 @@ fn file_note(id: &'static str, name: &'static str) -> AnyElement {
 /// Language and theme. Selection reuses the accent chips of the Alerts
 /// threshold editor — in this app a picked value is accent, like a crossed
 /// threshold, and everything else stays neutral.
-fn interface_card(state: &ZStatsAppState, fields: &Fields) -> AnyElement {
+fn interface_card() -> AnyElement {
     widgets::list_shell()
         .child(widgets::list_header(
             i18n::tr("config.interface"),
@@ -928,6 +996,24 @@ fn interface_card(state: &ZStatsAppState, fields: &Fields) -> AnyElement {
             crate::set_tray_pref,
             Some(i18n::tr("config.tray_tip")),
         ))
+        .child(notifications_row())
+        .child(autostart_row())
+        .child(disk_watch_row())
+        .child(overview_detail_row())
+        .child(opacity_row())
+        .into_any_element()
+}
+
+/// The `app.toml` settings that answer a question few people arrive
+/// with. They sat in the Interface card between "Menu bar shows" and
+/// "Launch at Login", where "Sustained load bar ÷3" was the fifth thing
+/// someone changing the language read.
+fn advanced_card(state: &ZStatsAppState, fields: &Fields) -> AnyElement {
+    widgets::list_shell()
+        .child(widgets::list_header(
+            i18n::tr("config.advanced"),
+            Some(file_note("file-note-app-advanced", "app.toml")),
+        ))
         // The sustained-load watcher's two knobs. Minutes and a divisor
         // rather than a percent, so the bar keeps following `alert-cpu`
         // (see `prefs::SUSTAINED_DIVISOR`). The tip quotes the bar in
@@ -965,12 +1051,8 @@ fn interface_card(state: &ZStatsAppState, fields: &Fields) -> AnyElement {
                 .to_string(),
             ),
         ))
-        .child(notifications_row())
         .child(webhook_row(state, fields.webhook, fields.webhook_valid))
-        .child(autostart_row())
-        .child(disk_watch_row())
         .child(proxy_row(fields.proxy, fields.proxy_valid))
-        .child(opacity_row())
         .into_any_element()
 }
 
@@ -1048,17 +1130,56 @@ fn disk_watch_row() -> AnyElement {
         .into_any_element()
 }
 
+/// Overview's form. The panel footer's toggle is the same switch and
+/// the one most people will meet; this is where someone looking for the
+/// setting looks.
+fn overview_detail_row() -> AnyElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .px(px(13.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("config.overview_detail")),
+                )
+                .child(widgets::info_icon(
+                    "pref-overview-detail-info",
+                    i18n::tr("config.overview_detail_tip"),
+                )),
+        )
+        .child(
+            Switch::new("pref-overview-detail")
+                .small()
+                .checked(prefs::overview_detail())
+                .on_click(|checked, _window, cx| crate::set_overview_detail_pref(*checked, cx)),
+        )
+        .into_any_element()
+}
+
 /// Outbound proxy for the clean-hints fetch — the app's only network
 /// call. Free text because proxies are arbitrary URIs; only values the
 /// resolver can act on are persisted, and the inline warning says when
 /// the field holds something else. "" follows the environment / system
 /// proxy, "none" forces direct.
+///
+/// The placeholder is the three tokens and nothing more. The sentence
+/// that says what each one does does not fit the field — it used to
+/// stop at `socks5:` — and the ⓘ beside the label already carries it
+/// (`config.proxy_tip`).
 fn proxy_row(input: &Entity<InputState>, valid: bool) -> AnyElement {
+    // The Advanced card's last row: no divider under it.
     v_flex()
         .px(px(13.))
         .py(px(8.))
-        .border_b(px(1.))
-        .border_color(theme::border_subtle())
         .child(
             h_flex()
                 .items_center()
@@ -1940,10 +2061,13 @@ fn interval_row(
         .into_any_element()
 }
 
-/// The human name for a threshold key. The key itself stays on the row
-/// beneath it: these are the exact strings `config.toml` and the CLI's
-/// `-add` take, and a card that only showed a translated name would
-/// leave a reader who wants to change one with nothing to type.
+/// The human name for a threshold key. The key itself stays reachable,
+/// behind the ⓘ beside the name: these are the exact strings
+/// `config.toml` and the CLI's `-add` take, and a card that only had a
+/// translated name would leave a reader who wants to change one with
+/// nothing to type. It was a second line under every name until
+/// 2026-10-12 — nine lines of `alert-app-mem-bytes` for the readers who
+/// came to pick a number.
 fn threshold_label(key: &str) -> String {
     i18n::tr(match key {
         "alert-cpu" => "config.th_cpu",
@@ -1951,10 +2075,11 @@ fn threshold_label(key: &str) -> String {
         "alert-mem-bytes" => "config.th_mem_bytes",
         "alert-app-cpu" => "config.th_app_cpu",
         "alert-app-mem" => "config.th_app_mem",
+        "alert-app-mem-bytes" => "config.th_app_mem_bytes",
         "alert-disk" => "config.th_disk",
         "alert-pressure" => "config.th_pressure",
         "alert-cooldown" => "config.th_cooldown",
-        // Unreachable for the eight rows above; a future key shows its
+        // Unreachable for the nine rows above; a future key shows its
         // own name rather than a blank until it is given one.
         other => return other.to_string(),
     })
@@ -1967,7 +2092,7 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
     // independent of the template layer (templates only refine per-name
     // overrides), so the builtin-template variant is exact and costs no IO.
     let eff = ActiveThresholds::from_config(a);
-    let rows: [(&'static str, String, usize); 8] = [
+    let rows: [(&'static str, Setting, usize); 9] = [
         (
             "alert-cpu",
             fmt_pct_setting(a.cpu, eff.cpu.base().map(f64::from)),
@@ -1997,6 +2122,14 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
             a.app_mem_overrides.len(),
         ),
         (
+            // The same ceiling one level up. It was missing here, so
+            // this card said "App memory default (40%)" while the Alerts
+            // tab's armed list said 8.0 GB — the ceiling biting, unnamed.
+            "alert-app-mem-bytes",
+            fmt_bytes_setting(a.app_mem_bytes, eff.app_memory_bytes),
+            0,
+        ),
+        (
             "alert-disk",
             fmt_pct_setting(a.disk, eff.disk.base().map(|f| f64::from(f) * 100.0)),
             a.disk_overrides.len(),
@@ -2009,8 +2142,8 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
         (
             "alert-cooldown",
             match a.cooldown {
-                Some(d) => humanize(d),
-                None => default_at(humanize(eff.cooldown)),
+                Some(d) => Setting::set(humanize(d)),
+                None => Setting::unset(humanize(eff.cooldown)),
             },
             0,
         ),
@@ -2041,25 +2174,23 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                                 .items_center()
                                 .justify_between()
                                 .child(
-                                    v_flex()
+                                    h_flex()
+                                        .items_center()
+                                        .gap(px(4.))
                                         .child(
                                             div()
                                                 .text_size(px(11.))
                                                 .text_color(theme::ink())
                                                 .child(threshold_label(k)),
                                         )
-                                        // The key stays, one size down:
-                                        // it is what you type into
-                                        // config.toml or `zstats -add`,
-                                        // and this card is where you
+                                        // The key, for whoever types it
+                                        // into config.toml or `zstats
+                                        // -add`: this card is where they
                                         // would go looking for it.
-                                        .child(
-                                            div()
-                                                .font_family(font::MONO)
-                                                .text_size(px(9.))
-                                                .text_color(theme::text_dim())
-                                                .child(k),
-                                        ),
+                                        .child(widgets::info_icon(
+                                            ("cfg-th-key", i),
+                                            t!("config.th_key_tip", key = k).to_string(),
+                                        )),
                                 )
                                 .child(
                                     h_flex()
@@ -2086,11 +2217,11 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                                                 .font_family(font::MONO)
                                                 .text_size(px(10.))
                                                 .text_color(theme::text())
-                                                .child(v.clone()),
+                                                .child(v.shown),
                                         ),
                                 ),
                         )
-                        .child(div().mt(px(6.)).child(threshold_chips(k, &v)))
+                        .child(div().mt(px(6.)).child(threshold_chips(k, &v.lit)))
                 })
         })
         .into_any_element()
@@ -2301,6 +2432,12 @@ fn threshold_chips(key: &'static str, current: &str) -> AnyElement {
             ("60%".into(), "60"),
             (off, "0"),
         ],
+        "alert-app-mem-bytes" => vec![
+            ("4 GB".into(), "4g"),
+            ("8 GB".into(), "8g"),
+            ("16 GB".into(), "16g"),
+            (off, "0"),
+        ],
         "alert-disk" => vec![
             ("80%".into(), "80"),
             ("90%".into(), "90"),
@@ -2354,23 +2491,50 @@ fn setting_chips(
         .into_any_element()
 }
 
+/// One rule's value two ways: as its row prints it — the file's own, or
+/// the default labelled as such — and as the chip label that value
+/// reads as. The chips matched the printed form, so a rule nobody had
+/// touched read "default (30%)" over five unlit chips: the one card
+/// where every rule is at its default was the one that never said which
+/// chip that is.
+struct Setting {
+    shown: String,
+    lit: String,
+}
+
+impl Setting {
+    fn set(value: String) -> Self {
+        Self {
+            shown: value.clone(),
+            lit: value,
+        }
+    }
+
+    fn unset(effective: String) -> Self {
+        Self {
+            shown: default_at(effective.clone()),
+            lit: effective,
+        }
+    }
+}
+
 /// The file's value when set; otherwise the effective default, labeled as
 /// such, so an untouched key still tells the user what the engine runs.
-fn fmt_pct_setting<T: Into<f64> + Copy>(file: Option<T>, effective_pct: Option<f64>) -> String {
+fn fmt_pct_setting<T: Into<f64> + Copy>(file: Option<T>, effective_pct: Option<f64>) -> Setting {
     match file {
-        None => default_at(match effective_pct {
+        None => Setting::unset(match effective_pct {
             Some(v) => format!("{v:.0}%"),
             None => i18n::tr("alerts.off"),
         }),
-        Some(v) if v.into() == 0.0 => i18n::tr("alerts.off"),
-        Some(v) => format!("{:.0}%", v.into()),
+        Some(v) if v.into() == 0.0 => Setting::set(i18n::tr("alerts.off")),
+        Some(v) => Setting::set(format!("{:.0}%", v.into())),
     }
 }
 
 /// The memory rule's absolute ceiling. Values are whole GiB in practice
 /// (the chips only offer those), so the clean "4 GB" form applies; a
 /// hand-edited odd value falls back to the byte formatter.
-fn fmt_bytes_setting(file: Option<u64>, effective: Option<u64>) -> String {
+fn fmt_bytes_setting(file: Option<u64>, effective: Option<u64>) -> Setting {
     const GIB: u64 = 1 << 30;
     let clean = |v: u64| {
         if v.is_multiple_of(GIB) {
@@ -2380,23 +2544,23 @@ fn fmt_bytes_setting(file: Option<u64>, effective: Option<u64>) -> String {
         }
     };
     match file {
-        None => default_at(match effective {
+        None => Setting::unset(match effective {
             Some(v) => clean(v),
             None => i18n::tr("alerts.off"),
         }),
-        Some(0) => i18n::tr("alerts.off"),
-        Some(v) => clean(v),
+        Some(0) => Setting::set(i18n::tr("alerts.off")),
+        Some(v) => Setting::set(clean(v)),
     }
 }
 
 /// Same for the pressure tri-state. `effective` uses zstats' encoding:
 /// 2 = warning, 4 = critical, `None` = rule off.
-fn pressure_setting(file: Option<PressureAlert>, effective: Option<u32>) -> String {
+fn pressure_setting(file: Option<PressureAlert>, effective: Option<u32>) -> Setting {
     match file {
-        Some(PressureAlert::Off) => i18n::tr("alerts.off"),
-        Some(PressureAlert::Warning) => i18n::tr("alerts.warning"),
-        Some(PressureAlert::Critical) => i18n::tr("alerts.critical"),
-        None => default_at(match effective {
+        Some(PressureAlert::Off) => Setting::set(i18n::tr("alerts.off")),
+        Some(PressureAlert::Warning) => Setting::set(i18n::tr("alerts.warning")),
+        Some(PressureAlert::Critical) => Setting::set(i18n::tr("alerts.critical")),
+        None => Setting::unset(match effective {
             Some(level) if level >= 4 => i18n::tr("alerts.critical"),
             Some(_) => i18n::tr("alerts.warning"),
             None => i18n::tr("alerts.off"),

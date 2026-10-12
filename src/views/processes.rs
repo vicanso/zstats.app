@@ -6,8 +6,8 @@
 //! set. The row shape is the original one: name + CPU, pid + memory,
 //! then a meter — the trough is what keeps each row from floating.
 
+use super::alerts::{BarSource, InForce, Resolved};
 use super::widgets;
-use crate::alerttpl;
 use crate::confirm;
 use crate::font;
 use crate::format;
@@ -18,18 +18,17 @@ use crate::state::{FullScan, FullScanData, ProcSort, ZStatsAppState, ZStatsGloba
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, div, list, px,
+    Anchor, AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, list, px,
 };
 use gpui_kit::component::input::Input;
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::process;
 use zstats::Tick;
-use zstats::alerts::ActiveThresholds;
-use zstats::settings::FileConfig;
 use zstats::snapshot::{Capabilities, ProcessSnapshot};
 
 /// Floor for the per-row CPU bar. The original scale was 800% (eight
@@ -129,17 +128,34 @@ pub(super) fn is_hot(cpu: f64, sustained: bool) -> bool {
     cpu > HOT_PERCENT || sustained
 }
 
-/// Header plus caveat above the list: 36 for the header (11 + 16 + 9), and
-/// 34 for the note, which wraps to two lines at this width in every locale.
+/// Header plus caveat above the list: [`LIST_HEADER`] (39.5) and 34 for
+/// the note, which wraps to two lines at this width in every locale.
 /// Subtracted from the body height to leave the list its bound.
 ///
 /// Overshooting is the safe direction — the list then ends a few pixels
 /// short of the footer, where undershooting makes the body itself scroll
 /// and the panel grow a second scrollbar.
-const FULL_CHROME_HEIGHT: f32 = 70.;
+const FULL_CHROME_HEIGHT: f32 = LIST_HEADER + 34.;
 
 /// What the open filter row adds to the chrome above the full-scan list.
 const FILTER_ROW_HEIGHT: f32 = 34.;
+
+/// Pinned list header: 11px above a 12px title, 9px under it.
+///
+/// gpui's default line height is φ, and at 2× a 12px run snaps to 19.5,
+/// so the row is 39.5 rather than the 36 this used to subtract. The
+/// shortfall let the card run a few pixels under the body and shaved
+/// the last meter.
+pub(super) const LIST_HEADER: f32 = 11. + 19.5 + 9.;
+
+/// Collapsed process row, hairline included.
+///
+/// At 2× the 12px name snaps to 19.5 and the 10px meta line to 16.
+/// Padding 7+7, the 2px gap, the 4px gap, a 3px meter, the 1px
+/// hairline. [`fit_row_budget`] keeps the viewport to a whole number of
+/// these, so the short panel ends on a row instead of cutting the next
+/// name in half against the footer.
+pub(super) const COLLAPSED_ROW: f32 = 7. + 7. + 19.5 + 2. + 16. + 4. + 3. + 1.;
 
 /// Used for the frame or two before a window size has been reported. Roughly
 /// one panel's worth; the next frame corrects it.
@@ -166,17 +182,32 @@ fn shown_memory(p: &ProcessSnapshot) -> u64 {
 }
 
 /// Height budget for the scrolling rows region of the top-N card: the
-/// body, minus the pinned header (36 — same figure FULL_CHROME_HEIGHT
-/// breaks down) and the filter row when open. Shared with the Apps card,
-/// whose chrome is identical.
+/// body, minus the pinned header and the filter row when open. Shared
+/// with the Apps card, whose chrome is identical. History subtracts its
+/// axis from this; Apps and Processes then keep a whole number of rows
+/// via [`fit_row_budget`].
 pub(super) fn rows_height(state: &ZStatsAppState) -> f32 {
-    let chrome = 36.
+    let chrome = LIST_HEADER
         + if state.proc_filter_open() {
             FILTER_ROW_HEIGHT
         } else {
             0.
         };
     (super::body_height(state).unwrap_or(FULL_LIST_FALLBACK) - chrome).max(FULL_LIST_MIN)
+}
+
+/// Shorten `budget` to a whole number of `row`s.
+///
+/// A viewport that is not a multiple of the row slices the next one. On
+/// the short panel that slice sat on the footer's hairline. The leftover
+/// stays under the card. A window too short for one row keeps the
+/// budget, so the card still cannot run under the footer.
+pub(super) fn fit_row_budget(budget: f32, row: f32) -> f32 {
+    if row <= 1.0 {
+        return budget;
+    }
+    let n = (budget / row).floor().max(1.0);
+    (n * row).min(budget)
 }
 
 /// Ranked by the 60s rolling average so the order is stable enough to read.
@@ -320,7 +351,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id("proc-rows")
                 .track_scroll(state.proc_rows_scroll())
                 .overflow_y_scroll()
-                .max_h(px(rows_height(state)))
+                .max_h(px(fit_row_budget(rows_height(state), COLLAPSED_ROW)))
                 .children(abnormal_rows(
                     state,
                     &abnormal,
@@ -340,7 +371,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .when(no_match, |d| {
                     d.child(
                         div()
-                            .px(px(13.))
+                            .px(px(widgets::CARD_PAD))
                             .py(px(10.))
                             .child(widgets::note(i18n::tr("processes.filter_no_match"))),
                     )
@@ -398,7 +429,7 @@ fn process_row(
         // its own, and without a width the row shrinks to its content —
         // every line a different length.
         .w_full()
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .py(px(7.))
         .when(!is_last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
@@ -410,19 +441,22 @@ fn process_row(
                 .items_baseline()
                 .justify_between()
                 .gap(px(8.))
-                .child(widgets::truncating_name(
+                // The name takes the slack so the mark sits beside the
+                // figure, as on the Apps rows.
+                .child(div().flex_1().min_w_0().child(widgets::truncating_name(
                     ("proc-name", pid as usize),
                     p.name.clone(),
                     12.,
                     gpui::FontWeight::MEDIUM,
                     Hsla::from(theme::text()),
-                ))
+                )))
+                .child(widgets::expand_mark(expanded))
                 .child(
                     div()
                         .flex_none()
-                        .font_family(font::MONO)
+                        .font_features(font::tnum())
                         .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::BOLD)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::text_for(hot))
                         .child(format::pct_col(avg as f32)),
                 ),
@@ -474,7 +508,7 @@ fn process_row(
                 )
                 .child(
                     div()
-                        .font_family(font::MONO)
+                        .font_features(font::tnum())
                         .text_color(theme::text_muted())
                         .child(match bar.measure {
                             // The ranking key belongs on the row, not only
@@ -578,7 +612,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
         ))
         .child(
             div()
-                .px(px(13.))
+                .px(px(widgets::CARD_PAD))
                 .pb(px(8.))
                 .child(widgets::note(full_scan_note(data))),
         )
@@ -586,7 +620,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
         .when(count == 0, |d| {
             d.child(
                 div()
-                    .px(px(13.))
+                    .px(px(widgets::CARD_PAD))
                     .py(px(10.))
                     .child(widgets::note(i18n::tr("processes.filter_no_match"))),
             )
@@ -673,7 +707,7 @@ pub(super) fn filter_row(state: &ZStatsAppState) -> Option<AnyElement> {
     let input = state.proc_filter_input()?;
     Some(
         div()
-            .px(px(13.))
+            .px(px(widgets::CARD_PAD))
             .pb(px(6.))
             .child(Input::new(input).xsmall().cleanable(true))
             .into_any_element(),
@@ -741,11 +775,13 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
 
 /// The figure an alert-bar row paints, and whether a per-name entry
 /// decided it. Surface is the number (or "off"); `overridden` is the
-/// ⓘ beside the label — putting "override" in the figure itself is
-/// what used to truncate "CPU alert" to "CPU…" at 320px.
+/// word and ⓘ beside the label — putting "override" in the figure
+/// itself is what used to truncate "CPU alert" to "CPU…" at 320px.
+/// `yours` picks the word: the user's own entry, or the alert table's.
 pub(super) struct BarDisplay {
     text: String,
     overridden: bool,
+    yours: bool,
 }
 
 impl BarDisplay {
@@ -753,6 +789,7 @@ impl BarDisplay {
         Self {
             text: text.into(),
             overridden: false,
+            yours: false,
         }
     }
 
@@ -760,7 +797,14 @@ impl BarDisplay {
         Self {
             text: text.into(),
             overridden,
+            yours: false,
         }
+    }
+
+    /// Name the layer that decided the bar ([`Resolved::in_force`]).
+    pub(super) fn decided_by(mut self, held: Option<InForce>) -> Self {
+        self.yours = held.is_some_and(|h| h.source == BarSource::Yours);
+        self
     }
 }
 
@@ -768,9 +812,9 @@ impl BarDisplay {
 /// expansion), resolved from what zstats' own `Thresholds` said about
 /// this name. Both pages and the tests share this vocabulary.
 /// `overridden` means a per-name entry matched — the user's own or the
-/// template table's; zstats does not say which layer won, and
-/// re-matching here to find out would be a second implementation of
-/// its precedence.
+/// template table's. Which of the two is [`BarDisplay::decided_by`]'s
+/// to say, from zstats' own second answer: re-matching the name here
+/// would be a second implementation of its precedence.
 pub(super) fn pct_bar_text(matched: Option<Option<f32>>, base: Option<f32>) -> BarDisplay {
     match matched {
         Some(Some(v)) => BarDisplay::of(format!("{v:.0}%"), true),
@@ -834,17 +878,28 @@ pub(super) fn bar_row(
                 .items_center()
                 .gap(px(4.))
                 .child(div().min_w_0().truncate().child(label))
+                // The layer in a word, not only behind the ⓘ: "off"
+                // over unlit chips otherwise has no visible reason.
                 .when(bar.overridden, |d| {
-                    d.child(widgets::info_icon(
-                        (id, seq),
-                        i18n::tr("processes.bar_override_tip"),
-                    ))
+                    let (word, tip) = if bar.yours {
+                        ("processes.bar_yours", "processes.bar_yours_tip")
+                    } else {
+                        ("processes.bar_table", "processes.bar_table_tip")
+                    };
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(9.5))
+                            .text_color(theme::tiny_label(theme::text_dim()))
+                            .child(i18n::tr(word)),
+                    )
+                    .child(widgets::info_icon((id, seq), i18n::tr(tip)))
                 }),
         )
         .child(
             div()
                 .flex_none()
-                .font_family(font::MONO)
+                .font_features(font::tnum())
                 .text_color(theme::text())
                 .child(bar.text),
         )
@@ -853,20 +908,21 @@ pub(super) fn bar_row(
 
 /// The two alert bars zstats holds for exactly this name — the answer
 /// to "why is this row at 300% and quiet". Resolved through zstats' own
-/// `ActiveThresholds` against the live template table ([`alerttpl`]),
+/// `ActiveThresholds` against the live template table ([`Resolved`]),
 /// the same resolution the engine armed itself with; nothing here
 /// evaluates a condition, it only reads the line back out.
 fn alert_bar_rows(name: &str, state: &ZStatsAppState) -> Vec<(String, BarDisplay)> {
     let Some(file) = state.settings() else {
         return Vec::new();
     };
-    let loaded = alerttpl::info();
-    let eff = ActiveThresholds::from_config_with_template(&file.alerts, &loaded.template);
+    let bars = Resolved::of(file);
+    let eff = bars.eff();
     let total = state.latest().map(|t| t.snapshot.memory.total_bytes);
     vec![
         (
             i18n::tr("processes.bar_cpu"),
-            pct_bar_text(eff.cpu.override_for(name), eff.cpu.base()),
+            pct_bar_text(eff.cpu.override_for(name), eff.cpu.base())
+                .decided_by(bars.in_force("alert-cpu", name)),
         ),
         (
             i18n::tr("processes.bar_mem"),
@@ -874,7 +930,8 @@ fn alert_bar_rows(name: &str, state: &ZStatsAppState) -> Vec<(String, BarDisplay
                 eff.memory.override_for(name),
                 total.and_then(|t| eff.memory_bar_bytes(name, t)),
                 eff.memory.base(),
-            ),
+            )
+            .decided_by(bars.in_force("alert-mem", name)),
         ),
     ]
 }
@@ -910,12 +967,22 @@ pub(super) fn threshold_editor(
     // the honest thing is to show the bars without controls rather than
     // chips that cannot know what is selected.
     let settings = state.settings()?;
+    let bars = Resolved::of(settings);
+    let total = state.latest().map(|t| t.snapshot.memory.total_bytes);
     let mut col = v_flex()
         .mt(px(8.))
         .pt(px(8.))
         .gap(px(4.))
         .border_t(px(1.))
-        .border_color(theme::border_subtle());
+        .border_color(theme::border_subtle())
+        // What the two rows of bare percentages are percentages of:
+        // a core for one, this machine's memory for the other. The
+        // total is zstats' own figure, printed, not multiplied out.
+        .when_some(total, |d, total| {
+            d.child(widgets::note(
+                t!("processes.th_caption", total = format::memory(total)).to_string(),
+            ))
+        });
     for (i, (key, label)) in [
         (cpu_key, i18n::tr("processes.bar_cpu_short")),
         (mem_key, i18n::tr("processes.bar_mem_short")),
@@ -923,7 +990,8 @@ pub(super) fn threshold_editor(
     .into_iter()
     .enumerate()
     {
-        col = col.child(threshold_row(id, seq * 2 + i, key, label, name, settings));
+        let lit = bars.in_force(key, name).and_then(|held| held.lit);
+        col = col.child(threshold_row(id, seq * 2 + i, key, label, name, lit));
     }
     Some(col.into_any_element())
 }
@@ -936,15 +1004,11 @@ fn threshold_row(
     key: &'static str,
     label: String,
     name: &str,
-    settings: &FileConfig,
+    // The preset the bar above reads as ([`Resolved::in_force`]) — the
+    // chip that matches is the one lit, so "which of these am I on"
+    // needs no reading, and none is lit where the bar is no preset.
+    current: Option<String>,
 ) -> AnyElement {
-    let target = super::alerts::OverrideTarget {
-        key,
-        name: name.to_string(),
-    };
-    // What the file resolves to for this name — the chip that matches
-    // is the one lit, so "which of these am I on" needs no reading.
-    let current = super::alerts::configured_value(Some(settings), &target);
     h_flex()
         .items_center()
         .gap(px(6.))
@@ -1378,8 +1442,9 @@ fn sort_indices(indices: &mut [usize], processes: &[ProcessSnapshot], sort: Proc
     }
 }
 
-/// Cycles the list ordering. A single button rather than a menu — there are
-/// only a handful of orderings and 320px of width to spend.
+/// The list ordering: one chip the width of the ordering in force —
+/// 320px has no room for four — that opens the others as a menu
+/// ([`super::MenuTrigger`]).
 fn sort_control(state: &ZStatsAppState) -> AnyElement {
     let sort = state.proc_sort();
     let full = matches!(state.full_scan(), FullScan::Ready(_));
@@ -1388,24 +1453,31 @@ fn sort_control(state: &ZStatsAppState) -> AnyElement {
     } else {
         sort.tip_key()
     });
-    div()
-        .id("sort-processes")
-        .flex_none()
-        .rounded(px(4.))
-        .px(px(5.))
-        .py(px(1.))
-        .text_size(px(9.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme::text_muted())
-        .hover(|d| d.bg(theme::surface_raised()))
-        .tooltip(widgets::wrap_tooltip(tip))
-        .child(format!("↓ {}", i18n::tr(sort.label_key())))
-        .on_click(|_, _window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.cycle_proc_sort(cx));
+    super::menu_trigger(
+        ("sort-processes", state.panel_visit()),
+        tip,
+        format!("↓ {}", i18n::tr(sort.label_key())),
+    )
+    .flex_none()
+    .px(px(5.))
+    .py(px(1.))
+    .text_size(px(9.))
+    .font_weight(gpui::FontWeight::MEDIUM)
+    .text_color(theme::text_muted())
+    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+        ProcSort::ALL.iter().fold(menu, |menu, &order| {
+            menu.item(
+                super::menu_text(i18n::tr(order.label_key()))
+                    .checked(order == sort)
+                    .on_click(move |_, _, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.set_proc_sort(order, cx));
+                    }),
+            )
         })
-        .into_any_element()
+    })
+    .into_any_element()
 }
 
 /// If `cmd` lives inside a `.app` bundle, the bundle's own name.
@@ -1500,6 +1572,22 @@ fn current_user_id() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The short panel's rows region is 385.5 after a 39.5 header
+    /// (539 − 60 − 44 − 10 − 39.5). It must end on a row.
+    #[test]
+    fn the_short_panel_list_ends_on_a_whole_row() {
+        let budget = 385.5;
+        let fitted = fit_row_budget(budget, COLLAPSED_ROW);
+        assert!(fitted <= budget);
+        assert!(
+            fitted + COLLAPSED_ROW > budget,
+            "one more row would still have fitted"
+        );
+        assert_eq!(fitted, 6.0 * COLLAPSED_ROW);
+        // Shorter than one row: keep the budget rather than grow the card.
+        assert_eq!(fit_row_budget(40.0, COLLAPSED_ROW), 40.0);
+    }
 
     /// The two pages edit two different pairs of rules, and mixing them
     /// up would write a process bar onto an app tree — 200% is
@@ -1749,5 +1837,19 @@ mod tests {
         let rule_off = mem_bar_text(None, None, None);
         assert_eq!(rule_off.text, "off");
         assert!(!rule_off.overridden);
+    }
+
+    /// The word beside a matched bar is "yours" only for the user's own
+    /// entry; the alert table's, and a key with no layers to tell apart,
+    /// stay the other word.
+    #[test]
+    fn the_word_beside_a_bar_names_the_layer() {
+        let bar = |source| {
+            pct_bar_text(Some(Some(300.0)), Some(80.0))
+                .decided_by(Some(InForce { lit: None, source }))
+        };
+        assert!(bar(BarSource::Yours).yours);
+        assert!(!bar(BarSource::Table).yours);
+        assert!(!pct_bar_text(Some(None), Some(80.0)).decided_by(None).yours);
     }
 }

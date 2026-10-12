@@ -410,6 +410,9 @@ pub fn start(cx: &mut App) {
                         // the face on the sample that reported it.
                         tray::sync(cx, state);
                     });
+                // Outside the store's update: it resizes the panel,
+                // which reads the store and updates the window.
+                crate::sync_panel_notice(cx);
             });
         }
     })

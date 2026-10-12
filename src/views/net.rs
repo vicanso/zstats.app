@@ -88,7 +88,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 ))
                 .child(
                     div()
-                        .px(px(13.))
+                        .px(px(widgets::CARD_PAD))
                         .pb(px(11.))
                         .text_size(px(11.))
                         .text_color(theme::text_dim())
@@ -162,7 +162,7 @@ fn iface_row(n: &zstats::snapshot::NetworkSnapshot, scale: f32, rule: bool) -> A
     h_flex()
         .items_center()
         .gap(px(10.))
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .py(px(10.))
         .when(rule, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
@@ -304,7 +304,7 @@ fn idle_compact(idle: &[&zstats::snapshot::NetworkSnapshot]) -> Option<AnyElemen
     }
     Some(
         div()
-            .px(px(13.))
+            .px(px(widgets::CARD_PAD))
             .py(px(8.))
             .child(widgets::note(
                 t!("net.idle_compact", names = names.join(" · ")).to_string(),

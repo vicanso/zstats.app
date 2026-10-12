@@ -29,27 +29,32 @@ pub fn pct(v: f32) -> String {
     }
 }
 
-/// [`pct`] with a leading space when the integer part is one digit, so a
-/// JetBrains Mono column of `8.0%` / `16.3%` stays put. Pads from the
-/// *rendered* digits (`9.96` becomes `10.0%`, no space).
+/// The blank a missing digit leaves: U+2007, which a face draws at the
+/// width of its tabular digits. An ordinary space did that job while
+/// these figures were in the mono face, where every glyph is one width;
+/// in the UI face it is about a third of a digit, and the P-core row's
+/// `1.8%` stood three points left of the E-core row's `15.2%`.
+const FIGURE_SPACE: char = '\u{2007}';
+
+/// [`pct`] with a [`FIGURE_SPACE`] in front when the integer part is one
+/// digit, so a column of `8.0%` / `16.3%` stays put. Pads from the
+/// *rendered* digits (`9.96` becomes `10.0%`, no pad).
 pub fn pct_col(v: f32) -> String {
     let s = pct(v);
     if integer_digits(&s) == 1 {
-        format!(" {s}")
+        format!("{FIGURE_SPACE}{s}")
     } else {
         s
     }
 }
 
-/// Whole-number percent digits (no unit) for the Processor headline.
-/// Same one-space pad as [`pct_col`], after rounding.
+/// Whole-number percent digits (no unit) for a headline figure. No pad:
+/// both places that print one stand it against an edge with nothing
+/// following it (the long Overview's processor figure at the card's
+/// left, the short form's three at its right), so a digit more or less
+/// moves nothing else.
 pub fn whole_pct(v: f32) -> String {
-    let n = v.round().abs();
-    if n < 10.0 {
-        format!(" {n:.0}")
-    } else {
-        format!("{n:.0}")
-    }
+    format!("{:.0}", v.round().abs())
 }
 
 /// Whole watts for the processor caption, floored. Zero (and anything
@@ -609,12 +614,12 @@ mod tests {
 
     #[test]
     fn column_percents_pad_a_space_below_ten() {
-        assert_eq!(pct_col(8.0), " 8.0%");
-        assert_eq!(pct_col(9.94), " 9.9%");
+        assert_eq!(pct_col(8.0), "\u{2007}8.0%");
+        assert_eq!(pct_col(9.94), "\u{2007}9.9%");
         assert_eq!(pct_col(9.96), "10.0%"); // rounds into two digits, no pad
         assert_eq!(pct_col(10.0), "10.0%");
         assert_eq!(pct_col(612.4), "612%");
-        assert_eq!(whole_pct(9.4), " 9");
+        assert_eq!(whole_pct(9.4), "9");
         assert_eq!(whole_pct(9.6), "10");
         assert_eq!(whole_pct(16.0), "16");
     }

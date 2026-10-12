@@ -60,7 +60,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         // this round. Either way the next tick is due in seconds.
         None => shell.child(
             div()
-                .px(px(13.))
+                .px(px(widgets::CARD_PAD))
                 .pb(px(11.))
                 .text_size(px(11.))
                 .text_color(theme::text_dim())
@@ -97,7 +97,7 @@ fn drive_row(index: usize, drive: &DriveSnapshot, last: bool) -> AnyElement {
         && drive.write_ops_per_sec.is_none()
         && drive.queue_depth.is_none();
     v_flex()
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .py(px(8.))
         .when(!last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())

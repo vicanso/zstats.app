@@ -15,19 +15,41 @@ use gpui::{
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 
+/// How much of the ink a tip's second tier keeps. Readable, but
+/// plainly the smaller print under the sentence above it.
+const TIP_DETAIL_OPACITY: f32 = 0.66;
+
 /// Long-copy tooltip: wraps inside the 320px panel and uses caption size
 /// instead of the default `text_sm` one-liner.
+///
+/// A tip may be two tiers, split by a blank line in the locale string
+/// (`\n\n`): first a sentence anyone can read — what this is, what to
+/// do about it — then the precise account in dimmer ink. Until
+/// 2026-10-12 every tip was only its second tier, and the first words
+/// someone met on hovering "Top apps" were "Each row is a launchd child
+/// plus every descendant". The split is in the string so a translator
+/// decides where it falls; separate children because gpui lays one
+/// div's text out as a single run and would draw the break as a space.
 pub fn wrap_tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    let text = text.into();
+    let tiers: Vec<SharedString> = text
+        .into()
+        .split("\n\n")
+        .map(|tier| SharedString::from(tier.to_string()))
+        .collect();
     move |window, cx| {
-        let text = text.clone();
+        let tiers = tiers.clone();
         Tooltip::element(move |_, _| {
-            div()
+            v_flex()
                 .max_w(px(220.))
+                .gap(px(6.))
                 .text_size(px(11.))
                 .line_height(relative(1.35))
-                .whitespace_normal()
-                .child(text.clone())
+                .children(tiers.iter().enumerate().map(|(i, tier)| {
+                    div()
+                        .whitespace_normal()
+                        .when(i > 0, |d| d.opacity(TIP_DETAIL_OPACITY))
+                        .child(tier.clone())
+                }))
         })
         .max_w(px(232.))
         .text_size(px(11.))
@@ -98,10 +120,12 @@ pub fn with_wrap_tooltip(
 /// their separation from the glass frame is a colour difference, and on
 /// a wallpaper that happens to match the card (black, for dark) that
 /// difference vanishes. The hairline is the separation that owes the
-/// wallpaper nothing. `theme::border()` picks the ink per theme.
+/// wallpaper nothing. `theme::card_line()` picks the ink per theme —
+/// and is no ink at all in golden dark, whose ground is opaque and
+/// whose cards are told from it by lightness.
 fn outline(d: Div) -> Div {
     d.shadow(vec![gpui::BoxShadow {
-        color: gpui::Hsla::from(theme::border()),
+        color: gpui::Hsla::from(theme::card_line()),
         offset: gpui::point(px(0.), px(0.)),
         blur_radius: px(0.),
         spread_radius: px(1.),
@@ -109,12 +133,17 @@ fn outline(d: Div) -> Div {
     }])
 }
 
+/// A card's inner margin, and the side margin of every row in a
+/// [`list_shell`], which has none of its own so a row's hover fill can
+/// reach the card's edge. One number so the two cannot drift: the rows
+/// were written as 13 when [`card`] was 13 and stayed there when it
+/// went to 12, and on Hardware the Drives title stood a point right of
+/// the GPU title under it.
+pub const CARD_PAD: f32 = 12.;
+
 /// Settings-style grouped container: fill, hairline outline.
 pub fn card() -> Div {
-    outline(v_flex().rounded(px(12.)).bg(theme::surface()))
-        .px(px(13.))
-        .pt(px(12.))
-        .pb(px(13.))
+    outline(v_flex().rounded(px(12.)).bg(theme::surface())).p(px(CARD_PAD))
 }
 
 /// Same grouping, no inner padding — lists paint their own rows to the edges.
@@ -158,7 +187,7 @@ pub fn list_header(title: impl IntoElement, right: Option<AnyElement>) -> AnyEle
         .items_center()
         .justify_between()
         .gap(px(8.))
-        .px(px(13.))
+        .px(px(CARD_PAD))
         .pt(px(11.))
         .pb(px(9.))
         .child(
@@ -208,6 +237,27 @@ pub fn info_icon_lines(id: impl Into<ElementId>, lines: Vec<SharedString>) -> An
                 .text_color(gpui::Hsla::from(theme::text_dim())),
         )
         .into_any_element()
+}
+
+/// The mark that says a row opens: a chevron beside its figure, turned
+/// down while it is open. A row's only sign that a click did something
+/// was the hover fill, which shows where the pointer is and nothing
+/// about what a click would do — the expansion, with the thresholds and
+/// the Quit in it, was found by accident or not at all. Dim on purpose:
+/// fifty of them down a list must not out-shout the figures.
+pub fn expand_mark(open: bool) -> AnyElement {
+    Icon::new(if open {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    })
+    .with_size(Size::Size(px(10.)))
+    .text_color(gpui::Hsla::from(if open {
+        theme::text_muted()
+    } else {
+        theme::text_dim()
+    }))
+    .into_any_element()
 }
 
 /// A name that may ellipsis at 320px. Short names skip the tooltip —
@@ -321,7 +371,7 @@ pub fn meter(fraction: f32, fill: impl Into<gpui::Hsla>, height: f32) -> AnyElem
         .h(px(height))
         .w_full()
         .rounded_full()
-        .bg(theme::inset())
+        .bg(theme::track())
         .overflow_hidden()
         .child(
             div()
@@ -339,7 +389,7 @@ pub fn stacked_meter(segments: Vec<(f32, gpui::Hsla)>, height: f32) -> AnyElemen
         .h(px(height))
         .w_full()
         .rounded_full()
-        .bg(theme::inset())
+        .bg(theme::track())
         .overflow_hidden()
         .child(
             h_flex()
@@ -407,11 +457,12 @@ fn legend_swatch(mark: LegendMark) -> AnyElement {
 }
 
 /// Above this many characters a kv value gets a hover tooltip with the
-/// full text. A proxy for "might be truncated", and a sound one: the
-/// value renders in the mono face, so character count maps linearly to
-/// pixels. Calibrated for the WORST case, not the default: at the
-/// panel's minimum width (320px) a half column beside the widest label
-/// fits ~12–13 mono chars. The error direction is safe by construction
+/// full text. A proxy for "might be truncated": the value is digits and
+/// a unit, so character count tracks pixels closely enough. Calibrated
+/// for the WORST case, not the default, and on the mono face these
+/// values wore until 2026-10-12 — at the panel's minimum width (320px)
+/// a half column beside the widest label fit ~12–13 of its characters;
+/// the UI face is narrower, which only moves the error the safe way. The error direction is safe by construction
 /// — a long-but-fitting value shows a redundant tooltip (harmless); a
 /// truncated value without one would lose the only path to the tail.
 const KV_TIP_FROM: usize = 12;
@@ -453,7 +504,7 @@ pub fn kv_row(
                 .max_w(relative(0.55))
                 .min_w_0()
                 .truncate()
-                .font_family(font::MONO)
+                .font_features(font::tnum())
                 .font_weight(FontWeight::NORMAL)
                 .text_color(theme::text_for(hot))
                 .when(long, |d| d.tooltip(wrap_tooltip(v.clone())))
@@ -473,9 +524,25 @@ pub fn kv_columns(rows: Vec<(String, String)>) -> AnyElement {
 /// to align, so [`kv_row`]'s right-pin would leave a hole (Compressed
 /// `8.8 GB` hanging on the card edge). Multi-row two-up still uses
 /// [`kv_pairs`].
-pub fn kv_packed(rows: Vec<(String, String, bool)>) -> AnyElement {
+///
+/// `trailing` hugs the right edge on the pairs' baseline and is what
+/// gives way when the row is tight — a remark about the row that is
+/// there some of the time, without costing a line when it is.
+pub fn kv_packed(rows: Vec<(String, String, bool)>, trailing: Option<AnyElement>) -> AnyElement {
     h_flex()
+        .w_full()
         .mt(px(10.))
+        .items_baseline()
+        .justify_between()
+        .gap(px(12.))
+        .child(kv_packed_pairs(rows))
+        .children(trailing)
+        .into_any_element()
+}
+
+fn kv_packed_pairs(rows: Vec<(String, String, bool)>) -> AnyElement {
+    h_flex()
+        .flex_none()
         .gap(px(16.))
         .children(rows.into_iter().enumerate().map(|(i, (k, v, hot))| {
             h_flex()
@@ -492,7 +559,7 @@ pub fn kv_packed(rows: Vec<(String, String, bool)>) -> AnyElement {
                 .child(
                     div()
                         .flex_none()
-                        .font_family(font::MONO)
+                        .font_features(font::tnum())
                         .text_size(px(11.))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(theme::text_for(hot))
@@ -527,30 +594,48 @@ pub fn kv_pairs(rows: Vec<(String, String, bool)>) -> AnyElement {
         .into_any_element()
 }
 
-/// The headline figure with its unit trailing, e.g. "42" + "%".
-pub fn big_number(
-    value: impl Into<SharedString>,
-    unit: impl Into<SharedString>,
-    size: f32,
-) -> AnyElement {
+/// A card's headline figure and the unit beside it: the figure large,
+/// what it is counted in a size and an ink down. They were one run in
+/// one ink ("19 GB"), which gave the unit the figure's weight, and the
+/// percent sign was a mono glyph at half size, a space away and below
+/// the line.
+const HEADLINE: f32 = 20.;
+const HEADLINE_UNIT: f32 = 13.;
+
+/// The headline figure with a sign trailing it, e.g. "42" + "%". The
+/// sign sits against the figure, as a percent does in a sentence.
+pub fn big_number(value: impl Into<SharedString>, unit: impl Into<SharedString>) -> AnyElement {
+    headline(value.into(), unit.into(), 1.)
+}
+
+/// [`big_number`] for a figure `format` has already joined to its unit
+/// ("19 GB", "4.5 TB"): split at the space, nothing recomputed, and the
+/// unit a word apart. A text with no unit — the placeholder — is the
+/// figure alone.
+pub fn big_figure(text: &str) -> AnyElement {
+    let (value, unit) = text.rsplit_once(' ').unwrap_or((text, ""));
+    headline(value.to_string().into(), unit.to_string().into(), 4.)
+}
+
+fn headline(value: SharedString, unit: SharedString, gap: f32) -> AnyElement {
     h_flex()
+        .flex_none()
         .items_baseline()
-        .gap(px(3.))
+        .gap(px(gap))
         .child(
             div()
-                .font_family(font::MONO)
-                .text_size(px(size))
-                .font_weight(gpui::FontWeight::BOLD)
+                .font_features(font::tnum())
+                .text_size(px(HEADLINE))
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::text())
-                .child(value.into()),
+                .child(value),
         )
         .child(
             div()
-                .font_family(font::MONO)
-                .text_size(px(size * 0.55))
-                .font_weight(gpui::FontWeight::NORMAL)
-                .text_color(theme::text_dim())
-                .child(unit.into()),
+                .text_size(px(HEADLINE_UNIT))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::text_muted())
+                .child(unit),
         )
         .into_any_element()
 }

@@ -187,6 +187,13 @@ static PINNED: AtomicBool = AtomicBool::new(false);
 /// been done by hand, and it is the one thing that can warn before a
 /// disk fills.
 static DISK_WATCH: AtomicBool = AtomicBool::new(true);
+/// Overview in full — load, uptime, the cluster rows, the memory chart
+/// and its swap line. Off unless the file says `overview_detail =
+/// true`: the page someone opens to ask "is my Mac all right" used to
+/// answer with about thirty figures and no sentence, and the short form
+/// is what it should say first. Everything the long form shows is one
+/// click away, on the footer's toggle.
+static OVERVIEW_DETAIL: AtomicBool = AtomicBool::new(false);
 /// Last panel tab as its file key, `None` = Overview / unset. Written on
 /// each tab switch so a restart opens where the reader left, not always
 /// on Overview. Kept as the string the file holds: `Tab::from_pref_key`
@@ -496,6 +503,7 @@ pub fn load() {
         .expect("analysis exclude pref lock poisoned") = prefs.analysis_exclude;
     PINNED.store(prefs.pinned, Ordering::Relaxed);
     DISK_WATCH.store(!prefs.disk_watch_off, Ordering::Relaxed);
+    OVERVIEW_DETAIL.store(prefs.overview_detail, Ordering::Relaxed);
     *LAST_TAB.write().expect("last tab pref lock poisoned") = prefs.last_tab;
 }
 
@@ -550,6 +558,7 @@ fn persist() {
             .clone(),
         pinned: PINNED.load(Ordering::Relaxed),
         disk_watch_off: !DISK_WATCH.load(Ordering::Relaxed),
+        overview_detail: OVERVIEW_DETAIL.load(Ordering::Relaxed),
         last_tab: LAST_TAB
             .read()
             .expect("last tab pref lock poisoned")
@@ -594,6 +603,8 @@ struct Prefs {
     /// `disk_watch = false` in the file; the derived default (`false`)
     /// is the check on.
     disk_watch_off: bool,
+    /// `overview_detail = true` in the file; absent is the short form.
+    overview_detail: bool,
     /// `tab` in the file; `None` is Overview, omitted like every other
     /// default.
     last_tab: Option<String>,
@@ -648,6 +659,10 @@ fn read(dir: &Path) -> Prefs {
             .get("disk_watch")
             .and_then(toml::Value::as_bool)
             .is_some_and(|on| !on),
+        overview_detail: table
+            .get("overview_detail")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
         last_tab: get("tab")
             .map(str::trim)
             .filter(|k| !k.is_empty())
@@ -676,6 +691,17 @@ pub fn disk_watch() -> bool {
 /// Remember and persist the daily-check switch.
 pub fn set_disk_watch(on: bool) {
     DISK_WATCH.store(on, Ordering::Relaxed);
+    persist();
+}
+
+/// Whether Overview shows its long form.
+pub fn overview_detail() -> bool {
+    OVERVIEW_DETAIL.load(Ordering::Relaxed)
+}
+
+/// Remember and persist Overview's form.
+pub fn set_overview_detail(on: bool) {
+    OVERVIEW_DETAIL.store(on, Ordering::Relaxed);
     persist();
 }
 
@@ -773,6 +799,9 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if prefs.disk_watch_off {
         doc.insert("disk_watch".into(), toml::Value::Boolean(false));
     }
+    if prefs.overview_detail {
+        doc.insert("overview_detail".into(), toml::Value::Boolean(true));
+    }
     if let Some(key) = prefs.last_tab.as_deref() {
         doc.insert("tab".into(), toml::Value::String(key.into()));
     }
@@ -842,6 +871,7 @@ mod tests {
                 analysis_exclude: vec!["~/github".to_string()],
                 pinned: true,
                 disk_watch_off: true,
+                overview_detail: true,
                 last_tab: Some("alerts".into()),
             },
         )
@@ -863,12 +893,14 @@ mod tests {
         assert_eq!(back.analysis_exclude, vec!["~/github".to_string()]);
         assert!(back.pinned);
         assert!(back.disk_watch_off);
+        assert!(back.overview_detail);
         assert_eq!(back.last_tab.as_deref(), Some("alerts"));
         // The switch is stored as the off value only.
         assert!(back.muted);
         let text = fs::read_to_string(file_path(&dir)).unwrap();
         assert!(text.contains("notifications = false"), "{text}");
         assert!(text.contains("disk_watch = false"), "{text}");
+        assert!(text.contains("overview_detail = true"), "{text}");
 
         // Both back to System: the keys disappear rather than being written
         // as a third value. Same for an unset opacity.
@@ -881,6 +913,10 @@ mod tests {
             "unset opacity should omit the key"
         );
         assert!(!text.contains("proxy"), "empty proxy should omit the key");
+        assert!(
+            !text.contains("overview_detail"),
+            "the short Overview should omit the key"
+        );
         assert!(!text.contains("webhook"), "no webhook, no key");
         assert!(
             !text.contains("notifications"),

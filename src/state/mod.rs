@@ -87,15 +87,13 @@ pub enum ProcSort {
 }
 
 impl ProcSort {
-    /// Cycles through the orderings; the control is one button, not a menu.
-    pub fn next(self) -> Self {
-        match self {
-            ProcSort::Cpu => ProcSort::Memory,
-            ProcSort::Memory => ProcSort::DiskIo,
-            ProcSort::DiskIo => ProcSort::Name,
-            ProcSort::Name => ProcSort::Cpu,
-        }
-    }
+    /// The orderings, in the order the control's menu lists them.
+    pub const ALL: [ProcSort; 4] = [
+        ProcSort::Cpu,
+        ProcSort::Memory,
+        ProcSort::DiskIo,
+        ProcSort::Name,
+    ];
 
     /// i18n key for the short label on the control.
     pub fn label_key(self) -> &'static str {
@@ -143,12 +141,7 @@ pub enum AppSort {
 }
 
 impl AppSort {
-    pub fn next(self) -> Self {
-        match self {
-            AppSort::Cpu => AppSort::Memory,
-            AppSort::Memory => AppSort::Cpu,
-        }
-    }
+    pub const ALL: [AppSort; 2] = [AppSort::Cpu, AppSort::Memory];
 
     pub fn label_key(self) -> &'static str {
         match self {
@@ -309,13 +302,11 @@ pub enum HistorySort {
 }
 
 impl HistorySort {
-    pub fn next(self) -> Self {
-        match self {
-            HistorySort::CpuTime => HistorySort::PeakMemory,
-            HistorySort::PeakMemory => HistorySort::MemoryGrowth,
-            HistorySort::MemoryGrowth => HistorySort::CpuTime,
-        }
-    }
+    pub const ALL: [HistorySort; 3] = [
+        HistorySort::CpuTime,
+        HistorySort::PeakMemory,
+        HistorySort::MemoryGrowth,
+    ];
 
     pub fn tip_key(self) -> &'static str {
         match self {
@@ -1746,8 +1737,8 @@ impl ZStatsAppState {
         self.proc_sort
     }
 
-    pub fn cycle_proc_sort(&mut self, cx: &mut Context<Self>) {
-        self.proc_sort = self.proc_sort.next();
+    pub fn set_proc_sort(&mut self, sort: ProcSort, cx: &mut Context<Self>) {
+        self.proc_sort = sort;
         cx.notify();
     }
 
@@ -1755,8 +1746,8 @@ impl ZStatsAppState {
         self.app_sort
     }
 
-    pub fn cycle_app_sort(&mut self, cx: &mut Context<Self>) {
-        self.app_sort = self.app_sort.next();
+    pub fn set_app_sort(&mut self, sort: AppSort, cx: &mut Context<Self>) {
+        self.app_sort = sort;
         cx.notify();
     }
 
@@ -2486,8 +2477,8 @@ impl ZStatsAppState {
     }
 
     /// One button, two orders — cycle like the process sort chip.
-    pub fn cycle_history_sort(&mut self, cx: &mut Context<Self>) {
-        self.history_sort = self.history_sort.next();
+    pub fn set_history_sort(&mut self, sort: HistorySort, cx: &mut Context<Self>) {
+        self.history_sort = sort;
         cx.notify();
     }
 
@@ -3426,27 +3417,29 @@ mod tests {
         );
     }
 
+    /// The menus list `ALL`, so an ordering missing from it cannot be
+    /// reached, and the default has to be its first line.
     #[test]
-    fn sort_cycles_through_every_option_and_returns() {
-        // One button cycles the list, so the cycle must be closed — otherwise
-        // an ordering becomes unreachable.
-        let mut seen = vec![ProcSort::default()];
-        let mut cur = ProcSort::default();
-        for _ in 0..8 {
-            cur = cur.next();
-            if cur == ProcSort::default() {
-                break;
-            }
-            seen.push(cur);
+    fn every_ordering_is_on_its_menu_once() {
+        fn distinct<T: PartialEq>(all: &[T]) -> bool {
+            all.iter()
+                .enumerate()
+                .all(|(i, a)| all[..i].iter().all(|b| a != b))
         }
-        assert_eq!(cur, ProcSort::default(), "cycle should return to start");
-        assert_eq!(seen.len(), 4, "every ordering should be reachable");
-
-        let mut app = AppSort::default();
-        app = app.next();
-        assert_eq!(app, AppSort::Memory);
-        app = app.next();
-        assert_eq!(app, AppSort::Cpu, "apps cycle is two-way");
+        assert!(distinct(&ProcSort::ALL));
+        assert!(distinct(&AppSort::ALL));
+        assert!(distinct(&HistorySort::ALL));
+        assert_eq!(ProcSort::ALL[0], ProcSort::default());
+        assert_eq!(AppSort::ALL[0], AppSort::default());
+        assert_eq!(HistorySort::ALL[0], HistorySort::default());
+        // A variant added to the enum has to be added to its menu: the
+        // match below stops compiling until it is counted here.
+        let on_the_menu = |sort: ProcSort| match sort {
+            ProcSort::Cpu | ProcSort::Memory | ProcSort::DiskIo | ProcSort::Name => {
+                ProcSort::ALL.contains(&sort)
+            }
+        };
+        assert!(ProcSort::ALL.iter().all(|&sort| on_the_menu(sort)));
     }
 
     fn group(root_pid: u32, name: &str) -> ProcessGroupSnapshot {

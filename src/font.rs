@@ -1,23 +1,31 @@
-//! Bundled JetBrains Mono — tabular figures for ticking metrics.
+//! The two faces a figure can wear, and which one.
 //!
-//! Registered at startup via [`register`] so Regular/Bold resolve the same
-//! on every platform, instead of leaning on Menlo / Consolas / DejaVu.
+//! **Figures are in the UI face with fixed-width digits** ([`tnum`],
+//! [`tabular`]): percentages, bytes, counts, durations, thresholds. They
+//! were all on [`MONO`] until 2026-10-12, for the one thing mono buys —
+//! a ticking value that does not change width — and the price was that
+//! every number in the panel read as code. The `tnum` feature buys the
+//! same stillness in the page's own type, with real Medium and Semibold
+//! weights (the bundle ships Regular and Bold only).
 //!
-//! **Where MONO goes** — the rule, since font choice is per-element:
-//! standalone data values (percentages, bytes, temperatures, rates,
-//! core-time, current thresholds) and code-like identifiers (a pid tag
-//! beside a duplicated name). Mono earns its place by keeping a ticking
-//! figure from changing width and by lining values up across rows —
-//! reasons that only apply to numbers standing on their own.
+//! **Where MONO still goes**: the rates — network and disk throughput,
+//! a program's traffic, a drive's operations and latency, swap moving —
+//! and code-like identifiers (an executable's name, a listening
+//! endpoint). A rate rewrites its digits *and* its unit every
+//! couple of seconds; there the fixed advance of every glyph is what
+//! keeps the line from shimmering, which fixed digits alone do not.
 //!
 //! Everything else stays on the UI face: names, labels, and sentences
 //! that happen to contain numbers ("pid 51244 · peak 1.2 GB"). Names in
-//! mono run ~25% wider — fatal at 320px — and a caption that switches
-//! face mid-sentence is noise without an alignment payoff. The split is
-//! also what keeps the panel reading as a native card, not a terminal.
+//! mono run ~25% wider — fatal at 320px.
+//!
+//! Bundled JetBrains Mono is registered at startup via [`register`] so
+//! Regular/Bold resolve the same on every platform, instead of leaning
+//! on Menlo / Consolas / DejaVu.
 
-use gpui::{App, Div, SharedString, Styled};
+use gpui::{App, Div, FontFeatures, SharedString, Styled};
 use gpui_kit::component::Theme;
+use std::sync::{Arc, LazyLock};
 
 use crate::assets;
 use crate::i18n;
@@ -49,6 +57,24 @@ pub fn mono_unless_cjk(d: Div) -> Div {
     } else {
         d.font_family(MONO)
     }
+}
+
+/// Fixed-width digits in whatever face the element has. Built once: a
+/// frame asks for it a couple of hundred times and the set never changes.
+static TNUM: LazyLock<FontFeatures> =
+    LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])));
+
+/// The feature set of a figure, for a chain that is already styling an
+/// element: `.font_features(font::tnum())`. The module doc says which
+/// figures take it and which stay on [`MONO`].
+pub fn tnum() -> FontFeatures {
+    TNUM.clone()
+}
+
+/// A `div` for a figure: the UI face with fixed-width digits, so a value
+/// ticking over does not shove what sits beside it.
+pub fn tabular(d: Div) -> Div {
+    d.font_features(tnum())
 }
 
 /// Load the two faces into gpui's text system. Call once, before the first

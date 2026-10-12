@@ -49,7 +49,7 @@ use crate::state::{Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnyElement, App, Div, Hsla, InteractiveElement, Interactivity, IntoElement,
+    Anchor, AnyElement, App, Div, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement,
     ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement,
     Styled, Window, div, px,
 };
@@ -59,43 +59,41 @@ use gpui_kit::component::{Icon, IconName, Selectable, Sizable, Size, h_flex, v_f
 use rust_i18n::t;
 use std::time::SystemTime;
 
-/// Height of the tab strip: 14 top pad + a 34-tall well (3 + 28 + 3) + 8 gap.
+/// The panel's one spacing scale (`.claude/skills/ui-polish`): 4, 8, 10,
+/// 12, 16 and nothing between. 12 is the gutter round everything and 10
+/// the gap between the things inside it. Before 2026-10-12 the frame was
+/// 14, the cards 12 apart with 13 of padding, and rows 5, 6 and 7 from
+/// each other — every value chosen once, for one card.
+const GUTTER: f32 = 12.;
+
+/// Height of the tab strip: the gutter above, a 38-tall well (4 + 30 +
+/// 4), and the gap to the first card under it.
 ///
 /// Written down, and applied as an explicit height below, because a view
 /// that has to size something against the viewport has no other way to know
 /// how much room the body was left — `uniform_list` cannot measure itself,
 /// it needs a bound to virtualise against.
-const TAB_STRIP_HEIGHT: f32 = 56.;
+const TAB_STRIP_HEIGHT: f32 = GUTTER + 38. + CARD_GAP;
 
-/// Height of the footer: 1px top border + 4 + a 22-tall icon row + 6.
-const FOOTER_HEIGHT: f32 = 33.;
+/// Height of the footer: a 30-tall button row centred in 44, hairline
+/// included.
+const FOOTER_HEIGHT: f32 = 44.;
 
-/// What the body keeps clear beneath its content — for every tab.
+/// What the body keeps clear beneath its content — for every tab: the
+/// same gap the cards keep from each other, above the footer's hairline.
 ///
 /// Removing it entirely was tried and was wrong: the tabs whose last
 /// card paints rows to its own edge (Processes, Apps, History) then sat
-/// flush against the footer's hairline. This gutter is what those pages
-/// have, so it stays here.
-///
-/// What must not happen is a card adding its own on top: the stack that
-/// looked slack at the bottom was Overview, where the memory card's 13
-/// of inner padding landed under a footnote line that needed none. The
-/// fix belongs to that card (`overview::memory`), not to this number —
-/// trimming rows elsewhere to pay for a doubled gap, which is what the
-/// previous attempt did, spends content on a spacing mistake.
-///
-const BODY_BOTTOM_PAD: f32 = 12.;
+/// flush against that hairline.
+const BODY_BOTTOM_PAD: f32 = CARD_GAP;
 
-/// Space above the first card. The tab strip already ends with 8px, so
-/// this 6 brings tab-well → card to 14 — the same as the side gutter —
-/// without pulling the cards themselves 14px apart (that would ungroup
-/// the stack). Lists that size against [`body_height`] subtract it too.
-const CONTENT_TOP_PAD: f32 = 6.;
+/// Space above the first card. None: the tab strip ends on the gap.
+/// Kept as a name because lists that size against [`body_height`]
+/// subtract it.
+const CONTENT_TOP_PAD: f32 = 0.;
 
-/// Space between cards. Less than the 14px frame so the stack still
-/// reads as one group; more than the old 8px so it does not look
-/// pinched against the sides.
-const CARD_GAP: f32 = 12.;
+/// Space between cards, and between the tab strip and the first.
+const CARD_GAP: f32 = 10.;
 
 /// Room the scrolling body actually has, or `None` until the first frame
 /// has reported a window size.
@@ -107,6 +105,14 @@ pub(super) fn body_height(state: &ZStatsAppState) -> Option<f32> {
             - BODY_BOTTOM_PAD
             - CONTENT_TOP_PAD
     })
+}
+
+/// Whether the short Overview is showing its notice row. The one fact
+/// about a page the window needs: the panel is that row taller while it
+/// is (`crate::sync_panel_notice`), so the question is asked here and
+/// answered by the page itself.
+pub fn overview_has_notice(state: &ZStatsAppState) -> bool {
+    !prefs::overview_detail() && overview::has_notice(state)
 }
 
 /// Build the whole panel.
@@ -148,24 +154,29 @@ fn shortcut_hint() -> &'static str {
 /// Full names live on the tooltip.
 fn tab_strip(state: &ZStatsAppState) -> AnyElement {
     let active = state.tab();
-    let alert_count = state.alerts().len();
+    // Red is for an alert that is happening: a card reported in this
+    // session. The bell used to turn red for any card in the list, so a
+    // record restored from this morning lit it on a day with nothing
+    // wrong.
+    let alerting = state.alerts().iter().any(|seen| seen.live);
 
     let cell = |tab: Tab| {
         let on = tab == active;
-        let alerting = tab == Tab::Alerts && alert_count > 0;
-        // A theme with a mark wears it, solid, on the selected tab:
-        // Golden's champagne rgb(217 185 140), Omarchy's accent. The icon
-        // takes the mark's own ink. An alerting Alerts tab keeps the red
-        // chip: that colour is the alarm, and it has to win over the theme.
-        let mark = theme::mark().filter(|_| on && !alerting);
-        let color = if alerting {
-            theme::accent_light()
-        } else if let Some((_, ink)) = mark {
-            ink
-        } else if on {
-            theme::text()
-        } else {
-            theme::text_dim()
+        let alarm = tab == Tab::Alerts && alerting;
+        // Selected is a tint of the accent under the accent, where the
+        // scheme has that state (`theme::selected`); elsewhere the
+        // theme's mark as a block, or the classic chip. An alerting
+        // Alerts tab is red either way: that colour is the alarm, and
+        // it has to win over the theme.
+        let (fill, color) = match (on, alarm) {
+            (true, true) => (Some(theme::accent_wash(16)), theme::accent_light()),
+            (false, true) => (None, theme::accent_light()),
+            (true, false) => match (theme::selected(), theme::mark()) {
+                (Some((fill, ink)), _) => (Some(fill), ink),
+                (None, Some((fill, ink))) => (Some(fill), ink),
+                (None, None) => (Some(theme::chip()), theme::text()),
+            },
+            (false, false) => (None, theme::text_dim()),
         };
         let id = tab.label();
         let title = t!(
@@ -175,30 +186,39 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
             n = tab.index() + 1
         )
         .to_string();
-        div()
+        h_flex()
             .id(id)
-            .flex_1()
-            .h(px(28.))
+            .flex_none()
+            .h(px(30.))
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
             .rounded(px(7.))
-            .when_some(mark, |d, (fill, _)| d.bg(fill))
-            .when(on && mark.is_none(), |d| d.bg(theme::chip()))
-            .hover(move |d| match mark {
-                Some((fill, _)) => d.bg(fill),
-                None => d.bg(theme::chip()),
-            })
+            // The tab on screen is as wide as its name; the rest are
+            // icons in a fixed box, spread across what is left.
+            .map(|d| if on { d.px(px(12.)) } else { d.w(px(34.)) })
+            .when_some(fill, |d, fill| d.bg(fill))
+            .when(!on, |d| d.hover(|d| d.bg(theme::chip())))
             .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
             .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        tab_icon(tab)
-                            .with_size(Size::Size(px(15.)))
-                            .text_color(Hsla::from(color)),
-                    ),
+                tab_icon(tab)
+                    .with_size(Size::Size(px(if on { 15. } else { 16. })))
+                    .text_color(Hsla::from(color)),
             )
+            // Seven glyphs with their names behind a hover was a strip
+            // to learn by heart: a chip for Processes, a drive for the
+            // page that also holds the GPU and the battery. The page on
+            // screen wears its name, so every visit teaches one.
+            .when(on, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(13.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Hsla::from(color))
+                        .child(tab.title()),
+                )
+            })
             .on_click(move |_, _window, cx| {
                 cx.global::<ZStatsGlobalStore>()
                     .clone()
@@ -209,13 +229,12 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
     v_flex()
         .h(px(TAB_STRIP_HEIGHT))
         .flex_none()
-        .px(px(14.))
-        .pt(px(14.))
-        .pb(px(8.))
+        .px(px(GUTTER))
+        .pt(px(GUTTER))
         .child(
             h_flex()
-                .gap(px(2.))
-                .p(px(3.))
+                .justify_between()
+                .p(px(4.))
                 .rounded(px(10.))
                 .bg(theme::trough())
                 .children(Tab::ALL.iter().copied().map(cell)),
@@ -270,14 +289,15 @@ fn content(state: &ZStatsAppState) -> AnyElement {
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
-        .px(px(14.))
+        .px(px(GUTTER))
         .pt(px(CONTENT_TOP_PAD))
         .pb(px(BODY_BOTTOM_PAD))
         .child(v_flex().gap(px(CARD_GAP)).children(body))
         .into_any_element()
 }
 
-const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
+/// The project page. The About page links it; the footer used to.
+pub(super) const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
 
 /// The footer's keep-awake control: a cup that opens a menu of lengths.
 ///
@@ -331,10 +351,13 @@ impl RenderOnce for AwakeTrigger {
         self.base
             .flex()
             .flex_none()
+            .h(px(FOOTER_BUTTON))
+            .min_w(px(32.))
             .items_center()
+            .justify_center()
             .gap(px(4.))
-            .p(px(4.))
-            .rounded(px(6.))
+            .px(px(8.))
+            .rounded(px(7.))
             // Lit while it holds; the hover fill kept while its menu is
             // open, so the menu visibly belongs to this button.
             .when(held, |d| d.bg(theme::chip()))
@@ -345,7 +368,7 @@ impl RenderOnce for AwakeTrigger {
             .hover(|d| d.bg(theme::surface_raised()))
             .child(
                 Icon::from(CustomIconName::Coffee)
-                    .with_size(Size::Size(px(14.)))
+                    .with_size(Size::Size(px(16.)))
                     .text_color(Hsla::from(if held {
                         theme::text()
                     } else {
@@ -362,12 +385,85 @@ impl RenderOnce for AwakeTrigger {
             .children(left.map(|left| {
                 div()
                     .pr(px(2.))
-                    .font_family(font::MONO)
+                    .font_features(font::tnum())
                     .text_size(px(10.))
                     .line_height(px(14.))
                     .text_color(theme::text())
                     .child(left)
             }))
+    }
+}
+
+/// A header control that opens a menu: the sort chips and History's
+/// title. [`AwakeTrigger`]'s box, for a control that is not the cup.
+///
+/// These three cycled on a click until 2026-10-12 — one button, the
+/// next ordering — which spends no width but hides what the other
+/// orderings are, costs up to three clicks to go back one, and on
+/// History wore a chevron that promised the menu it did not open. The
+/// menu spends the same width. Give it an id keyed by
+/// `panel_visit`, for the cup's reason: a kit dropdown closes only
+/// from inside its window, and the panel is hidden rather than closed.
+#[derive(IntoElement)]
+pub(super) struct MenuTrigger {
+    base: Stateful<Div>,
+    /// Its menu is open. Set by the dropdown, not by us.
+    open: bool,
+    tip: SharedString,
+    label: AnyElement,
+}
+
+pub(super) fn menu_trigger(
+    id: impl Into<ElementId>,
+    tip: impl Into<SharedString>,
+    label: impl IntoElement,
+) -> MenuTrigger {
+    MenuTrigger {
+        base: div().id(id),
+        open: false,
+        tip: tip.into(),
+        label: label.into_any_element(),
+    }
+}
+
+impl Styled for MenuTrigger {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.base.style()
+    }
+}
+
+impl InteractiveElement for MenuTrigger {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.base.interactivity()
+    }
+}
+
+impl Selectable for MenuTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.open
+    }
+}
+
+impl DropdownMenu for MenuTrigger {}
+
+impl RenderOnce for MenuTrigger {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let (open, tip) = (self.open, self.tip);
+        self.base
+            .flex()
+            .items_center()
+            .rounded(px(4.))
+            // The hover fill kept while the menu is open, and no tooltip
+            // under it — as on the cup.
+            .when(open, |d| d.bg(theme::surface_raised()))
+            .when(!open, |d| d.tooltip(widgets::wrap_tooltip(tip)))
+            .hover(|d| d.bg(theme::surface_raised()))
+            .child(self.label)
     }
 }
 
@@ -420,9 +516,9 @@ fn keep_awake_menu(state: &ZStatsAppState) -> impl IntoElement {
         open: false,
         tip: tip.into(),
     }
-    // Upward and right-aligned: the footer is the panel's bottom edge
-    // and the cup sits in its right-hand cluster.
-    .dropdown_menu_with_anchor(Anchor::BottomRight, |menu, _, _| {
+    // Upward and left-aligned: the footer is the panel's bottom edge
+    // and the cup sits in its left-hand group.
+    .dropdown_menu_with_anchor(Anchor::BottomLeft, |menu, _, _| {
         // Read when the menu opens, not when the footer was built.
         let hold = awake::held();
         let current = hold.map_or(0, |hold| hold.minutes);
@@ -453,139 +549,148 @@ fn keep_awake_menu(state: &ZStatsAppState) -> impl IntoElement {
 /// a menu from a larger app — the same reason [`widgets::wrap_tooltip`]
 /// does not use the kit's default tooltip. An item built from an element
 /// carries its own text; a disabled one is the kit's muted heading.
-fn menu_text(label: String) -> PopupMenuItem {
+pub(super) fn menu_text(label: String) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| div().text_size(px(MENU_PT)).child(label.clone()))
 }
 
 /// Type size of the footer menu's lines — the panel's row text.
 const MENU_PT: f32 = 12.;
 
-/// Keep-awake, Pin, Config, GitHub and Quit sit together on the right —
-/// a lone icon on the left read as an unfinished row. Quit stays last so
-/// it is the edge action.
+/// Height of a footer button: the tab strip's cell.
+const FOOTER_BUTTON: f32 = 30.;
+
+/// One of the footer's icon buttons: a 32×30 box, the icon at 16.
+fn footer_button(id: &'static str, icon: Icon, lit: bool) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .w(px(32.))
+        .h(px(FOOTER_BUTTON))
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .when(lit, |d| d.bg(theme::chip()))
+        .hover(|d| d.bg(theme::surface_raised()))
+        .child(
+            icon.with_size(Size::Size(px(16.)))
+                .text_color(Hsla::from(if lit {
+                    theme::text()
+                } else {
+                    theme::text_dim()
+                })),
+        )
+}
+
+/// What the panel does to itself on the left — Pin, its form, Settings,
+/// the keep-awake cup — and, alone on the right and in words, Quit.
+///
+/// The form toggle is here and not on the Overview page it reshapes:
+/// what it changes is the panel's height, on every tab, and the long
+/// form's way back used to be a line of its own above that page's
+/// cards — 26 of height for one word. Its glyph is the act, not the
+/// state: two chevrons pulling apart while the panel is short, closing
+/// while it is long.
+///
+/// The five used to sit together on the right as five glyphs, the power
+/// one last: the action that ends the app was the same size and the
+/// same grey as the one that pins the panel, one slot away from it.
+/// The GitHub button that sat among them is on the About page now — a
+/// link out of the app is not something the panel is for, and it took a
+/// place in a row of things the panel does.
 fn footer(state: &ZStatsAppState) -> AnyElement {
-    let github_tip = i18n::tr("common.github");
     let nudge = state.update_nudge().map(str::to_string);
+    let pinned = prefs::pinned();
+    let pin_tip = i18n::tr(if pinned { "common.unpin" } else { "common.pin" });
+    // Settings lives in its own window, not a tab: a session should not
+    // be cut short by the popover auto-hiding on focus loss.
+    //
+    // One dot, two possible reasons — a second dot at this size would
+    // be noise, and both answers are the same act (open settings). The
+    // tooltip is what says which.
+    let template_nudge = state.template_nudge();
+    let settings_tip = match (&nudge, template_nudge) {
+        (Some(v), true) => t!("config.both_nudge_tip", v = v).to_string(),
+        // The dot's words: a silent check found a newer release; the
+        // About page has the download.
+        (Some(v), false) => t!("config.update_nudge_tip", v = v).to_string(),
+        (None, true) => i18n::tr("config.template_nudge_tip"),
+        (None, false) => i18n::tr("tabs.settings"),
+    };
+    let dotted = nudge.is_some() || template_nudge;
+    // "Quit" alone under a power glyph, beside the cup that keeps the
+    // Mac awake, read as something about the Mac.
+    let quit_tip = i18n::tr("common.quit_app");
+    let detail = prefs::overview_detail();
+    let (form_icon, form_tip) = if detail {
+        (CustomIconName::Collapse, "overview.collapse_tip")
+    } else {
+        (CustomIconName::Expand, "overview.expand_tip")
+    };
+    let form_tip = i18n::tr(form_tip);
     h_flex()
         .h(px(FOOTER_HEIGHT))
         .flex_none()
         .items_center()
-        .justify_end()
-        .gap(px(6.))
-        .px(px(14.))
-        .pt(px(4.))
-        .pb(px(6.))
+        .justify_between()
+        .px(px(8.))
         .border_t(px(1.))
         .border_color(theme::border_subtle())
-        .child(keep_awake_menu(state))
-        .child({
-            // Stays with the right-hand cluster: a lone icon on the
-            // left read as an unfinished row. Pin only stops auto-hide
-            // — tray click still toggles, and this is not a second
-            // window model.
-            let pinned = prefs::pinned();
-            let pin_tip = i18n::tr(if pinned { "common.unpin" } else { "common.pin" });
-            div()
-                .id("pin")
-                .flex_none()
-                .p(px(4.))
-                .rounded(px(6.))
-                .when(pinned, |d| d.bg(theme::chip()))
-                .tooltip(move |window, cx| Tooltip::new(pin_tip.clone()).build(window, cx))
-                .hover(|d| d.bg(theme::surface_raised()))
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
                 .child(
-                    Icon::from(CustomIconName::Pin)
-                        .with_size(Size::Size(px(14.)))
-                        .text_color(Hsla::from(if pinned {
-                            theme::text()
-                        } else {
-                            theme::text_dim()
-                        })),
+                    // Pin only stops auto-hide — a tray click still
+                    // toggles, and this is not a second window model.
+                    footer_button("pin", Icon::from(CustomIconName::Pin), pinned)
+                        .tooltip(move |window, cx| Tooltip::new(pin_tip.clone()).build(window, cx))
+                        .on_click(|_, _window, cx| {
+                            prefs::set_pinned(!prefs::pinned());
+                            cx.global::<ZStatsGlobalStore>()
+                                .clone()
+                                .update(cx, |_, cx| cx.notify());
+                        }),
                 )
-                .on_click(|_, _window, cx| {
-                    prefs::set_pinned(!prefs::pinned());
-                    cx.global::<ZStatsGlobalStore>()
-                        .clone()
-                        .update(cx, |_, cx| cx.notify());
-                })
-        })
-        .child({
-            // Settings lives in its own window, not a tab: a session
-            // should not be cut short by the popover auto-hiding on
-            // focus loss. The gear opens (or refocuses) it. The window
-            // title and this tooltip say Settings; the page that edits
-            // config.toml inside it is still Config.
-            //
-            // One dot, two possible reasons — a second dot at this size
-            // would be noise, and both answers are the same act (open
-            // settings). The tooltip is what says which.
-            let template_nudge = state.template_nudge();
-            let settings_tip = match (&nudge, template_nudge) {
-                (Some(v), true) => t!("config.both_nudge_tip", v = v).to_string(),
-                // The dot's words: a silent check found a newer release;
-                // the About page has the download.
-                (Some(v), false) => t!("config.update_nudge_tip", v = v).to_string(),
-                (None, true) => i18n::tr("config.template_nudge_tip"),
-                (None, false) => i18n::tr("tabs.settings"),
-            };
-            div()
-                .id("settings")
-                .flex_none()
-                .p(px(4.))
-                .rounded(px(6.))
-                .tooltip(move |window, cx| Tooltip::new(settings_tip.clone()).build(window, cx))
-                .hover(|d| d.bg(theme::surface_raised()))
                 .child(
-                    div()
+                    footer_button("panel-form", Icon::from(form_icon), false)
+                        .tooltip(widgets::wrap_tooltip(form_tip))
+                        .on_click(move |_, _window, cx| {
+                            crate::set_overview_detail_pref(!detail, cx)
+                        }),
+                )
+                .child(
+                    footer_button("settings", Icon::new(IconName::Settings2), false)
                         .relative()
-                        .child(
-                            Icon::new(IconName::Settings2)
-                                .with_size(Size::Size(px(14.)))
-                                .text_color(Hsla::from(theme::text_dim())),
-                        )
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(settings_tip.clone()).build(window, cx)
+                        })
                         // The nudge dot: paint only, no layout — the
                         // gear must not shift when it appears.
-                        .when(nudge.is_some() || template_nudge, |d| {
+                        .when(dotted, |d| {
                             d.child(
                                 div()
                                     .absolute()
-                                    .top(px(-1.))
-                                    .right(px(-1.))
-                                    .w(px(6.))
-                                    .h(px(6.))
+                                    .top(px(6.))
+                                    .right(px(6.))
+                                    .size(px(6.))
                                     .rounded_full()
                                     .bg(Hsla::from(theme::accent())),
                             )
-                        }),
+                        })
+                        .on_click(|_, _window, cx| crate::open_settings_window(cx)),
                 )
-                .on_click(|_, _window, cx| crate::open_settings_window(cx))
-        })
-        .child(
-            div()
-                .id("github")
-                .cursor_pointer()
-                .flex_none()
-                .p(px(4.))
-                .rounded(px(6.))
-                .text_color(theme::text_muted())
-                .tooltip(move |window, cx| Tooltip::new(github_tip.clone()).build(window, cx))
-                .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
-                .child(
-                    Icon::new(IconName::Github)
-                        .with_size(Size::Size(px(14.)))
-                        .text_color(Hsla::from(theme::text_dim())),
-                )
-                .on_click(|_, _window, cx| {
-                    cx.open_url(REPO_URL);
-                }),
+                .child(keep_awake_menu(state)),
         )
-        .child({
-            let quit_tip = i18n::tr("common.quit");
-            div()
+        .child(
+            h_flex()
                 .id("quit")
                 .flex_none()
-                .p(px(4.))
-                .rounded(px(6.))
+                .h(px(FOOTER_BUTTON))
+                .items_center()
+                .gap(px(6.))
+                .px(px(10.))
+                .rounded(px(7.))
                 .tooltip(move |window, cx| Tooltip::new(quit_tip.clone()).build(window, cx))
                 .hover(|d| d.bg(theme::surface_raised()))
                 .child(
@@ -593,7 +698,13 @@ fn footer(state: &ZStatsAppState) -> AnyElement {
                         .with_size(Size::Size(px(14.)))
                         .text_color(Hsla::from(theme::text_dim())),
                 )
-                .on_click(|_, _window, cx| cx.quit())
-        })
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::text_dim())
+                        .child(i18n::tr("common.quit")),
+                )
+                .on_click(|_, _window, cx| cx.quit()),
+        )
         .into_any_element()
 }

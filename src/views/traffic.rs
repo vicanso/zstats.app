@@ -223,7 +223,7 @@ fn tip(coverage: Option<OwnerCoverage>) -> String {
 
 fn note_line(text: String) -> AnyElement {
     div()
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .pb(px(11.))
         .text_size(px(11.))
         .text_color(theme::text_dim())
@@ -248,7 +248,7 @@ fn row_element(
     // far edge, which parted the pair a reader compares and spent ~20px a
     // row; the pid sits after the name, dim, as the listening card has it.
     v_flex()
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .py(px(8.))
         .when(rule, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())

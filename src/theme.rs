@@ -13,10 +13,26 @@
 //! gpui-kit's own widgets (the window ground, switches, focus rings).
 //! These functions paint the panel's cards, which that file does not.
 //!
+//! **Golden's dark half is no longer Notchclip's** (2026-10-12): it is
+//! the palette written down in `.claude/skills/ui-polish` — base
+//! `#1c1c1e`, card `#252528`, track `#36363a`, three inks `#f2f0eb` /
+//! `#a19d96` / `#8f8b85`, one accent `#d9ae7a`. (Its green, `#6ec48a`,
+//! is in the kit theme as `success` and has no function here since the
+//! "Nothing needs attention" row went: an ordinary day draws no row at
+//! all.) Three steps of lightness do the work
+//! the hairlines did, which only holds on an opaque ground: the weakest
+//! ink is 4.5:1 on the card and 2.2:1 on the glass. So this scheme is
+//! opaque by default ([`default_opacity`]), and its fills are written as
+//! white lifts that composite to exactly those hexes over that ground —
+//! someone who lowers the opacity still gets three steps over whatever
+//! shows through. The light half keeps the Notchclip tokens.
+//!
 //! Brand red stays the over-threshold colour in every scheme, golden
 //! included. Champagne is the theme's own mark — a checked switch, a
-//! selected chip, the active tab — because a hot bar that turned gold
-//! would read as the theme's brand rather than a crossed line.
+//! selected chip, the active tab — and since 2026-10-12 the colour of a
+//! reading that is in order ([`gauge`]): a bar that says how much, the
+//! line of a chart. It is never the colour of a crossed line; a hot bar
+//! that turned gold would read as the theme's brand.
 //!
 //! Omarchy is the third, and the only one not written here: its tokens
 //! are derived from the desktop's current palette (`omarchy.rs`) by
@@ -239,7 +255,8 @@ pub fn surface() -> Rgba {
     // Golden light is `--paper` at the same near-solid alpha the classic
     // light card uses. Golden dark is `--wash` (`#f5efe612`), the warm
     // equivalent of the white lift — still translucent, so the glass stays.
-    tone(0xffffff12, 0xfffffff2, 0xf5efe612, 0xfbf8f3f2, |t| {
+    // Golden dark: `#252528` over the `#1c1c1e` ground, as a lift.
+    tone(0xffffff12, 0xfffffff2, 0xffffff0a, 0xfbf8f3f2, |t| {
         t.surface
     })
 }
@@ -249,21 +266,21 @@ pub fn surface() -> Rgba {
 #[inline]
 pub fn trough() -> Rgba {
     // Golden light: `--bone-deep`, the well a paper chip sits in.
-    tone(0xffffff12, 0x0000000a, 0xf5efe612, 0xe8dfd2ff, |t| t.trough)
+    tone(0xffffff12, 0x0000000a, 0xffffff0a, 0xe8dfd2ff, |t| t.trough)
 }
 
 /// Selected tab chip.
 #[inline]
 pub fn chip() -> Rgba {
     // Golden dark chip is `--line` (`#f5efe61f`). Golden light is `--paper`.
-    tone(0xffffff1f, 0xffffffff, 0xf5efe61f, 0xfbf8f3ff, |t| t.chip)
+    tone(0xffffff1f, 0xffffffff, 0xffffff14, 0xfbf8f3ff, |t| t.chip)
 }
 
 /// Hover / expanded rows. Dark: lift. Light: a grey wash on the white card.
 #[inline]
 pub fn surface_raised() -> Rgba {
     // Golden: `--wash-strong` on dark (`#ffffff1a`), `--wash` on light.
-    tone(0xffffff1f, 0x0000000e, 0xffffff1a, 0x1a17140f, |t| {
+    tone(0xffffff1f, 0x0000000e, 0xffffff14, 0x1a17140f, |t| {
         t.surface_raised
     })
 }
@@ -283,14 +300,14 @@ pub fn border() -> Rgba {
     // Golden dark hairline is `--line`. Golden light is `--line-solid`,
     // the site's card edge, which is a real warm line rather than a
     // faint black wash.
-    tone(0xffffff22, 0x00000012, 0xf5efe61f, 0xe2d8c9ff, |t| t.border)
+    tone(0xffffff22, 0x00000012, 0xffffff17, 0xe2d8c9ff, |t| t.border)
 }
 
 /// Row separators — dimmer than [`border`].
 #[inline]
 pub fn border_subtle() -> Rgba {
     // `--line-soft` on dark, `--line` on light.
-    tone(0xffffff14, 0x00000014, 0xf5efe612, 0x1a171424, |t| {
+    tone(0xffffff14, 0x00000014, 0xffffff0f, 0x1a171424, |t| {
         t.border_subtle
     })
 }
@@ -299,14 +316,14 @@ pub fn border_subtle() -> Rgba {
 #[inline]
 pub fn text() -> Rgba {
     // Golden is `--ink`.
-    tone(0xfafafaff, 0x1d1d1fff, 0xf5efe6ff, 0x1a1714ff, |t| t.text)
+    tone(0xfafafaff, 0x1d1d1fff, 0xf2f0ebff, 0x1a1714ff, |t| t.text)
 }
 
 /// Secondary text: units, captions, inactive tabs.
 #[inline]
 pub fn text_muted() -> Rgba {
     // Golden is `--ink-soft`.
-    tone(0xa1a1aaff, 0x6e6e73ff, 0xa89f93ff, 0x5a534bff, |t| {
+    tone(0xa1a1aaff, 0x6e6e73ff, 0xa19d96ff, 0x5a534bff, |t| {
         t.text_muted
     })
 }
@@ -319,7 +336,7 @@ pub fn text_dim() -> Rgba {
     // 4.5:1 that 10pt captions and path prefixes need, while every other
     // scheme cleared 4.9; `#747479` reads 4.65:1. Golden steps down to
     // `--ink-faint`, the site's last published ink.
-    tone(0x8e8e93ff, 0x747479ff, 0x968d81ff, 0x645d54ff, |t| {
+    tone(0x8e8e93ff, 0x747479ff, 0x8f8b85ff, 0x645d54ff, |t| {
         t.text_dim
     })
 }
@@ -353,7 +370,7 @@ pub fn tiny_label(base: Rgba) -> Rgba {
 #[inline]
 pub fn text_faint() -> Rgba {
     // Golden has no ink past `--ink-faint`, so faint and dim share it.
-    tone(0x636366ff, 0xa1a1a6ff, 0x968d81ff, 0x645d54ff, |t| {
+    tone(0x636366ff, 0xa1a1a6ff, 0x8f8b85ff, 0x645d54ff, |t| {
         t.text_faint
     })
 }
@@ -363,7 +380,7 @@ pub fn text_faint() -> Rgba {
 pub fn ink() -> Rgba {
     // Golden meters use `--ink`, the same role as the classic near-black
     // / near-white neutral.
-    tone(0xe4e4e7ff, 0x1d1d1fff, 0xf5efe6ff, 0x1a1714ff, |t| t.ink)
+    tone(0xe4e4e7ff, 0x1d1d1fff, 0xf2f0ebff, 0x1a1714ff, |t| t.ink)
 }
 
 /// Brand red. Reserved for over-threshold states and the primary action.
@@ -421,35 +438,125 @@ pub fn is_golden() -> bool {
 /// The site publishes it as the dark half of `--accent`. Both golden
 /// variants use it as the theme's mark: a wash of it would colour-pick
 /// as a blend, and the light-mode bronze reads as brown.
+///
+/// That is the light half's. The dark half's accent is `#d9ae7a`, the
+/// one the ui-polish palette names.
 #[inline]
 pub fn gold() -> Rgba {
-    rgb(0xd9b98c)
+    if scheme() == Scheme::GoldenDark {
+        rgb(0xd9ae7a)
+    } else {
+        rgb(0xd9b98c)
+    }
 }
 
-/// Dark `--on-accent`. Cream on champagne has no contrast.
+/// The ink on a gold fill: dark `--on-accent`, or the dark half's own
+/// ground. Cream on champagne has no contrast.
 #[inline]
 pub fn on_gold() -> Rgba {
-    rgb(0x14110e)
+    if scheme() == Scheme::GoldenDark {
+        rgb(0x1c1c1e)
+    } else {
+        rgb(0x14110e)
+    }
+}
+
+/// A selected thing's fill and ink in golden dark: the mark at 16%
+/// under the mark itself. The tab on screen, a chosen option chip. They
+/// used to be the mark as a solid block with dark ink on it — the
+/// loudest shape on any page was whichever chip happened to be selected.
+/// `None` elsewhere: golden light's mark has no contrast as text on
+/// bone, an Omarchy palette's accent is not promised to have any on its
+/// own ground (only its ink *on* the accent is checked), and the classic
+/// pair has no mark.
+#[inline]
+pub fn selected() -> Option<(Rgba, Rgba)> {
+    (scheme() == Scheme::GoldenDark).then(|| {
+        let mark = gold();
+        (Rgba { a: 0.16, ..mark }, mark)
+    })
+}
+
+/// The paint of a reading where nothing is wrong: the scheme's mark if
+/// it has one that shows, the neutral ink if not. For the readings that
+/// are a card's subject — Overview's bars and charts in both forms, a
+/// volume's fullness, the GPU — and not for the fifty share bars down a
+/// list, which stay [`ink`]: there the bar ranks a row against its
+/// neighbours, and fifty marks are no mark. The short Overview had it
+/// first, which left the same two figures (memory, the startup disk)
+/// champagne on one page and bone on the long form and on Hardware.
+///
+/// Golden light is the scheme with a mark that does not show: its
+/// champagne is 1.4:1 on the bar's own track and worse as a link's ink
+/// on paper, where the ink is 13.5:1. It keeps [`ink`], as the classic
+/// pair does for want of a mark.
+#[inline]
+pub fn gauge() -> Rgba {
+    if scheme() == Scheme::GoldenLight {
+        return ink();
+    }
+    mark().map_or_else(ink, |(mark, _)| mark)
+}
+
+/// [`fill_for`] for a reading that is its card's subject: [`gauge`]
+/// until over the line, the alarm after.
+#[inline]
+pub fn gauge_for(over: bool) -> Rgba {
+    if over { accent() } else { gauge() }
+}
+
+/// The track a bar fills. Golden dark's is a step *lighter* than the
+/// card (`#36363a`), the third of its three steps; every other scheme
+/// keeps the recess a track has always been ([`inset`]).
+#[inline]
+pub fn track() -> Rgba {
+    tone(0x00000040, 0x0000000c, 0xffffff14, 0xe8dfd2ff, |t| t.inset)
+}
+
+/// The hairline round a card. None in golden dark, where the card is a
+/// step lighter than an opaque ground and needs no line to be seen;
+/// [`border`] everywhere else, where the ground is glass.
+#[inline]
+pub fn card_line() -> Rgba {
+    if scheme() == Scheme::GoldenDark {
+        rgba(0x00000000)
+    } else {
+        border()
+    }
+}
+
+/// How solid the panel's ground is when the reader has not said.
+/// Golden dark is opaque (the module doc says why); the classic dark
+/// keeps the glass, and light concedes it.
+#[inline]
+pub fn default_opacity(glass_dark: f32, glass_light: f32) -> f32 {
+    match scheme() {
+        Scheme::GoldenDark => 1.0,
+        _ if is_dark() => glass_dark,
+        _ => glass_light,
+    }
 }
 
 /// Fill of a selected option chip. Classic keeps the faint brand wash.
 /// A scheme with a [`mark`] fills it solid.
 #[inline]
 pub fn choice_fill(on: bool) -> Rgba {
-    match (on, mark()) {
-        (false, _) => inset(),
-        (true, Some((fill, _))) => fill,
-        (true, None) => accent_wash(10),
+    match (on, selected(), mark()) {
+        (false, _, _) => inset(),
+        (true, Some((fill, _)), _) => fill,
+        (true, None, Some((fill, _))) => fill,
+        (true, None, None) => accent_wash(10),
     }
 }
 
 /// Border of a selected option chip. Same split as [`choice_fill`].
 #[inline]
 pub fn choice_line(on: bool) -> Rgba {
-    match (on, mark()) {
-        (false, _) => border(),
-        (true, Some((fill, _))) => fill,
-        (true, None) => accent_wash(45),
+    match (on, selected(), mark()) {
+        (false, _, _) => border(),
+        (true, Some((fill, _)), _) => fill,
+        (true, None, Some((fill, _))) => fill,
+        (true, None, None) => accent_wash(45),
     }
 }
 
@@ -457,10 +564,11 @@ pub fn choice_line(on: bool) -> Rgba {
 /// ink, because the fill is the mark itself.
 #[inline]
 pub fn choice_ink(on: bool) -> Rgba {
-    match (on, mark()) {
-        (false, _) => text(),
-        (true, Some((_, ink))) => ink,
-        (true, None) => accent_light(),
+    match (on, selected(), mark()) {
+        (false, _, _) => text(),
+        (true, Some((_, ink)), _) => ink,
+        (true, None, Some((_, ink))) => ink,
+        (true, None, None) => accent_light(),
     }
 }
 
@@ -469,8 +577,9 @@ pub fn choice_ink(on: bool) -> Rgba {
 /// that ink on a card.
 #[inline]
 pub fn choice_hover(on: bool) -> Rgba {
-    match (on, mark()) {
-        (true, Some((fill, _))) => fill,
+    match (on, selected(), mark()) {
+        (true, Some((fill, _)), _) => fill,
+        (true, None, Some((fill, _))) => fill,
         _ => surface_raised(),
     }
 }
@@ -661,6 +770,8 @@ mod tests {
             "f3eee6", "e8dfd2", "fbf8f3", "1a1714", "5a534b", "645d54", "8a5a2b", "2f6f3e",
             "7a5a0a", "e2d8c9", "a8321e", "14110e", "0e0c0a", "1c1814", "f5efe6", "a89f93",
             "968d81", "d9b98c", "5cc98a", "e8c26a", "332c25", "ff9a80", "ffffff", "000000",
+            // The dark half's own palette (`.claude/skills/ui-polish`).
+            "1c1c1e", "252528", "36363a", "f2f0eb", "a19d96", "8f8b85", "d9ae7a", "6ec48a",
         ];
         let json = GOLDEN_JSON.to_ascii_lowercase();
         let mut i = 0;
@@ -676,7 +787,7 @@ mod tests {
                 8 => &hex[..6],
                 other => panic!("#{hex} has {other} digits; want 6 or 8"),
             };
-            assert!(allowed.contains(&rgb), "#{hex} is not a Notchclip token");
+            assert!(allowed.contains(&rgb), "#{hex} is not a published token");
             i = start + hex_len;
         }
         // `#8a5a2b` is a published token (the light half of `--accent`)
@@ -684,7 +795,7 @@ mod tests {
         // in, it reads as brown rather than the champagne above.
         assert!(
             !json.contains("8a5a2b"),
-            "golden mark is #d9b98c on both variants"
+            "golden light's mark is the champagne, not the bronze"
         );
     }
 
@@ -710,14 +821,58 @@ mod tests {
                 }
                 "Golden Dark" => {
                     assert!(theme.mode.is_dark());
-                    assert_eq!(theme.colors.background.as_deref(), Some("#14110e"));
-                    assert_eq!(theme.colors.primary.as_deref(), Some("#d9b98c"));
+                    // The dark half is the ui-polish palette, not the
+                    // site's: its ground and its one accent.
+                    assert_eq!(theme.colors.background.as_deref(), Some("#1c1c1e"));
+                    assert_eq!(theme.colors.primary.as_deref(), Some("#d9ae7a"));
                     dark = true;
                 }
                 other => panic!("unexpected theme {other}"),
             }
         }
         assert!(light && dark, "the file is a pair, like macos-classic");
+    }
+
+    /// Golden dark is three steps of lightness over an opaque ground,
+    /// and its fills are lifts that land on the published hexes there.
+    #[test]
+    fn golden_dark_is_three_steps_over_an_opaque_ground() {
+        let _scheme = SCHEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_golden(true);
+        assert_eq!(default_opacity(0.35, 0.8), 1.0);
+        // White at `alpha` over `under`, one channel.
+        let over = |under: u32, alpha: f32| (under as f32 + alpha * (255.0 - under as f32)).round();
+        // Card over the ground's #1c, then track over the card's #25.
+        assert_eq!(over(0x1c, surface().a), 0x25 as f32);
+        assert_eq!(over(0x25, track().a), 0x36 as f32);
+        // No line round a card, and the three inks as written.
+        assert_eq!(card_line().a, 0.0);
+        assert_eq!(text(), rgb(0xf2f0eb));
+        assert_eq!(text_muted(), rgb(0xa19d96));
+        assert_eq!(text_dim(), rgb(0x8f8b85));
+        // Selected is the accent at 16% under the accent, not a block.
+        let (fill, label) = selected().expect("golden dark has a selected state");
+        assert_eq!(label, rgb(0xd9ae7a));
+        assert!((fill.a - 0.16).abs() < 1e-6);
+        assert_eq!(choice_fill(true), fill);
+        assert_eq!(choice_ink(true), label);
+        assert_eq!(gauge(), rgb(0xd9ae7a));
+
+        // The light half is still the site's, and still a solid mark.
+        set_golden(false);
+        assert_eq!(gold(), rgb(0xd9b98c));
+        assert!(selected().is_none());
+        assert_eq!(choice_fill(true), gold());
+        assert!(default_opacity(0.35, 0.8) < 1.0);
+        // Its champagne does not show on its own track: bars take the ink.
+        assert_eq!(gauge(), ink());
+        assert_eq!(gauge_for(true), accent());
+        // The classic dark keeps its glass and its recessed track.
+        set_dark(true);
+        assert_eq!(default_opacity(0.35, 0.8), 0.35);
+        assert_eq!(track(), inset());
+        assert_eq!(card_line(), border());
+        assert_eq!(gauge(), ink());
     }
 
     /// gpui-kit paints a menu's hovered item in `accent.background`, on

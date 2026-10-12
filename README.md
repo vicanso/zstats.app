@@ -25,7 +25,7 @@ Most menu-bar monitors paint pretty numbers, nag you, or both — and they treat
 - Live CPU% beside the tray icon — and while a memory alert you have not dismissed is on the Alerts tab (a process, an app, or kernel pressure), the item turns into a memory stick with the memory still available instead; a disk-full alert turns it into a disk with the space still free. Or pin it to CPU or memory for good, or keep both side by side
 - ⌘1–7 switch tabs, and the panel reopens on the one you left; pin it (the footer pin, or ⌘P) to keep it up beside another window instead of hiding on focus loss
 - Keep the Mac awake for a set time, 30 minutes to 8 hours, picked from the cup in the panel's footer: the screen stays on, nothing locks from sitting idle and the system does not idle-sleep, so a long job finishes and you can still read it. One power assertion — the one `caffeinate -d -t` takes — with its end time on the assertion, so macOS drops it on the minute, on battery too. The cup stays lit until then with the time left beside it; Off in its menu gives the Mac back its own sleep settings at once. Locking the screen does not interrupt it; closing the lid, or choosing Sleep, still sleeps the Mac
-- Overview: P/E cores, uptime and live power draw, memory and compression, kernel memory pressure, disk and network throughput
+- Overview: the headline figures — processor, memory, disk, who is using them — with a line above them only when something needs a look; expand it from the footer for P/E cores, uptime and live power draw, memory and compression, kernel memory pressure, disk and network throughput
 - Apps aggregated by process tree — one row for a browser and all its helpers
 - Processes ranked by a 60-second average, by memory, or by disk IO, with a name filter and a one-click full-table scan
 - Hardware: volumes, each physical drive's IOPS, latency and queue depth, the GPU, hottest sensors first, battery health — the drive and GPU reads run only while this tab is open
@@ -77,7 +77,7 @@ Behind the Great Firewall, the same files are mirrored to [Gitee](https://gitee.
 make bundle          # or build from source (needs cargo-bundle)
 ```
 
-Language, theme, the tray's face, panel opacity and the sustained-load knobs live in a settings window. The UI is fully bilingual; dark and light modes use native vibrancy.
+Language, theme, the tray's face, panel opacity and the sustained-load knobs live in a settings window. The UI is fully bilingual. The Golden dark theme is an opaque panel by default; the classic themes use native vibrancy, and Opacity in Settings moves any of them either way.
 
 ### Linux (preview)
 

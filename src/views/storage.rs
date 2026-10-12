@@ -2714,8 +2714,14 @@ fn dupes_body(state: &ZStatsAppState) -> AnyElement {
     let hidden = result.groups.len() - shown;
     div()
         .child(section_heading(
-            t!("disk.dup_groups", n = result.groups.len()).to_string(),
-            Some(t!("disk.dup_copies", n = result.extra_copies()).to_string()),
+            match result.groups.len() {
+                1 => i18n::tr("disk.dup_groups_one"),
+                n => t!("disk.dup_groups", n = n).to_string(),
+            },
+            Some(match result.extra_copies() {
+                1 => i18n::tr("disk.dup_copies_one"),
+                n => t!("disk.dup_copies", n = n).to_string(),
+            }),
             Some(frees_label(result.reclaimable())),
         ))
         .when(state.dupes_stale(), |d| {

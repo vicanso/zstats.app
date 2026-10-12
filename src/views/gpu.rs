@@ -83,11 +83,11 @@ fn gpu_card(gpu: &GpuSnapshot) -> AnyElement {
         .child(
             div()
                 .mt(px(8.))
-                .child(widgets::big_number(format!("{busy:.0}"), "%", 20.)),
+                .child(widgets::big_number(format!("{busy:.0}"), "%")),
         )
         .child(div().mt(px(8.)).child(widgets::meter(
             busy / 100.0,
-            Hsla::from(theme::fill_for(hot)),
+            Hsla::from(theme::gauge_for(hot)),
             6.,
         )))
         .child(widgets::kv_pairs(detail_rows(gpu)))

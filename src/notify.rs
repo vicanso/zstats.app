@@ -622,10 +622,21 @@ fn subject_title(subject: &AlertSubject) -> String {
         | AlertSubject::App {
             name, display_name, ..
         } => display_name.clone().unwrap_or_else(|| name.clone()),
-        AlertSubject::Volume { mount_point } => {
-            t!("alerts.volume", mount = mount_point.clone()).to_string()
-        }
+        AlertSubject::Volume { mount_point } => volume_title(mount_point),
         AlertSubject::System => i18n::tr("alerts.system"),
+    }
+}
+
+/// A volume as a banner and an alert card name it. The boot volume's
+/// mount point is `/`, and "Volume /" is a path to someone who has
+/// never typed one — it is the disk every reader already has a word
+/// for. Other volumes keep their mount point: it ends in the name
+/// Finder shows.
+pub fn volume_title(mount_point: &str) -> String {
+    if mount_point == "/" {
+        i18n::tr("alerts.volume_root")
+    } else {
+        t!("alerts.volume", mount = mount_point).to_string()
     }
 }
 

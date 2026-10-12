@@ -42,6 +42,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 const MENU_ID_SHOW: &str = "show";
 const MENU_ID_QUIT: &str = "quit";
+const MENU_ID_STORAGE: &str = "storage";
 
 /// Which figure the menu bar item wears. The glyph and the percent beside
 /// it always agree — a bare `91%` means nothing until the icon says what
@@ -431,6 +432,8 @@ enum TrayAction {
     Toggle(Option<TrayAnchor>),
     /// The menu item, which has no position and always shows.
     Show,
+    /// The menu's way into the disk-space window.
+    Storage,
     Quit,
 }
 
@@ -625,6 +628,15 @@ fn build_menu() -> Menu {
         true,
         None,
     ));
+    // The disk-space window was reachable only from a chip on the
+    // Hardware tab and a card on Alerts. Someone whose disk is full
+    // looks in the menu first.
+    let _ = menu.append(&MenuItem::with_id(
+        MENU_ID_STORAGE,
+        i18n::tr("disk.storage_title"),
+        true,
+        None,
+    ));
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&MenuItem::with_id(
         MENU_ID_QUIT,
@@ -693,6 +705,7 @@ fn try_build_tray(cx: &mut App) -> bool {
         while let Ok(event) = receiver.recv() {
             let action = match event.id().0.as_str() {
                 MENU_ID_SHOW => TrayAction::Show,
+                MENU_ID_STORAGE => TrayAction::Storage,
                 MENU_ID_QUIT => TrayAction::Quit,
                 _ => continue,
             };
@@ -759,6 +772,13 @@ fn try_build_tray(cx: &mut App) -> bool {
             cx.update(|cx| match action {
                 TrayAction::Toggle(anchor) => toggle_main_window(cx, anchor),
                 TrayAction::Show => show_main_window(cx),
+                TrayAction::Storage => {
+                    // A menu click does not make a menu-bar app active,
+                    // and a window opened behind the one in use is not
+                    // an answer to the click.
+                    cx.activate(true);
+                    crate::open_storage_window(cx);
+                }
                 TrayAction::Quit => cx.quit(),
             });
         }

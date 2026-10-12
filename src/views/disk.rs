@@ -28,6 +28,14 @@ use zstats::snapshot::DiskSnapshot;
 /// The design's default disk alert bar.
 const FULL_PERCENT: f32 = 90.0;
 
+/// Whether a volume's bar wears the accent: past [`FULL_PERCENT`], and
+/// not removable — a full removable drive is normal, a full boot volume
+/// is not. One rule for this tab's cards and Overview's disk row, so a
+/// volume is red in both or in neither.
+pub(super) fn is_full(disk: &DiskSnapshot) -> bool {
+    disk.used_percent > FULL_PERCENT && !disk.is_removable
+}
+
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(tick) = state.latest() else {
         return vec![widgets::empty_card(
@@ -70,8 +78,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             // and what the disk alert fires on, so recomputing it here could
             // only ever produce a number that disagrees with both.
             let used_pct = d.used_percent;
-            // A full removable drive is normal; a full boot volume is not.
-            let hot = used_pct > FULL_PERCENT && !d.is_removable;
+            let hot = is_full(d);
 
             card()
                 .child(
@@ -100,19 +107,12 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                     h_flex()
                         .items_baseline()
                         .justify_between()
-                        .gap(px(6.))
+                        .gap(px(8.))
                         .mt(px(6.))
+                        .child(widgets::big_figure(&format::capacity(d.available_bytes)))
                         .child(
-                            div()
-                                .font_family(font::MONO)
-                                .text_size(px(20.))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(theme::text())
-                                .child(format::capacity(d.available_bytes)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
+                            font::tabular(div())
+                                .text_size(px(12.))
                                 .text_color(theme::text_muted())
                                 .child(
                                     t!(
@@ -126,7 +126,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 )
                 .child(div().mt(px(7.)).child(widgets::meter(
                     used_pct / 100.0,
-                    Hsla::from(theme::fill_for(hot)),
+                    Hsla::from(theme::gauge_for(hot)),
                     6.,
                 )))
                 .child(
@@ -208,7 +208,7 @@ fn volume_footer_id(disk: &DiskSnapshot) -> String {
 /// 10px pill "Analyze…" is indistinguishable from "Analyze" with its
 /// tail cut off, and it was read exactly that way. The tooltip says
 /// where the click leads.
-fn storage_chip() -> AnyElement {
+pub(super) fn storage_chip() -> AnyElement {
     div()
         .id("storage-open")
         .flex_none()

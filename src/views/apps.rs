@@ -10,9 +10,9 @@
 //! escape hatch: a one-shot scan with the cap off, same reasons as
 //! [`crate::fullscan`].
 
+use super::alerts::Resolved;
 use super::processes;
 use super::widgets;
-use crate::alerttpl;
 use crate::confirm;
 use crate::font;
 use crate::format;
@@ -24,14 +24,14 @@ use crate::theme;
 use crate::trend;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, div, list, px,
+    Anchor, AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, list, px,
 };
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use zstats::alerts::ActiveThresholds;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
 /// Same one-core colour line as [`super::processes`] — a tree and a
@@ -40,11 +40,17 @@ const HOT_PERCENT: f32 = 100.0;
 
 /// Header + caveat line. Same budget as the process full-scan card so
 /// the list fills the panel instead of leaving a strip of empty card.
-const FULL_CHROME_HEIGHT: f32 = 70.;
+const FULL_CHROME_HEIGHT: f32 = processes::LIST_HEADER + 34.;
 // Same value as processes::FILTER_ROW_HEIGHT — the row itself is shared
 // (`processes::filter_row`), so a smaller budget here made the full list
 // overflow by the difference and the header slid before pinning.
 const FILTER_ROW_HEIGHT: f32 = 34.;
+
+/// Collapsed app row, hairline included. A process row with two
+/// differences: the figure is 13px, which at 2× snaps to a 21px line
+/// and is the taller of that and the 12px name, and the gap under the
+/// name is 3. Same reason as [`processes::COLLAPSED_ROW`].
+const COLLAPSED_ROW: f32 = 7. + 7. + 21. + 3. + 16. + 4. + 3. + 1.;
 const FULL_LIST_FALLBACK: f32 = 480.;
 const FULL_LIST_MIN: f32 = 120.;
 
@@ -146,7 +152,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id("app-rows")
                 .track_scroll(state.app_rows_scroll())
                 .overflow_y_scroll()
-                .max_h(px(processes::rows_height(state)))
+                .max_h(px(processes::fit_row_budget(
+                    processes::rows_height(state),
+                    COLLAPSED_ROW,
+                )))
                 .children({
                     // Ambiguity is about what is on screen: two
                     // stock-Electron trees showing distinct bundle
@@ -169,7 +178,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .when(no_match, |d| {
                     d.child(
                         div()
-                            .px(px(13.))
+                            .px(px(widgets::CARD_PAD))
                             .py(px(10.))
                             .child(widgets::note(i18n::tr("apps.filter_no_match"))),
                     )
@@ -235,7 +244,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
         ))
         .child(
             div()
-                .px(px(13.))
+                .px(px(widgets::CARD_PAD))
                 .pb(px(8.))
                 .child(widgets::note(full_scan_note(data))),
         )
@@ -243,7 +252,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
         .when(count == 0, |d| {
             d.child(
                 div()
-                    .px(px(13.))
+                    .px(px(widgets::CARD_PAD))
                     .py(px(10.))
                     .child(widgets::note(i18n::tr("apps.filter_no_match"))),
             )
@@ -355,7 +364,7 @@ fn app_row(
     let mut row = v_flex()
         .id(("app", root_pid as usize))
         .w_full()
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         // Same rhythm as a process row, meter included — the two lists
         // used to disagree about whether a ranking has a trough.
         .py(px(7.))
@@ -369,26 +378,37 @@ fn app_row(
                 .items_baseline()
                 .justify_between()
                 .gap(px(8.))
-                .child(widgets::truncating_name_tailed(
-                    ("app-name", root_pid as usize),
-                    // Bundle name, or a bare tree's job (`cargo`
-                    // instead of `login`); an app whose tree a bare
-                    // job burns keeps its name and gains the job as a
-                    // muted tail (`Zed · cargo`). The matchable name
-                    // stays in the expansion, beside the bars that key
-                    // on it.
-                    face.title,
-                    face.job.map(gpui::SharedString::from),
-                    12.,
-                    gpui::FontWeight::MEDIUM,
-                    Hsla::from(theme::text()),
-                ))
+                // The name takes the slack so the mark sits beside the
+                // figure. Without it the row's three children were
+                // spread by `justify_between`, and the mark stood
+                // halfway between the name and the percent — at a
+                // different place on every row.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::truncating_name_tailed(
+                            ("app-name", root_pid as usize),
+                            // Bundle name, or a bare tree's job (`cargo`
+                            // instead of `login`); an app whose tree a
+                            // bare job burns keeps its name and gains
+                            // the job as a muted tail (`Zed · cargo`).
+                            // The matchable name stays in the
+                            // expansion, beside the bars that key on it.
+                            face.title,
+                            face.job.map(gpui::SharedString::from),
+                            12.,
+                            gpui::FontWeight::MEDIUM,
+                            Hsla::from(theme::text()),
+                        )),
+                )
+                .child(widgets::expand_mark(expanded))
                 .child(
                     div()
                         .flex_none()
-                        .font_family(font::MONO)
+                        .font_features(font::tnum())
                         .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::BOLD)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::text_for(hot))
                         .child(format::pct_col(g.cpu_usage_percent)),
                 ),
@@ -415,7 +435,7 @@ fn app_row(
                     h_flex()
                         .flex_none()
                         .gap(px(4.))
-                        .font_family(font::MONO)
+                        .font_features(font::tnum())
                         .text_size(px(9.5))
                         .text_color(theme::text_muted())
                         .children(
@@ -463,16 +483,18 @@ fn app_bars(
             processes::BarDisplay::plain(format::PLACEHOLDER),
         );
     };
-    let loaded = alerttpl::info();
-    let eff = ActiveThresholds::from_config_with_template(&file.alerts, &loaded.template);
+    let bars = Resolved::of(file);
+    let eff = bars.eff();
     let total = state.latest().map(|t| t.snapshot.memory.total_bytes);
     (
-        processes::pct_bar_text(eff.app_cpu.override_for(&g.name), eff.app_cpu.base()),
+        processes::pct_bar_text(eff.app_cpu.override_for(&g.name), eff.app_cpu.base())
+            .decided_by(bars.in_force("alert-app-cpu", &g.name)),
         processes::mem_bar_text(
             eff.app_memory.override_for(&g.name),
             total.and_then(|t| eff.app_memory_bar_bytes(&g.name, t)),
             eff.app_memory.base(),
-        ),
+        )
+        .decided_by(bars.in_force("alert-app-mem", &g.name)),
     )
 }
 
@@ -713,7 +735,7 @@ fn expand_row(label: String, value: AnyElement, last: bool) -> AnyElement {
 fn expand_value(text: impl Into<gpui::SharedString>) -> AnyElement {
     div()
         .flex_none()
-        .font_family(font::MONO)
+        .font_features(font::tnum())
         .text_color(theme::text())
         .child(text.into())
         .into_any_element()
@@ -753,7 +775,7 @@ fn member_row(p: &ProcessSnapshot, cpu: Option<f32>, last: bool) -> AnyElement {
             h_flex()
                 .flex_none()
                 .gap(px(8.))
-                .font_family(font::MONO)
+                .font_features(font::tnum())
                 .text_size(px(10.))
                 .text_color(theme::text_muted())
                 .child(
@@ -769,9 +791,10 @@ fn snap_memory(p: &ProcessSnapshot) -> u64 {
     p.phys_footprint_bytes.unwrap_or(p.memory_bytes)
 }
 
-/// Cycles CPU ↔ memory. Name order is omitted on purpose: fifty trees
-/// are still findable with the filter, and a third stop would spend
-/// width the header does not have (filter + All + ⓘ already sit there).
+/// CPU or memory, as a menu like the Processes page's chip beside
+/// which it would otherwise be the one that behaves differently. Name
+/// order is omitted on purpose: fifty trees are still findable with the
+/// filter.
 fn sort_control(state: &ZStatsAppState) -> AnyElement {
     let sort = state.app_sort();
     let full = matches!(state.full_app_scan(), FullAppScan::Ready(_));
@@ -780,24 +803,31 @@ fn sort_control(state: &ZStatsAppState) -> AnyElement {
     } else {
         sort.tip_key()
     });
-    div()
-        .id("sort-apps")
-        .flex_none()
-        .rounded(px(4.))
-        .px(px(5.))
-        .py(px(1.))
-        .text_size(px(9.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme::text_muted())
-        .hover(|d| d.bg(theme::surface_raised()))
-        .tooltip(widgets::wrap_tooltip(tip))
-        .child(format!("↓ {}", i18n::tr(sort.label_key())))
-        .on_click(|_, _window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.cycle_app_sort(cx));
+    super::menu_trigger(
+        ("sort-apps", state.panel_visit()),
+        tip,
+        format!("↓ {}", i18n::tr(sort.label_key())),
+    )
+    .flex_none()
+    .px(px(5.))
+    .py(px(1.))
+    .text_size(px(9.))
+    .font_weight(gpui::FontWeight::MEDIUM)
+    .text_color(theme::text_muted())
+    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+        AppSort::ALL.iter().fold(menu, |menu, &order| {
+            menu.item(
+                super::menu_text(i18n::tr(order.label_key()))
+                    .checked(order == sort)
+                    .on_click(move |_, _, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| state.set_app_sort(order, cx));
+                    }),
+            )
         })
-        .into_any_element()
+    })
+    .into_any_element()
 }
 
 /// What a full track means. Memory has no one-core equivalent, so the
@@ -907,6 +937,17 @@ fn io_line(read: Option<u64>, write: Option<u64>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Same budget as the process list's test. An app row is 62 tall,
+    /// so the short panel holds six of them and stops on the sixth.
+    #[test]
+    fn the_short_panel_list_ends_on_a_whole_row() {
+        let budget = 385.5;
+        let fitted = processes::fit_row_budget(budget, COLLAPSED_ROW);
+        assert!(fitted <= budget);
+        assert!(fitted + COLLAPSED_ROW > budget);
+        assert_eq!(fitted, 6.0 * COLLAPSED_ROW);
+    }
 
     /// One program in two tabs must be measured one way. This mirrors
     /// `processes::shown_memory_prefers_footprint_and_falls_back_to_rss`

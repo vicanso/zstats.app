@@ -176,7 +176,7 @@ fn search_row(state: &ZStatsAppState) -> Option<AnyElement> {
     let input = state.listen_filter_input()?;
     Some(
         div()
-            .px(px(13.))
+            .px(px(widgets::CARD_PAD))
             .pb(px(6.))
             .child(Input::new(input).xsmall().cleanable(true))
             .into_any_element(),
@@ -200,7 +200,7 @@ fn header(chip: Option<AnyElement>, coverage: Option<OwnerCoverage>) -> AnyEleme
 
 fn note_line(text: String) -> AnyElement {
     div()
-        .px(px(13.))
+        .px(px(widgets::CARD_PAD))
         .pb(px(11.))
         .text_size(px(11.))
         .text_color(theme::text_dim())
@@ -228,10 +228,19 @@ fn row_element(index: usize, row: &Row, last: bool) -> AnyElement {
             }
         })
         .collect();
-    let quit =
-        quit_target(row).map(|(pid, name)| quit_button(index, pid, name, endpoints.join(", ")));
+    // The row is the hover group its Quit comes forward in.
+    let group = SharedString::from(format!("listen-row-{index}"));
+    let quit = quit_target(row).map(|(pid, name)| {
+        div()
+            .flex_none()
+            .opacity(QUIT_REST)
+            .group_hover(group.clone(), |s| s.opacity(1.))
+            .child(quit_button(index, pid, name, endpoints.join(", ")))
+            .into_any_element()
+    });
     v_flex()
-        .px(px(13.))
+        .group(group)
+        .px(px(widgets::CARD_PAD))
         .py(px(7.))
         .when(!last, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
@@ -334,9 +343,19 @@ fn quit_target(row: &Row) -> Option<(u32, String)> {
     (terminate::can_term(pid) && terminate::can_quit(pid)).then(|| (pid, name.clone()))
 }
 
+/// How far a row's Quit recedes until the row is hovered — the
+/// disk-space window's `ACTION_REST`, for its reason. Three or four red
+/// outlines down a list of sockets were the loudest thing on the Network
+/// tab, beside `rapportd` and other programs nobody opened the tab to
+/// stop; at rest the control stays visible, and it comes forward with
+/// the row under the pointer.
+const QUIT_REST: f32 = 0.4;
+
 /// The process page's Quit, sized for a row's first line. SIGTERM behind
 /// the confirm sheet; the sheet names the endpoints too, so it says what
 /// will stop answering, not just which process.
+///
+/// It rests at [`QUIT_REST`] until its row is hovered.
 fn quit_button(index: usize, pid: u32, name: String, endpoints: String) -> AnyElement {
     div()
         .id(("listen-quit", index))

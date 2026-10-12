@@ -31,9 +31,21 @@ use std::env;
 /// (`overview::io_card`) — the second card's padding and the gap
 /// between cards, less the hairline row it replaced; measured as the
 /// last card's bottom edge moving 28 device pixels down at @2x.
-/// Overview is sized not to scroll; the other tabs scroll either way.
+/// 828 is the 2026-10-12 redesign, measured again from scratch rather
+/// than added to the above: the four cards, the title the
+/// disk-and-network card gained, and the panel's new spacing scale (a
+/// 12 gutter, cards 10 apart with 12 of padding, a 44-tall footer). It
+/// was 908 for a few hours, with a status row and a line of facts above
+/// the cards — 80 of height for things the cards and the Hardware tab
+/// already say — and then 854 with one line for the link back to the
+/// short form, which is the footer's toggle now. At 828 the page fits
+/// under the menu bar of a 13-inch screen at its default scaling (876).
+/// The last card's bottom edge is at 774pt and the body keeps 10 under
+/// it, above that footer. This is the long form's height; the short
+/// form has its own ([`SIMPLE_WINDOW_HEIGHT`]). Overview is sized not
+/// to scroll; the other tabs scroll either way.
 #[cfg(not(target_os = "linux"))]
-pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 792.);
+pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 828.);
 /// Linux: 53 shorter than macOS, for the same fit, then the same chart
 /// and caption budget. Overview's cards measured 543 tall on macOS and
 /// 489 on Omarchy (2026-09-28, before the charts): the gap is the
@@ -44,13 +56,65 @@ pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 792.);
 /// dropped, and 14 more for the disk-and-network card, as on macOS.
 /// Revisit when zstats grows
 /// Linux perf levels (hybrid Intel parts have them in sysfs) — the rows
-/// come back and so do the 53.
+/// come back and so do the 53. 775 is macOS's 828 less those 53 —
+/// carried over, not measured: no Linux machine has drawn this page
+/// since the redesign.
 #[cfg(target_os = "linux")]
-pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 739.);
+pub const DEFAULT_WINDOW_SIZE: (f32, f32) = (358., 775.);
+/// The short Overview's height (`prefs::overview_detail` off, the
+/// default) on an ordinary day: the card of the processor's figure
+/// and chart over four facts (memory, disk, network, the hottest
+/// sensor), and the apps card at five rows. The same on both
+/// platforms — what made macOS taller was the P/E cluster rows, which
+/// the short form does not show. Measured on macOS, and then moved
+/// four times on 2026-10-12 by what the page lost and gained, each
+/// seen on screen: 665 with a status row that was always there; 619
+/// without it ([`NOTICE_HEIGHT`], now only while it has something to
+/// say); 649 with the processor row's chart, a 36-tall well where a
+/// 6-tall bar was (`overview::cpu_pulse`); 573 once memory and the
+/// disk gave up their bars and the line of small print under each,
+/// 38 a row; 539 when those two rows became facts beside the network's
+/// (`overview::facts`), two 24-tall rows and a gap for one 34-tall row
+/// of the grid.
+pub const SIMPLE_WINDOW_HEIGHT: f32 = 539.;
+
+/// What the short form's notice row adds while it is shown: the row's
+/// 36 and the 10 between cards (`overview::NOTICE_ROW` asserts the sum).
+pub const NOTICE_HEIGHT: f32 = 46.;
+
+/// The panel's size for Overview's form. A height per form, so neither
+/// scrolls and neither ends in empty panel. Two things resize the
+/// window: switching form (`crate::set_overview_detail_pref`), and the
+/// short form's notice row coming or going (`crate::sync_panel_notice`)
+/// — the long form has no such row and `notice` does not move it.
+pub fn window_size(detail: bool, notice: bool) -> (f32, f32) {
+    let (width, full) = DEFAULT_WINDOW_SIZE;
+    let height = match (detail, notice) {
+        (true, _) => full,
+        (false, true) => SIMPLE_WINDOW_HEIGHT + NOTICE_HEIGHT,
+        (false, false) => SIMPLE_WINDOW_HEIGHT,
+    };
+    (width, height)
+}
+
+/// The panel's height once the notice row has appeared (`shown`) or
+/// gone, from the height it has now. A step and not [`window_size`]'s
+/// figure, so a panel someone dragged taller keeps what they added; it
+/// never goes under the form's own height, which is all a panel cut to
+/// a short screen can be given back.
+pub fn notice_step(current: f32, shown: bool) -> f32 {
+    let (_, fitted) = window_size(false, shown);
+    if shown {
+        current + NOTICE_HEIGHT
+    } else {
+        (current - NOTICE_HEIGHT).max(fitted)
+    }
+}
+
 /// Fixed width — the layout is built for exactly this and nothing reflows.
 pub const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
 /// Gap between the tray icon and the top of the window.
-const TRAY_GAP: f32 = 6.;
+pub const TRAY_GAP: f32 = 6.;
 /// Hang the window under the tray icon: horizontally centred on it, `TRAY_GAP`
 /// below it. Centring is the default; the clamp only kicks in when the window
 /// would run past a screen edge, in which case it sits flush against that edge.
@@ -156,6 +220,40 @@ fn load_screens() -> Vec<ScreenGeom> {
     Vec::new()
 }
 
+/// The panel's height on a screen with `visible` of height to give:
+/// what it asks for, or what fits under the tray gap. Never under the
+/// minimum — a screen that short is not one the panel can be right on.
+fn fitted_height(wanted: Pixels, visible: Pixels) -> Pixels {
+    wanted
+        .min(visible - px(TRAY_GAP))
+        .max(px(MIN_WINDOW_SIZE.1))
+}
+
+/// Where a panel's top edge and height land when it is given a new
+/// height, in AppKit's coordinates (y grows upwards): `floor` and
+/// `ceiling` are the bottom of the screen's usable area and the highest
+/// the panel's top edge may sit — the tray gap under that area's top.
+///
+/// The top edge stays where it is while the new height fits under it.
+/// When it does not, the panel rises first, as far as `ceiling`, and
+/// only then gives up height. A top edge already above `ceiling` is
+/// never moved down.
+///
+/// The rise is for a panel that was not hung from the tray — a debug
+/// run opens it mid-screen, and so does "Show Window": it used to be
+/// cut to what was left under wherever it happened to be, so a page
+/// sized not to scroll scrolled with half a screen free above it. A
+/// panel hung from the tray is at `ceiling` already and only the cut
+/// applies.
+pub fn resized(top: f64, height: f64, floor: f64, ceiling: f64) -> (f64, f64) {
+    let top = if top - height < floor {
+        (floor + height).min(ceiling.max(top))
+    } else {
+        top
+    };
+    (top, height.min(top - floor))
+}
+
 /// [`anchored_origin`] plus the two things that need an `App`: converting the
 /// tray's physical pixels to logical ones, and finding the icon's display.
 pub fn bounds_below_tray(
@@ -193,6 +291,16 @@ pub fn bounds_below_tray(
             .or_else(|| cx.primary_display())
             .map(|d| d.visible_bounds())
     });
+    // A panel the reader dragged taller, or a screen shorter than the
+    // long Overview's 828: the body scrolls, the footer must not hang
+    // off the screen.
+    let window_size = match screen {
+        Some(screen) => size(
+            window_size.width,
+            fitted_height(window_size.height, screen.size.height),
+        ),
+        None => window_size,
+    };
     let origin = match screen {
         Some(screen) => anchored_origin(icon, window_size, screen),
         // No display info to clamp against — centre and hope for the best.
@@ -294,6 +402,72 @@ mod tests {
     fn window() -> Size<Pixels> {
         let (w, h) = DEFAULT_WINDOW_SIZE;
         size(px(w), px(h))
+    }
+
+    /// Given a new height, the panel keeps its top edge while that
+    /// fits, rises when it does not, and is cut only when the screen
+    /// itself is too short.
+    #[test]
+    fn a_resized_panel_rises_before_it_is_cut() {
+        // A screen whose usable area runs from 0 to 1050, tray gap 6.
+        let (floor, ceiling) = (0., 1044.);
+        // Hung from the tray, growing: room below, nothing moves.
+        assert_eq!(resized(1044., 854., floor, ceiling), (1044., 854.));
+        // Shrinking never moves the top.
+        assert_eq!(resized(700., 665., floor, ceiling), (700., 665.));
+        // Mid-screen with 700 under the top edge: rises by what is short.
+        assert_eq!(resized(700., 854., floor, ceiling), (854., 854.));
+        // A screen too short even from the ceiling: top at the ceiling,
+        // the rest cut.
+        assert_eq!(resized(700., 854., floor, 800.), (800., 800.));
+        // A top edge above the ceiling is never brought down.
+        assert_eq!(resized(1050., 854., floor, ceiling), (1050., 854.));
+        assert_eq!(resized(1050., 1100., floor, ceiling), (1050., 1050.));
+    }
+
+    /// A panel taller than the screen is cut to what fits under the
+    /// tray gap; one that fits is left alone.
+    #[test]
+    fn a_panel_taller_than_the_screen_is_cut_to_fit() {
+        assert_eq!(fitted_height(px(828.), px(1080.)), px(828.));
+        assert_eq!(fitted_height(px(1000.), px(876.)), px(876. - TRAY_GAP));
+        assert_eq!(fitted_height(px(828.), px(200.)), px(MIN_WINDOW_SIZE.1));
+    }
+
+    /// One width for both forms — the layout does not reflow — and the
+    /// short form is the shorter window.
+    #[test]
+    fn the_short_overview_is_a_shorter_panel_of_the_same_width() {
+        let (full_w, full_h) = window_size(true, false);
+        let (short_w, short_h) = window_size(false, false);
+        assert_eq!((full_w, full_h), DEFAULT_WINDOW_SIZE);
+        assert_eq!(short_w, full_w);
+        assert!(short_h < full_h);
+        assert!(short_h >= MIN_WINDOW_SIZE.1);
+    }
+
+    /// The notice row is the short form's alone, and its coming and
+    /// going is a step from whatever height the panel has.
+    #[test]
+    fn the_notice_row_is_a_step_in_the_short_form_only() {
+        let (_, short) = window_size(false, false);
+        assert_eq!(window_size(false, true).1, short + NOTICE_HEIGHT);
+        assert_eq!(window_size(true, true), window_size(true, false));
+        // Fitted panel: there and back.
+        assert_eq!(notice_step(short, true), short + NOTICE_HEIGHT);
+        assert_eq!(notice_step(short + NOTICE_HEIGHT, false), short);
+        // Dragged 100 taller: the 100 survives both ways.
+        assert_eq!(
+            notice_step(short + 100., true),
+            short + 100. + NOTICE_HEIGHT
+        );
+        assert_eq!(
+            notice_step(short + 100. + NOTICE_HEIGHT, false),
+            short + 100.
+        );
+        // Cut to a short screen while the row was shown: never under
+        // the form's own height.
+        assert_eq!(notice_step(short + 20., false), short);
     }
 
     #[test]

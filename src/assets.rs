@@ -97,6 +97,12 @@ pub enum CustomIconName {
     /// default embedded set, and its `Delete` is a backspace key — which
     /// read as "clear this field" on a control that moves files.
     Trash,
+    /// The footer's form toggle while the panel is short: lucide
+    /// `chevrons-up-down`, two chevrons pulling apart — open it out.
+    Expand,
+    /// The same toggle while the panel is long: lucide
+    /// `chevrons-down-up`, the two chevrons closing.
+    Collapse,
 }
 
 impl CustomIconName {
@@ -114,6 +120,8 @@ impl CustomIconName {
             CustomIconName::Pin => "icons/pin.svg",
             CustomIconName::Coffee => "icons/coffee.svg",
             CustomIconName::Trash => "icons/trash.svg",
+            CustomIconName::Expand => "icons/chevrons-up-down.svg",
+            CustomIconName::Collapse => "icons/chevrons-down-up.svg",
         }
         .into()
     }
@@ -151,6 +159,8 @@ mod tests {
             CustomIconName::Pin,
             CustomIconName::Coffee,
             CustomIconName::Trash,
+            CustomIconName::Expand,
+            CustomIconName::Collapse,
         ] {
             let path = icon.path();
             assert!(get(&path).is_some(), "{path} is not embedded");

@@ -1,18 +1,21 @@
 //! Overview: processor, top application trees, memory.
 
+use super::alerts;
 use super::processes;
 use super::widgets::{self, card};
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::placement;
+use crate::prefs;
 use crate::series::{self, Point};
 use crate::state::{MemoryCreep, Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use crate::trend;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Bounds, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels,
-    Rgba, StatefulInteractiveElement, Styled, Window, div, point, px, size,
+    AnyElement, App, Bounds, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder,
+    Pixels, Rgba, StatefulInteractiveElement, Styled, Window, div, point, px, size,
 };
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
@@ -20,7 +23,8 @@ use rust_i18n::t;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use zstats::snapshot::{
-    Capabilities, CpuSnapshot, IoTotalsSnapshot, LoadSnapshot, MemorySnapshot, ProcessGroupSnapshot,
+    Capabilities, CpuSnapshot, DiskSnapshot, IoTotalsSnapshot, LoadSnapshot, MemorySnapshot,
+    ProcessGroupSnapshot, SystemSnapshot,
 };
 
 /// How many trees the first panel names. Enough to answer "who's
@@ -29,6 +33,10 @@ use zstats::snapshot::{
 /// rest were the same few residents every time, and each row is ~30pt
 /// of a panel the charts had already made taller. All opens the rest.
 const TOP_N: usize = 3;
+/// The short form's apps card. It has the room the long form gives its
+/// charts, and "which app is it" is the question the three bars above
+/// it leave open — five answers instead of three.
+const TOP_N_SHORT: usize = 5;
 
 /// Per-core bar turns accent past this.
 const CORE_HOT: f32 = 85.0;
@@ -75,24 +83,636 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         net_up: state.net_up_series(),
         now,
     };
-    let mut cards = vec![
-        processor(
+    // Two forms, each designed as itself rather than one cut down from
+    // the other. The short one is the default and follows the
+    // 2026-10-12 design: the three things a Mac runs out of in one
+    // grammar — name, percent, bar — then who is using it, and above
+    // them a notice only while there is one. The long one is the page
+    // as it always was; the way back from it is the footer's form
+    // toggle (`views::footer`). Each has a fixed height
+    // (`placement::window_size`) and nothing in either comes and goes
+    // from one sample to the next; the notice is the one row that does
+    // come and go, minutes or hours apart, and the panel's height goes
+    // with it.
+    let mut cards = Vec::new();
+    if prefs::overview_detail() {
+        cards.push(processor(
             &snapshot.cpu,
             &snapshot.load,
             snapshot.host.uptime_secs,
             watts,
             recent,
-        ),
-        top_apps(state),
-        memory(
+        ));
+        cards.push(top_apps(state, TOP_N));
+        cards.push(memory(
             &snapshot.memory,
             snapshot.capabilities,
             state.memory_climbers(),
+            state.memory_needs_attention(),
             recent,
-        ),
-    ];
-    cards.extend(io_card(&snapshot.io_totals, recent));
+        ));
+        cards.extend(io_card(&snapshot.io_totals, recent));
+    } else {
+        cards.extend(notice_row(state));
+        cards.push(vitals_card(state, snapshot, recent));
+        cards.push(top_apps(state, TOP_N_SHORT));
+    }
     cards
+}
+
+/// The kernel's memory-pressure level at critical (1 is normal, 2
+/// warning). The only tier that earns a word of its own, beside the
+/// memory row's name and in the long form's badge.
+const PRESSURE_CRITICAL: u32 = 4;
+
+/// What the notice row says, most pressing first.
+#[derive(Debug, PartialEq, Eq)]
+enum Notice {
+    /// The menu bar is on memory ([`ZStatsAppState::memory_needs_attention`]).
+    Memory,
+    /// The menu bar is on a disk ([`ZStatsAppState::disk_needs_attention`]).
+    Disk,
+    /// Live alert cards that do not turn the menu bar: `count` of them,
+    /// the newest named.
+    Alerts { count: usize, latest: String },
+    /// The sustained-load watcher is holding a card.
+    Busy(String),
+    /// The memory-climb watcher is holding a card.
+    Growing(String),
+}
+
+/// Everything the notice row reads, already reduced to names.
+#[derive(Default)]
+struct Signs {
+    memory: bool,
+    disk: bool,
+    /// Subjects of the live alert cards, newest first.
+    alerts: Vec<String>,
+    busy: Vec<String>,
+    growing: Vec<String>,
+}
+
+/// One sentence for the machine, when there is one to say; `None` is
+/// the ordinary case and draws nothing.
+///
+/// It is display of verdicts already made — zstats' alert episodes, in
+/// the form the menu bar and the Alerts tab already show them, then the
+/// panel's two slow-burn watchers — and compares nothing itself: no
+/// figure is read here, so there is no line of its own to cross. The
+/// order is the menu bar's (memory before disk), then alerts that are
+/// cards only, then the watchers, which are observations rather than
+/// crossed thresholds.
+///
+/// **Every one of these is held by something with a memory** — an
+/// episode, a watcher's card — so the answer changes minutes or hours
+/// apart, never from one sample to the next. That is a requirement and
+/// not a habit: the row's coming and going resizes the panel
+/// ([`has_notice`]). The kernel's pressure level was read here too, at
+/// critical, for the minutes the engine waits before it reports one;
+/// it is a raw level that flaps between samples, and it is now only
+/// the word beside the memory row's name.
+fn notice(signs: Signs) -> Option<Notice> {
+    if signs.memory {
+        return Some(Notice::Memory);
+    }
+    if signs.disk {
+        return Some(Notice::Disk);
+    }
+    if let Some(latest) = signs.alerts.first() {
+        return Some(Notice::Alerts {
+            count: signs.alerts.len(),
+            latest: latest.clone(),
+        });
+    }
+    if let Some(name) = signs.busy.into_iter().next() {
+        return Some(Notice::Busy(name));
+    }
+    signs.growing.into_iter().next().map(Notice::Growing)
+}
+
+fn signs(state: &ZStatsAppState) -> Signs {
+    Signs {
+        memory: state.memory_needs_attention(),
+        disk: state.disk_needs_attention(),
+        alerts: state
+            .alerts()
+            .iter()
+            .filter(|seen| seen.live)
+            .map(|seen| alerts::subject_name(&seen.event.subject))
+            .collect(),
+        busy: state
+            .sustained_active()
+            .into_iter()
+            .map(|notice| notice.name)
+            .collect(),
+        growing: state
+            .creeps_active()
+            .into_iter()
+            .map(|(creep, _)| creep.name)
+            .collect(),
+    }
+}
+
+/// Whether the short form is showing its notice row. The panel is
+/// [`placement::NOTICE_HEIGHT`] taller while it is
+/// (`crate::sync_panel_notice`), so this and the row must be one
+/// answer: both go through [`notice`].
+pub fn has_notice(state: &ZStatsAppState) -> bool {
+    notice(signs(state)).is_some()
+}
+
+/// The short form's first row, there only while there is something to
+/// say: the sentence, tinted by what it says — red when an alert is
+/// behind it, the card's own fill for the watchers, which are news and
+/// not alarms — and the whole row the way into Alerts, where a card
+/// says it in full.
+///
+/// **It was always there until 2026-10-12**, green and reading "Nothing
+/// needs attention" on an ordinary day. That sentence went the way
+/// "Memory is tight" had gone at the warning tier, for the reason
+/// written then: a line that says the same thing from morning to
+/// evening is read once. Three bars that are not red and a grey bell
+/// already say nothing is wrong, and a row that is absent on an
+/// ordinary day is seen on the day it appears. The link to the long
+/// form left with it — the footer's toggle is that control, and beside
+/// a sentence that opens Alerts it was a second destination on one
+/// row.
+///
+/// The long form never has it: someone who asked for every figure reads
+/// the Memory card's badge and a red bell without being told, and the
+/// row was 46 of a height that has to fit a 13-inch screen.
+fn notice_row(state: &ZStatsAppState) -> Option<AnyElement> {
+    let notice = notice(signs(state))?;
+    // (the dot, its halo, the row's fill)
+    let (dot, halo, fill) = match notice {
+        Notice::Memory | Notice::Disk | Notice::Alerts { .. } => (
+            theme::accent_light(),
+            theme::accent_wash(18),
+            theme::accent_wash(10),
+        ),
+        Notice::Busy(_) | Notice::Growing(_) => (theme::gauge(), theme::chip(), theme::surface()),
+    };
+    let sentence = match notice {
+        Notice::Memory => i18n::tr("overview.status_memory"),
+        Notice::Disk => i18n::tr("overview.status_disk"),
+        Notice::Alerts { count: 1, latest } => {
+            t!("overview.status_alert", name = latest).to_string()
+        }
+        Notice::Alerts { count, latest } => {
+            t!("overview.status_alerts", count = count, name = latest).to_string()
+        }
+        Notice::Busy(name) => t!("overview.status_busy", name = name).to_string(),
+        Notice::Growing(name) => t!("overview.status_growing", name = name).to_string(),
+    };
+    Some(
+        h_flex()
+            .id("overview-notice")
+            .h(px(NOTICE_ROW))
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .rounded(px(10.))
+            .bg(Hsla::from(fill))
+            .hover(|d| d.bg(Hsla::from(halo)))
+            .tooltip(widgets::wrap_tooltip(i18n::tr("overview.status_tip")))
+            .on_click(|_, _window, cx| {
+                cx.global::<ZStatsGlobalStore>()
+                    .clone()
+                    .update(cx, |state, cx| state.set_tab(Tab::Alerts, cx));
+            })
+            .child(
+                // The dot in its halo: the same colour, thinned, 3px out.
+                div()
+                    .flex()
+                    .flex_none()
+                    .size(px(13.))
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(Hsla::from(halo))
+                    .child(div().size(px(7.)).rounded_full().bg(Hsla::from(dot))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme::text())
+                    .child(sentence),
+            )
+            // The row opens Alerts, and says so the way every row that
+            // opens does (`widgets::expand_mark`'s reason).
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .with_size(Size::Size(px(12.)))
+                    .text_color(Hsla::from(theme::text_muted())),
+            )
+            .into_any_element(),
+    )
+}
+
+/// Height of the notice row. With the gap under it, what the panel
+/// grows by while the row is shown: [`placement::NOTICE_HEIGHT`], which
+/// a `const` assertion below holds to this.
+const NOTICE_ROW: f32 = 36.;
+const _: () = assert!(NOTICE_ROW + super::CARD_GAP == placement::NOTICE_HEIGHT);
+
+/// A link in the page's own voice: a word and a chevron, in `ink`.
+/// The form switch and the way into the disk-space window were two
+/// filled pills, the heaviest marks on a page whose news is the
+/// sentence beside them.
+fn quiet_link(
+    id: &'static str,
+    label: String,
+    tip: String,
+    ink: Rgba,
+    go: impl Fn(&mut App) + 'static,
+) -> AnyElement {
+    h_flex()
+        .id(id)
+        .flex_none()
+        .items_center()
+        .gap(px(4.))
+        .rounded(px(7.))
+        .px(px(8.))
+        .py(px(4.))
+        .tooltip(widgets::wrap_tooltip(tip))
+        .hover(|d| d.bg(theme::chip()))
+        .on_click(move |_, _window, cx| go(cx))
+        .child(
+            div()
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(ink)
+                .child(label),
+        )
+        .child(
+            Icon::new(IconName::ChevronRight)
+                .with_size(Size::Size(px(12.)))
+                .text_color(Hsla::from(ink)),
+        )
+        .into_any_element()
+}
+
+/// The boot volume, when the snapshot lists it.
+fn boot_disk(snapshot: &SystemSnapshot) -> Option<&DiskSnapshot> {
+    snapshot
+        .disks
+        .as_deref()
+        .and_then(|disks| disks.iter().find(|disk| disk.mount_point == "/"))
+}
+
+/// The hottest sensor in degrees — the figure the Hardware tab's
+/// sensor card leads with, read the same way.
+fn hottest(snapshot: &SystemSnapshot) -> Option<f32> {
+    snapshot
+        .temperatures
+        .as_deref()
+        .filter(|temps| !temps.is_empty())
+        .map(|temps| temps.iter().map(|t| t.celsius).fold(f32::MIN, f32::max))
+}
+
+/// The short form's card: the processor — its figure and the line of
+/// its last half hour — and under a hairline four facts in one form,
+/// memory, the disk, the network and the hottest sensor.
+///
+/// **One picture and four facts.** The card began as three rows of one
+/// grammar — a name, a percent at 20px, a bar — for processor, memory
+/// and disk, with the network and the sensor as two small facts under
+/// them, and came apart one question at a time on 2026-10-12. The
+/// processor's bar became a line ([`cpu_pulse`] says why: what flows
+/// is a shape). Memory's and the disk's bars went next: each said the
+/// figure beside it a second time, and they were the two brightest
+/// marks on the page for the two things on it that do not change in a
+/// day. That left two rows that were a name, a few words and a large
+/// percent — a third form on a card that already had two, for figures
+/// that are read the way the network's are: looked up, not watched.
+/// They are facts now, in the facts' form.
+///
+/// Each of the two keeps the words that say what its percent means:
+/// how much memory is still available (`available_bytes`, never total
+/// minus used — a Mac at 77% used is an ordinary Mac, and a bare
+/// "77%" is the most misread figure on one), how much of the disk is
+/// free, which is the figure people act on and here the way into the
+/// disk-space window.
+///
+/// **A fact is red only when an alert is behind it** — the verdicts
+/// that turn the menu bar (`memory_needs_attention`,
+/// `disk_needs_attention`), the same ones that put a red notice above
+/// this card. Not the kernel's pressure level — at critical that is a
+/// word ahead of memory's and no more, and at warning it is nothing
+/// here at all, because that tier is where a memory-heavy Mac sits all
+/// day — and not a figure past some line of this page's own: a red
+/// figure under a grey bell and no red sentence told three stories at
+/// once.
+fn vitals_card(
+    state: &ZStatsAppState,
+    snapshot: &SystemSnapshot,
+    recent: Recent<'_>,
+) -> AnyElement {
+    card()
+        .child(processor_row(&snapshot.cpu, recent))
+        .child(facts(state, snapshot))
+        .into_any_element()
+}
+
+/// The card's head: the name, how far back the line goes, the figure,
+/// and the line.
+fn processor_row(cpu: &CpuSnapshot, recent: Recent<'_>) -> AnyElement {
+    let span = recent.cpu.span(recent.now).map(|span| {
+        font::tabular(div())
+            .min_w_0()
+            .truncate()
+            .text_size(px(12.))
+            .line_height(px(16.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme::text_muted())
+            .child(t!("overview.pulse_span", span = series::span_label(span)).to_string())
+    });
+    v_flex()
+        .gap(px(8.))
+        .child(
+            h_flex()
+                .items_baseline()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .items_baseline()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(13.))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::text())
+                                .child(i18n::tr("overview.processor")),
+                        )
+                        .children(span),
+                )
+                .child(
+                    // The figure large, its unit a size and an ink down.
+                    h_flex()
+                        .flex_none()
+                        .items_baseline()
+                        .gap(px(1.))
+                        .child(
+                            // The line box is set by hand: gpui's
+                            // default is 1.618 × the size, 32px for
+                            // this figure.
+                            font::tabular(div())
+                                .text_size(px(20.))
+                                .line_height(px(24.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::text())
+                                .child(format::whole_pct(cpu.usage_percent)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme::text_muted())
+                                .child("%"),
+                        ),
+                ),
+        )
+        .child(cpu_pulse(recent))
+        .into_any_element()
+}
+
+/// Height of the short form's processor chart: the long form's well
+/// less a little, since it carries no caption under it. With
+/// [`CHART_PAD`] inside, 28 of swing.
+const PULSE_H: f32 = 36.;
+
+/// The processor row's picture in the short form, and the card's only
+/// one: the last half hour as a line.
+///
+/// **What flows gets a line; what fills is its figure.** All three rows
+/// had a bar, for the sake of one grammar down the card. The
+/// processor's was the one that said nothing — at 7% it is an empty
+/// track, and the figure is a reading that will be different in two
+/// seconds; what a glance wants from it is whether the Mac has been
+/// busy, which is a shape and not a level. Memory's and the disk's said
+/// the figure beside them a second time, and were the two brightest
+/// marks on the page for the two things on it that do not change in a
+/// day: once the processor had a picture that adds something, they
+/// were plainly the ones that did not. A half hour of memory as bars
+/// was asked for with the line and not built, for the same reason — it
+/// is sixty bars of one height, which the long form dims.
+///
+/// The long form's chart without its caption line: the same well, the
+/// same averaged points and axis rule ([`cpu_axis_top`]), the top of
+/// the axis in the corner once the stroke is a line
+/// ([`stroke_is_a_line`]). The span is the word beside the row's name
+/// and the peak is the line's own highest point; a "Max" and a "Last"
+/// under it were another line of the card's height for figures the
+/// long form is there to give.
+fn cpu_pulse(recent: Recent<'_>) -> AnyElement {
+    let points = chart_buckets(recent.cpu.points(), recent.now);
+    let scale = cpu_axis_top(&points);
+    let span = recent.cpu.span(recent.now);
+    let axis = stroke_is_a_line(&points);
+    div()
+        .id("cpu-pulse")
+        .relative()
+        .w_full()
+        .h(px(PULSE_H))
+        .rounded(px(CHART_WELL_RADIUS))
+        .bg(theme::inset())
+        .overflow_hidden()
+        .tooltip(widgets::wrap_tooltip(format!(
+            "{} {}",
+            i18n::tr("overview.cpu_curve_tip"),
+            i18n::tr("overview.chart_gap_tip")
+        )))
+        .child(sparkline(
+            vec![points],
+            span,
+            recent.now,
+            scale,
+            CurveStroke::Smooth,
+        ))
+        .when(axis, |well| {
+            well.child(corner_label(scale_label(ChartUnit::Percent, scale)))
+        })
+        .into_any_element()
+}
+
+/// The card's facts, under a hairline: memory and the disk, then the
+/// network's two rates and the hottest sensor. Two to a row, each a
+/// small label over its value.
+fn facts(state: &ZStatsAppState, snapshot: &SystemSnapshot) -> AnyElement {
+    let mem = &snapshot.memory;
+    let memory_alarm = state.memory_needs_attention();
+    // What is left, in the kernel's own count. The pressure level
+    // joins it at critical.
+    let available = t!(
+        "overview.mem_available",
+        n = format::gb(mem.available_bytes)
+    )
+    .to_string();
+    let critical = mem
+        .pressure_level
+        .is_some_and(|level| level >= PRESSURE_CRITICAL);
+    let memory_words = if critical {
+        format!("{} · {available}", i18n::tr("overview.pressure_critical"))
+    } else {
+        available
+    };
+    let memory = fact(
+        i18n::tr("overview.fact_memory"),
+        share(
+            mem.used_percent,
+            memory_alarm,
+            fact_text(memory_words, fact_ink(memory_alarm)),
+        ),
+    );
+    let disk = boot_disk(snapshot).map(|disk| {
+        let hot = state.disk_needs_attention();
+        fact(
+            i18n::tr("overview.fact_disk"),
+            share(
+                disk.used_percent,
+                hot,
+                storage_fact(
+                    t!(
+                        "overview.disk_free",
+                        n = format::capacity(disk.available_bytes)
+                    )
+                    .to_string(),
+                    hot,
+                ),
+            ),
+        )
+    });
+
+    let io = &snapshot.io_totals;
+    let (down, up) = (
+        io.network_received_bytes_per_sec,
+        io.network_transmitted_bytes_per_sec,
+    );
+    // The one value on the page in the mono face (`font`'s module doc):
+    // a rate rewrites its digits and its unit every couple of seconds.
+    // One space between the directions. Two put the pair a couple of
+    // pixels over this fact's half of the card — JetBrains Mono at 12px,
+    // "↓ 27 kB/s  ↑ 154 kB/s" is 151 against a 149 column — and
+    // `truncate` then ate the unit, so the line read "154 kB…".
+    let network = (down.is_some() || up.is_some()).then(|| {
+        fact(
+            i18n::tr("overview.fact_network"),
+            div()
+                .font_family(font::MONO)
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .text_color(theme::text())
+                .truncate()
+                .child(format!("↓ {} ↑ {}", format::rate(down), format::rate(up)))
+                .into_any_element(),
+        )
+    });
+    let heat = hottest(snapshot).map(|hottest| {
+        fact(
+            i18n::tr("overview.fact_hottest"),
+            fact_text(format!("{hottest:.0} °C"), theme::text()),
+        )
+    });
+    let second = (network.is_some() || heat.is_some())
+        .then(|| h_flex().gap(px(12.)).children(network).children(heat));
+    v_flex()
+        .mt(px(16.))
+        .gap(px(12.))
+        .child(div().h(px(1.)).bg(theme::border_subtle()))
+        .child(h_flex().gap(px(12.)).child(memory).children(disk))
+        .children(second)
+        .into_any_element()
+}
+
+/// One fact: a small label over its value, half the card wide.
+fn fact(label: String, value: AnyElement) -> AnyElement {
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(11.))
+                .line_height(px(14.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text_dim())
+                .child(label),
+        )
+        .child(value)
+        .into_any_element()
+}
+
+/// A fact's value in words or figures, in the page's face.
+fn fact_text(text: String, ink: Rgba) -> AnyElement {
+    font::tabular(div())
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .text_color(ink)
+        .child(text)
+        .into_any_element()
+}
+
+/// Ink of the words after a share: the alarm's when an alert is behind
+/// the fact, the second ink when not.
+fn fact_ink(hot: bool) -> Rgba {
+    if hot {
+        theme::accent_light()
+    } else {
+        theme::text_muted()
+    }
+}
+
+/// The value of a fact that is a share of something: the percent in the
+/// first ink — the alarm's when `hot` — then what the percent leaves.
+fn share(percent: f32, hot: bool, rest: AnyElement) -> AnyElement {
+    h_flex()
+        .min_w_0()
+        .items_baseline()
+        .gap(px(8.))
+        .child(
+            font::tabular(div())
+                .flex_none()
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text_for(hot))
+                .child(format!("{}%", format::whole_pct(percent))),
+        )
+        .child(rest)
+        .into_any_element()
+}
+
+/// How much of the disk is free, as the way into the disk-space
+/// window: a [`quiet_link`] in the ink of the words after memory's
+/// percent, so the two facts read as one shape and the chevron is what
+/// says this one opens. It was the words "Free up space" in the
+/// accent, at the end of a line of small print the card no longer has.
+fn storage_fact(free: String, hot: bool) -> AnyElement {
+    // The link's hover box, pulled back so its words start where
+    // memory's do and the value keeps a line's height.
+    div()
+        .ml(px(-8.))
+        .my(px(-4.))
+        .child(quiet_link(
+            "overview-storage",
+            free,
+            i18n::tr("disk.storage_hint"),
+            fact_ink(hot),
+            crate::open_storage_window,
+        ))
+        .into_any_element()
 }
 
 /// The half-hour series behind the three charts, stamped once per paint.
@@ -122,7 +742,7 @@ const RISE_FLOOR: f32 = 15.0;
 /// rest of the slots keep the current CPU ranking so a quiet climb
 /// (one tree) does not leave the card rows short of the window.
 /// All still opens the full Apps list.
-fn top_apps(state: &ZStatsAppState) -> AnyElement {
+fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
     let Some(tick) = state.latest() else {
         return widgets::empty_card(
             i18n::tr("overview.top_cpu"),
@@ -159,17 +779,16 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
         (
             "overview.top_cpu",
             "overview.top_apps_tip",
-            pad_rising(Vec::new(), groups, TOP_N),
+            pad_rising(Vec::new(), groups, rows),
         )
     } else {
         risers.sort_by(|a, b| b.1.total_cmp(&a.1));
         (
             "overview.rising_title",
             "overview.rising_tip",
-            pad_rising(risers, groups, TOP_N),
+            pad_rising(risers, groups, rows),
         )
     };
-    let n = rows.len();
     // In the climbing mode, the rows after the climbers are the current
     // CPU ranking filling the card — not climbers. Without a mark the
     // title called all three "climbing". A firmer hairline above the
@@ -182,36 +801,65 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
         .then(|| rows.iter().position(|(_, delta)| delta.is_none()))
         .flatten();
 
+    let top = title_key == "overview.top_cpu";
+    // No hairlines between the rows: each is its own rounded hover box,
+    // and five lines under five names were five more things to read.
     widgets::list_shell()
-        .child(widgets::list_header(
+        .p(px(4.))
+        .child(
             h_flex()
+                .h(px(36.))
+                .px(px(8.))
                 .items_center()
-                .gap(px(4.))
-                .min_w_0()
-                .child(div().min_w_0().truncate().child(i18n::tr(title_key)))
-                .child(widgets::info_icon("overview-top-apps", i18n::tr(tip_key))),
-            Some(top_apps_all()),
-        ))
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::text())
+                                .child(i18n::tr(title_key)),
+                        )
+                        // What the list is ranked by. The climbing
+                        // mode's title already says.
+                        .when(top, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(12.))
+                                    .text_color(theme::text_dim())
+                                    .child(i18n::tr("overview.top_by_cpu")),
+                            )
+                        })
+                        .child(widgets::info_icon("overview-top-apps", i18n::tr(tip_key))),
+                )
+                .child(top_apps_all()),
+        )
         .children(rows.into_iter().enumerate().map(|(i, (g, delta))| {
             // Burst only: a tree has no sustained flag of its own, and
             // walking members here would make Overview a second Apps tab.
             let hot = processes::is_hot(f64::from(g.cpu_usage_percent), false);
             let root_pid = g.root_pid;
+            // Face, not [`trend::tree_key`]: a login compile shows as
+            // cargo, a compile in Zed's terminal as `Zed · cargo`. The
+            // rise is still looked up on the launchd child so the hour
+            // does not split.
+            let face = trend::tree_face(g, topology, processes, state.member_pgids());
+            let pct = format::pct(g.cpu_usage_percent);
             h_flex()
                 .id(("top-app-row", root_pid as usize))
+                .h(px(34.))
+                .px(px(8.))
                 .items_center()
-                .justify_between()
-                .gap(px(8.))
-                .px(px(13.))
-                .py(px(5.))
-                .when(i + 1 < n, |d| {
-                    d.border_b(px(1.))
-                        .border_color(if Some(i + 1) == first_fill {
-                            theme::border()
-                        } else {
-                            theme::border_subtle()
-                        })
-                })
+                .gap(px(10.))
+                .rounded(px(7.))
                 // The row answers "who" — the Apps tab answers the next
                 // question, so a click lands there with this tree open
                 // and scrolled into view. Hover fill is the affordance,
@@ -222,38 +870,38 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                         .clone()
                         .update(cx, |state, cx| state.reveal_app(root_pid, cx));
                 })
-                .child({
-                    // Face, not [`trend::tree_key`]: a login compile
-                    // shows as cargo, a compile in Zed's terminal as
-                    // `Zed · cargo`. The rise is still looked up on the
-                    // launchd child so the hour does not split.
-                    let face = trend::tree_face(g, topology, processes, state.member_pgids());
-                    widgets::truncating_name_tailed(
-                        ("top-app-name", g.root_pid as usize),
-                        face.title,
-                        face.job.map(gpui::SharedString::from),
-                        12.,
-                        gpui::FontWeight::MEDIUM,
-                        Hsla::from(theme::text()),
-                    )
-                })
-                // Climb + current as one right-hand cluster. Three
-                // `justify_between` children parked the rise in the
-                // leftover middle, so a short name left a hole and a
-                // long one shoved the arrow into the percent. Muted
-                // on purpose: a rise is news, not a threshold, and
-                // accent stays reserved for over-the-line (`theme.rs`).
+                .child(monogram(&face.title))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::truncating_name_tailed(
+                            ("top-app-name", g.root_pid as usize),
+                            face.title,
+                            face.job.map(gpui::SharedString::from),
+                            13.,
+                            gpui::FontWeight::NORMAL,
+                            Hsla::from(theme::text()),
+                        )),
+                )
+                // Climb + current as one right-hand cluster. Muted on
+                // purpose: a rise is news, not a threshold, and the
+                // alarm's ink stays reserved for over-the-line.
                 .child(
                     h_flex()
                         .flex_none()
                         .items_baseline()
-                        .gap(px(6.))
+                        .gap(px(8.))
+                        // In the climbing mode, the rows after the
+                        // climbers are the current ranking filling the
+                        // card — not climbers. A word in the first one's
+                        // rise slot says where they start.
                         .when(Some(i) == first_fill, |cluster| {
                             cluster.child(
                                 div()
                                     .id(("top-app-fill", g.root_pid as usize))
                                     .flex_none()
-                                    .text_size(px(10.))
+                                    .text_size(px(11.))
                                     .text_color(theme::text_dim())
                                     .tooltip(widgets::wrap_tooltip(i18n::tr(
                                         "overview.busy_now_tip",
@@ -262,11 +910,10 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                             )
                         })
                         .children(delta.map(|delta| {
-                            div()
+                            font::tabular(div())
                                 .id(("top-app-rise", g.root_pid as usize))
                                 .flex_none()
-                                .font_family(font::MONO)
-                                .text_size(px(10.))
+                                .text_size(px(11.))
                                 .text_color(theme::text_muted())
                                 .tooltip(widgets::wrap_tooltip(
                                     t!("overview.rise_row_tip", delta = format::pct(delta))
@@ -275,20 +922,47 @@ fn top_apps(state: &ZStatsAppState) -> AnyElement {
                                 .child(format!("↑{}", format::pct(delta)))
                         }))
                         .child(
-                            div()
+                            font::tabular(div())
                                 .id(("top-app-pct", g.root_pid as usize))
+                                .flex()
                                 .flex_none()
-                                .font_family(font::MONO)
-                                .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(theme::text_for(hot))
+                                .min_w(px(44.))
+                                .justify_end()
+                                .text_size(px(13.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(app_pct_ink(g.cpu_usage_percent, hot))
                                 .tooltip(widgets::wrap_tooltip(i18n::tr(
                                     "overview.top_app_pct_tip",
                                 )))
-                                .child(format::pct_col(g.cpu_usage_percent)),
+                                .child(pct),
                         ),
                 )
         }))
+        .into_any_element()
+}
+
+/// A row's mark: the name's first letter in a small tile, where an app
+/// icon would be. It gives five names five different left edges to find
+/// again on the next glance, and costs no lookup — the icon itself is a
+/// file read per app per paint.
+fn monogram(name: &str) -> AnyElement {
+    let letter: String = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default();
+    div()
+        .flex()
+        .flex_none()
+        .size(px(22.))
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(theme::track())
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme::text_muted())
+        .child(letter)
         .into_any_element()
 }
 
@@ -319,34 +993,19 @@ fn pad_rising<'a>(
 }
 
 fn top_apps_all() -> AnyElement {
-    let tip = Tab::Apps.title();
-    h_flex()
-        .id("top-apps-all")
-        .items_center()
-        .gap(px(1.))
-        .rounded(px(5.))
-        .px(px(6.))
-        .py(px(2.))
-        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-        .hover(|d| d.bg(theme::chip()))
-        .on_click(|_, _window, cx| {
+    // The chevron says this opens. Accent stays on the selected tab and
+    // on the processor's line; a champagne "All" outranked every row.
+    quiet_link(
+        "top-apps-all",
+        i18n::tr("overview.top_cpu_all"),
+        Tab::Apps.title(),
+        theme::text_muted(),
+        |cx| {
             cx.global::<ZStatsGlobalStore>()
                 .clone()
                 .update(cx, |state, cx| state.set_tab(Tab::Apps, cx));
-        })
-        .child(
-            div()
-                .text_size(px(11.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme::text_dim())
-                .child(i18n::tr("overview.top_cpu_all")),
-        )
-        .child(
-            Icon::new(IconName::ChevronRight)
-                .with_size(Size::Size(px(12.)))
-                .text_color(Hsla::from(theme::text_dim())),
-        )
-        .into_any_element()
+        },
+    )
 }
 
 fn processor(
@@ -363,10 +1022,13 @@ fn processor(
             Some(header_right),
         ))
         .child(
-            // Baseline-aligned so the footnote sits on the headline's
-            // line, not on the bottom of its taller box. Usage + load
-            // stay a left-hand pair; uptime hugs the right so the
-            // three-number load caption has room to breathe.
+            // The figure stands at the card's edge and the two
+            // footnotes hug the right, on its baseline. Load used to
+            // follow the figure, which made the figure's width part of
+            // the layout: it was padded to two digits so 9 → 10 did not
+            // push the caption, and a lone "7" stood a digit in from
+            // the title above it. Anchored right, nothing follows the
+            // figure and it needs no pad.
             h_flex()
                 .w_full()
                 .items_baseline()
@@ -374,23 +1036,24 @@ fn processor(
                 .gap(px(10.))
                 .mt(px(4.))
                 .child(
+                    div()
+                        .id("cpu-usage")
+                        .flex_none()
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
+                        .child(widgets::big_number(
+                            format::whole_pct(cpu.usage_percent),
+                            "%",
+                        )),
+                )
+                .child(
                     h_flex()
                         .items_baseline()
-                        .gap(px(10.))
+                        .justify_end()
+                        .gap(px(12.))
                         .min_w_0()
-                        .child(
-                            div()
-                                .id("cpu-usage")
-                                .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
-                                .child(widgets::big_number(
-                                    format::whole_pct(cpu.usage_percent),
-                                    "%",
-                                    20.,
-                                )),
-                        )
-                        .child(load_caption(load, cpu.logical_cores)),
-                )
-                .child(uptime_caption(uptime_secs)),
+                        .child(load_caption(load, cpu.logical_cores))
+                        .child(uptime_caption(uptime_secs)),
+                ),
         )
         .children(recent_line(
             Chart {
@@ -438,14 +1101,14 @@ fn processor(
                         )
                         .child(div().flex_1().child(widgets::meter(
                             level.usage_percent / 100.0,
-                            Hsla::from(theme::fill_for(over)),
+                            Hsla::from(theme::gauge_for(over)),
                             5.,
                         )))
                         .child(
                             div()
                                 .w(px(44.))
                                 .flex_none()
-                                .font_family(font::MONO)
+                                .font_features(font::tnum())
                                 .text_size(px(11.))
                                 .font_weight(gpui::FontWeight::NORMAL)
                                 .text_color(theme::text())
@@ -521,7 +1184,7 @@ fn load_caption(load: &LoadSnapshot, cores: u32) -> AnyElement {
     let tip = t!("overview.load_tip", cores = cores).to_string();
     div()
         .id("cpu-load")
-        .font_family(font::MONO)
+        .font_features(font::tnum())
         .text_size(px(10.))
         .text_color(theme::text_dim())
         .tooltip(widgets::wrap_tooltip(tip))
@@ -535,7 +1198,7 @@ fn watts_caption(watts: u32) -> AnyElement {
     div()
         .id("cpu-watts")
         .flex_none()
-        .font_family(font::MONO)
+        .font_features(font::tnum())
         .text_size(px(10.))
         .text_color(theme::text_dim())
         .tooltip(widgets::wrap_tooltip(i18n::tr("overview.watts_tip")))
@@ -550,7 +1213,7 @@ fn uptime_caption(secs: u64) -> AnyElement {
     div()
         .id("cpu-uptime")
         .flex_none()
-        .font_family(font::MONO)
+        .font_features(font::tnum())
         .text_size(px(10.))
         .text_color(theme::text_dim())
         .tooltip(widgets::wrap_tooltip(i18n::tr("overview.uptime_tip")))
@@ -568,21 +1231,41 @@ fn cluster_label(name: &str, cores: u32) -> String {
     format!("{pretty} · {cores}")
 }
 
-/// How many climbers the strip names. Three fit one line at 320px
-/// beside the lead; a fourth would be a second line for a glance.
+/// How many climbers the tag's tooltip lists. The tag itself names the
+/// biggest; three is as far as "who" stays a glance.
 const MEM_RISE_N: usize = 3;
 
-/// One muted line under the memory figures: who has been climbing this
-/// hour and is still up — `Chrome +1.2 GB · Code +420 MB`. The hour's
-/// answer to the question the History tab asks of the day, and the
-/// one the memory rules cannot ask at all (a climb crosses no line
-/// until it is too late). Absent when nothing is climbing, so a quiet
-/// hour costs the card no height. `None`, not an empty strip.
-fn mem_climb_strip(climbers: &[MemoryCreep], total_bytes: u64) -> Option<AnyElement> {
+/// The climbers worth naming: past the floor, in the store's order
+/// (largest climb first).
+fn mem_climbers(climbers: &[MemoryCreep], total_bytes: u64) -> Vec<&MemoryCreep> {
     let floor = trend::mem_rise_floor(total_bytes);
-    let named: Vec<String> = climbers
+    climbers.iter().filter(|c| c.climb_bytes >= floor).collect()
+}
+
+/// Who has been climbing this hour and is still up, at the right of
+/// the headline row — `Climbing  Zed +1.1 GB`, with `×3` on the lead
+/// when there are more and the rest in the tooltip. The hour's answer
+/// to the question the History tab asks of the day, and the one the
+/// memory rules cannot ask at all (a climb crosses no line until it is
+/// too late).
+///
+/// On the headline's line, not under the card's last one, where it used
+/// to be a strip of its own: a climb comes and goes, the strip came and
+/// went with it, and every card below moved by a line each time — in a
+/// panel whose height is fitted to this page. The row it sits on is
+/// always there and taller than the tag, so the card is the same height
+/// with it or without. The name gives way before the figure does: the
+/// delta is the news.
+fn mem_climb_tag(climbers: &[MemoryCreep], total_bytes: u64) -> Option<AnyElement> {
+    let named = mem_climbers(climbers, total_bytes);
+    let top = named.first()?;
+    let lead = if named.len() > 1 {
+        format!("{} ×{}", i18n::tr("overview.mem_rise_short"), named.len())
+    } else {
+        i18n::tr("overview.mem_rise_short")
+    };
+    let listed = named
         .iter()
-        .filter(|c| c.climb_bytes >= floor)
         .take(MEM_RISE_N)
         .map(|c| {
             t!(
@@ -592,32 +1275,35 @@ fn mem_climb_strip(climbers: &[MemoryCreep], total_bytes: u64) -> Option<AnyElem
             )
             .to_string()
         })
-        .collect();
-    if named.is_empty() {
-        return None;
-    }
+        .collect::<Vec<_>>()
+        .join(" · ");
     Some(
         h_flex()
             .id("mem-climbers")
             .items_baseline()
+            .justify_end()
             .gap(px(6.))
-            .mt(px(8.))
             .min_w_0()
             .text_size(px(10.))
-            .tooltip(widgets::wrap_tooltip(i18n::tr("overview.mem_rise_tip")))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(theme::text_dim())
-                    .child(i18n::tr("overview.mem_rise_lead")),
-            )
+            .tooltip(widgets::wrap_tooltip_lines(vec![
+                format!("{}  {listed}", i18n::tr("overview.mem_rise_lead")).into(),
+                i18n::tr("overview.mem_rise_tip").into(),
+            ]))
+            .child(div().flex_none().text_color(theme::text_dim()).child(lead))
             .child(
                 div()
                     .min_w_0()
                     .truncate()
-                    .font_family(font::MONO)
+                    .font_features(font::tnum())
                     .text_color(theme::text_muted())
-                    .child(named.join(" · ")),
+                    .child(top.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_features(font::tnum())
+                    .text_color(theme::text_muted())
+                    .child(format!("+{}", format::memory(top.climb_bytes))),
             )
             .into_any_element(),
     )
@@ -647,54 +1333,63 @@ pub(crate) fn swap_moving(ins: Option<u64>, outs: Option<u64>) -> Option<(u64, u
 /// `Swapping  out 120/s · in 40/s`. The badge says memory is tight; this
 /// says how hard macOS is working to stay there — a warning with nothing
 /// moving is a machine that has settled, one at hundreds a second is
-/// still fighting. Absent otherwise, like the climb strip below it, so a
-/// quiet machine pays no height.
+/// still fighting. Absent otherwise — and at the end of the Swap row
+/// rather than on a line under it, for the climb tag's reason: a line
+/// that comes and goes moves everything below it. The row's own label
+/// is the lead, so the tag is the figures alone — or, when the kernel
+/// says so, its "Thrashing" verdict alone.
 ///
 /// Segments are the kernel's unit — bundles of compressed pages, no fixed
 /// size — so they are shown as activity and never converted to bytes.
 /// `swap_thrashing` is the kernel's own detector (segments written out
 /// only to be read straight back): a verdict, so it recolours the lead
 /// in accent and is never compared to anything here.
-fn swap_activity_strip(mem: &MemorySnapshot) -> Option<AnyElement> {
+fn swap_activity_tag(mem: &MemorySnapshot) -> Option<AnyElement> {
     let thrashing = mem.swap_thrashing == Some(true);
     let moving = swap_moving(mem.swap_ins_per_sec, mem.swap_outs_per_sec);
     if !thrashing && moving.is_none() {
         return None;
     }
     let (outs, ins) = moving.unwrap_or((0, 0));
-    let (lead, lead_color) = if thrashing {
-        (i18n::tr("overview.swap_thrashing"), theme::accent())
+    let figures = t!(
+        "overview.swap_activity",
+        outs = format::thousands(outs as usize),
+        ins = format::thousands(ins as usize)
+    )
+    .to_string();
+    let tip = i18n::tr("overview.swap_activity_tip");
+    let tag = h_flex()
+        .id("mem-swapping")
+        .items_baseline()
+        .justify_end()
+        .min_w_0()
+        .text_size(px(10.));
+    Some(if thrashing {
+        // The verdict alone, and the figures on hover: both do not fit
+        // beside the Swap pair, and what a row cut short loses is the
+        // end of a number — "in 4…" for 400. The word is the news.
+        tag.tooltip(widgets::wrap_tooltip_lines(vec![
+            figures.into(),
+            tip.into(),
+        ]))
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme::accent())
+                .child(i18n::tr("overview.swap_thrashing")),
+        )
+        .into_any_element()
     } else {
-        (i18n::tr("overview.swap_activity_lead"), theme::text_dim())
-    };
-    Some(
-        h_flex()
-            .id("mem-swapping")
-            .items_baseline()
-            .gap(px(6.))
-            .mt(px(8.))
-            .min_w_0()
-            .text_size(px(10.))
-            .tooltip(widgets::wrap_tooltip(i18n::tr(
-                "overview.swap_activity_tip",
-            )))
-            .child(div().flex_none().text_color(lead_color).child(lead))
+        tag.tooltip(widgets::wrap_tooltip(tip))
             .child(
                 font::mono_unless_cjk(div())
                     .min_w_0()
                     .truncate()
                     .text_color(theme::text_muted())
-                    .child(
-                        t!(
-                            "overview.swap_activity",
-                            outs = format::thousands(outs as usize),
-                            ins = format::thousands(ins as usize)
-                        )
-                        .to_string(),
-                    ),
+                    .child(figures),
             )
-            .into_any_element(),
-    )
+            .into_any_element()
+    })
 }
 
 /// `caps` decides how an absent figure reads: this build cannot measure
@@ -704,6 +1399,7 @@ fn memory(
     mem: &MemorySnapshot,
     caps: Capabilities,
     climbers: Vec<MemoryCreep>,
+    alarm: bool,
     recent: Recent<'_>,
 ) -> AnyElement {
     // The kernel's own verdict, not a number we derive: 1 normal, 2 warning,
@@ -714,44 +1410,49 @@ fn memory(
     // on macOS the capability is true and every arm below reads exactly
     // as it did.
     let supported = caps.memory_pressure;
-    let (label, tip, fg, bg, line) = match mem.pressure_level {
-        Some(l) if l >= 4 => (
+    let (label, tip) = match mem.pressure_level {
+        Some(l) if l >= PRESSURE_CRITICAL => (
             i18n::tr("overview.pressure_critical"),
             i18n::tr("overview.pressure_tip_critical"),
-            gpui::white(),
-            Hsla::from(theme::accent()),
-            Hsla::from(theme::accent()),
         ),
         Some(l) if l >= 2 => (
             i18n::tr("overview.pressure_warning"),
             i18n::tr("overview.pressure_tip_warning"),
-            Hsla::from(theme::accent_light()),
-            Hsla::from(theme::accent_wash(14)),
-            Hsla::from(theme::accent_wash(40)),
         ),
         Some(_) => (
             i18n::tr("overview.pressure_normal"),
             i18n::tr("overview.pressure_tip_normal"),
-            Hsla::from(theme::text_muted()),
-            Hsla::from(theme::inset()),
-            Hsla::from(theme::border()),
         ),
         None if !supported => (
             i18n::tr("overview.pressure_none"),
             i18n::tr("overview.pressure_tip_none"),
-            Hsla::from(theme::text_muted()),
-            Hsla::from(theme::inset()),
-            Hsla::from(theme::border()),
         ),
         // Measurable here, just not measured yet — the same `—` every
         // other waiting figure shows, not a claim about the platform.
         None => (
             format::PLACEHOLDER.to_string(),
             i18n::tr("overview.pressure_tip_waiting"),
-            Hsla::from(theme::text_muted()),
-            Hsla::from(theme::inset()),
-            Hsla::from(theme::border()),
         ),
+    };
+    // The badge is red when an alert is behind memory — the verdict that
+    // turns the menu bar and the short form's memory row — and never for
+    // the kernel's level alone. It was red at "Warning", which is where
+    // a memory-heavy Mac sits all day: a red pill under a grey bell, on
+    // the page whose short form had nothing to report at that moment.
+    // The word still says the level; a level that lasts becomes an
+    // alert, and that is what the red is for.
+    let (fg, bg, line) = if alarm {
+        (
+            Hsla::from(theme::accent_light()),
+            Hsla::from(theme::accent_wash(14)),
+            Hsla::from(theme::accent_wash(40)),
+        )
+    } else {
+        (
+            Hsla::from(theme::text_muted()),
+            Hsla::from(theme::track()),
+            Hsla::from(theme::card_line()),
+        )
     };
     // The figure the verdict is derived from (`kern.memorystatus_level`),
     // printed in the badge beside the verdict — "Normal · 62% available" —
@@ -774,8 +1475,10 @@ fn memory(
     let comp_w = compressed as f32 / total;
     // Used and compressed are painted slices. Free is the unfilled
     // trough — leftover, not a third colour that has to fight the badge.
-    let used_fill = Hsla::from(theme::ink());
-    let compressed_fill = Hsla::from(theme::text_muted());
+    // One paint in two strengths: compressed is part of used, and a grey
+    // slice beside the bar's own colour read as a second quantity.
+    let used_fill = Hsla::from(theme::gauge());
+    let compressed_fill = Hsla::from(dim_ink());
 
     // Total is already in the hero caption ("used of 24 GB"). The bar
     // shows compressed as a slice, and its legend names how many GB that
@@ -851,26 +1554,31 @@ fn memory(
             ),
         ))
         .child(
+            // The processor card's headline shape: the figure and its
+            // caption a left-hand pair, a small tag hugging the right.
             h_flex()
+                .w_full()
                 .items_baseline()
-                .gap(px(6.))
+                .justify_between()
+                .gap(px(10.))
                 .mt(px(8.))
                 .child(
-                    div()
-                        .font_family(font::MONO)
-                        .text_size(px(20.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(theme::text())
-                        .child(format::gb(mem.used_bytes)),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme::text_muted())
+                    h_flex()
+                        .flex_none()
+                        .items_baseline()
+                        .gap(px(4.))
+                        .child(widgets::big_figure(&format::gb(mem.used_bytes)))
                         .child(
-                            t!("overview.used_of", total = format::gb(mem.total_bytes)).to_string(),
+                            font::tabular(div())
+                                .text_size(px(12.))
+                                .text_color(theme::text_muted())
+                                .child(
+                                    t!("overview.used_of", total = format::gb(mem.total_bytes))
+                                        .to_string(),
+                                ),
                         ),
-                ),
+                )
+                .children(mem_climb_tag(&climbers, mem.total_bytes)),
         )
         .children(recent_line(
             Chart {
@@ -897,17 +1605,22 @@ fn memory(
             6.,
         )))
         .child(div().mt(px(8.)).child(widgets::legend(legend)))
-        .child(widgets::kv_packed(rows))
-        .children(swap_activity_strip(mem))
-        .children(mem_climb_strip(&climbers, mem.total_bytes))
+        // The card's last line, whatever the machine is doing: nothing
+        // that comes and goes gets a line of its own here (the two tags'
+        // docs say what that cost).
+        .child(widgets::kv_packed(rows, swap_activity_tag(mem)))
         .into_any_element()
 }
 
 /// Disk and network throughput: the rates row and the network chart. A
 /// card of its own — they used to close the Memory card, so the network
-/// chart sat under a "Memory" title. No title: the row's two glyphs are
-/// the tab strip's Hardware and Network icons, and a header would cost
-/// the panel another 20px for a word those glyphs already say.
+/// chart sat under a "Memory" title. It had no title of its own until
+/// 2026-10-12 — the row's two glyphs are the tab strip's Hardware and
+/// Network icons, and a header cost 20px for a word they already say.
+/// That held for a reader who knew the tab strip; to anyone else it was
+/// the one card on the page with no name, four unlabelled rates under
+/// two icons. The long form pays the 20px; the short form says the
+/// network's rates in its last line ([`side_facts`]).
 fn io_card(io: &IoTotalsSnapshot, recent: Recent<'_>) -> Option<AnyElement> {
     let rates = io_strip(io);
     let chart = recent_line(
@@ -956,7 +1669,13 @@ fn io_card(io: &IoTotalsSnapshot, recent: Recent<'_>) -> Option<AnyElement> {
     if rates.is_none() && chart.is_none() {
         return None;
     }
-    Some(card().children(rates).children(chart).into_any_element())
+    Some(
+        card()
+            .child(widgets::card_header(i18n::tr("overview.io_title"), None))
+            .child(div().mt(px(8.)).children(rates))
+            .children(chart)
+            .into_any_element(),
+    )
 }
 
 /// Height of an Overview chart. CPU and network are curves; memory is
@@ -1313,6 +2032,7 @@ fn recent_line(chart: Chart, now: Instant) -> Option<AnyElement> {
         .zip(&marks)
         .map(|(line, points)| (line.arrow, chart_peak(points)))
         .collect();
+    let axis = chart.corner_label && corner_label_earned(&marks);
     Some(
         // The well stays [`CURVE_H`]. A ceiling change (CPU crossing
         // 30, a network step) moves the mark inside it. The caption
@@ -1334,7 +2054,7 @@ fn recent_line(chart: Chart, now: Instant) -> Option<AnyElement> {
                     .bg(theme::inset())
                     .overflow_hidden()
                     .child(sparkline(marks, span, now, chart.scale, chart.stroke))
-                    .when(chart.corner_label, |well| {
+                    .when(axis, |well| {
                         well.child(corner_label(scale_label(chart.unit, chart.scale)))
                     }),
             )
@@ -1358,18 +2078,21 @@ fn scale_label(unit: ChartUnit, scale: f64) -> String {
 /// it: without it the top of the chart was a rule in a tooltip — 30%
 /// under a "Max 15.8%" caption, or an unnamed doubling under "Max 6.6
 /// MB/s". The left is the oldest half hour, so the newest data on the
-/// right is never under it. It sits over the stroke on a scrap of the
-/// well's own fill, so a line passing beneath dims instead of crossing
-/// the digits.
+/// right is never under it.
+///
+/// The digits used to sit on a second coat of the well's own fill, so a
+/// line passing beneath would dim. That fill is translucent, and the
+/// second coat composites darker than the well — `#151516` on a
+/// `#1c1c1d` well, measured on the short form — so "30%" became a chip,
+/// the brightest mark in a quiet half hour and a second percent beside
+/// the headline. 9px in the dim ink is the axis. A line at the ceiling
+/// may cross it; that end of the chart is the oldest.
 fn corner_label(text: String) -> AnyElement {
     div()
         .absolute()
         .top(px(2.))
         .left(px(CHART_PAD))
-        .px(px(3.))
-        .rounded(px(3.))
-        .bg(theme::inset())
-        .font_family(font::MONO)
+        .font_features(font::tnum())
         .text_size(px(9.))
         .line_height(px(11.))
         .text_color(theme::text_dim())
@@ -1405,7 +2128,7 @@ fn chart_readout(
         };
         div()
             .flex_none()
-            .font_family(font::MONO)
+            .font_features(font::tnum())
             .text_size(px(10.))
             .line_height(px(CHART_CAPTION))
             .text_color(ink)
@@ -1457,7 +2180,7 @@ fn chart_stat(label: String, value: String) -> AnyElement {
         .child(
             div()
                 .flex_none()
-                .font_family(font::MONO)
+                .font_features(font::tnum())
                 .text_size(px(10.))
                 .line_height(px(CHART_CAPTION))
                 .text_color(theme::text())
@@ -1469,8 +2192,8 @@ fn chart_stat(label: String, value: String) -> AnyElement {
 /// The slot is always the same height. Nothing is stroked until the
 /// series covers a second. The well behind it is already up, and the
 /// axis under the stroke is the full 30 minutes, marked off by
-/// [`paint_guides`] from the first frame. `marks` is one bucketed
-/// series per line, the lead first.
+/// [`paint_guides`] once the span reaches each mark. `marks` is one
+/// bucketed series per line, the lead first.
 fn sparkline(
     marks: Vec<Vec<Point>>,
     span: Option<Duration>,
@@ -1481,13 +2204,17 @@ fn sparkline(
     gpui::canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            paint_guides(bounds, window);
+            paint_guides(bounds, span, window);
             if span.is_none() {
                 return;
             }
             // Behind first, so the lead line is painted on top.
             for (index, points) in marks.iter().enumerate().rev() {
-                let ink = if index == 0 { theme::ink() } else { dim_ink() };
+                let ink = if index == 0 {
+                    theme::gauge()
+                } else {
+                    dim_ink()
+                };
                 paint_curve(bounds, points, now, scale, stroke, ink, window);
             }
             // The lead line's holes only: two dotted rows under the
@@ -1505,13 +2232,15 @@ fn sparkline(
 /// minutes ago, split the 30-minute axis into thirds.
 const GUIDE_EVERY: Duration = Duration::from_secs(10 * 60);
 
-/// Hairlines across the well at every [`GUIDE_EVERY`]. Until the window
-/// fills, the marks sit on the right and the rest of the well is empty;
-/// without these that emptiness read as a chart that failed to draw
-/// rather than as half an hour not yet collected. Painted under the
-/// marks, in the row-separator ink, full well height. On the bar chart
-/// a guide falls on a slot boundary, in the gap between two bars.
-fn paint_guides(bounds: Bounds<Pixels>, window: &mut Window) {
+/// Hairlines across the well at every [`GUIDE_EVERY`] the span has
+/// reached. A mark at 10 minutes on a 13-second line cuts an empty well
+/// into thirds, and that grid is what a reader sees instead of the dash;
+/// the span beside the chart already says the window is short. Once the
+/// oldest sample is at least this far back, the mark sits on collected
+/// time and the empty left of it is the rest of the half hour. Painted
+/// under the stroke, in the row-separator ink, full well height. On the
+/// bar chart a guide falls on a slot boundary, in the gap between two bars.
+fn paint_guides(bounds: Bounds<Pixels>, span: Option<Duration>, window: &mut Window) {
     let pad = px(CHART_PAD);
     let left = bounds.left() + pad;
     let width = bounds.size.width - pad * 2.;
@@ -1520,14 +2249,50 @@ fn paint_guides(bounds: Bounds<Pixels>, window: &mut Window) {
     }
     let mut age = GUIDE_EVERY;
     while age < series::WINDOW {
-        // Whole pixels: a 1px hairline straddling two columns paints
-        // as two faint ones.
-        let x = (f32::from(left) + f32::from(width) * axis_t(age) as f32).round();
-        window.paint_quad(gpui::fill(
-            Bounds::new(point(px(x), bounds.top()), size(px(1.), bounds.size.height)),
-            theme::border_subtle(),
-        ));
+        if guide_due(age, span) {
+            // Whole pixels: a 1px hairline straddling two columns paints
+            // as two faint ones.
+            let x = (f32::from(left) + f32::from(width) * axis_t(age) as f32).round();
+            window.paint_quad(gpui::fill(
+                Bounds::new(point(px(x), bounds.top()), size(px(1.), bounds.size.height)),
+                theme::border_subtle(),
+            ));
+        }
         age += GUIDE_EVERY;
+    }
+}
+
+/// Whether the guide `age` back from now sits on time the series has
+/// actually collected.
+fn guide_due(age: Duration, span: Option<Duration>) -> bool {
+    span.is_some_and(|span| span >= age)
+}
+
+/// The corner figure names the top of the axis, and it waits until the
+/// stroke is a line. One occupied bucket is the dash [`lone_reading`]
+/// draws — a couple of pixels on the right of an empty well — and beside
+/// it "30%" is a second percentage with nothing under it to scale. Two
+/// buckets are a segment, and the top is then what that segment is drawn
+/// against.
+fn stroke_is_a_line(points: &[Point]) -> bool {
+    chart_runs(points).iter().any(|run| run.len() >= 2)
+}
+
+/// Either series earning a line is enough: CPU has one, the network
+/// chart has two, and one ceiling covers both.
+fn corner_label_earned(marks: &[Vec<Point>]) -> bool {
+    marks.iter().any(|points| stroke_is_a_line(points))
+}
+
+/// Ink of a top-apps percent. `0.0%` is what the column prints for every
+/// idle tree, and five of them in the name's ink were the loudest marks
+/// on a quiet page. A reading the decimal keeps, and anything over the
+/// line, stays as it was.
+fn app_pct_ink(percent: f32, hot: bool) -> Rgba {
+    if !hot && format::pct(percent) == "0.0%" {
+        theme::text_dim()
+    } else {
+        theme::text_for(hot)
     }
 }
 
@@ -1536,11 +2301,13 @@ const GAP_DOT: f32 = 2.;
 const GAP_DOT_STEP: f32 = 5.;
 
 /// A dotted baseline across every hole *between* readings — not before
-/// the first, which is the window still filling and has the guides to
-/// say so. The rings are fed every tick, panel hidden or not, so a hole
-/// in the middle is time with nothing recorded: the Mac asleep, or this
-/// app not running. Bare, that read as a chart that broke; dotted, it
-/// reads as a stretch where nothing was measured.
+/// the first, which is the window still filling. The span beside the
+/// chart says how far that goes, and [`paint_guides`] marks 10 and 20
+/// minutes once the span reaches them. The rings are fed every tick,
+/// panel hidden or not, so a hole in the middle is time with nothing
+/// recorded: the Mac asleep, or this app not running. Bare, that read
+/// as a chart that broke; dotted, it reads as a stretch where nothing
+/// was measured.
 fn paint_gaps(
     bounds: Bounds<Pixels>,
     points: &[Point],
@@ -1609,14 +2376,15 @@ fn paint_dotted(from: f32, to: f32, y: f32, window: &mut Window) {
     }
 }
 
-/// Share of [`theme::ink`]'s alpha kept by the marks behind the lead:
-/// network upload under download, and every memory bar but the newest.
+/// Share of [`theme::gauge`]'s alpha kept by the marks behind the lead:
+/// network upload under download, every memory bar but the newest, and
+/// the compressed slice of the memory meter.
 const CHART_DIM: f32 = 0.45;
 
-/// [`theme::ink`] at [`CHART_DIM`]. Paint only, so a theme switch moves
+/// [`theme::gauge`] at [`CHART_DIM`]. Paint only, so a theme switch moves
 /// no geometry.
 fn dim_ink() -> Rgba {
-    let ink = theme::ink();
+    let ink = theme::gauge();
     Rgba {
         a: ink.a * CHART_DIM,
         ..ink
@@ -1767,7 +2535,7 @@ fn paint_bars(
         window.paint_path(path, dim_ink());
     }
     if drew_latest && let Ok(path) = latest.build() {
-        window.paint_path(path, theme::ink());
+        window.paint_path(path, theme::gauge());
     }
 }
 
@@ -1979,6 +2747,60 @@ fn io_strip(io: &IoTotalsSnapshot) -> Option<AnyElement> {
 mod tests {
     use super::*;
 
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// The notice names the most pressing thing, and there is none on
+    /// an ordinary day.
+    #[test]
+    fn the_notice_names_the_most_pressing_thing() {
+        let everything = || Signs {
+            memory: true,
+            disk: true,
+            alerts: names(&["Google Chrome", "Zed"]),
+            busy: names(&["mds"]),
+            growing: names(&["Slack"]),
+        };
+        assert_eq!(notice(everything()), Some(Notice::Memory));
+        assert_eq!(
+            notice(Signs {
+                memory: false,
+                ..everything()
+            }),
+            Some(Notice::Disk)
+        );
+        // Newest first: the count is the list, the name its head.
+        assert_eq!(
+            notice(Signs {
+                memory: false,
+                disk: false,
+                ..everything()
+            }),
+            Some(Notice::Alerts {
+                count: 2,
+                latest: "Google Chrome".into()
+            })
+        );
+        assert_eq!(
+            notice(Signs {
+                busy: names(&["mds"]),
+                growing: names(&["Slack"]),
+                ..Signs::default()
+            }),
+            Some(Notice::Busy("mds".into()))
+        );
+        assert_eq!(
+            notice(Signs {
+                growing: names(&["Slack"]),
+                ..Signs::default()
+            }),
+            Some(Notice::Growing("Slack".into()))
+        );
+        // Nothing held by an episode or a watcher: no row at all.
+        assert_eq!(notice(Signs::default()), None);
+    }
+
     fn bezier_y(from_y: f32, cubic: &Cubic, t: f32) -> f32 {
         let u = 1.0 - t;
         u * u * u * from_y
@@ -2048,6 +2870,52 @@ mod tests {
         assert_eq!(cpu_axis_top(&[point(Some(40.0))]), 40.0);
         assert_eq!(cpu_axis_top(&[point(Some(95.5))]), 100.0);
         assert_eq!(cpu_axis_top(&[point(Some(100.0))]), 100.0);
+    }
+
+    #[test]
+    fn the_axis_label_waits_until_the_stroke_is_a_line() {
+        let now = Instant::now();
+        let point = |value: Option<f64>| Point { at: now, value };
+        assert!(!corner_label_earned(&[]));
+        assert!(!corner_label_earned(&[vec![point(None)]]));
+        // One bucket is the dash on the right, label or not.
+        assert!(!corner_label_earned(&[vec![point(Some(7.0))]]));
+        assert!(!corner_label_earned(&[vec![
+            point(None),
+            point(Some(7.0)),
+            point(None),
+        ]]));
+        assert!(corner_label_earned(&[vec![
+            point(Some(7.0)),
+            point(Some(8.0))
+        ]]));
+        // Either series earning the line is enough: one ceiling for both.
+        assert!(corner_label_earned(&[
+            vec![point(Some(1.0))],
+            vec![point(Some(1.0)), point(Some(2.0))],
+        ]));
+    }
+
+    #[test]
+    fn a_guide_waits_until_the_span_reaches_it() {
+        assert!(!guide_due(GUIDE_EVERY, None));
+        assert!(!guide_due(GUIDE_EVERY, Some(Duration::from_secs(13))));
+        assert!(guide_due(GUIDE_EVERY, Some(GUIDE_EVERY)));
+        assert!(!guide_due(GUIDE_EVERY * 2, Some(GUIDE_EVERY)));
+        assert!(guide_due(
+            GUIDE_EVERY * 2,
+            Some(GUIDE_EVERY * 2 + Duration::from_secs(1))
+        ));
+    }
+
+    #[test]
+    fn a_zero_percent_recedes_and_a_real_one_does_not() {
+        assert_eq!(app_pct_ink(0.0, false), theme::text_dim());
+        // What the column prints as 0.0% recedes with it.
+        assert_eq!(format::pct(0.04), "0.0%");
+        assert_eq!(app_pct_ink(0.04, false), theme::text_dim());
+        assert_eq!(app_pct_ink(1.2, false), theme::text());
+        assert_eq!(app_pct_ink(40.0, true), theme::text_for(true));
     }
 
     #[test]
@@ -2378,6 +3246,31 @@ mod tests {
         // Waiting for a first sample, or a platform with neither figure
         assert_eq!(badge_available(None, Some(62)), None);
         assert_eq!(badge_available(Some(1), None), None);
+    }
+
+    /// The tag names what crossed the floor, in the store's order —
+    /// and nothing at all when nothing did, which is the common hour.
+    #[test]
+    fn only_climbs_past_the_floor_are_named() {
+        let total = 24u64 << 30;
+        let floor = trend::mem_rise_floor(total);
+        let creep = |name: &str, climb_bytes: u64| MemoryCreep {
+            name: name.into(),
+            root_pid: 1,
+            climb_bytes,
+            now_bytes: climb_bytes * 2,
+        };
+        let all = [
+            creep("a", floor * 3),
+            creep("b", floor),
+            creep("c", floor - 1),
+        ];
+        let named: Vec<&str> = mem_climbers(&all, total)
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(named, ["a", "b"]);
+        assert!(mem_climbers(&all[2..], total).is_empty());
     }
 
     #[test]
