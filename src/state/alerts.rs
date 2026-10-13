@@ -9,7 +9,7 @@ use crate::alertlog;
 use crate::tray;
 use crate::volflag;
 use gpui::Context;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process;
 #[cfg(test)]
 use std::time::UNIX_EPOCH;
@@ -179,10 +179,25 @@ pub struct SeenAlert {
     /// stays on the Alerts tab; the menu bar goes back to CPU after
     /// [`TRAY_RECOVER`]. Display-layer only — the engine is not asked.
     recovered_since: Option<SystemTime>,
+    /// Whether the Alerts tab has been on screen since this episode
+    /// opened ([`ZStatsAppState::see_alerts`]). Overview's notice row is
+    /// for the ones it has not ([`Self::is_news`]). Display-layer only,
+    /// and not written to the day's file: after a restart the first live
+    /// report is news again, as its banner is.
+    noticed: bool,
     pub event: AlertEvent,
 }
 
 impl SeenAlert {
+    /// Reported this session and not yet shown on the Alerts tab: what
+    /// Overview's notice row announces. A card someone has opened that
+    /// tab on has been said, and the row would otherwise repeat it for
+    /// as long as the condition holds — every follow-up report is the
+    /// same episode, ten minutes apart at the default.
+    pub fn is_news(&self) -> bool {
+        self.live && !self.noticed
+    }
+
     /// Time since the most recent report. A clock stepped backwards
     /// (NTP, a manual change) reads as "just now" rather than a
     /// negative age.
@@ -222,6 +237,7 @@ impl SeenAlert {
             reports: 1,
             live,
             recovered_since: None,
+            noticed: false,
             event,
         }
     }
@@ -349,6 +365,15 @@ fn disk_event_holds(
     Some(f64::from(d.used_percent) >= *threshold_percent)
 }
 
+/// One of the panel's two slow-burn observations as the Alerts tab
+/// shows it: a process under sustained load, by pid, or a tree whose
+/// memory is climbing, by the name trees are keyed by.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum WatchCard {
+    Busy(u32),
+    Growing(String),
+}
+
 /// The store's alert cluster: today's episodes, the week's record, and
 /// the delivery-layer filters (snooze / auto-quiet) plus the tray spec.
 #[derive(Default)]
@@ -357,6 +382,10 @@ pub(crate) struct AlertBook {
     dismissed_today: Vec<alertlog::Restored>,
     alert_history: Vec<alertlog::DayLog>,
     tray_alert_unseen: bool,
+    /// The watcher cards that were standing when the Alerts tab was last
+    /// on screen, for as long as each stands
+    /// ([`ZStatsAppState::forget_ended_watch`]).
+    watch_noticed: HashSet<WatchCard>,
     selected_alert: Option<(String, String)>,
     banner_sent: HashMap<Episode, Vec<Instant>>,
     snoozed: HashMap<Episode, Snooze>,
@@ -383,6 +412,12 @@ impl ZStatsAppState {
         {
             seen.at = now;
             seen.reports += 1;
+            // A record restored from earlier today has just been
+            // reported in this session: that is news once. A follow-up
+            // of a live episode is not — it keeps what it had.
+            if !seen.live {
+                seen.noticed = false;
+            }
             // A live report just named this pid: the card may act again.
             seen.live = true;
             seen.recovered_since = None;
@@ -401,6 +436,7 @@ impl ZStatsAppState {
             reports: 1,
             live: true,
             recovered_since: None,
+            noticed: false,
             event,
         });
         while self.alert_book.alerts.len() > MAX_ALERTS {
@@ -433,6 +469,7 @@ impl ZStatsAppState {
                 // see [`SeenAlert::live`].
                 live: false,
                 recovered_since: None,
+                noticed: false,
                 event: saved.event,
             });
         }
@@ -591,10 +628,23 @@ impl ZStatsAppState {
     }
 
     pub(super) fn memory_needs_attention_at(&self, now: SystemTime) -> bool {
-        self.alert_book
-            .alerts
-            .iter()
-            .any(|seen| seen.live && turns_the_face(&seen.event) && !seen.recovered_for(now))
+        self.memory_episodes(now).next().is_some()
+    }
+
+    /// The episodes behind [`Self::memory_needs_attention`].
+    fn memory_episodes(&self, now: SystemTime) -> impl Iterator<Item = &SeenAlert> {
+        self.alert_book.alerts.iter().filter(move |seen| {
+            seen.live && turns_the_face(&seen.event) && !seen.recovered_for(now)
+        })
+    }
+
+    /// Memory needs attention and the Alerts tab has not shown why yet:
+    /// Overview's notice row says so until it has. The menu bar and the
+    /// red figure keep [`Self::memory_needs_attention`] — they are the
+    /// state, the row is its announcement.
+    pub fn memory_is_news(&self) -> bool {
+        self.memory_episodes(SystemTime::now())
+            .any(SeenAlert::is_news)
     }
 
     /// Auto's second trigger: a live disk episode from this session,
@@ -614,7 +664,12 @@ impl ZStatsAppState {
     }
 
     pub(super) fn disk_needs_attention_at(&self, now: SystemTime) -> bool {
-        self.alert_book.alerts.iter().any(|seen| {
+        self.disk_episodes(now).next().is_some()
+    }
+
+    /// The episodes behind [`Self::disk_needs_attention`].
+    fn disk_episodes(&self, now: SystemTime) -> impl Iterator<Item = &SeenAlert> {
+        self.alert_book.alerts.iter().filter(move |seen| {
             seen.live
                 && seen.event.kind() == AlertKind::Disk
                 && !seen.recovered_for(now)
@@ -623,6 +678,12 @@ impl ZStatsAppState {
                     _ => false,
                 }
         })
+    }
+
+    /// [`Self::memory_is_news`], for a disk.
+    pub fn disk_is_news(&self) -> bool {
+        self.disk_episodes(SystemTime::now())
+            .any(SeenAlert::is_news)
     }
 
     /// Whether a disk episode's volume can still wear the face: not
@@ -841,9 +902,79 @@ impl ZStatsAppState {
     }
 
     /// The Alerts tab is (or is about to be) what the user is looking
-    /// at: the spec has done its job. Does not touch the episode list.
+    /// at: the spec has done its job, and so has Overview's notice row
+    /// for everything that tab now shows. Does not touch the episode
+    /// list.
+    ///
+    /// The two differ on one point. A follow-up of an episode already
+    /// seen re-lights the spec, a few pixels on the menu bar, and does
+    /// not bring the row back: the row is a line of the panel and 46 of
+    /// its height, and a condition that holds is reported again every
+    /// ten minutes at the default — it stood there all day, saying what
+    /// had been read in the morning. A new episode, or a new watcher
+    /// card, is what it comes back for.
     pub fn see_alerts(&mut self) {
         self.alert_book.tray_alert_unseen = false;
+        for seen in &mut self.alert_book.alerts {
+            seen.noticed = true;
+        }
+        self.alert_book.watch_noticed = self.watch_cards().collect();
+    }
+
+    /// The watcher cards standing now, as the Alerts tab lists them.
+    fn watch_cards(&self) -> impl Iterator<Item = WatchCard> {
+        let busy = self.sustained_active().into_iter();
+        let growing = self.creeps_active().into_iter();
+        busy.map(|notice| WatchCard::Busy(notice.pid))
+            .chain(growing.map(|(creep, _)| WatchCard::Growing(creep.name)))
+    }
+
+    /// A watcher card that has ended is forgotten, so the same process
+    /// under load again tomorrow, or the same tree climbing again, is
+    /// news. A climb is kept while the tree still climbs at all, not
+    /// while its banner is out: the banner re-arms by the hour, and the
+    /// minute between two announcements of one climb is not its end.
+    pub(super) fn forget_ended_watch(&mut self) {
+        if self.alert_book.watch_noticed.is_empty() {
+            return;
+        }
+        let busy: HashSet<u32> = self
+            .sustained_active()
+            .into_iter()
+            .map(|notice| notice.pid)
+            .collect();
+        let growing: HashSet<String> = self
+            .memory_climbers()
+            .into_iter()
+            .map(|creep| creep.name)
+            .collect();
+        self.alert_book.watch_noticed.retain(|card| match card {
+            WatchCard::Busy(pid) => busy.contains(pid),
+            WatchCard::Growing(name) => growing.contains(name),
+        });
+    }
+
+    /// The names under sustained load that the Alerts tab has not shown
+    /// yet, for Overview's notice row.
+    pub fn sustained_news(&self) -> Vec<String> {
+        self.sustained_active()
+            .into_iter()
+            .filter(|notice| !self.watch_was_noticed(&WatchCard::Busy(notice.pid)))
+            .map(|notice| notice.name)
+            .collect()
+    }
+
+    /// The announced climbs that the Alerts tab has not shown yet.
+    pub fn creeps_news(&self) -> Vec<String> {
+        self.creeps_active()
+            .into_iter()
+            .map(|(creep, _)| creep.name)
+            .filter(|name| !self.watch_was_noticed(&WatchCard::Growing(name.clone())))
+            .collect()
+    }
+
+    fn watch_was_noticed(&self, card: &WatchCard) -> bool {
+        self.alert_book.watch_noticed.contains(card)
     }
 
     /// Reveal path: opening the panel onto Alerts is the same as
@@ -1248,6 +1379,75 @@ mod tests {
             state.tray_alert_unseen(),
             "a follow-up while away re-lights"
         );
+    }
+
+    /// Overview's notice row announces what the Alerts tab has not shown.
+    /// Showing that tab is the end of it for every episode then on it: a
+    /// follow-up report — one every ten minutes while a condition holds,
+    /// at the default — is the same episode and brings nothing back. A
+    /// new episode does, and so does a restored record's first live
+    /// report of the session.
+    #[test]
+    fn an_episode_is_news_until_alerts_are_shown() {
+        let mut state = ZStatsAppState::new();
+        let now = SystemTime::now();
+        let news =
+            |state: &ZStatsAppState| state.alerts().iter().filter(|seen| seen.is_news()).count();
+
+        state.adopt_alerts(vec![alertlog::Restored {
+            event: cpu_alert(7),
+            first_at: now,
+            at: now,
+            reports: 1,
+            dismissed: false,
+        }]);
+        assert_eq!(news(&state), 0, "a restored card is a record");
+
+        state.record_alert(cpu_alert(8), now);
+        assert_eq!(news(&state), 1);
+
+        state.see_alerts();
+        assert_eq!(news(&state), 0, "shown is said");
+
+        state.record_alert(cpu_alert(8), now);
+        assert_eq!(news(&state), 0, "a follow-up says nothing new");
+
+        state.record_alert(mem_alert(8), now);
+        assert_eq!(news(&state), 1, "another episode does");
+
+        state.see_alerts();
+        state.record_alert(cpu_alert(7), now);
+        assert_eq!(news(&state), 1, "the record's first live report");
+    }
+
+    /// The row is the announcement and the menu bar is the state: once
+    /// the Alerts tab has shown a memory episode the row has nothing to
+    /// say, and the verdict behind the tray face and the red figure
+    /// stands for as long as it did before.
+    #[test]
+    fn a_verdict_outlives_its_announcement() {
+        let mut state = ZStatsAppState::new();
+        state.record_alert(mem_alert(7), SystemTime::now());
+        assert!(state.memory_needs_attention());
+        assert!(state.memory_is_news());
+
+        state.see_alerts();
+        assert!(state.memory_needs_attention());
+        assert!(!state.memory_is_news());
+    }
+
+    /// A watcher card that ended is forgotten, so the same process
+    /// under load again, or the same tree climbing again, is news. A
+    /// store with no tick has nothing under load and nothing climbing.
+    #[test]
+    fn an_ended_watcher_card_is_forgotten() {
+        let mut state = ZStatsAppState::new();
+        let noticed = &mut state.alert_book.watch_noticed;
+        noticed.insert(WatchCard::Busy(7));
+        noticed.insert(WatchCard::Growing("Google Chrome".into()));
+
+        state.forget_ended_watch();
+        assert!(state.alert_book.watch_noticed.is_empty());
     }
 
     /// The acting controls on a card are gated on the pid having been

@@ -190,26 +190,26 @@ fn notice(signs: Signs) -> Option<Notice> {
     signs.growing.into_iter().next().map(Notice::Growing)
 }
 
+/// What there is to announce: each source, less what the Alerts tab has
+/// already shown (`ZStatsAppState::see_alerts`). The row is an
+/// announcement and not a state. It used to stand for as long as its
+/// episode did — a disk at 91% said so in red from the morning's banner
+/// to midnight, 46 of the panel's height, to someone who had opened the
+/// card hours before. Having been followed, or the bell having been, it
+/// is done; the red figure on the card below and the red bell go on
+/// saying that the condition holds.
 fn signs(state: &ZStatsAppState) -> Signs {
     Signs {
-        memory: state.memory_needs_attention(),
-        disk: state.disk_needs_attention(),
+        memory: state.memory_is_news(),
+        disk: state.disk_is_news(),
         alerts: state
             .alerts()
             .iter()
-            .filter(|seen| seen.live)
+            .filter(|seen| seen.is_news())
             .map(|seen| alerts::subject_name(&seen.event.subject))
             .collect(),
-        busy: state
-            .sustained_active()
-            .into_iter()
-            .map(|notice| notice.name)
-            .collect(),
-        growing: state
-            .creeps_active()
-            .into_iter()
-            .map(|(creep, _)| creep.name)
-            .collect(),
+        busy: state.sustained_news(),
+        growing: state.creeps_news(),
     }
 }
 

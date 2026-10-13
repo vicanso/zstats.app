@@ -1224,6 +1224,7 @@ impl ZStatsAppState {
             self.ensure_listeners(cx);
         }
         self.prune_stale_alerts();
+        self.forget_ended_watch();
         self.maybe_auto_check_update(cx);
         // Views cannot start work. Hide drops the table. A still-open
         // expansion, or a job face the tick cannot name, asks from here
@@ -2026,6 +2027,13 @@ impl ZStatsAppState {
             if tab == Tab::Alerts {
                 self.see_alerts();
                 tray::sync(cx, self);
+                // Seeing them takes Overview's notice row away, and the
+                // panel is 46 shorter without it. With the switch, when
+                // the whole body changes anyway, rather than on the
+                // collector's next tick, up to two seconds into reading
+                // the page that was asked for. Deferred: the fit reads
+                // this store.
+                cx.defer(crate::sync_panel_notice);
             }
             cx.notify();
         }
