@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.9](https://github.com/vicanso/zstats.app/compare/v0.4.7..v0.4.9) - 2026-10-13
+
+### ⛰️  Features
+
+- The webhook's JSON is pretty-printed, a field to a line, with percentages cut to two decimals — ntfy shows the body as sent - ([4fffd6e](https://github.com/vicanso/zstats.app/commit/4fffd6ee9728dad4b8c0216ebab3a4c686fc976f))
+- Notifications can also be sent to a URL as JSON — set it under Settings → Interface, with a button to send a test - ([adf5e64](https://github.com/vicanso/zstats.app/commit/adf5e646e1ccd7ee309b2fbf547be11afd23cef1))
+
+### 🐛 Bug Fixes
+
+- Lists reach the footer on a whole row, and the selected tab keeps one width - ([73174f0](https://github.com/vicanso/zstats.app/commit/73174f01077a94beebc4052048decd34b7dcb661))
+- The short panel ends on a whole row, and a few figures stay whole - ([c2029d4](https://github.com/vicanso/zstats.app/commit/c2029d475fda874273a167c076db39e899620460))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.4.8 - ([7afd314](https://github.com/vicanso/zstats.app/commit/7afd31408660cb733bae1d700f10b561ea3f4e06))
+
 ## [0.4.8](https://github.com/vicanso/zstats.app/compare/v0.4.7..v0.4.8) - 2026-10-12
 
 ### ⛰️  Features
