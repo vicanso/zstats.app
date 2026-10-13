@@ -967,13 +967,15 @@ fn with_app_identity(mut options: WindowOptions) -> WindowOptions {
     options
 }
 
-/// Retarget gpui's vibrancy view at the `Popover` material.
+/// Put the `Popover` material's ground under the panel.
 ///
-/// gpui hardcodes `NSVisualEffectMaterial::Selection` (`gpui_macos/src/window.rs`),
-/// which is the selection-highlight material, not the one AppKit uses for
-/// menu bar panels. The view itself is fine — it's the bottom-most subview of
-/// the window's content view — so this just walks the subviews and re-materials
-/// the `NSVisualEffectView` it finds. A no-op if gpui ever stops adding one.
+/// gpui's own vibrancy view (`gpui_macos/src/window.rs`) pins a material and
+/// strips its tint — `Selection` up to gpui-pre 0.3.8, `UnderWindowBackground`
+/// since 0.3.9, because `Selection` has no backdrop layer on macOS 27 and
+/// blurred nothing there. Either way what it leaves is a blur and not a
+/// ground, and a material set on that view does not hold, so a stock
+/// `NSVisualEffectView` goes in directly above it; the comment inside says
+/// why.
 #[cfg(target_os = "macos")]
 fn use_popover_material(window: &Window) {
     use objc2::ClassType;
@@ -1002,8 +1004,8 @@ fn use_popover_material(window: &Window) {
         let subviews: *mut AnyObject = objc2::msg_send![content, subviews];
         let count: usize = objc2::msg_send![subviews, count];
         // Setting the material on gpui's own blur view is not enough — it
-        // is a subclass that pins `Selection` and strips the layer
-        // background on every `updateLayer` ("colorless" by design), so
+        // is a subclass that pins a material of its own and strips the
+        // layer background on every `updateLayer` ("colorless" by design), so
         // any material's adaptive backdrop is removed the moment AppKit
         // repaints. What is left is pure blur: a white wallpaper arrives
         // at full brightness and the dark theme sits on light glass. So a

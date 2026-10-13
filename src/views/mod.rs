@@ -150,6 +150,35 @@ fn shortcut_hint() -> &'static str {
     }
 }
 
+/// The selected tab's icon, and the space between it and the name.
+const TAB_ICON_ON: f32 = 15.;
+const TAB_FACE_GAP: f32 = 6.;
+
+/// A tab's name as the selected cell wears it.
+fn tab_name(tab: Tab) -> Div {
+    div()
+        .flex_none()
+        .text_size(px(13.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(tab.title())
+}
+
+/// As wide as `tab`'s selected face, no height, never painted. The
+/// selected cell holds one for every tab and is therefore as wide as the
+/// widest face — in this language and this font, with no table of
+/// measured widths to keep (the Chinese names are all two characters and
+/// were always one width; a third language would need a third row of
+/// such a table, and Linux draws the same names in another face).
+fn tab_strut(tab: Tab) -> Div {
+    h_flex()
+        .flex_none()
+        .h(px(0.))
+        .invisible()
+        .gap(px(TAB_FACE_GAP))
+        .child(div().flex_none().w(px(TAB_ICON_ON)))
+        .child(tab_name(tab))
+}
+
 /// Every view in a single icon row — Control Center / Stats, not a text grid.
 /// Full names live on the tooltip.
 fn tab_strip(state: &ZStatsAppState) -> AnyElement {
@@ -186,39 +215,44 @@ fn tab_strip(state: &ZStatsAppState) -> AnyElement {
             n = tab.index() + 1
         )
         .to_string();
-        h_flex()
+        // A column, so that the selected cell can be as wide as the
+        // widest thing in it (`tab_strut`) while its face stays centred.
+        v_flex()
             .id(id)
             .flex_none()
             .h(px(30.))
             .items_center()
             .justify_center()
-            .gap(px(6.))
             .rounded(px(7.))
-            // The tab on screen is as wide as its name; the rest are
-            // icons in a fixed box, spread across what is left.
+            // The rest are icons in a fixed box, spread across what the
+            // selected one leaves.
             .map(|d| if on { d.px(px(12.)) } else { d.w(px(34.)) })
             .when_some(fill, |d, fill| d.bg(fill))
             .when(!on, |d| d.hover(|d| d.bg(theme::chip())))
             .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
             .child(
-                tab_icon(tab)
-                    .with_size(Size::Size(px(if on { 15. } else { 16. })))
-                    .text_color(Hsla::from(color)),
+                h_flex()
+                    .items_center()
+                    .gap(px(TAB_FACE_GAP))
+                    .child(
+                        tab_icon(tab)
+                            .with_size(Size::Size(px(if on { TAB_ICON_ON } else { 16. })))
+                            .text_color(Hsla::from(color)),
+                    )
+                    // Seven glyphs with their names behind a hover was a
+                    // strip to learn by heart: a chip for Processes, a
+                    // drive for the page that also holds the GPU and the
+                    // battery. The page on screen wears its name, so
+                    // every visit teaches one.
+                    .when(on, |d| d.child(tab_name(tab).text_color(Hsla::from(color)))),
             )
-            // Seven glyphs with their names behind a hover was a strip
-            // to learn by heart: a chip for Processes, a drive for the
-            // page that also holds the GPU and the battery. The page on
-            // screen wears its name, so every visit teaches one.
-            .when(on, |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Hsla::from(color))
-                        .child(tab.title()),
-                )
-            })
+            // The selected cell is as wide as the longest name, whichever
+            // it wears. As wide as its own, "Apps" was 78 and "Processes"
+            // 111, and the six icons shared out the difference: every
+            // step along the strip moved all of them by a few points.
+            // Now a step moves the icons between the two tabs and
+            // nothing else.
+            .when(on, |d| d.children(Tab::ALL.iter().copied().map(tab_strut)))
             .on_click(move |_, _window, cx| {
                 cx.global::<ZStatsGlobalStore>()
                     .clone()

@@ -148,14 +148,92 @@ const FILTER_ROW_HEIGHT: f32 = 34.;
 /// the last meter.
 pub(super) const LIST_HEADER: f32 = 11. + 19.5 + 9.;
 
+/// What stands above and below a collapsed row's lines, before
+/// [`fit_rows`] gives the row its share of the leftover.
+pub(super) const ROW_PAD: f32 = 7.;
+
 /// Collapsed process row, hairline included.
 ///
 /// At 2× the 12px name snaps to 19.5 and the 10px meta line to 16.
-/// Padding 7+7, the 2px gap, the 4px gap, a 3px meter, the 1px
-/// hairline. [`fit_row_budget`] keeps the viewport to a whole number of
-/// these, so the short panel ends on a row instead of cutting the next
-/// name in half against the footer.
-pub(super) const COLLAPSED_ROW: f32 = 7. + 7. + 19.5 + 2. + 16. + 4. + 3. + 1.;
+/// The padding twice, the 2px gap, the 4px gap, a 3px meter, the 1px
+/// hairline. [`fit_rows`] divides the rows region by this to decide how
+/// many rows it holds, and then gives each row its exact share — so
+/// this has to be near, not right: a display that snaps a line half a
+/// point differently moves no row.
+pub(super) const COLLAPSED_ROW: f32 = ROW_PAD + ROW_PAD + 19.5 + 2. + 16. + 4. + 3. + 1.;
+
+/// How far under its natural height a row may go to let one more in: a
+/// point and a quarter off each padding. More, and the rows read as a
+/// denser list than the one on the next tab. It was 2, and History's
+/// wider ranges then held five rows on the short panel, each eleven
+/// over its own height, for want of a sixth at 2.2 under.
+const ROW_SQUEEZE: f32 = 2.5;
+
+/// How far over it. Past this the rows would be another list's rows, so
+/// the region keeps natural ones and the leftover stays under the card.
+/// Only a panel dragged shorter than the short form gets there: with six
+/// rows or more the largest share is `(row − ROW_SQUEEZE) ÷ 6`, about 10.
+const ROW_STRETCH: f32 = 12.;
+
+/// The rows run this far past the region's edge, so the boundary under
+/// the last whole row is never a pixel short of the clip — where the row
+/// after it would show its hairline as a line across the card's bottom
+/// edge. What is cut is half a point of the last row's padding. It is
+/// also what makes the standard regions come out even: they end in a
+/// half ([`LIST_HEADER`] is 39.5), and the rows are whole points.
+const ROW_SEAM: f32 = 0.5;
+
+/// A rows region divided among whole rows ([`fit_rows`]).
+///
+/// The rows are whole points tall, the first few a point taller than the
+/// rest, because gpui rounds each row's height to the pixel by itself: an
+/// equal fractional share came out three pixels short over nine History
+/// rows, and the tenth row's hairline stood in the gap.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct RowFit {
+    /// The scrolling region's height.
+    pub viewport: f32,
+    /// One collapsed row, hairline included.
+    row: f32,
+    /// How many rows from the top are a point taller than `row`.
+    taller: usize,
+    /// The row's height before the fit, and its padding at that height.
+    natural: f32,
+    pad: f32,
+}
+
+impl RowFit {
+    /// The collapsed row at `index`, hairline included.
+    pub(super) fn height(self, index: usize) -> f32 {
+        self.row + if index < self.taller { 1. } else { 0. }
+    }
+
+    /// What stands above and below that row's lines.
+    pub(super) fn pad(self, index: usize) -> f32 {
+        self.pad + (self.height(index) - self.natural) / 2.
+    }
+}
+
+/// Where a row stands in its list, and the fit the list made — `None`
+/// in the full listings, whose rows keep their own height.
+#[derive(Clone, Copy)]
+pub(super) struct RowSlot {
+    pub index: usize,
+    pub fit: Option<RowFit>,
+}
+
+impl RowSlot {
+    /// What stands above and below the row's lines: `own` where the list
+    /// made no fit.
+    pub(super) fn pad(self, own: f32) -> f32 {
+        self.fit.map_or(own, |fit| fit.pad(self.index))
+    }
+
+    /// The collapsed row's height, where the list gave it one.
+    pub(super) fn height(self) -> Option<f32> {
+        self.fit.map(|fit| fit.height(self.index))
+    }
+}
 
 /// Used for the frame or two before a window size has been reported. Roughly
 /// one panel's worth; the next frame corrects it.
@@ -184,8 +262,8 @@ fn shown_memory(p: &ProcessSnapshot) -> u64 {
 /// Height budget for the scrolling rows region of the top-N card: the
 /// body, minus the pinned header and the filter row when open. Shared
 /// with the Apps card, whose chrome is identical. History subtracts its
-/// axis from this; Apps and Processes then keep a whole number of rows
-/// via [`fit_row_budget`].
+/// axis from this; all three then divide it among whole rows
+/// ([`fit_rows`]).
 pub(super) fn rows_height(state: &ZStatsAppState) -> f32 {
     let chrome = LIST_HEADER
         + if state.proc_filter_open() {
@@ -196,18 +274,55 @@ pub(super) fn rows_height(state: &ZStatsAppState) -> f32 {
     (super::body_height(state).unwrap_or(FULL_LIST_FALLBACK) - chrome).max(FULL_LIST_MIN)
 }
 
-/// Shorten `budget` to a whole number of `row`s.
+/// Divide `budget` among whole rows of about `natural`, `pad` of which
+/// stands above and below each row's lines.
 ///
-/// A viewport that is not a multiple of the row slices the next one. On
-/// the short panel that slice sat on the footer's hairline. The leftover
-/// stays under the card. A window too short for one row keeps the
-/// budget, so the card still cannot run under the footer.
-pub(super) fn fit_row_budget(budget: f32, row: f32) -> f32 {
-    if row <= 1.0 {
-        return budget;
+/// A region that is not a multiple of the row slices the next one, and
+/// on the short panel that slice sat on the footer's hairline. The
+/// first answer cut the region back to a whole number of natural rows
+/// and left the rest under the card. That was 23.5 of empty panel under
+/// Apps on the short form, 38.5 under Processes and 64.5 under Apps on
+/// the long one: a card that stopped short of where every other page's
+/// last card stops, with the sixth row's hairline standing clear of its
+/// rounded corners. So the rows take the leftover instead. Each is given
+/// a share of the region, in its padding; the card ends on the gap above
+/// the footer as Overview's does, and the region still ends on a row.
+///
+/// One more row goes in when that costs each at most [`ROW_SQUEEZE`];
+/// otherwise the rows that fit are stretched, by at most
+/// [`ROW_STRETCH`]. A window too short for one row keeps the budget, so
+/// the card still cannot run under the footer.
+pub(super) fn fit_rows(budget: f32, natural: f32, pad: f32) -> RowFit {
+    let plain = |viewport: f32, row: f32| RowFit {
+        viewport,
+        row,
+        taller: 0,
+        natural,
+        pad,
+    };
+    if natural <= 1.0 || budget < natural {
+        return plain(budget, natural);
     }
-    let n = (budget / row).floor().max(1.0);
-    (n * row).min(budget)
+    // Whole points to share out: the region and the seam past it.
+    let whole = (budget + ROW_SEAM).floor();
+    let more = (whole / natural).ceil();
+    let n = if whole / more >= natural - ROW_SQUEEZE {
+        more
+    } else {
+        (more - 1.0).max(1.0)
+    };
+    let row = (whole / n).floor();
+    if row - natural > ROW_STRETCH {
+        let row = natural.ceil();
+        return plain(n * row - ROW_SEAM, row);
+    }
+    RowFit {
+        viewport: whole - ROW_SEAM,
+        row,
+        taller: (whole - n * row) as usize,
+        natural,
+        pad,
+    }
 }
 
 /// Ranked by the 60s rolling average so the order is stable enough to read.
@@ -315,6 +430,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         t!("processes.count_of", shown = rows.len(), total = total).to_string()
     };
 
+    let fit = fit_rows(rows_height(state), COLLAPSED_ROW, ROW_PAD);
     let list_el = widgets::list_shell()
         .child(widgets::list_header(
             h_flex()
@@ -351,7 +467,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id("proc-rows")
                 .track_scroll(state.proc_rows_scroll())
                 .overflow_y_scroll()
-                .max_h(px(fit_row_budget(rows_height(state), COLLAPSED_ROW)))
+                .max_h(px(fit.viewport))
                 .children(abnormal_rows(
                     state,
                     &abnormal,
@@ -365,7 +481,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .map(move |(i, (p, avg))| {
                             let parent_name =
                                 p.parent_pid.and_then(|pp| name_by_pid.get(&pp).copied());
-                            process_row(p, avg, bar, i + 1 == shown, state, parent_name)
+                            let slot = RowSlot {
+                                index: i,
+                                fit: Some(fit),
+                            };
+                            process_row(p, avg, bar, slot, state, parent_name)
                         })
                 })
                 .when(no_match, |d| {
@@ -405,7 +525,7 @@ fn process_row(
     p: &ProcessSnapshot,
     cpu: f64,
     bar: BarScale,
-    is_last: bool,
+    slot: RowSlot,
     state: &ZStatsAppState,
     parent_name: Option<&str>,
 ) -> AnyElement {
@@ -430,9 +550,17 @@ fn process_row(
         // every line a different length.
         .w_full()
         .px(px(widgets::CARD_PAD))
-        .py(px(7.))
-        .when(!is_last, |d| {
-            d.border_b(px(1.)).border_color(theme::border_subtle())
+        .py(px(slot.pad(ROW_PAD)))
+        // Collapsed, the row is exactly its share of the region, and
+        // must not be shrunk back to its lines by the column it is in.
+        // An open row is as tall as what it opened.
+        .flex_none()
+        .when_some(slot.height().filter(|_| !expanded), |d, h| d.h(px(h)))
+        // The hairline is over a row, not under it: under, the last
+        // whole row's line lay on the card's bottom edge and stood clear
+        // of its rounded corners.
+        .when(slot.index != 0, |d| {
+            d.border_t(px(1.)).border_color(theme::border_subtle())
         })
         .when(expanded, |d| d.bg(theme::surface_raised()))
         .hover(|d| d.bg(theme::surface_raised()))
@@ -640,11 +768,15 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
                             .map(|q| q.name.as_str())
                     })
                     .flatten();
+                let slot = RowSlot {
+                    index: i,
+                    fit: None,
+                };
                 process_row(
                     p,
                     f64::from(p.cpu_usage_percent),
                     bar,
-                    i + 1 == count,
+                    slot,
                     state,
                     parent_name,
                 )
@@ -1573,20 +1705,74 @@ fn current_user_id() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The short panel's rows region is 385.5 after a 39.5 header
-    /// (539 − 60 − 44 − 10 − 39.5). It must end on a row.
+    /// How many whole rows a fit shows, and how far they reach.
+    fn whole_rows(fit: RowFit) -> (usize, f32) {
+        let (mut rows, mut reach) = (0, 0.);
+        while reach + fit.height(rows) <= fit.viewport + ROW_SEAM {
+            reach += fit.height(rows);
+            rows += 1;
+        }
+        (rows, reach)
+    }
+
+    /// The rows region is the body less a 39.5 header: 385.5 on the short
+    /// panel (539 − 60 − 44 − 10 − 39.5), 431.5 with its notice row,
+    /// 674.5 on the long one. Each must reach the gap above the footer
+    /// and end on a row, every row a whole number of points and none far
+    /// from its natural height.
     #[test]
-    fn the_short_panel_list_ends_on_a_whole_row() {
-        let budget = 385.5;
-        let fitted = fit_row_budget(budget, COLLAPSED_ROW);
-        assert!(fitted <= budget);
-        assert!(
-            fitted + COLLAPSED_ROW > budget,
-            "one more row would still have fitted"
-        );
-        assert_eq!(fitted, 6.0 * COLLAPSED_ROW);
-        // Shorter than one row: keep the budget rather than grow the card.
-        assert_eq!(fit_row_budget(40.0, COLLAPSED_ROW), 40.0);
+    fn a_list_fills_its_region_with_whole_rows() {
+        for (budget, expected) in [(385.5, 6), (431.5, 7), (674.5, 11)] {
+            let fit = fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
+            assert_eq!(fit.viewport, budget, "the card stops short at {budget}");
+            let (rows, reach) = whole_rows(fit);
+            assert_eq!(rows, expected, "at {budget}");
+            // The rows end a seam past the region, never short of it.
+            assert_eq!(reach, budget + ROW_SEAM);
+            for i in 0..rows {
+                let h = fit.height(i);
+                assert_eq!(h, h.round(), "row {i} is not on the pixel grid");
+                let over = h - COLLAPSED_ROW;
+                assert!((-ROW_SQUEEZE..=6.).contains(&over), "{over} at {budget}");
+                assert_eq!(fit.pad(i), ROW_PAD + over / 2.);
+            }
+        }
+    }
+
+    /// One more row goes in only while that costs each at most
+    /// `ROW_SQUEEZE`; a region that is a whole number of rows keeps them
+    /// within a quarter point of their own padding.
+    #[test]
+    fn a_row_is_squeezed_a_little_or_not_at_all() {
+        let exact = fit_rows(6. * COLLAPSED_ROW, COLLAPSED_ROW, ROW_PAD);
+        assert_eq!(whole_rows(exact).0, 6);
+        assert!((exact.pad(0) - ROW_PAD).abs() <= 0.25);
+
+        // Seven rows at a point and a half under: seven.
+        let near = fit_rows(7. * (COLLAPSED_ROW - 1.5), COLLAPSED_ROW, ROW_PAD);
+        assert_eq!(whole_rows(near).0, 7);
+        assert!(near.pad(0) < ROW_PAD);
+        // At three under: six, stretched.
+        let far = fit_rows(7. * (COLLAPSED_ROW - 3.), COLLAPSED_ROW, ROW_PAD);
+        assert_eq!(whole_rows(far).0, 6);
+        assert!(far.pad(0) > ROW_PAD);
+    }
+
+    /// A panel dragged down to a couple of rows keeps rows of its own
+    /// height and the leftover under the card, rather than two rows of
+    /// three times the padding; one too short for a single row keeps the
+    /// budget.
+    #[test]
+    fn a_region_of_few_rows_keeps_natural_ones() {
+        let budget = 2.7 * COLLAPSED_ROW;
+        let fit = fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
+        assert_eq!(fit.height(0), COLLAPSED_ROW.ceil());
+        assert_eq!(whole_rows(fit), (2, 2. * COLLAPSED_ROW.ceil()));
+        assert!(fit.viewport < budget - COLLAPSED_ROW / 2.);
+
+        let none = fit_rows(40., COLLAPSED_ROW, ROW_PAD);
+        assert_eq!((none.viewport, none.height(0)), (40., COLLAPSED_ROW));
+        assert_eq!(none.pad(0), ROW_PAD);
     }
 
     /// The two pages edit two different pairs of rules, and mixing them

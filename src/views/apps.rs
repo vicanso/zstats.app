@@ -11,7 +11,7 @@
 //! [`crate::fullscan`].
 
 use super::alerts::Resolved;
-use super::processes;
+use super::processes::{self, RowSlot};
 use super::widgets;
 use crate::confirm;
 use crate::font;
@@ -50,7 +50,7 @@ const FILTER_ROW_HEIGHT: f32 = 34.;
 /// differences: the figure is 13px, which at 2× snaps to a 21px line
 /// and is the taller of that and the 12px name, and the gap under the
 /// name is 3. Same reason as [`processes::COLLAPSED_ROW`].
-const COLLAPSED_ROW: f32 = 7. + 7. + 21. + 3. + 16. + 4. + 3. + 1.;
+const COLLAPSED_ROW: f32 = processes::ROW_PAD + processes::ROW_PAD + 21. + 3. + 16. + 4. + 3. + 1.;
 const FULL_LIST_FALLBACK: f32 = 480.;
 const FULL_LIST_MIN: f32 = 120.;
 
@@ -110,6 +110,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         state.app_rows_scroll().scroll_to_item(ix);
     }
 
+    let fit = processes::fit_rows(
+        processes::rows_height(state),
+        COLLAPSED_ROW,
+        processes::ROW_PAD,
+    );
     let list_el = widgets::list_shell()
         .child(widgets::list_header(
             h_flex()
@@ -152,10 +157,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id("app-rows")
                 .track_scroll(state.app_rows_scroll())
                 .overflow_y_scroll()
-                .max_h(px(processes::fit_row_budget(
-                    processes::rows_height(state),
-                    COLLAPSED_ROW,
-                )))
+                .max_h(px(fit.viewport))
                 .children({
                     // Ambiguity is about what is on screen: two
                     // stock-Electron trees showing distinct bundle
@@ -172,7 +174,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             .collect();
                     rows.into_iter().enumerate().map(move |(i, g)| {
                         let ambiguous = repeated.contains(&shown_names[i]);
-                        app_row(g, i + 1 == shown, state, ambiguous, sort, bar_full)
+                        let slot = RowSlot {
+                            index: i,
+                            fit: Some(fit),
+                        };
+                        app_row(g, slot, state, ambiguous, sort, bar_full)
                     })
                 })
                 .when(no_match, |d| {
@@ -262,7 +268,11 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let g = &groups[visible[i]];
                 let ambiguous = repeated.contains(face_of(g, state).text().as_str());
-                app_row(g, i + 1 == count, state, ambiguous, sort, bar_full)
+                let slot = RowSlot {
+                    index: i,
+                    fit: None,
+                };
+                app_row(g, slot, state, ambiguous, sort, bar_full)
             })
             .h(px(height)),
         )
@@ -350,7 +360,7 @@ fn face_of(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> trend::Face {
 
 fn app_row(
     g: &ProcessGroupSnapshot,
-    is_last: bool,
+    slot: RowSlot,
     state: &ZStatsAppState,
     ambiguous: bool,
     sort: AppSort,
@@ -366,10 +376,14 @@ fn app_row(
         .w_full()
         .px(px(widgets::CARD_PAD))
         // Same rhythm as a process row, meter included — the two lists
-        // used to disagree about whether a ranking has a trough.
-        .py(px(7.))
-        .when(!is_last, |d| {
-            d.border_b(px(1.)).border_color(theme::border_subtle())
+        // used to disagree about whether a ranking has a trough. The
+        // share, the fixed height and the hairline over the row are
+        // that row's too (`processes::process_row`).
+        .py(px(slot.pad(processes::ROW_PAD)))
+        .flex_none()
+        .when_some(slot.height().filter(|_| !expanded), |d, h| d.h(px(h)))
+        .when(slot.index != 0, |d| {
+            d.border_t(px(1.)).border_color(theme::border_subtle())
         })
         .when(expanded, |d| d.bg(theme::surface_raised()))
         .hover(|d| d.bg(theme::surface_raised()))
@@ -938,15 +952,22 @@ fn io_line(read: Option<u64>, write: Option<u64>) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Same budget as the process list's test. An app row is 62 tall,
-    /// so the short panel holds six of them and stops on the sixth.
+    /// Same regions as the process list's test. An app row is 62 tall:
+    /// six on the short panel, seven with its notice row and eleven on
+    /// the long one — the last two by a squeeze of a point at most,
+    /// where natural rows left most of a row empty under the card.
     #[test]
-    fn the_short_panel_list_ends_on_a_whole_row() {
-        let budget = 385.5;
-        let fitted = processes::fit_row_budget(budget, COLLAPSED_ROW);
-        assert!(fitted <= budget);
-        assert!(fitted + COLLAPSED_ROW > budget);
-        assert_eq!(fitted, 6.0 * COLLAPSED_ROW);
+    fn a_list_fills_its_region_with_whole_rows() {
+        for (budget, rows) in [(385.5, 6), (431.5, 7), (674.5, 11)] {
+            let fit = processes::fit_rows(budget, COLLAPSED_ROW, processes::ROW_PAD);
+            assert_eq!(fit.viewport, budget);
+            let reach: f32 = (0..rows).map(|i| fit.height(i)).sum();
+            assert_eq!(reach, budget + 0.5, "at {budget}");
+            for i in 0..rows {
+                let over = fit.height(i) - COLLAPSED_ROW;
+                assert!((-1.0..=3.0).contains(&over), "{over} at {budget}");
+            }
+        }
     }
 
     /// One program in two tabs must be measured one way. This mirrors

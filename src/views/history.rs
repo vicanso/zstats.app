@@ -5,6 +5,7 @@
 //! process that never looks busy and yet costs the most over a day — see
 //! [`crate::history`].
 
+use super::processes;
 use super::widgets;
 use crate::assets::CustomIconName;
 use crate::font;
@@ -82,7 +83,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         .into_iter()
         .take(if show_all { rows.len() } else { TOP_N })
         .collect();
-    let last = shown.len().saturating_sub(1);
     // Names that more than one shown row carries. Only those rows say
     // their pid — elsewhere it was a number beside every name on a page
     // about whole days, where the pid is history; between two "Google
@@ -94,6 +94,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // Today draws each row's band on a shared 00:00 → now axis; the
     // other ranges draw a share meter and have no clock to label.
     let today = rows.iter().any(|s| s.band.is_some());
+    let fit = processes::fit_rows(
+        rows_height(state, today),
+        if today { BAND_ROW } else { METER_ROW },
+        ROW_PAD,
+    );
 
     let list = widgets::list_shell()
         .child(widgets::list_header(
@@ -126,16 +131,20 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .id("history-rows")
                 .track_scroll(state.history_rows_scroll())
                 .overflow_y_scroll()
-                .max_h(px(rows_height(state, today)))
+                .max_h(px(fit.viewport))
                 .children(shown.into_iter().enumerate().map(|(i, s)| {
                     let pid = s.pid;
                     let name = s.name.clone();
                     v_flex()
                         .id(row_id(pid, &name))
                         .px(px(widgets::CARD_PAD))
-                        .py(px(9.))
-                        .when(i != last, |d| {
-                            d.border_b(px(1.)).border_color(theme::border_subtle())
+                        // Its share of the region, and the hairline over
+                        // the row: `processes::process_row` says why.
+                        .py(px(fit.pad(i)))
+                        .flex_none()
+                        .h(px(fit.height(i)))
+                        .when(i != 0, |d| {
+                            d.border_t(px(1.)).border_color(theme::border_subtle())
                         })
                         // The row answers "who burned it" — Processes or
                         // Apps answers the next question. Hover fill is
@@ -329,6 +338,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 .when(hidden > 0, |rows| {
                     rows.child(
                         h_flex()
+                            .flex_none()
                             .px(px(widgets::CARD_PAD))
                             .py(px(8.))
                             .child(more_chip(hidden, show_all)),
@@ -406,6 +416,22 @@ fn more_chip(hidden: usize, showing: bool) -> AnyElement {
 
 /// Height of [`band_axis`], reserved out of the rows' budget.
 const AXIS_ROW: f32 = 16.;
+
+/// What stands above and below a row's lines, before
+/// [`processes::fit_rows`] gives the row its share of the leftover.
+const ROW_PAD: f32 = 9.;
+
+/// A row with Today's band, hairline included: the padding twice, the
+/// 12px name (19.5 at 2×), 2, the 10px caption (16), 6, the 8-tall band
+/// and the hairline. Measured at 70.5 on screen. As with
+/// [`processes::COLLAPSED_ROW`] it decides how many rows the region
+/// holds and no more; this page's last row used to be cut through its
+/// name by the card's bottom edge.
+const BAND_ROW: f32 = ROW_PAD + ROW_PAD + 19.5 + 2. + 16. + 6. + 8. + 1.;
+
+/// The same row under the wider ranges, where a 4-tall share meter
+/// stands in the band's place.
+const METER_ROW: f32 = BAND_ROW - 8. + 4.;
 
 /// The clock under Today's bands: 0:00 at the left, now at the right,
 /// and the six-hour marks the lived day has reached between them. The
@@ -617,7 +643,7 @@ fn band_alpha(peak: f32) -> f32 {
 /// has nothing left to scroll, and the header cannot be scrolled away.
 fn rows_height(state: &ZStatsAppState, axis: bool) -> f32 {
     let axis = if axis { AXIS_ROW } else { 0. };
-    (super::processes::rows_height(state) - axis).max(160.)
+    (processes::rows_height(state) - axis).max(160.)
 }
 
 /// Range and refresh, side by side in the header. The lens is the title
@@ -721,6 +747,18 @@ fn row_id(pid: u32, name: &str) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wider ranges' rows are 66.5 and the short panel's region is
+    /// 385.5: six of them at 64 and 65, where five would each stand
+    /// eleven over its own height.
+    #[test]
+    fn the_short_panel_holds_six_rows_under_the_wider_ranges() {
+        let fit = processes::fit_rows(385.5, METER_ROW, ROW_PAD);
+        assert_eq!(fit.viewport, 385.5);
+        let reach: f32 = (0..6).map(|i| fit.height(i)).sum();
+        assert_eq!(reach, 386.);
+        assert!(METER_ROW - fit.height(5) <= 2.5);
+    }
 
     #[test]
     fn rows_sharing_a_pid_keep_distinct_ids() {
