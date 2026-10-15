@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.10](https://github.com/vicanso/zstats.app/compare/v0.4.9..v0.4.10) - 2026-10-15
+
+### 🐛 Bug Fixes
+
+- Overview's notice goes once the Alerts tab has shown it - ([ea1aa4b](https://github.com/vicanso/zstats.app/commit/ea1aa4b62ca887c5bb0b9a4fa441270ca6b7b066))
+
 ## [0.4.9](https://github.com/vicanso/zstats.app/compare/v0.4.7..v0.4.9) - 2026-10-13
 
 ### ⛰️  Features
