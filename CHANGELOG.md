@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.11](https://github.com/vicanso/zstats.app/compare/v0.4.9..v0.4.11) - 2026-10-16
+
+### ⛰️  Features
+
+- Network's traffic rows and History's rows lead with the app's icon, Quit on the listening card turns red only on its row, and the interfaces card is titled Interfaces - ([31a2cd7](https://github.com/vicanso/zstats.app/commit/31a2cd71ab074978af375cf6fda502856c0b2913))
+- A volume's free space is labelled where it is read, and the battery says where its power comes from - ([e3c308d](https://github.com/vicanso/zstats.app/commit/e3c308d1b4dfc8f83fee4ef8852111abb075dbbe))
+- Apps and Processes rows lead with the app's icon, the expand chevron moves off the figure, and the sort control is a chip - ([fc11e7a](https://github.com/vicanso/zstats.app/commit/fc11e7a1c224aa6a04266552dc28d8a7ae8190c8))
+- Top apps show each app's own icon, disk rates read R and W, and the charts get a faint wash - ([c4bbf50](https://github.com/vicanso/zstats.app/commit/c4bbf50574712d5da668330fd21c58e5a9fd31c7))
+- Large files join the disk analysis, and the Large files tab goes - ([6ecefa5](https://github.com/vicanso/zstats.app/commit/6ecefa5b149765231488caf8eca9dc064b100090))
+- The panel can be dragged to any size and keeps it, and its height picks the Overview - ([df86705](https://github.com/vicanso/zstats.app/commit/df86705a0a3a6591e4cd7612e89d8a1a97e2391a))
+
+### 🐛 Bug Fixes
+
+- The daily disk check costs a fifth of the CPU, pauses while the Mac is busy or unplugged, and says so on this app's row - ([c77443d](https://github.com/vicanso/zstats.app/commit/c77443d9c862c8466ea8f22e9c20ea9b1dbec630))
+- Overview's notice goes once the Alerts tab has shown it - ([ea1aa4b](https://github.com/vicanso/zstats.app/commit/ea1aa4b62ca887c5bb0b9a4fa441270ca6b7b066))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.4.10 - ([8320ede](https://github.com/vicanso/zstats.app/commit/8320ede0f84638469022930c80b3bda8fc2c90f5))
+
 ## [0.4.10](https://github.com/vicanso/zstats.app/compare/v0.4.9..v0.4.10) - 2026-10-15
 
 ### 🐛 Bug Fixes
