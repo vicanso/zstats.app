@@ -12,13 +12,19 @@
 //! `NSWindow` and drives it directly, and the window is built exactly once.
 
 use crate::placement;
+use block2::RcBlock;
 use gpui::{Bounds, Pixels, Point, Size, Window, px};
 use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSScreen, NSWindow, NSWindowCollectionBehavior};
-use objc2_foundation::NSPoint;
+use objc2_app_kit::{
+    NSScreen, NSWindow, NSWindowCollectionBehavior, NSWindowDidEndLiveResizeNotification,
+    NSWindowStyleMask,
+};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSSize};
 use raw_window_handle::RawWindowHandle;
+use std::mem;
+use std::ptr::NonNull;
 
 /// Borrow the `NSWindow` behind a gpui window.
 ///
@@ -61,6 +67,78 @@ pub fn join_all_spaces(window: &Window) {
     }
 }
 
+/// Let the reader drag the panel's edges, and hear where they let go.
+///
+/// gpui builds a window without a title bar with no `Resizable` in its
+/// style mask, so there was no edge to drag. The mask gains it here;
+/// the smallest the panel may be is the window's minimum size
+/// (`placement::MIN_WINDOW_SIZE`). A resizable titled window also shows
+/// its three title-bar buttons, and the panel has no title bar to put
+/// them in, so they are hidden.
+///
+/// `on_end` runs once a drag ends, with the window's width and height,
+/// off AppKit's `NSWindowDidEndLiveResizeNotification`. A live resize is
+/// only ever a person's: the panel's own resizes — switching form, the
+/// notice row, a screen too short — never reach it ([`in_live_resize`]
+/// is the same question asked while the drag is still going).
+///
+/// Set once after creation, for the life of the window.
+pub fn let_size_be_dragged(window: &Window, on_end: impl Fn(f32, f32) + 'static) {
+    let Some(ns) = ns_window(window) else {
+        return;
+    };
+    ns.setStyleMask(ns.styleMask() | NSWindowStyleMask::Resizable);
+    // NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton.
+    for button in 0isize..3 {
+        unsafe {
+            let button: *mut AnyObject = objc2::msg_send![ns, standardWindowButton: button];
+            if let Some(button) = button.as_ref() {
+                let _: () = objc2::msg_send![button, setHidden: true];
+            }
+        }
+    }
+
+    let ended = RcBlock::new(move |note: NonNull<NSNotification>| {
+        let note = unsafe { note.as_ref() };
+        let Some(object) = note.object() else {
+            return;
+        };
+        if let Some(window) = object.downcast_ref::<NSWindow>() {
+            let size = window.frame().size;
+            on_end(size.width as f32, size.height as f32);
+        }
+    });
+    let center = NSNotificationCenter::defaultCenter();
+    let object: &AnyObject = ns.as_ref();
+    let token = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(NSWindowDidEndLiveResizeNotification),
+            Some(object),
+            None,
+            &ended,
+        )
+    };
+    // The panel is built once and lives as long as the process, and so
+    // does this: leaking the token is what keeps it registered (the
+    // posture `active.rs` takes for its observers).
+    mem::forget(token);
+    mem::forget(ended);
+}
+
+/// The least height a person can drag the window to. The width's
+/// floor stays what the window was built with.
+pub fn set_min_height(window: &Window, height: f32) {
+    if let Some(ns) = ns_window(window) {
+        let width = ns.contentMinSize().width;
+        ns.setContentMinSize(NSSize::new(width, f64::from(height)));
+    }
+}
+
+/// Whether a person is dragging the window's edge right now.
+pub fn in_live_resize(window: &Window) -> bool {
+    ns_window(window).is_some_and(|ns| ns.inLiveResize())
+}
+
 /// Retain the `NSWindow` so AppKit visibility calls can run *after*
 /// gpui has released both of its cells.
 ///
@@ -101,8 +179,9 @@ pub fn show_retained_at(ns: &NSWindow, origin: Point<Pixels>) {
     ns.makeKeyAndOrderFront(None);
 }
 
-/// Give a retained panel a new height, keeping its top edge where it is
-/// while the screen has room for that.
+/// Give a retained panel a new size, keeping its top edge where it is
+/// while the screen has room for that, and its left edge where it is
+/// (the next reveal centres it under the tray again).
 ///
 /// AppKit sizes a window from its bottom-left corner, so a plain resize
 /// would move the edge the panel hangs from: shrinking it would leave a
@@ -117,7 +196,7 @@ pub fn show_retained_at(ns: &NSWindow, origin: Point<Pixels>) {
 ///
 /// Fires `windowDidResize` synchronously, like [`show_retained_at`]'s
 /// move — callers hop it off gpui's App borrow.
-pub fn set_height_keeping_top(ns: &NSWindow, height: f32, gap: f32) {
+pub fn set_size_keeping_top(ns: &NSWindow, width: f32, height: f32, gap: f32) {
     let frame = ns.frame();
     let top = frame.origin.y + frame.size.height;
     let height = f64::from(height);
@@ -133,7 +212,7 @@ pub fn set_height_keeping_top(ns: &NSWindow, height: f32, gap: f32) {
     ns.setFrame_display(
         objc2_foundation::NSRect::new(
             NSPoint::new(frame.origin.x, top - height),
-            objc2_foundation::NSSize::new(frame.size.width, height),
+            NSSize::new(f64::from(width), height),
         ),
         true,
     );

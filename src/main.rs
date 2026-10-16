@@ -499,6 +499,12 @@ impl Render for ZStatsApp {
         store.update(cx, |state, cx| {
             state.set_window_metrics(bounds, scale_factor, cx)
         });
+        // Before the page is built, so the frame that crosses the line
+        // is already the other form.
+        #[cfg(target_os = "macos")]
+        if window_ext::in_live_resize(window) {
+            follow_dragged_height(f32::from(bounds.size.height), window, cx);
+        }
         #[cfg(target_os = "linux")]
         self.dismiss_when_pointer_leaves(window, cx);
 
@@ -774,12 +780,97 @@ fn overview_has_notice(cx: &App) -> bool {
     views::overview_has_notice(cx.global::<ZStatsGlobalStore>().read(cx))
 }
 
-/// Give the panel the height of Overview's current form, top edge held.
+/// Where the panel was last dragged to: its width, and the height of
+/// this form of Overview (`prefs::panel_width` / `panel_height`).
+/// macOS only: a layer surface cannot be resized by hand, and the Linux
+/// build hands the compositor the design's size (`open_main_window`
+/// says why).
+fn dragged(detail: bool) -> placement::Dragged {
+    if cfg!(target_os = "macos") {
+        placement::Dragged {
+            width: prefs::panel_width(),
+            height: prefs::panel_height(detail),
+        }
+    } else {
+        placement::Dragged::default()
+    }
+}
+
+/// Give the panel the size of Overview's current form, top edge held.
 fn fit_panel_to_overview(cx: &mut App) {
     let notice = overview_has_notice(cx);
     NOTICE_FITTED.store(notice, Ordering::Relaxed);
-    let (width, height) = placement::window_size(prefs::overview_detail(), notice);
+    apply_min_height(cx);
+    let detail = prefs::overview_detail();
+    let (width, height) = placement::window_size(detail, notice, dragged(detail));
     set_panel_size(width, height, cx);
+}
+
+/// Hold the least height a drag can reach to what the short Overview
+/// needs now — its page, and the notice row while [`NOTICE_FITTED`]
+/// says it is shown (`placement::min_height`). Called wherever that
+/// flag moves; a drag that switches form sets it from the render that
+/// switched (`follow_dragged_height`).
+fn apply_min_height(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    {
+        let height = placement::min_height(NOTICE_FITTED.load(Ordering::Relaxed));
+        if let Some(handle) = cx.global::<ZStatsGlobalStore>().read(cx).panel_window() {
+            let _ = handle.update(cx, |_, window, _| {
+                window_ext::set_min_height(window, height)
+            });
+        }
+    }
+    let _ = cx;
+}
+
+/// While a person drags the panel's edge, Overview's form follows the
+/// height: the long form once the panel is as tall as that page needs
+/// (`placement::detail_fits`), the short one under it, switched on the
+/// frame the line is crossed. Asked of a drag only — the panel's own
+/// resizes would let the notice row's 46 carry a short panel over the
+/// line, and the long form, which has no row, take it back.
+///
+/// The height stays the person's: the notice row the new form shows or
+/// hides is drawn inside it rather than stepped onto it, which is what
+/// [`NOTICE_FITTED`] is set to say. The footer's toggle and the
+/// Interface switch go the other way — they pick the form, and the
+/// panel takes that form's height.
+#[cfg(target_os = "macos")]
+fn follow_dragged_height(height: f32, window: &Window, cx: &mut App) {
+    let detail = placement::detail_fits(height);
+    if detail == prefs::overview_detail() {
+        return;
+    }
+    prefs::set_overview_detail(detail);
+    let notice = overview_has_notice(cx);
+    NOTICE_FITTED.store(notice, Ordering::Relaxed);
+    window_ext::set_min_height(window, placement::min_height(notice));
+    repaint(cx);
+}
+
+/// A drag of the panel's edge has ended at `width` × `height`: that is
+/// the panel's width, and the height of the form on screen, from now on
+/// — here and after a restart. The height is kept without the short
+/// form's notice row, which comes and goes on top of whichever height
+/// the form has. A panel dragged while another tab is up is still that
+/// form's height — the form, not the tab, sizes the panel.
+#[cfg(target_os = "macos")]
+fn remember_dragged_size(width: f32, height: f32) {
+    let detail = prefs::overview_detail();
+    let row = if !detail && NOTICE_FITTED.load(Ordering::Relaxed) {
+        placement::NOTICE_HEIGHT
+    } else {
+        0.
+    };
+    prefs::set_panel_size(detail, width, height - row);
+}
+
+/// Settings → Interface: the design's size back, now.
+pub fn reset_panel_size_pref(cx: &mut App) {
+    prefs::reset_panel_size();
+    cx.defer(fit_panel_to_overview);
+    repaint(cx);
 }
 
 /// Follow the short Overview's notice row with the panel's height: the
@@ -799,13 +890,15 @@ pub fn sync_panel_notice(cx: &mut App) {
     if NOTICE_FITTED.swap(notice, Ordering::Relaxed) == notice {
         return;
     }
+    apply_min_height(cx);
     let Some(handle) = cx.global::<ZStatsGlobalStore>().read(cx).panel_window() else {
         return;
     };
     let Ok(bounds) = handle.update(cx, |_, window, _| window.bounds()) else {
         return;
     };
-    let height = placement::notice_step(f32::from(bounds.size.height), notice);
+    let height =
+        placement::notice_step(f32::from(bounds.size.height), notice, dragged(false).height);
     set_panel_size(f32::from(bounds.size.width), height, cx);
 }
 
@@ -816,7 +909,6 @@ fn set_panel_size(width: f32, height: f32, cx: &mut App) {
     };
     #[cfg(target_os = "macos")]
     {
-        let _ = width;
         let ns = handle
             .update(cx, |_, window, _| window_ext::retain(window))
             .ok()
@@ -826,7 +918,7 @@ fn set_panel_size(width: f32, height: f32, cx: &mut App) {
         // makes for `setFrameOrigin`.
         if let Some(ns) = ns {
             after_app_borrow(cx, move || {
-                window_ext::set_height_keeping_top(&ns, height, placement::TRAY_GAP)
+                window_ext::set_size_keeping_top(&ns, width, height, placement::TRAY_GAP)
             });
         }
     }
@@ -1685,7 +1777,8 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     let default_size = {
         let notice = overview_has_notice(cx);
         NOTICE_FITTED.store(notice, Ordering::Relaxed);
-        let (w, h) = placement::window_size(prefs::overview_detail(), notice);
+        let detail = prefs::overview_detail();
+        let (w, h) = placement::window_size(detail, notice, dragged(detail));
         size(px(w), px(h))
     };
     let bounds = match anchor {
@@ -1852,10 +1945,24 @@ fn build_panel(window: &mut Window, cx: &mut App, layer_shell: bool) -> gpui::En
     // Pairs with `show: false` above — macOS paints hidden windows, so
     // this fires; on Windows / Linux it never would.
     #[cfg(target_os = "macos")]
-    window.on_next_frame(|window, _cx| {
+    window.on_next_frame(|window, cx| {
         window.activate_window();
         use_popover_material(window);
         window_ext::join_all_spaces(window);
+        let app = cx.to_async();
+        window_ext::let_size_be_dragged(window, move |width, height| {
+            remember_dragged_size(width, height);
+            // The settings window's row says whether there is a height
+            // to give back, and repaints on the store's nudge — which
+            // needs the App, and AppKit's notification does not hold it.
+            app.spawn(async move |cx| cx.update(repaint)).detach();
+        });
+        // The window was built with the short Overview's height as its
+        // floor; the notice row may already be on that page.
+        window_ext::set_min_height(
+            window,
+            placement::min_height(NOTICE_FITTED.load(Ordering::Relaxed)),
+        );
     });
 
     let view = cx.new(|cx| ZStatsApp::new(window, cx));

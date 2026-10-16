@@ -200,6 +200,14 @@ static OVERVIEW_DETAIL: AtomicBool = AtomicBool::new(false);
 /// is the one table of names, and an unknown key restores to Overview
 /// there — a second table here could only drift from it.
 static LAST_TAB: RwLock<Option<String>> = RwLock::new(None);
+/// The size the panel was last dragged to, in whole points: one width,
+/// and a height per Overview form (`panel_width`, `panel_height` and
+/// `panel_height_detail` in the file; 0 = the design's, the file
+/// omitting the key). The heights are without the short form's notice
+/// row, which comes and goes on top of either.
+static PANEL_WIDTH: AtomicU16 = AtomicU16::new(0);
+static PANEL_HEIGHT: AtomicU16 = AtomicU16::new(0);
+static PANEL_HEIGHT_DETAIL: AtomicU16 = AtomicU16::new(0);
 
 /// Floor accepted from the file or the picker. Below this the built-in
 /// dark/light default is used instead.
@@ -505,6 +513,9 @@ pub fn load() {
     DISK_WATCH.store(!prefs.disk_watch_off, Ordering::Relaxed);
     OVERVIEW_DETAIL.store(prefs.overview_detail, Ordering::Relaxed);
     *LAST_TAB.write().expect("last tab pref lock poisoned") = prefs.last_tab;
+    PANEL_WIDTH.store(prefs.panel_width.unwrap_or(0), Ordering::Relaxed);
+    PANEL_HEIGHT.store(prefs.panel_height.unwrap_or(0), Ordering::Relaxed);
+    PANEL_HEIGHT_DETAIL.store(prefs.panel_height_detail.unwrap_or(0), Ordering::Relaxed);
 }
 
 /// Remember and persist a language choice. Only the store is infallible —
@@ -563,6 +574,9 @@ fn persist() {
             .read()
             .expect("last tab pref lock poisoned")
             .clone(),
+        panel_width: stored_points(&PANEL_WIDTH),
+        panel_height: stored_points(&PANEL_HEIGHT),
+        panel_height_detail: stored_points(&PANEL_HEIGHT_DETAIL),
     };
     if let Err(e) = write(&dir, &prefs) {
         tracing::error!("could not write {}: {e}", file_path(&dir).display());
@@ -608,6 +622,12 @@ struct Prefs {
     /// `tab` in the file; `None` is Overview, omitted like every other
     /// default.
     last_tab: Option<String>,
+    /// `panel_width`, `panel_height` / `panel_height_detail`: where the
+    /// panel was dragged to — one width, a height for each form; `None`
+    /// is the design's.
+    panel_width: Option<u16>,
+    panel_height: Option<u16>,
+    panel_height_detail: Option<u16>,
 }
 
 fn read(dir: &Path) -> Prefs {
@@ -667,6 +687,73 @@ fn read(dir: &Path) -> Prefs {
             .map(str::trim)
             .filter(|k| !k.is_empty())
             .map(str::to_string),
+        panel_width: table.get("panel_width").and_then(parse_points),
+        panel_height: table.get("panel_height").and_then(parse_points),
+        panel_height_detail: table.get("panel_height_detail").and_then(parse_points),
+    }
+}
+
+/// A length in points: a positive whole number. Anything else reads as
+/// unset — the design's — rather than as a panel 0 tall; the floor a
+/// window can actually be is the placement's to apply.
+fn parse_points(value: &toml::Value) -> Option<u16> {
+    value
+        .as_integer()
+        .and_then(|h| u16::try_from(h).ok())
+        .filter(|h| *h > 0)
+}
+
+fn stored_points(slot: &AtomicU16) -> Option<u16> {
+    Some(slot.load(Ordering::Relaxed)).filter(|h| *h > 0)
+}
+
+fn height_slot(detail: bool) -> &'static AtomicU16 {
+    if detail {
+        &PANEL_HEIGHT_DETAIL
+    } else {
+        &PANEL_HEIGHT
+    }
+}
+
+/// The width the panel was last dragged to; `None` is the design's.
+pub fn panel_width() -> Option<f32> {
+    stored_points(&PANEL_WIDTH).map(f32::from)
+}
+
+/// The height the panel was last dragged to for Overview's long form
+/// (`detail`) or short one, without the notice row; `None` is the
+/// form's own.
+pub fn panel_height(detail: bool) -> Option<f32> {
+    stored_points(height_slot(detail)).map(f32::from)
+}
+
+/// Remember where the panel was dragged to: its width, and the height
+/// of the form it is showing. Whole points, and nothing written when
+/// that is what the file already says — the end of a drag that went
+/// nowhere is not a change.
+pub fn set_panel_size(detail: bool, width: f32, height: f32) {
+    let points = |v: f32| v.round().clamp(1.0, f32::from(u16::MAX)) as u16;
+    let width = PANEL_WIDTH.swap(points(width), Ordering::Relaxed) != points(width);
+    let height = height_slot(detail).swap(points(height), Ordering::Relaxed) != points(height);
+    if width || height {
+        persist();
+    }
+}
+
+/// Whether the panel has been dragged to a size of its own.
+pub fn panel_size_custom() -> bool {
+    panel_width().is_some() || panel_height(false).is_some() || panel_height(true).is_some()
+}
+
+/// The design's size back, for both forms.
+pub fn reset_panel_size() {
+    // Every slot, not the first that was set: `any` would stop there.
+    let mut changed = false;
+    for slot in [&PANEL_WIDTH, &PANEL_HEIGHT, &PANEL_HEIGHT_DETAIL] {
+        changed |= slot.swap(0, Ordering::Relaxed) != 0;
+    }
+    if changed {
+        persist();
     }
 }
 
@@ -805,6 +892,18 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if let Some(key) = prefs.last_tab.as_deref() {
         doc.insert("tab".into(), toml::Value::String(key.into()));
     }
+    if let Some(width) = prefs.panel_width {
+        doc.insert("panel_width".into(), toml::Value::Integer(width.into()));
+    }
+    if let Some(height) = prefs.panel_height {
+        doc.insert("panel_height".into(), toml::Value::Integer(height.into()));
+    }
+    if let Some(height) = prefs.panel_height_detail {
+        doc.insert(
+            "panel_height_detail".into(),
+            toml::Value::Integer(height.into()),
+        );
+    }
     let mut list = |key: &str, values: &[String]| {
         if !values.is_empty() {
             doc.insert(
@@ -873,10 +972,16 @@ mod tests {
                 disk_watch_off: true,
                 overview_detail: true,
                 last_tab: Some("alerts".into()),
+                panel_width: Some(420),
+                panel_height: Some(612),
+                panel_height_detail: Some(900),
             },
         )
         .unwrap();
         let back = read(&dir);
+        assert_eq!(back.panel_width, Some(420));
+        assert_eq!(back.panel_height, Some(612));
+        assert_eq!(back.panel_height_detail, Some(900));
         assert_eq!(back.language, LanguagePref::Chinese);
         assert_eq!(back.theme, ThemePref::Dark);
         assert_eq!(back.tray, TrayPref::Memory);
@@ -932,6 +1037,10 @@ mod tests {
         );
         assert!(!text.contains("pinned"), "unpinned should omit the key");
         assert!(!text.contains("tab"), "Overview should omit the key");
+        assert!(
+            !text.contains("panel_"),
+            "a panel at the design's size should omit the keys"
+        );
         assert!(
             !text.contains("disk_watch"),
             "the daily check on should omit the key"

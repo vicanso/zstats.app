@@ -1000,7 +1000,68 @@ fn interface_card() -> AnyElement {
         .child(autostart_row())
         .child(disk_watch_row())
         .child(overview_detail_row())
+        .when(cfg!(target_os = "macos"), |card| {
+            card.child(panel_size_row())
+        })
         .child(opacity_row())
+        .into_any_element()
+}
+
+/// The panel's size is the reader's to drag (`window_ext::let_size_be_dragged`).
+/// An edge that can be dragged says nothing about itself, so this row is
+/// where that is written down, and the way back: the width the layout
+/// was designed at, and both forms at the heights their pages were
+/// measured for. Only on macOS — a layer surface's edges cannot be
+/// dragged.
+fn panel_size_row() -> AnyElement {
+    let custom = prefs::panel_size_custom();
+    h_flex()
+        .items_center()
+        .justify_between()
+        .px(px(13.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::border_subtle())
+        .child(
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::ink())
+                        .child(i18n::tr("config.panel_size")),
+                )
+                .child(widgets::info_icon(
+                    "pref-panel-size-info",
+                    i18n::tr("config.panel_size_tip"),
+                )),
+        )
+        .child(if custom {
+            div()
+                .id("pref-panel-size-reset")
+                .h(px(20.))
+                .px(px(8.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::inset())
+                .flex()
+                .items_center()
+                .hover(|d| d.bg(theme::chip()))
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme::text())
+                .child(i18n::tr("config.panel_size_reset"))
+                .on_click(|_, _window, cx| crate::reset_panel_size_pref(cx))
+                .into_any_element()
+        } else {
+            div()
+                .text_size(px(11.))
+                .text_color(theme::text_muted())
+                .child(i18n::tr("config.panel_size_default"))
+                .into_any_element()
+        })
         .into_any_element()
 }
 

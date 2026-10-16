@@ -82,28 +82,65 @@ pub const SIMPLE_WINDOW_HEIGHT: f32 = 539.;
 /// 36 and the 10 between cards (`overview::NOTICE_ROW` asserts the sum).
 pub const NOTICE_HEIGHT: f32 = 46.;
 
+/// Where the reader dragged the panel to (`prefs::panel_width`,
+/// `prefs::panel_height`): `None` is the design's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Dragged {
+    pub width: Option<f32>,
+    /// The height of the form being sized, without the notice row.
+    pub height: Option<f32>,
+}
+
 /// The panel's size for Overview's form. A height per form, so neither
-/// scrolls and neither ends in empty panel. Two things resize the
-/// window: switching form (`crate::set_overview_detail_pref`), and the
-/// short form's notice row coming or going (`crate::sync_panel_notice`)
-/// — the long form has no such row and `notice` does not move it.
-pub fn window_size(detail: bool, notice: bool) -> (f32, f32) {
-    let (width, full) = DEFAULT_WINDOW_SIZE;
-    let height = match (detail, notice) {
-        (true, _) => full,
-        (false, true) => SIMPLE_WINDOW_HEIGHT + NOTICE_HEIGHT,
-        (false, false) => SIMPLE_WINDOW_HEIGHT,
+/// scrolls and neither ends in empty panel — or where the reader dragged
+/// it (`dragged`), which is theirs to leave room under. The form is
+/// what the height says it is (`detail_fits`): a short form is held
+/// under the long form's height and a long one at it or over, so a
+/// file that says otherwise cannot open a panel that would switch form
+/// the first time it is dragged. Never under [`MIN_WINDOW_SIZE`]. Two
+/// things resize the window: switching form
+/// (`crate::set_overview_detail_pref`), and the short form's notice row
+/// coming or going (`crate::sync_panel_notice`) — the long form has no
+/// such row and `notice` does not move it, and the row is added on top
+/// of a dragged height as on the form's own.
+pub fn window_size(detail: bool, notice: bool, dragged: Dragged) -> (f32, f32) {
+    let (design_width, full) = DEFAULT_WINDOW_SIZE;
+    let width = dragged
+        .width
+        .map_or(design_width, |w| w.max(MIN_WINDOW_SIZE.0));
+    let height = if detail {
+        dragged.height.map_or(full, |h| h.max(full))
+    } else {
+        dragged.height.map_or(SIMPLE_WINDOW_HEIGHT, |h| {
+            h.clamp(MIN_WINDOW_SIZE.1, full - 1.)
+        })
     };
-    (width, height)
+    let row = if notice && !detail { NOTICE_HEIGHT } else { 0. };
+    (width, height + row)
+}
+
+/// Whether a panel this tall shows Overview's long form: once it is as
+/// tall as that page was measured for, the page fits without scrolling,
+/// and under that height the short form is what fits. Asked while a
+/// person drags the panel's edge (`crate::follow_dragged_height`) —
+/// never of a height the panel gave itself, or the notice row's 46
+/// could carry a short panel over the line and the long form, which has
+/// no such row, would take them back.
+pub fn detail_fits(height: f32) -> bool {
+    height >= DEFAULT_WINDOW_SIZE.1
 }
 
 /// The panel's height once the notice row has appeared (`shown`) or
 /// gone, from the height it has now. A step and not [`window_size`]'s
-/// figure, so a panel someone dragged taller keeps what they added; it
-/// never goes under the form's own height, which is all a panel cut to
-/// a short screen can be given back.
-pub fn notice_step(current: f32, shown: bool) -> f32 {
-    let (_, fitted) = window_size(false, shown);
+/// figure, so a dragged panel keeps what it was given; it never goes
+/// under the short form's height (`dragged`, as for [`window_size`]),
+/// which is all a panel cut to a short screen can be given back.
+pub fn notice_step(current: f32, shown: bool, dragged: Option<f32>) -> f32 {
+    let short = Dragged {
+        width: None,
+        height: dragged,
+    };
+    let (_, fitted) = window_size(false, shown, short);
     if shown {
         current + NOTICE_HEIGHT
     } else {
@@ -111,8 +148,30 @@ pub fn notice_step(current: f32, shown: bool) -> f32 {
     }
 }
 
-/// Fixed width — the layout is built for exactly this and nothing reflows.
-pub const MIN_WINDOW_SIZE: (f32, f32) = (320., 320.);
+/// The smallest the panel can be dragged. The width's floor is the
+/// width the layout was designed at: narrower, and the tab strip's
+/// longest name no longer fits beside the six icons. Wider only gives
+/// every row more room. The height's floor is the short Overview's own
+/// height — the page the panel opens on, whole — and while that page
+/// shows its notice row, the row's height more ([`min_height`]). It was
+/// 320, which let the panel be dragged to two cards cut through the
+/// middle with the footer under them; a screen too short for the panel
+/// still cuts it further ([`CUT_FLOOR`]).
+pub const MIN_WINDOW_SIZE: (f32, f32) = (358., SIMPLE_WINDOW_HEIGHT);
+
+/// The least height the panel can be dragged to now: the short
+/// Overview's, and its notice row's on top while that is shown — the
+/// page is that much taller then, and a drag that ended under it left
+/// the row and two cards scrolling.
+pub fn min_height(notice: bool) -> f32 {
+    MIN_WINDOW_SIZE.1 + if notice { NOTICE_HEIGHT } else { 0. }
+}
+
+/// The least a screen too short for the panel cuts it to. Not
+/// [`MIN_WINDOW_SIZE`]: that is what a drag may reach, and a floor over
+/// the screen's own height would leave the footer hanging off it. Under
+/// this a screen is not one the panel can be right on.
+const CUT_FLOOR: f32 = 320.;
 /// Gap between the tray icon and the top of the window.
 pub const TRAY_GAP: f32 = 6.;
 /// Hang the window under the tray icon: horizontally centred on it, `TRAY_GAP`
@@ -221,12 +280,10 @@ fn load_screens() -> Vec<ScreenGeom> {
 }
 
 /// The panel's height on a screen with `visible` of height to give:
-/// what it asks for, or what fits under the tray gap. Never under the
-/// minimum — a screen that short is not one the panel can be right on.
+/// what it asks for, or what fits under the tray gap. Never under
+/// [`CUT_FLOOR`].
 fn fitted_height(wanted: Pixels, visible: Pixels) -> Pixels {
-    wanted
-        .min(visible - px(TRAY_GAP))
-        .max(px(MIN_WINDOW_SIZE.1))
+    wanted.min(visible - px(TRAY_GAP)).max(px(CUT_FLOOR))
 }
 
 /// Where a panel's top edge and height land when it is given a new
@@ -431,15 +488,15 @@ mod tests {
     fn a_panel_taller_than_the_screen_is_cut_to_fit() {
         assert_eq!(fitted_height(px(828.), px(1080.)), px(828.));
         assert_eq!(fitted_height(px(1000.), px(876.)), px(876. - TRAY_GAP));
-        assert_eq!(fitted_height(px(828.), px(200.)), px(MIN_WINDOW_SIZE.1));
+        assert_eq!(fitted_height(px(828.), px(200.)), px(CUT_FLOOR));
     }
 
     /// One width for both forms — the layout does not reflow — and the
     /// short form is the shorter window.
     #[test]
     fn the_short_overview_is_a_shorter_panel_of_the_same_width() {
-        let (full_w, full_h) = window_size(true, false);
-        let (short_w, short_h) = window_size(false, false);
+        let (full_w, full_h) = window_size(true, false, Dragged::default());
+        let (short_w, short_h) = window_size(false, false, Dragged::default());
         assert_eq!((full_w, full_h), DEFAULT_WINDOW_SIZE);
         assert_eq!(short_w, full_w);
         assert!(short_h < full_h);
@@ -450,24 +507,78 @@ mod tests {
     /// going is a step from whatever height the panel has.
     #[test]
     fn the_notice_row_is_a_step_in_the_short_form_only() {
-        let (_, short) = window_size(false, false);
-        assert_eq!(window_size(false, true).1, short + NOTICE_HEIGHT);
-        assert_eq!(window_size(true, true), window_size(true, false));
+        let (_, short) = window_size(false, false, Dragged::default());
+        assert_eq!(
+            window_size(false, true, Dragged::default()).1,
+            short + NOTICE_HEIGHT
+        );
+        assert_eq!(
+            window_size(true, true, Dragged::default()),
+            window_size(true, false, Dragged::default())
+        );
         // Fitted panel: there and back.
-        assert_eq!(notice_step(short, true), short + NOTICE_HEIGHT);
-        assert_eq!(notice_step(short + NOTICE_HEIGHT, false), short);
+        assert_eq!(notice_step(short, true, None), short + NOTICE_HEIGHT);
+        assert_eq!(notice_step(short + NOTICE_HEIGHT, false, None), short);
         // Dragged 100 taller: the 100 survives both ways.
         assert_eq!(
-            notice_step(short + 100., true),
+            notice_step(short + 100., true, None),
             short + 100. + NOTICE_HEIGHT
         );
         assert_eq!(
-            notice_step(short + 100. + NOTICE_HEIGHT, false),
+            notice_step(short + 100. + NOTICE_HEIGHT, false, None),
             short + 100.
         );
         // Cut to a short screen while the row was shown: never under
         // the form's own height.
-        assert_eq!(notice_step(short + 20., false), short);
+        assert_eq!(notice_step(short + 20., false, None), short);
+    }
+
+    /// A dragged size replaces the design's: the width for both forms,
+    /// the height for the form it was dragged in. The notice row still
+    /// goes on top, and its going takes a panel dragged taller than the
+    /// form back to where it was dragged.
+    #[test]
+    fn a_dragged_size_is_the_forms_size() {
+        let short = |h: f32| Dragged {
+            width: Some(420.),
+            height: Some(h),
+        };
+        assert_eq!(window_size(false, false, short(650.)), (420., 650.));
+        assert_eq!(
+            window_size(false, true, short(650.)).1,
+            650. + NOTICE_HEIGHT
+        );
+        assert_eq!(window_size(true, false, short(900.)), (420., 900.));
+        assert_eq!(notice_step(650. + NOTICE_HEIGHT, false, Some(650.)), 650.);
+        // A file that asks for less than the panel may be dragged to
+        // gets the floor, which is the short Overview whole.
+        let tiny = Dragged {
+            width: Some(100.),
+            height: Some(400.),
+        };
+        assert_eq!(window_size(false, false, tiny), MIN_WINDOW_SIZE);
+        assert_eq!(MIN_WINDOW_SIZE.1, SIMPLE_WINDOW_HEIGHT);
+        assert_eq!(min_height(true), SIMPLE_WINDOW_HEIGHT + NOTICE_HEIGHT);
+    }
+
+    /// The height decides the form: a short panel stays under the long
+    /// form's height and a long one at it or over, whatever the file
+    /// says — the same line a drag switches form at.
+    #[test]
+    fn the_long_form_starts_where_its_page_fits() {
+        let full = DEFAULT_WINDOW_SIZE.1;
+        assert!(detail_fits(full));
+        assert!(!detail_fits(full - 1.));
+        let tall = Dragged {
+            width: None,
+            height: Some(full + 200.),
+        };
+        let low = Dragged {
+            width: None,
+            height: Some(SIMPLE_WINDOW_HEIGHT),
+        };
+        assert!(!detail_fits(window_size(false, false, tall).1));
+        assert!(detail_fits(window_size(true, false, low).1));
     }
 
     #[test]

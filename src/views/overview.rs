@@ -38,6 +38,10 @@ const TOP_N: usize = 3;
 /// it leave open — five answers instead of three.
 const TOP_N_SHORT: usize = 5;
 
+/// One row of the apps card. Also the unit a taller panel buys rows in
+/// ([`apps_rows`]).
+const APP_ROW: f32 = 34.;
+
 /// Per-core bar turns accent past this.
 const CORE_HOT: f32 = 85.0;
 /// Swap past this share of **physical memory** is worth colour — display
@@ -103,7 +107,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             watts,
             recent,
         ));
-        cards.push(top_apps(state, TOP_N));
+        cards.push(top_apps(state, apps_rows(state, true, TOP_N)));
         cards.push(memory(
             &snapshot.memory,
             snapshot.capabilities,
@@ -115,7 +119,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     } else {
         cards.extend(notice_row(state));
         cards.push(vitals_card(state, snapshot, recent));
-        cards.push(top_apps(state, TOP_N_SHORT));
+        cards.push(top_apps(state, apps_rows(state, false, TOP_N_SHORT)));
     }
     cards
 }
@@ -742,6 +746,28 @@ const RISE_FLOOR: f32 = 15.0;
 /// rest of the slots keep the current CPU ranking so a quiet climb
 /// (one tree) does not leave the card rows short of the window.
 /// All still opens the full Apps list.
+/// How many rows the apps card shows: `base` at the form's own height,
+/// and one more for every row's worth of panel the reader dragged on
+/// top of it. Each form's page was measured to end on the gap above the
+/// footer at its own height, so what a taller panel adds is that much
+/// empty panel under the last card — at 780 the short form stood over a
+/// band of 241 with nothing in it. The ranking is what grows into it:
+/// the card that can, and the one whose next rows are the next answers
+/// to the question it asks. A panel cut shorter by a screen keeps
+/// `base` and scrolls, as it did.
+fn apps_rows(state: &ZStatsAppState, detail: bool, base: usize) -> usize {
+    let Some(bounds) = state.window_bounds() else {
+        return base;
+    };
+    let notice = !detail && has_notice(state);
+    let (_, own) = placement::window_size(detail, notice, placement::Dragged::default());
+    let spare = f32::from(bounds.size.height) - own;
+    if spare < APP_ROW {
+        return base;
+    }
+    base + (spare / APP_ROW).floor() as usize
+}
+
 fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
     let Some(tick) = state.latest() else {
         return widgets::empty_card(
@@ -855,7 +881,7 @@ fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
             let pct = format::pct(g.cpu_usage_percent);
             h_flex()
                 .id(("top-app-row", root_pid as usize))
-                .h(px(34.))
+                .h(px(APP_ROW))
                 .px(px(8.))
                 .items_center()
                 .gap(px(10.))
