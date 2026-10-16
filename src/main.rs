@@ -19,6 +19,7 @@ mod about;
 mod active;
 mod alertlog;
 mod alerttpl;
+mod appicon;
 mod assetinfo;
 mod assets;
 mod autostart;

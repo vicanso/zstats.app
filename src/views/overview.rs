@@ -3,6 +3,7 @@
 use super::alerts;
 use super::processes;
 use super::widgets::{self, card};
+use crate::appicon;
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -15,7 +16,8 @@ use crate::trend;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, Bounds, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder,
-    Pixels, Rgba, StatefulInteractiveElement, Styled, Window, div, point, px, size,
+    Pixels, Rgba, StatefulInteractiveElement, Styled, Window, div, linear_color_stop,
+    linear_gradient, point, px, size,
 };
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
@@ -896,7 +898,7 @@ fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
                         .clone()
                         .update(cx, |state, cx| state.reveal_app(root_pid, cx));
                 })
-                .child(monogram(&face.title))
+                .child(app_mark(root_pid, &g.name, &face.title))
                 .child(
                     div()
                         .flex_1()
@@ -967,10 +969,26 @@ fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
         .into_any_element()
 }
 
-/// A row's mark: the name's first letter in a small tile, where an app
-/// icon would be. It gives five names five different left edges to find
-/// again on the next glance, and costs no lookup — the icon itself is a
-/// file read per app per paint.
+/// A row's mark: the application's own icon where the tree's root is an
+/// `.app` (`appicon::for_tree`, drawn once per app and kept), the
+/// name's first letter in a tile where it is not — a shell, a command-
+/// line tool, a daemon. Either way five rows have five different left
+/// edges to find again on the next glance.
+fn app_mark(root_pid: u32, tree: &str, title: &str) -> AnyElement {
+    match appicon::for_tree(root_pid, tree) {
+        Some(icon) => gpui::img(icon)
+            .flex_none()
+            .size(px(MARK_SIZE))
+            .into_any_element(),
+        None => monogram(title),
+    }
+}
+
+/// The edge of a row's mark, icon or tile.
+const MARK_SIZE: f32 = 22.;
+
+/// The letter a row falls back to: the name's first letter in a small
+/// tile, where an app icon would be.
 fn monogram(name: &str) -> AnyElement {
     let letter: String = name
         .chars()
@@ -980,7 +998,7 @@ fn monogram(name: &str) -> AnyElement {
     div()
         .flex()
         .flex_none()
-        .size(px(22.))
+        .size(px(MARK_SIZE))
         .items_center()
         .justify_center()
         .rounded(px(6.))
@@ -1683,8 +1701,8 @@ fn io_card(io: &IoTotalsSnapshot, recent: Recent<'_>) -> Option<AnyElement> {
             // the bend is only where two readings differ.
             stroke: CurveStroke::Smooth,
             unit: ChartUnit::Rate,
-            // The row above carries disk rates too, with the same
-            // arrows; the glyph says which pair this chart is.
+            // The row above carries disk rates too; the glyph says
+            // which pair this chart is.
             icon: Some(IconName::Network),
             corner_label: true,
         },
@@ -1726,6 +1744,14 @@ const CHART_CAPTION: f32 = 14.;
 /// Stroke. [`CHART_PAD`] is wider than half of this, so a peak on the
 /// top of the drawing is not cut by the well.
 const CURVE_STROKE: f32 = 1.5;
+
+/// Share of the lead line's alpha the wash under it starts with, at the
+/// line's highest point; it fades to nothing at the axis. A line alone
+/// in a 40-tall well read thin beside the memory card's bars, and the
+/// wash gives a busy stretch the weight of an area. Faint on purpose:
+/// sixty full-ink bars were once the brightest block in the panel for
+/// the least news, and the line's shape is still the news here.
+const AREA_ALPHA: f32 = 0.24;
 
 /// Radius of the chart well. Nested inside the card's 12px corner, and
 /// the same in both themes: only the fill changes with the theme.
@@ -2234,14 +2260,16 @@ fn sparkline(
             if span.is_none() {
                 return;
             }
-            // Behind first, so the lead line is painted on top.
+            // Behind first, so the lead line is painted on top. Only the
+            // lead has a wash under it: the network's upload line is the
+            // one behind, and a second wash would muddy the first.
             for (index, points) in marks.iter().enumerate().rev() {
-                let ink = if index == 0 {
-                    theme::gauge()
-                } else {
-                    dim_ink()
+                let lead = index == 0;
+                let look = LineInk {
+                    ink: if lead { theme::gauge() } else { dim_ink() },
+                    wash: lead,
                 };
-                paint_curve(bounds, points, now, scale, stroke, ink, window);
+                paint_curve(bounds, points, now, scale, stroke, look, window);
             }
             // The lead line's holes only: two dotted rows under the
             // network's pair would be one fact drawn twice.
@@ -2417,15 +2445,24 @@ fn dim_ink() -> Rgba {
     }
 }
 
+/// How one line of a chart is painted: its ink, and whether a wash of
+/// it fills the well under it ([`AREA_ALPHA`] — the lead line only).
+#[derive(Clone, Copy)]
+struct LineInk {
+    ink: Rgba,
+    wash: bool,
+}
+
 fn paint_curve(
     bounds: Bounds<Pixels>,
     points: &[Point],
     now: Instant,
     scale: f64,
     stroke: CurveStroke,
-    ink: Rgba,
+    look: LineInk,
     window: &mut Window,
 ) {
+    let LineInk { ink, wash: area } = look;
     if scale <= 0.0 {
         return;
     }
@@ -2451,6 +2488,10 @@ fn paint_curve(
         return;
     }
     let mut builder = PathBuilder::stroke(px(CURVE_STROKE));
+    // The wash under the line: each run closed down to the axis, so a
+    // break stays a break in the fill too.
+    let mut wash = PathBuilder::fill();
+    let mut washed = false;
     let mut drew = false;
     for segment in chart_runs(points) {
         let plotted: Vec<(f32, f32)> = segment
@@ -2471,18 +2512,52 @@ fn paint_curve(
             drew = true;
             continue;
         }
+        let cubics = smooth_cubics(&plotted);
         builder.move_to(point(px(plotted[0].0), px(plotted[0].1)));
-        for cubic in smooth_cubics(&plotted) {
+        for cubic in &cubics {
             builder.cubic_bezier_to(
                 point(px(cubic.to.0), px(cubic.to.1)),
                 point(px(cubic.ctrl_a.0), px(cubic.ctrl_a.1)),
                 point(px(cubic.ctrl_b.0), px(cubic.ctrl_b.1)),
             );
         }
+        if area {
+            let (first, last) = (plotted[0], plotted[plotted.len() - 1]);
+            wash.move_to(point(px(first.0), bottom));
+            wash.line_to(point(px(first.0), px(first.1)));
+            for cubic in &cubics {
+                wash.cubic_bezier_to(
+                    point(px(cubic.to.0), px(cubic.to.1)),
+                    point(px(cubic.ctrl_a.0), px(cubic.ctrl_a.1)),
+                    point(px(cubic.ctrl_b.0), px(cubic.ctrl_b.1)),
+                );
+            }
+            wash.line_to(point(px(last.0), bottom));
+            wash.close();
+            washed = true;
+        }
         drew = true;
     }
     if !drew {
         return;
+    }
+    // Under the stroke, from the line's highest point down to nothing:
+    // the gradient spans the fill's own box, so a quiet line gets a
+    // shallow wash and a busy one a tall one.
+    if washed && let Ok(path) = wash.build() {
+        let top = Rgba {
+            a: ink.a * AREA_ALPHA,
+            ..ink
+        };
+        let clear = Rgba { a: 0., ..ink };
+        window.paint_path(
+            path,
+            linear_gradient(
+                180.,
+                linear_color_stop(top, 0.),
+                linear_color_stop(clear, 1.),
+            ),
+        );
     }
     if let Ok(path) = builder.build() {
         window.paint_path(path, ink);
@@ -2709,11 +2784,17 @@ fn endpoint_slope(h0: f32, h1: f32, d0: f32, d1: f32) -> f32 {
 /// already uses for Hardware and Network, so they carry that meaning
 /// here; the translated name sits on the tooltip.
 fn io_strip(io: &IoTotalsSnapshot) -> Option<AnyElement> {
+    // The disk's pair is read and write, said as R and W — as the Apps
+    // tab says them. It wore the network's arrows, and on a disk an
+    // arrow does not say which way it points: down into memory, or down
+    // onto the disk? Download and upload keep theirs, which every
+    // reader already knows.
     let cells = [
         (
             "io-disk",
             IconName::HardDrive,
             i18n::tr("overview.io_disk"),
+            ("R", "W"),
             io.disk_read_bytes_per_sec,
             io.disk_write_bytes_per_sec,
         ),
@@ -2721,51 +2802,49 @@ fn io_strip(io: &IoTotalsSnapshot) -> Option<AnyElement> {
             "io-net",
             IconName::Network,
             i18n::tr("overview.io_net"),
+            ("↓", "↑"),
             io.network_received_bytes_per_sec,
             io.network_transmitted_bytes_per_sec,
         ),
     ];
     if cells
         .iter()
-        .all(|(_, _, _, r, w)| r.is_none() && w.is_none())
+        .all(|(_, _, _, _, r, w)| r.is_none() && w.is_none())
     {
         return None;
     }
 
     // The first row of its own card now (`io_card`), so no hairline and
     // no air above it: the card's padding is the separation.
-    let row =
-        h_flex()
-            .gap(px(16.))
-            .children(cells.into_iter().map(|(id, icon, label, read, write)| {
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .id(id)
-                            .flex_none()
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(label.clone()).build(window, cx)
-                            })
-                            .child(
-                                Icon::new(icon)
-                                    .with_size(Size::Size(px(12.)))
-                                    .text_color(Hsla::from(theme::text_dim())),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .font_family(font::MONO)
-                            .text_size(px(10.))
-                            .text_color(theme::text_muted())
-                            .child(format!("↓ {}", format::rate(read)))
-                            .child(format!("↑ {}", format::rate(write))),
-                    )
-            }));
+    let row = h_flex().gap(px(16.)).children(cells.into_iter().map(
+        |(id, icon, label, sides, read, write)| {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .id(id)
+                        .flex_none()
+                        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                        .child(
+                            Icon::new(icon)
+                                .with_size(Size::Size(px(12.)))
+                                .text_color(Hsla::from(theme::text_dim())),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(6.))
+                        .font_family(font::MONO)
+                        .text_size(px(10.))
+                        .text_color(theme::text_muted())
+                        .child(format!("{} {}", sides.0, format::rate(read)))
+                        .child(format!("{} {}", sides.1, format::rate(write))),
+                )
+        },
+    ));
     Some(row.into_any_element())
 }
 
