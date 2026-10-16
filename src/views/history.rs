@@ -100,42 +100,43 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ROW_PAD,
     );
 
-    let list = widgets::list_shell()
-        .child(widgets::list_header(
-            // The note this carries used to be a card of its own under
-            // the list. It is a read-once fact about how the ranking
-            // works, which is what an ⓘ beside the title is for (the
-            // Processes header does the same with its CPU basis) — and
-            // moving it out is what lets the list card be exactly one
-            // screen tall, so the header can stay put for real.
-            h_flex()
-                .items_center()
-                .gap(px(4.))
-                .min_w_0()
-                .child(lens_title(sort, title, state.panel_visit()))
-                .child(widgets::info_icon(
-                    "history-basis",
-                    i18n::tr("history.about_body"),
-                )),
-            Some(header_controls(range)),
-        ))
-        .when(today, |list| list.child(band_axis()))
-        .child(
-            // The rows scroll under the header rather than taking the
-            // whole card past the top of the panel — the same pinned
-            // model as the Processes and Apps lists, and the reason is
-            // the same: the range and sort controls live in that header,
-            // and a control you have to scroll back up to reach is a
-            // control you stop using.
-            v_flex()
-                .id("history-rows")
-                .track_scroll(state.history_rows_scroll())
-                .overflow_y_scroll()
-                .max_h(px(fit.viewport))
-                .children(shown.into_iter().enumerate().map(|(i, s)| {
-                    let pid = s.pid;
-                    let name = s.name.clone();
-                    v_flex()
+    let list =
+        widgets::list_shell()
+            .child(widgets::list_header(
+                // The note this carries used to be a card of its own under
+                // the list. It is a read-once fact about how the ranking
+                // works, which is what an ⓘ beside the title is for (the
+                // Processes header does the same with its CPU basis) — and
+                // moving it out is what lets the list card be exactly one
+                // screen tall, so the header can stay put for real.
+                h_flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .min_w_0()
+                    .child(lens_title(sort, title, state.panel_visit()))
+                    .child(widgets::info_icon(
+                        "history-basis",
+                        i18n::tr("history.about_body"),
+                    )),
+                Some(header_controls(range)),
+            ))
+            .when(today, |list| list.child(band_axis()))
+            .child(
+                // The rows scroll under the header rather than taking the
+                // whole card past the top of the panel — the same pinned
+                // model as the Processes and Apps lists, and the reason is
+                // the same: the range and sort controls live in that header,
+                // and a control you have to scroll back up to reach is a
+                // control you stop using.
+                v_flex()
+                    .id("history-rows")
+                    .track_scroll(state.history_rows_scroll())
+                    .overflow_y_scroll()
+                    .max_h(px(fit.viewport))
+                    .children(shown.into_iter().enumerate().map(|(i, s)| {
+                        let pid = s.pid;
+                        let name = s.name.clone();
+                        v_flex()
                         .id(row_id(pid, &name))
                         .px(px(widgets::CARD_PAD))
                         // Its share of the region, and the hairline over
@@ -157,7 +158,17 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                     state.reveal_history_subject(pid, &name, cx)
                                 });
                         })
+                        // The app's icon while the recorded pid still runs
+                        // that program (`widgets::record_mark`), its letter
+                        // otherwise, beside the two lines it names — three
+                        // Chrome helpers in a day's list read as one app's.
                         .child(
+                            h_flex()
+                                .items_start()
+                                .gap(px(10.))
+                                .child(widgets::record_mark(s.pid, &s.name, shown_name(s)))
+                                .child(
+                                    v_flex().flex_1().min_w_0().child(
                             h_flex()
                                 .items_baseline()
                                 .justify_between()
@@ -305,6 +316,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                         .to_string(),
                                     ),
                                 ),
+                        ),
+                                ),
                         )
                         .child(div().mt(px(6.)).child(match &s.band {
                             // Today: WHEN it burned, on a shared
@@ -331,20 +344,20 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             ),
                         }))
                         .into_any_element()
-                }))
-                // Inside the card, at the end of the rows — the same chip
-                // as every other "show more". It was a sentence under the
-                // card that only said the rows existed.
-                .when(hidden > 0, |rows| {
-                    rows.child(
-                        h_flex()
-                            .flex_none()
-                            .px(px(widgets::CARD_PAD))
-                            .py(px(8.))
-                            .child(more_chip(hidden, show_all)),
-                    )
-                }),
-        );
+                    }))
+                    // Inside the card, at the end of the rows — the same chip
+                    // as every other "show more". It was a sentence under the
+                    // card that only said the rows existed.
+                    .when(hidden > 0, |rows| {
+                        rows.child(
+                            h_flex()
+                                .flex_none()
+                                .px(px(widgets::CARD_PAD))
+                                .py(px(8.))
+                                .child(more_chip(hidden, show_all)),
+                        )
+                    }),
+            );
 
     vec![list.into_any_element()]
 }

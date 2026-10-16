@@ -1,5 +1,7 @@
 //! The icon an application shows in the Dock, for a row that names a
-//! program: Overview's top apps, the Apps tab and the Processes tab. A
+//! program: Overview's top apps, the Apps and Processes tabs, the
+//! Network tab's traffic card, and History (through [`for_record`],
+//! which checks the recorded pid still runs that program). A
 //! letter in a tile stood there before (`widgets::monogram`), and five
 //! letters in five grey tiles are read one by one, where Chrome's or
 //! WeChat's own icon is recognised before the name is.
@@ -40,11 +42,30 @@ use std::sync::Arc;
 
 /// The icon for the process `pid`, called `name` — or for the tree it
 /// roots — or `None` where the row keeps its letter (see the module
-/// doc). Cached for the session, answers included that were `None`; a
-/// miss costs one `proc_pidpath`, and a bundle not met before one
-/// AppKit drawing.
-#[cfg(target_os = "macos")]
+/// doc). For a pid the caller has just seen running under that name.
+/// Cached for the session, answers included that were `None`; a miss
+/// costs one `proc_pidpath`, and a bundle not met before one AppKit
+/// drawing.
 pub fn for_pid(pid: u32, name: &str) -> Option<Arc<Image>> {
+    cached(pid, name, false)
+}
+
+/// [`for_pid`] for a process read back from the records — History's
+/// rows — whose pid may have exited since, or been handed to another
+/// program. The icon is given only while the pid still runs an
+/// executable of the recorded name (zstats' process name is the
+/// executable's file name, as sysinfo reads it on macOS); otherwise the
+/// row keeps its letter. A stranger's icon on a row would be a claim
+/// about the record that nothing behind it makes.
+pub fn for_record(pid: u32, name: &str) -> Option<Arc<Image>> {
+    cached(pid, name, true)
+}
+
+/// Both lookups, cached apart: a record that failed the name check must
+/// not answer for a live row under the same pid and name, or the other
+/// way round.
+#[cfg(target_os = "macos")]
+fn cached(pid: u32, name: &str, recorded: bool) -> Option<Arc<Image>> {
     use gpui::ImageFormat;
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -61,9 +82,9 @@ pub fn for_pid(pid: u32, name: &str) -> Option<Arc<Image>> {
 
     #[derive(Default)]
     struct Cache {
-        /// A process by its pid and its name; the bundle it runs from,
-        /// `None` included.
-        bundles: HashMap<(u32, String), Option<String>>,
+        /// A process by its pid, its name and whether it came from the
+        /// records; the bundle it runs from, `None` included.
+        bundles: HashMap<(u32, String, bool), Option<String>>,
         /// A bundle's icon, `None` included.
         icons: HashMap<String, Option<Arc<Image>>>,
     }
@@ -73,11 +94,11 @@ pub fn for_pid(pid: u32, name: &str) -> Option<Arc<Image>> {
     }
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let key = (pid, name.to_string());
+        let key = (pid, name.to_string(), recorded);
         let bundle = match cache.bundles.get(&key) {
             Some(hit) => hit.clone(),
             None => {
-                let bundle = native::bundle_of(pid);
+                let bundle = native::bundle_of(pid, recorded.then_some(name));
                 if cache.bundles.len() >= PID_CAP {
                     cache.bundles.clear();
                 }
@@ -101,7 +122,7 @@ pub fn for_pid(pid: u32, name: &str) -> Option<Arc<Image>> {
 /// No bundles to read an icon from off macOS: every row keeps its
 /// letter.
 #[cfg(not(target_os = "macos"))]
-pub fn for_pid(_pid: u32, _name: &str) -> Option<Arc<Image>> {
+fn cached(_pid: u32, _name: &str, _recorded: bool) -> Option<Arc<Image>> {
     None
 }
 
@@ -138,9 +159,10 @@ mod native {
     }
 
     /// The outermost `.app` bundle the process `pid` runs from, as a
-    /// path — `None` for a process that runs from none, or one whose
-    /// path the OS will not give.
-    pub(super) fn bundle_of(pid: u32) -> Option<String> {
+    /// path — `None` for a process that runs from none, one whose path
+    /// the OS will not give, or, given `named`, one whose executable is
+    /// not called that.
+    pub(super) fn bundle_of(pid: u32, named: Option<&str>) -> Option<String> {
         let pid = i32::try_from(pid).ok()?;
         let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         // SAFETY: the buffer is as long as the size passed, and the call
@@ -149,7 +171,15 @@ mod native {
         let written = usize::try_from(written).ok().filter(|&n| n > 0)?;
         buf.truncate(written);
         let exe = String::from_utf8(buf).ok()?;
+        if named.is_some_and(|name| !runs(&exe, name)) {
+            return None;
+        }
         bundle_in(&exe).map(str::to_string)
+    }
+
+    /// Whether the executable at `exe` is the one called `name`.
+    fn runs(exe: &str, name: &str) -> bool {
+        Path::new(exe).file_name().is_some_and(|file| file == name)
     }
 
     /// The outermost of [`app_dirs`] that is a bundle — has its
@@ -305,7 +335,7 @@ mod native {
             }
             assert!(icon_png("/usr/sbin").is_none());
             // This test binary is a bare executable, not inside an `.app`.
-            assert_eq!(bundle_of(process::id()), None);
+            assert_eq!(bundle_of(process::id(), None), None);
         }
 
         /// The path is asked of another process, not only this one:
@@ -322,9 +352,15 @@ mod native {
                 .map(|app| app.processIdentifier());
             if let Some(pid) = finder.and_then(|pid| u32::try_from(pid).ok()) {
                 assert_eq!(
-                    bundle_of(pid).as_deref(),
+                    bundle_of(pid, None).as_deref(),
                     Some("/System/Library/CoreServices/Finder.app")
                 );
+                // As a record: the name must still be the one running.
+                assert_eq!(
+                    bundle_of(pid, Some("Finder")).as_deref(),
+                    Some("/System/Library/CoreServices/Finder.app")
+                );
+                assert_eq!(bundle_of(pid, Some("Safari")), None, "a reused pid");
             }
         }
     }

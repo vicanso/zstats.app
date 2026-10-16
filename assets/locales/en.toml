@@ -419,7 +419,7 @@ dup_trash_body = "%{path} goes to the Trash — recoverable until you empty it. 
 dup_trash_nothing = "It shares its storage with another copy, so this frees no space."
 [net]
 idle_body = "Nothing has carried traffic in the last 30 minutes. Interfaces reappear as soon as they do."
-title = "Network"
+title = "Interfaces"
 off = "Network — off"
 off_body = "Not collected. collect-networks is disabled in config."
 show_more = "Show more · %{count}"

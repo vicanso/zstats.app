@@ -419,7 +419,7 @@ dup_trash_body = "%{path} 将移到废纸篓——清空前可恢复。保留的
 dup_trash_nothing = "它与另一份副本共享存储，所以不会释放空间。"
 [net]
 idle_body = "过去 30 分钟内没有接口收发过数据。有流量时会自动出现。"
-title = "网络"
+title = "网络接口"
 off = "网络 — 已关闭"
 off_body = "未采集。配置里 collect-networks 是关的。"
 show_more = "显示更多 · %{count}"

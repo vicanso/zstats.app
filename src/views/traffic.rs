@@ -243,6 +243,15 @@ fn row_element(
         .name
         .clone()
         .unwrap_or_else(|| i18n::tr("traffic.unknown"));
+    // The program's app icon, or its letter (`widgets::app_mark`): a
+    // tunnel or a helper is often named for its job, not its app —
+    // "MacPacketTunnel" is Shadowrocket. Every pid on a row carries the
+    // row's name, so the first answers for all of them.
+    let mark = widgets::app_mark(
+        row.pids.first().copied().unwrap_or(0),
+        row.name.as_deref().unwrap_or_default(),
+        &name,
+    );
     // Two lines, not three: who and how fast on one, the curve under
     // it. The rates used to have a line of their own with ↑ pushed to the
     // far edge, which parted the pair a reader compares and spent ~20px a
@@ -253,48 +262,56 @@ fn row_element(
         .when(rule, |d| {
             d.border_b(px(1.)).border_color(theme::border_subtle())
         })
+        // The mark beside both lines, so the row is no taller for it.
         .child(
-            h_flex()
-                .items_baseline()
-                .justify_between()
-                .gap(px(8.))
-                .child(
-                    h_flex()
-                        .items_baseline()
-                        .gap(px(6.))
-                        .flex_1()
-                        .min_w_0()
-                        .child(widgets::truncating_name(
-                            ("traffic-owner", index),
-                            name,
-                            11.,
-                            gpui::FontWeight::MEDIUM,
-                            theme::text().into(),
-                        ))
-                        .children(pid_label(index, row)),
-                )
-                .child(
-                    h_flex()
-                        .flex_none()
-                        .gap(px(8.))
-                        .font_family(font::MONO)
-                        .text_size(px(11.))
-                        .text_color(theme::text())
-                        .child(format!("↓ {}", format::rate(row.received_per_sec)))
-                        .child(format!("↑ {}", format::rate(row.transmitted_per_sec))),
-                ),
-        )
-        // On the recessed meter-track fill, as Overview's charts are.
-        // Without it a quiet program's flat 0 read as a row divider.
-        .child(
-            div()
-                .mt(px(4.))
-                .h(px(CURVE_H))
-                .px(px(WELL_PAD_X))
-                .py(px(WELL_PAD_Y))
-                .rounded(px(WELL_RADIUS))
-                .bg(theme::inset())
-                .child(sparkline(points, span, now)),
+            h_flex().items_start().gap(px(10.)).child(mark).child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        h_flex()
+                            .items_baseline()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                h_flex()
+                                    .items_baseline()
+                                    .gap(px(6.))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(widgets::truncating_name(
+                                        ("traffic-owner", index),
+                                        name,
+                                        11.,
+                                        gpui::FontWeight::MEDIUM,
+                                        theme::text().into(),
+                                    ))
+                                    .children(pid_label(index, row)),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .gap(px(8.))
+                                    .font_family(font::MONO)
+                                    .text_size(px(11.))
+                                    .text_color(theme::text())
+                                    .child(format!("↓ {}", format::rate(row.received_per_sec)))
+                                    .child(format!("↑ {}", format::rate(row.transmitted_per_sec))),
+                            ),
+                    )
+                    // On the recessed meter-track fill, as Overview's charts are.
+                    // Without it a quiet program's flat 0 read as a row divider.
+                    .child(
+                        div()
+                            .mt(px(4.))
+                            .h(px(CURVE_H))
+                            .px(px(WELL_PAD_X))
+                            .py(px(WELL_PAD_Y))
+                            .rounded(px(WELL_RADIUS))
+                            .bg(theme::inset())
+                            .child(sparkline(points, span, now)),
+                    ),
+            ),
         )
         .into_any_element()
 }

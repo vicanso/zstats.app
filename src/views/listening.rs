@@ -228,16 +228,10 @@ fn row_element(index: usize, row: &Row, last: bool) -> AnyElement {
             }
         })
         .collect();
-    // The row is the hover group its Quit comes forward in.
+    // The row is the hover group its Quit turns red in.
     let group = SharedString::from(format!("listen-row-{index}"));
-    let quit = quit_target(row).map(|(pid, name)| {
-        div()
-            .flex_none()
-            .opacity(QUIT_REST)
-            .group_hover(group.clone(), |s| s.opacity(1.))
-            .child(quit_button(index, pid, name, endpoints.join(", ")))
-            .into_any_element()
-    });
+    let quit = quit_target(row)
+        .map(|(pid, name)| quit_button(index, &group, pid, name, endpoints.join(", ")));
     v_flex()
         .group(group)
         .px(px(widgets::CARD_PAD))
@@ -343,20 +337,23 @@ fn quit_target(row: &Row) -> Option<(u32, String)> {
     (terminate::can_term(pid) && terminate::can_quit(pid)).then(|| (pid, name.clone()))
 }
 
-/// How far a row's Quit recedes until the row is hovered — the
-/// disk-space window's `ACTION_REST`, for its reason. Three or four red
-/// outlines down a list of sockets were the loudest thing on the Network
-/// tab, beside `rapportd` and other programs nobody opened the tab to
-/// stop; at rest the control stays visible, and it comes forward with
-/// the row under the pointer.
-const QUIT_REST: f32 = 0.4;
-
 /// The process page's Quit, sized for a row's first line. SIGTERM behind
 /// the confirm sheet; the sheet names the endpoints too, so it says what
 /// will stop answering, not just which process.
 ///
-/// It rests at [`QUIT_REST`] until its row is hovered.
-fn quit_button(index: usize, pid: u32, name: String, endpoints: String) -> AnyElement {
+/// In the second ink at rest, and red only while its row is hovered —
+/// the alarm's colour on the one row the pointer chose. Red at rest,
+/// even receded to 40% (until 2026-10-16), was three or four red
+/// outlines down a list of sockets: the loudest thing on the Network
+/// tab, on a page with nothing wrong, beside `rapportd` and other
+/// programs nobody opened the tab to stop.
+fn quit_button(
+    index: usize,
+    group: &SharedString,
+    pid: u32,
+    name: String,
+    endpoints: String,
+) -> AnyElement {
     div()
         .id(("listen-quit", index))
         .flex_none()
@@ -364,7 +361,16 @@ fn quit_button(index: usize, pid: u32, name: String, endpoints: String) -> AnyEl
         .px(px(7.))
         .rounded(px(5.))
         .border_1()
-        .border_color(theme::accent_wash(45))
+        .border_color(theme::border())
+        .text_color(theme::text_muted())
+        // On this element, not on the label inside it: a text's colour
+        // is fixed when it is laid out, and only an element with an id
+        // remembers at layout that its group is hovered — on the label
+        // the outline turned red around a grey word.
+        .group_hover(group.clone(), |d| {
+            d.border_color(theme::accent_wash(45))
+                .text_color(theme::accent_light())
+        })
         .flex()
         .items_center()
         .justify_center()
@@ -402,7 +408,6 @@ fn quit_button(index: usize, pid: u32, name: String, endpoints: String) -> AnyEl
             div()
                 .text_size(px(10.))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme::accent_light())
                 .child(i18n::tr("processes.kill_ok")),
         )
         .into_any_element()

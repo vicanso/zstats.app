@@ -10,11 +10,12 @@ use crate::format;
 use crate::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AnyView, App, Div, ElementId, FontWeight, InteractiveElement, IntoElement,
+    AnyElement, AnyView, App, Div, ElementId, FontWeight, Image, InteractiveElement, IntoElement,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
+use std::sync::Arc;
 
 /// How much of the ink a tip's second tier keeps. Readable, but
 /// plainly the smaller print under the sentence above it.
@@ -245,13 +246,24 @@ pub fn info_icon_lines(id: impl Into<ElementId>, lines: Vec<SharedString>) -> An
 /// tree, its root — and the name's first letter in a tile where there
 /// is none: a shell, a command-line tool, a daemon. Either way the rows
 /// have different left edges to find again on the next glance.
-/// Overview's apps card, the Apps tab and the Processes tab lead their
-/// rows with it. A gear for the daemons and a terminal for the tools was
+/// Overview's apps card, the Apps and Processes tabs and the Network
+/// tab's traffic card lead their rows with it, History's with
+/// [`record_mark`]. A gear for the daemons and a terminal for the tools was
 /// proposed for the letter's place and not taken: nothing here can tell
 /// one from the other reliably, and a glyph that guesses is worse than a
 /// letter that does not.
 pub fn app_mark(pid: u32, name: &str, title: &str) -> AnyElement {
-    match appicon::for_pid(pid, name) {
+    mark(appicon::for_pid(pid, name), title)
+}
+
+/// [`app_mark`] for a row read back from the records, whose pid may
+/// have exited or been reused since (`appicon::for_record`): History's.
+pub fn record_mark(pid: u32, name: &str, title: &str) -> AnyElement {
+    mark(appicon::for_record(pid, name), title)
+}
+
+fn mark(icon: Option<Arc<Image>>, title: &str) -> AnyElement {
+    match icon {
         Some(icon) => gpui::img(icon)
             .flex_none()
             .size(px(MARK_SIZE))
