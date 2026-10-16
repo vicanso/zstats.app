@@ -3,7 +3,6 @@
 use super::alerts;
 use super::processes;
 use super::widgets::{self, card};
-use crate::appicon;
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -898,7 +897,7 @@ fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
                         .clone()
                         .update(cx, |state, cx| state.reveal_app(root_pid, cx));
                 })
-                .child(app_mark(root_pid, &g.name, &face.title))
+                .child(widgets::app_mark(root_pid, &g.name, &face.title))
                 .child(
                     div()
                         .flex_1()
@@ -966,47 +965,6 @@ fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
                         ),
                 )
         }))
-        .into_any_element()
-}
-
-/// A row's mark: the application's own icon where the tree's root is an
-/// `.app` (`appicon::for_tree`, drawn once per app and kept), the
-/// name's first letter in a tile where it is not — a shell, a command-
-/// line tool, a daemon. Either way five rows have five different left
-/// edges to find again on the next glance.
-fn app_mark(root_pid: u32, tree: &str, title: &str) -> AnyElement {
-    match appicon::for_tree(root_pid, tree) {
-        Some(icon) => gpui::img(icon)
-            .flex_none()
-            .size(px(MARK_SIZE))
-            .into_any_element(),
-        None => monogram(title),
-    }
-}
-
-/// The edge of a row's mark, icon or tile.
-const MARK_SIZE: f32 = 22.;
-
-/// The letter a row falls back to: the name's first letter in a small
-/// tile, where an app icon would be.
-fn monogram(name: &str) -> AnyElement {
-    let letter: String = name
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default();
-    div()
-        .flex()
-        .flex_none()
-        .size(px(MARK_SIZE))
-        .items_center()
-        .justify_center()
-        .rounded(px(6.))
-        .bg(theme::track())
-        .text_size(px(11.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme::text_muted())
-        .child(letter)
         .into_any_element()
 }
 

@@ -541,6 +541,7 @@ fn process_row(
     let pid = p.pid;
     let is_self = pid == process::id();
     let avg = cpu;
+    let mark = widgets::app_mark(pid, &p.name, &p.name);
 
     let mut row = v_flex()
         .id(("proc", pid as usize))
@@ -564,91 +565,104 @@ fn process_row(
         })
         .when(expanded, |d| d.bg(theme::surface_raised()))
         .hover(|d| d.bg(theme::surface_raised()))
+        // The icon of the app it runs from, or its letter, beside the two
+        // lines it names, as on the Apps rows: a helper's name often does
+        // not say whose it is, and the icon does.
         .child(
-            h_flex()
-                .items_baseline()
-                .justify_between()
-                .gap(px(8.))
-                // The name takes the slack so the mark sits beside the
-                // figure, as on the Apps rows.
-                .child(div().flex_1().min_w_0().child(widgets::truncating_name(
-                    ("proc-name", pid as usize),
-                    p.name.clone(),
-                    12.,
-                    gpui::FontWeight::MEDIUM,
-                    Hsla::from(theme::text()),
-                )))
-                .child(widgets::expand_mark(expanded))
-                .child(
-                    div()
-                        .flex_none()
-                        .font_features(font::tnum())
-                        .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text_for(hot))
-                        .child(format::pct_col(avg as f32)),
-                ),
-        )
-        .child(
-            h_flex()
-                .justify_between()
-                .gap(px(8.))
-                .mt(px(2.))
-                .text_size(px(10.))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(5.))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_color(if format::notable_status(&p.status) {
-                                    theme::accent_light()
-                                } else {
-                                    theme::text_dim()
-                                })
-                                .child(if format::notable_status(&p.status) {
-                                    t!(
-                                        "processes.pid_status",
-                                        pid = p.pid,
-                                        status = p.status.clone()
+            h_flex().items_start().gap(px(10.)).child(mark).child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        h_flex()
+                            .items_baseline()
+                            .justify_between()
+                            .gap(px(8.))
+                            // The name takes the slack, so the figure keeps the
+                            // right edge on every row.
+                            .child(div().flex_1().min_w_0().child(widgets::truncating_name(
+                                ("proc-name", pid as usize),
+                                p.name.clone(),
+                                12.,
+                                gpui::FontWeight::MEDIUM,
+                                Hsla::from(theme::text()),
+                            )))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_features(font::tnum())
+                                    .text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::text_for(hot))
+                                    .child(format::pct_col(avg as f32)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .gap(px(8.))
+                            .mt(px(2.))
+                            .text_size(px(10.))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .min_w_0()
+                                    // The mark that says the row opens, at the head
+                                    // of the line as on the Apps rows.
+                                    .child(widgets::expand_mark(expanded))
+                                    .child(
+                                        div()
+                                            .text_color(if format::notable_status(&p.status) {
+                                                theme::accent_light()
+                                            } else {
+                                                theme::text_dim()
+                                            })
+                                            .child(if format::notable_status(&p.status) {
+                                                t!(
+                                                    "processes.pid_status",
+                                                    pid = p.pid,
+                                                    status = p.status.clone()
+                                                )
+                                                .to_string()
+                                            } else {
+                                                t!("processes.pid_only", pid = p.pid).to_string()
+                                            }),
                                     )
-                                    .to_string()
-                                } else {
-                                    t!("processes.pid_only", pid = p.pid).to_string()
-                                }),
-                        )
-                        .when(is_self, |d| d.child(this_app_badge()))
-                        .children(sustained.map(|dur| {
-                            // This never trips the alert — that asks
-                            // whether it is over the line right now,
-                            // and it never is. So the badge is the
-                            // only place it can announce itself.
-                            pill(
-                                t!(
-                                    "processes.sustained",
-                                    duration = format::uptime(dur.as_secs())
-                                )
-                                .to_string(),
-                                true,
+                                    .when(is_self, |d| d.child(this_app_badge()))
+                                    .children(sustained.map(|dur| {
+                                        // This never trips the alert — that asks
+                                        // whether it is over the line right now,
+                                        // and it never is. So the badge is the
+                                        // only place it can announce itself.
+                                        pill(
+                                            t!(
+                                                "processes.sustained",
+                                                duration = format::uptime(dur.as_secs())
+                                            )
+                                            .to_string(),
+                                            true,
+                                        )
+                                    })),
                             )
-                        })),
-                )
-                .child(
-                    div()
-                        .font_features(font::tnum())
-                        .text_color(theme::text_muted())
-                        .child(match bar.measure {
-                            // The ranking key belongs on the row, not only
-                            // in the meter — memory sort already prints
-                            // memory here; IO has nowhere else to show it
-                            // on a collapsed row.
-                            BarMeasure::DiskIo => {
-                                disk_io_display(p.read_bytes_per_sec, p.write_bytes_per_sec)
-                            }
-                            _ => format::memory(shown_memory(p)),
-                        }),
-                ),
+                            .child(
+                                div()
+                                    .font_features(font::tnum())
+                                    .text_color(theme::text_muted())
+                                    .child(match bar.measure {
+                                        // The ranking key belongs on the row, not only
+                                        // in the meter — memory sort already prints
+                                        // memory here; IO has nowhere else to show it
+                                        // on a collapsed row.
+                                        BarMeasure::DiskIo => disk_io_display(
+                                            p.read_bytes_per_sec,
+                                            p.write_bytes_per_sec,
+                                        ),
+                                        _ => format::memory(shown_memory(p)),
+                                    }),
+                            ),
+                    ),
+            ),
         )
         .child(div().mt(px(4.)).child(widgets::meter(
             bar.fraction(p, avg),
@@ -1590,8 +1604,9 @@ fn sort_control(state: &ZStatsAppState) -> AnyElement {
         tip,
         format!("↓ {}", i18n::tr(sort.label_key())),
     )
+    .chip()
     .flex_none()
-    .px(px(5.))
+    .px(px(7.))
     .py(px(1.))
     .text_size(px(9.))
     .font_weight(gpui::FontWeight::MEDIUM)

@@ -1,70 +1,105 @@
-//! The icon an application shows in the Dock, for a row that names an
-//! app tree: Overview's top apps. A letter in a tile stood there before
-//! (`overview::monogram`), and five letters in five grey tiles are read
-//! one by one, where Chrome's or WeChat's own icon is recognised before
-//! the name is.
+//! The icon an application shows in the Dock, for a row that names a
+//! program: Overview's top apps, the Apps tab and the Processes tab. A
+//! letter in a tile stood there before (`widgets::monogram`), and five
+//! letters in five grey tiles are read one by one, where Chrome's or
+//! WeChat's own icon is recognised before the name is.
 //!
-//! The icon is the running application's (`NSRunningApplication`, asked
-//! by the tree's root pid), and only when that application is an `.app`
-//! bundle that declares an icon of its own (`CFBundleIconFile` or
-//! `CFBundleIconName`). A tree rooted in a shell, a command-line tool or
-//! a bare daemon has none, and neither do the system's own agents
-//! (`MenuBarAgent` was the one seen): AppKit hands back the generic
-//! application glyph, or nothing. Those keep the letter — the same pale
-//! blueprint repeated down the list said less than the letters it
-//! replaced.
+//! The icon is the one of the outermost `.app` the process runs from —
+//! its executable's path (`proc_pidpath`) — and only when that bundle
+//! declares an icon of its own (`CFBundleIconFile` or `CFBundleIconName`).
+//! Outermost, because a helper is a bundle of its own inside its app's
+//! (`Google Chrome Helper (Renderer).app` deep in `Google Chrome.app`),
+//! and the app is what the reader knows: on the Processes tab the icon
+//! is what says whose a helper is, which its name often does not
+//! ("MacPacketTunnel" is Shadowrocket's). The executable's path and not
+//! the command line, which can name another app's bundle as an argument
+//! (`open -a /Applications/X.app`). And not `NSRunningApplication`, which
+//! the first version asked by the tree's root pid: it knows only what
+//! LaunchServices launched, which was the Apps tab's roots and none of
+//! the helpers. Like `active.rs`'s frontmost table, this asks the OS who
+//! a process is, never how it is doing — no figure comes from here.
 //!
-//! Each icon is drawn once, as a small PNG, and kept for the session
-//! ([`for_tree`]). The monogram's doc said why it did not do this: "the
-//! icon itself is a file read per app per paint" — which a cache keyed
-//! by tree makes once per app instead. A pid can be reused, so the key
-//! carries the tree's name too; a recycled pid under another program
-//! misses and asks again.
+//! A shell, a command-line tool or a daemon runs from no `.app`; the
+//! system's own agents do, but declare no icon (`MenuBarAgent` was the
+//! one seen), and AppKit would hand back the generic application glyph.
+//! Those keep the letter — the same pale blueprint repeated down the
+//! list said less than the letters it replaced.
+//!
+//! Each bundle's icon is drawn once, as a small PNG, and kept for the
+//! session ([`for_pid`]): six Chrome helpers share one drawing. The
+//! monogram's doc said why it did not do this: "the icon itself is a
+//! file read per app per paint" — which a cache by bundle makes once per
+//! app. The bundle a pid runs from is kept under the pid and the
+//! process's name: a pid can be reused, and a recycled pid under another
+//! program misses and asks again.
 
 use gpui::Image;
 use std::sync::Arc;
 
-/// The icon for the tree rooted at `root_pid` and called `name`, or
-/// `None` where the row keeps its letter (see the module doc). Cached for
-/// the session, answers included that were `None`; a miss costs one
-/// AppKit lookup and one small drawing.
+/// The icon for the process `pid`, called `name` — or for the tree it
+/// roots — or `None` where the row keeps its letter (see the module
+/// doc). Cached for the session, answers included that were `None`; a
+/// miss costs one `proc_pidpath`, and a bundle not met before one
+/// AppKit drawing.
 #[cfg(target_os = "macos")]
-pub fn for_tree(root_pid: u32, name: &str) -> Option<Arc<Image>> {
+pub fn for_pid(pid: u32, name: &str) -> Option<Arc<Image>> {
     use gpui::ImageFormat;
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    /// Trees the cache holds before it starts over. A session meets a
-    /// few dozen apps; the cap only stops a machine that cycles through
-    /// thousands of short-lived pids from growing it without end.
-    const CACHE_CAP: usize = 256;
+    /// Processes the cache holds before it starts over. The Processes
+    /// tab's full listing scrolls through every pid on the machine, so
+    /// this is reached; starting over costs one `proc_pidpath` per row
+    /// in view, since the drawings are kept apart, by bundle.
+    const PID_CAP: usize = 512;
 
-    /// A tree by its root pid and its name; the answer, `None` included.
-    type Icons = HashMap<(u32, String), Option<Arc<Image>>>;
+    /// Bundles the cache holds before it starts over: one per app that
+    /// has run, which a session counts in dozens. Only a backstop.
+    const BUNDLE_CAP: usize = 256;
+
+    #[derive(Default)]
+    struct Cache {
+        /// A process by its pid and its name; the bundle it runs from,
+        /// `None` included.
+        bundles: HashMap<(u32, String), Option<String>>,
+        /// A bundle's icon, `None` included.
+        icons: HashMap<String, Option<Arc<Image>>>,
+    }
 
     thread_local! {
-        static CACHE: RefCell<Icons> = RefCell::new(HashMap::new());
+        static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
     }
     CACHE.with(|cache| {
-        let key = (root_pid, name.to_string());
-        if let Some(hit) = cache.borrow().get(&key) {
+        let mut cache = cache.borrow_mut();
+        let key = (pid, name.to_string());
+        let bundle = match cache.bundles.get(&key) {
+            Some(hit) => hit.clone(),
+            None => {
+                let bundle = native::bundle_of(pid);
+                if cache.bundles.len() >= PID_CAP {
+                    cache.bundles.clear();
+                }
+                cache.bundles.insert(key, bundle.clone());
+                bundle
+            }
+        }?;
+        if let Some(hit) = cache.icons.get(&bundle) {
             return hit.clone();
         }
-        let icon = native::icon_png(root_pid)
-            .map(|png| Arc::new(Image::from_bytes(ImageFormat::Png, png)));
-        let mut cache = cache.borrow_mut();
-        if cache.len() >= CACHE_CAP {
-            cache.clear();
+        let icon =
+            native::icon_png(&bundle).map(|png| Arc::new(Image::from_bytes(ImageFormat::Png, png)));
+        if cache.icons.len() >= BUNDLE_CAP {
+            cache.icons.clear();
         }
-        cache.insert(key, icon.clone());
+        cache.icons.insert(bundle, icon.clone());
         icon
     })
 }
 
-/// No running-application registry to ask off macOS: every row keeps its
+/// No bundles to read an icon from off macOS: every row keeps its
 /// letter.
 #[cfg(not(target_os = "macos"))]
-pub fn for_tree(_root_pid: u32, _name: &str) -> Option<Arc<Image>> {
+pub fn for_pid(_pid: u32, _name: &str) -> Option<Arc<Image>> {
     None
 }
 
@@ -74,8 +109,8 @@ mod native {
     use objc2::rc::autoreleasepool;
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
-    use objc2_app_kit::NSRunningApplication;
-    use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, ns_string};
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, NSString, ns_string};
     use std::ffi::c_void;
     use std::ptr;
 
@@ -99,18 +134,40 @@ mod native {
         const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGImage", &[]));
     }
 
-    /// The running application's icon at [`ICON_PX`], as PNG bytes —
-    /// `None` when the pid is not a running `.app`, or is one that
-    /// declares no icon of its own.
-    pub(super) fn icon_png(pid: u32) -> Option<Vec<u8>> {
+    /// The outermost `.app` the process `pid` runs from, as a path —
+    /// `None` for a process that runs from none, or one whose path the
+    /// OS will not give.
+    pub(super) fn bundle_of(pid: u32) -> Option<String> {
         let pid = i32::try_from(pid).ok()?;
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: the buffer is as long as the size passed, and the call
+        // writes at most that many bytes into it.
+        let written = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        let written = usize::try_from(written).ok().filter(|&n| n > 0)?;
+        buf.truncate(written);
+        let exe = String::from_utf8(buf).ok()?;
+        outer_bundle(&exe).map(str::to_string)
+    }
+
+    /// The path up to the first component named `*.app`: the app a
+    /// helper's own nested bundle belongs to, or the app itself.
+    fn outer_bundle(exe: &str) -> Option<&str> {
+        exe.match_indices(".app")
+            .map(|(at, _)| at + 4)
+            .filter(|&end| matches!(exe.as_bytes().get(end), None | Some(b'/')))
+            .find_map(|end| {
+                let start = exe[..end].rfind('/')? + 1;
+                // A component called just ".app" names no app.
+                (end - start > 4).then(|| &exe[..end])
+            })
+    }
+
+    /// The bundle's icon at [`ICON_PX`], as PNG bytes — `None` when the
+    /// path is no bundle, or one that declares no icon of its own.
+    pub(super) fn icon_png(bundle: &str) -> Option<Vec<u8>> {
         autoreleasepool(|_| {
-            let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
-            let bundle = app.bundleURL()?;
-            if bundle.pathExtension()?.to_string() != "app" {
-                return None;
-            }
-            let info = NSBundle::bundleWithURL(&bundle)?;
+            let path = NSString::from_str(bundle);
+            let info = NSBundle::bundleWithPath(&path)?;
             let declared = [
                 ns_string!("CFBundleIconFile"),
                 ns_string!("CFBundleIconName"),
@@ -120,8 +177,9 @@ mod native {
             if !declared {
                 return None;
             }
+            let workspace = NSWorkspace::sharedWorkspace();
             unsafe {
-                let icon: *mut AnyObject = msg_send![&*app, icon];
+                let icon: *mut AnyObject = msg_send![&*workspace, iconForFile: &*path];
                 if icon.is_null() {
                     return None;
                 }
@@ -166,14 +224,57 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use objc2_app_kit::NSWorkspace;
+        use std::path::Path;
+        use std::process;
 
-        /// Every message on the way to a PNG, sent for real: Finder is a
-        /// running `.app` on any Mac with a session. A wrong type in one
-        /// of them is a panic in a debug build, which is how the first
-        /// version took the panel down the moment it drew an icon.
         #[test]
-        fn a_running_app_gives_a_png_and_a_bare_process_does_not() {
+        fn a_helper_belongs_to_the_outermost_app() {
+            assert_eq!(
+                outer_bundle(
+                    "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome \
+                     Framework.framework/Versions/141.0/Helpers/Google Chrome Helper \
+                     (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)"
+                ),
+                Some("/Applications/Google Chrome.app")
+            );
+            assert_eq!(
+                outer_bundle("/Applications/企业微信.app/Contents/MacOS/企业微信"),
+                Some("/Applications/企业微信.app")
+            );
+            assert_eq!(outer_bundle("/usr/sbin/cupsd"), None);
+            // `.app` only as a whole component's end.
+            assert_eq!(outer_bundle("/opt/tool.application/bin/tool"), None);
+            assert_eq!(outer_bundle("/Users/me/my.apps/run"), None);
+            assert_eq!(outer_bundle("/tmp/.app/x"), None);
+            assert_eq!(
+                outer_bundle("/tmp/.app/Tool.app/Contents/MacOS/Tool"),
+                Some("/tmp/.app/Tool.app")
+            );
+        }
+
+        /// Every message on the way to a PNG, sent for real: Finder's
+        /// bundle is on every Mac. A wrong type in one of them is a panic
+        /// in a debug build, which is how the first version took the
+        /// panel down the moment it drew an icon.
+        #[test]
+        fn an_app_gives_a_png_and_an_agent_or_a_bare_process_does_not() {
+            let png = icon_png("/System/Library/CoreServices/Finder.app").expect("Finder");
+            assert!(png.starts_with(b"\x89PNG"), "PNG signature");
+            // A system agent whose bundle declares no icon keeps the
+            // letter: the generic glyph is no icon.
+            let agent = "/System/Library/CoreServices/MenuBarAgent.app";
+            if Path::new(agent).exists() {
+                assert!(icon_png(agent).is_none());
+            }
+            assert!(icon_png("/usr/sbin").is_none());
+            // This test binary is a bare executable, not inside an `.app`.
+            assert_eq!(bundle_of(process::id()), None);
+        }
+
+        /// The path is asked of another process, not only this one:
+        /// Finder runs on any Mac with a session.
+        #[test]
+        fn a_running_app_is_found_by_its_pid() {
             let finder = NSWorkspace::sharedWorkspace()
                 .runningApplications()
                 .iter()
@@ -183,24 +284,11 @@ mod native {
                 })
                 .map(|app| app.processIdentifier());
             if let Some(pid) = finder.and_then(|pid| u32::try_from(pid).ok()) {
-                let png = icon_png(pid).expect("Finder has an icon");
-                assert!(png.starts_with(b"\x89PNG"), "PNG signature");
+                assert_eq!(
+                    bundle_of(pid).as_deref(),
+                    Some("/System/Library/CoreServices/Finder.app")
+                );
             }
-            // A system agent whose bundle declares no icon keeps the
-            // letter, where it is running.
-            let agent = NSWorkspace::sharedWorkspace()
-                .runningApplications()
-                .iter()
-                .find(|app| {
-                    app.bundleIdentifier()
-                        .is_some_and(|id| id.to_string() == "com.apple.MenuBarAgent")
-                })
-                .map(|app| app.processIdentifier());
-            if let Some(pid) = agent.and_then(|pid| u32::try_from(pid).ok()) {
-                assert!(icon_png(pid).is_none(), "the generic glyph is no icon");
-            }
-            // This test binary is a bare executable, not an `.app`.
-            assert!(icon_png(std::process::id()).is_none());
         }
     }
 }

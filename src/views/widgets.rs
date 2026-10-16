@@ -4,6 +4,7 @@
 //! cards, pills, meters and key/value rows are div + radius + a width
 //! percentage, so there is nothing to gain from real components.
 
+use crate::appicon;
 use crate::font;
 use crate::format;
 use crate::theme;
@@ -239,12 +240,61 @@ pub fn info_icon_lines(id: impl Into<ElementId>, lines: Vec<SharedString>) -> An
         .into_any_element()
 }
 
-/// The mark that says a row opens: a chevron beside its figure, turned
-/// down while it is open. A row's only sign that a click did something
-/// was the hover fill, which shows where the pointer is and nothing
-/// about what a click would do — the expansion, with the thresholds and
-/// the Quit in it, was found by accident or not at all. Dim on purpose:
-/// fifty of them down a list must not out-shout the figures.
+/// A row's mark: the icon of the application the process runs from
+/// (`appicon::for_pid`, drawn once per app and kept) — for an app's
+/// tree, its root — and the name's first letter in a tile where there
+/// is none: a shell, a command-line tool, a daemon. Either way the rows
+/// have different left edges to find again on the next glance.
+/// Overview's apps card, the Apps tab and the Processes tab lead their
+/// rows with it. A gear for the daemons and a terminal for the tools was
+/// proposed for the letter's place and not taken: nothing here can tell
+/// one from the other reliably, and a glyph that guesses is worse than a
+/// letter that does not.
+pub fn app_mark(pid: u32, name: &str, title: &str) -> AnyElement {
+    match appicon::for_pid(pid, name) {
+        Some(icon) => gpui::img(icon)
+            .flex_none()
+            .size(px(MARK_SIZE))
+            .into_any_element(),
+        None => monogram(title),
+    }
+}
+
+/// The edge of a row's mark, icon or tile.
+const MARK_SIZE: f32 = 22.;
+
+/// The letter a row falls back to: the name's first letter in a small
+/// tile, where an app icon would be.
+fn monogram(name: &str) -> AnyElement {
+    let letter: String = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default();
+    div()
+        .flex()
+        .flex_none()
+        .size(px(MARK_SIZE))
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(theme::track())
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme::text_muted())
+        .child(letter)
+        .into_any_element()
+}
+
+/// The mark that says a row opens: a chevron at the start of the row's
+/// second line, turned down while it is open. A row's only sign that a
+/// click did something was the hover fill, which shows where the
+/// pointer is and nothing about what a click would do — the expansion,
+/// with the thresholds and the Quit in it, was found by accident or not
+/// at all. Dim on purpose: fifty of them down a list must not out-shout
+/// the figures. It stood beside the figure until 2026-10-16, where
+/// "› 34.4%" read as "more than 34.4%"; at the head of "26 processes"
+/// it sits where a disclosure sits in Finder, beside what it discloses.
 pub fn expand_mark(open: bool) -> AnyElement {
     Icon::new(if open {
         IconName::ChevronDown

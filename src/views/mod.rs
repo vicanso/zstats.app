@@ -443,6 +443,9 @@ pub(super) struct MenuTrigger {
     base: Stateful<Div>,
     /// Its menu is open. Set by the dropdown, not by us.
     open: bool,
+    /// Worn as a chip, outlined like the "All" chip beside it, with a
+    /// chevron after the label ([`MenuTrigger::chip`]).
+    chip: bool,
     tip: SharedString,
     label: AnyElement,
 }
@@ -455,8 +458,22 @@ pub(super) fn menu_trigger(
     MenuTrigger {
         base: div().id(id),
         open: false,
+        chip: false,
         tip: tip.into(),
         label: label.into_any_element(),
+    }
+}
+
+impl MenuTrigger {
+    /// The sort controls' form: the outline of the "All" chip beside
+    /// them and a chevron after the label. "↓ CPU" as bare words opened
+    /// a menu without saying it would, beside a chip that looked like
+    /// the one thing in the header to press (2026-10-16). History's
+    /// title stays words: it is the card's title, and wears its own
+    /// chevron.
+    pub(super) fn chip(mut self) -> Self {
+        self.chip = true;
+        self
     }
 }
 
@@ -487,17 +504,44 @@ impl DropdownMenu for MenuTrigger {}
 
 impl RenderOnce for MenuTrigger {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let (open, tip) = (self.open, self.tip);
+        let (open, tip, chip) = (self.open, self.tip, self.chip);
         self.base
             .flex()
             .items_center()
-            .rounded(px(4.))
+            .map(|d| {
+                if chip {
+                    d.gap(px(3.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if open {
+                            theme::border()
+                        } else {
+                            theme::border_subtle()
+                        })
+                } else {
+                    d.rounded(px(4.))
+                }
+            })
             // The hover fill kept while the menu is open, and no tooltip
             // under it — as on the cup.
             .when(open, |d| d.bg(theme::surface_raised()))
             .when(!open, |d| d.tooltip(widgets::wrap_tooltip(tip)))
-            .hover(|d| d.bg(theme::surface_raised()))
+            .hover(move |d| {
+                let d = d.bg(theme::surface_raised());
+                if chip {
+                    d.border_color(theme::border())
+                } else {
+                    d
+                }
+            })
             .child(self.label)
+            .when(chip, |d| {
+                d.child(
+                    Icon::new(IconName::ChevronDown)
+                        .with_size(Size::Size(px(8.)))
+                        .text_color(Hsla::from(theme::text_dim())),
+                )
+            })
     }
 }
 
