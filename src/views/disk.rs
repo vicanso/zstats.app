@@ -109,14 +109,23 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                         .justify_between()
                         .gap(px(8.))
                         .mt(px(6.))
-                        .child(widgets::big_figure(&format::capacity(d.available_bytes)))
+                        // Free is the headline — the figure people act on,
+                        // and the one Overview and the menu bar's disk face
+                        // quote — with the word that says so beside it. The
+                        // word stood at the far end of the row, past the
+                        // total, over a bar filled to the *used* share, so
+                        // "121 GB" read as what the bar measured.
+                        .child(widgets::big_figure_with(
+                            &format::capacity(d.available_bytes),
+                            &i18n::tr("disk.free"),
+                        ))
                         .child(
                             font::tabular(div())
                                 .text_size(px(12.))
                                 .text_color(theme::text_muted())
                                 .child(
                                     t!(
-                                        "disk.free_of",
+                                        "disk.used_of",
                                         total = format::capacity(d.total_bytes),
                                         used = format!("{used_pct:.0}")
                                     )

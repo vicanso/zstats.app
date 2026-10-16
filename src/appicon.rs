@@ -4,9 +4,11 @@
 //! letters in five grey tiles are read one by one, where Chrome's or
 //! WeChat's own icon is recognised before the name is.
 //!
-//! The icon is the one of the outermost `.app` the process runs from —
-//! its executable's path (`proc_pidpath`) — and only when that bundle
-//! declares an icon of its own (`CFBundleIconFile` or `CFBundleIconName`).
+//! The icon is the one of the outermost `.app` bundle the process runs
+//! from — its executable's path (`proc_pidpath`) — and only when that
+//! bundle declares an icon of its own (`CFBundleIconFile` or
+//! `CFBundleIconName`). A bundle, not a name: a directory can be called
+//! `*.app` and be none, as CI's checkout of this repository is.
 //! Outermost, because a helper is a bundle of its own inside its app's
 //! (`Google Chrome Helper (Renderer).app` deep in `Google Chrome.app`),
 //! and the app is what the reader knows: on the Processes tab the icon
@@ -112,6 +114,7 @@ mod native {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, NSString, ns_string};
     use std::ffi::c_void;
+    use std::path::Path;
     use std::ptr;
 
     /// The drawing's edge in pixels: the rows show the icon at 22pt,
@@ -134,9 +137,9 @@ mod native {
         const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGImage", &[]));
     }
 
-    /// The outermost `.app` the process `pid` runs from, as a path —
-    /// `None` for a process that runs from none, or one whose path the
-    /// OS will not give.
+    /// The outermost `.app` bundle the process `pid` runs from, as a
+    /// path — `None` for a process that runs from none, or one whose
+    /// path the OS will not give.
     pub(super) fn bundle_of(pid: u32) -> Option<String> {
         let pid = i32::try_from(pid).ok()?;
         let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
@@ -146,16 +149,26 @@ mod native {
         let written = usize::try_from(written).ok().filter(|&n| n > 0)?;
         buf.truncate(written);
         let exe = String::from_utf8(buf).ok()?;
-        outer_bundle(&exe).map(str::to_string)
+        bundle_in(&exe).map(str::to_string)
     }
 
-    /// The path up to the first component named `*.app`: the app a
-    /// helper's own nested bundle belongs to, or the app itself.
-    fn outer_bundle(exe: &str) -> Option<&str> {
+    /// The outermost of [`app_dirs`] that is a bundle — has its
+    /// `Contents/Info.plist`. A name is not enough: a directory may be
+    /// called `*.app` without being one, as this repository's checkout
+    /// is on CI (`/Users/runner/work/zstats.app/…`), and an app built
+    /// inside it would otherwise be passed over for the checkout.
+    fn bundle_in(exe: &str) -> Option<&str> {
+        app_dirs(exe).find(|dir| Path::new(dir).join("Contents/Info.plist").is_file())
+    }
+
+    /// Every directory on `exe`'s path whose name ends in `.app`,
+    /// outermost first: the app a helper's own nested bundle belongs to
+    /// comes before that helper's.
+    fn app_dirs(exe: &str) -> impl Iterator<Item = &str> {
         exe.match_indices(".app")
             .map(|(at, _)| at + 4)
-            .filter(|&end| matches!(exe.as_bytes().get(end), None | Some(b'/')))
-            .find_map(|end| {
+            .filter(|&end| matches!(exe.as_bytes().get(end), Some(b'/')))
+            .filter_map(|end| {
                 let start = exe[..end].rfind('/')? + 1;
                 // A component called just ".app" names no app.
                 (end - start > 4).then(|| &exe[..end])
@@ -224,32 +237,56 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::path::Path;
+        use std::env;
+        use std::fs;
         use std::process;
 
+        fn dirs(exe: &str) -> Vec<&str> {
+            app_dirs(exe).collect()
+        }
+
         #[test]
-        fn a_helper_belongs_to_the_outermost_app() {
+        fn a_helper_lists_its_app_first() {
             assert_eq!(
-                outer_bundle(
+                dirs(
                     "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome \
                      Framework.framework/Versions/141.0/Helpers/Google Chrome Helper \
                      (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)"
-                ),
-                Some("/Applications/Google Chrome.app")
+                )[0],
+                "/Applications/Google Chrome.app"
             );
             assert_eq!(
-                outer_bundle("/Applications/企业微信.app/Contents/MacOS/企业微信"),
-                Some("/Applications/企业微信.app")
+                dirs("/Applications/企业微信.app/Contents/MacOS/企业微信"),
+                ["/Applications/企业微信.app"]
             );
-            assert_eq!(outer_bundle("/usr/sbin/cupsd"), None);
-            // `.app` only as a whole component's end.
-            assert_eq!(outer_bundle("/opt/tool.application/bin/tool"), None);
-            assert_eq!(outer_bundle("/Users/me/my.apps/run"), None);
-            assert_eq!(outer_bundle("/tmp/.app/x"), None);
+            assert!(dirs("/usr/sbin/cupsd").is_empty());
+            // `.app` only as a whole directory name's end.
+            assert!(dirs("/opt/tool.application/bin/tool").is_empty());
+            assert!(dirs("/Users/me/my.apps/run").is_empty());
+            assert!(dirs("/Users/me/run.app").is_empty());
             assert_eq!(
-                outer_bundle("/tmp/.app/Tool.app/Contents/MacOS/Tool"),
-                Some("/tmp/.app/Tool.app")
+                dirs("/tmp/.app/Tool.app/Contents/MacOS/Tool"),
+                ["/tmp/.app/Tool.app"]
             );
+        }
+
+        /// A directory named `*.app` that is no bundle is passed over,
+        /// for the app inside it — CI checks this repository out into
+        /// one, and the test binary lives under it.
+        #[test]
+        fn a_folder_named_like_an_app_is_not_one() {
+            let root = env::temp_dir().join(format!("zstats-appicon-{}", process::id()));
+            let checkout = root.join("zstats.app");
+            let bundle = checkout.join("target/Tool.app");
+            fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+            fs::write(bundle.join("Contents/Info.plist"), "").unwrap();
+            let tool = bundle.join("Contents/MacOS/Tool");
+            let built = checkout.join("target/debug/zstats");
+            let found = bundle_in(tool.to_str().unwrap()).map(str::to_string);
+            let bare = bundle_in(built.to_str().unwrap()).map(str::to_string);
+            fs::remove_dir_all(&root).unwrap();
+            assert_eq!(found.as_deref(), bundle.to_str());
+            assert_eq!(bare, None);
         }
 
         /// Every message on the way to a PNG, sent for real: Finder's

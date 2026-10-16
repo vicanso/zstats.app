@@ -667,6 +667,19 @@ pub fn big_figure(text: &str) -> AnyElement {
     headline(value.to_string().into(), unit.to_string().into(), 4.)
 }
 
+/// [`big_figure`] with a word after its unit, in the unit's size and
+/// ink: "121 GB free". What a headline counts belongs where the eye
+/// lands on it, not at the far end of its row.
+pub fn big_figure_with(text: &str, word: &str) -> AnyElement {
+    let (value, unit) = text.rsplit_once(' ').unwrap_or((text, ""));
+    let tail = if unit.is_empty() {
+        word.to_string()
+    } else {
+        format!("{unit} {word}")
+    };
+    headline(value.to_string().into(), tail.into(), 4.)
+}
+
 fn headline(value: SharedString, unit: SharedString, gap: f32) -> AnyElement {
     h_flex()
         .flex_none()

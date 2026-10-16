@@ -284,25 +284,54 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// The one time figure that applies right now, or none at all.
+/// What the battery is doing, for the card's header: where the power
+/// comes from and, while there is one, how long until full or empty —
+/// "Charging · 1h 20m to full", "On battery · 3h 40m left", "Plugged in
+/// · full". zstats' doc for `state` says frontends derive "on AC" from
+/// it, and these are its words for the states that say so (a battery
+/// that is not discharging is on an external source); "unknown", or a
+/// word it adds later, says nothing rather than a guess.
 ///
-/// A battery is either emptying or filling, so the old fixed pair of
-/// "Time left" and "To full" guaranteed that one of them was a dash —
-/// and on a full, idle machine both were. One adaptive cell says the
-/// same thing when there is something to say. State lives in the title
-/// so the grid is always three rows: charging fills six cells, full and
-/// idle leaves the last right-hand cell empty rather than collapsing
-/// the card (five cells in two-up is three-and-two, and the hairlines
-/// no longer meet).
-fn battery_time(b: &zstats::snapshot::BatterySnapshot) -> Option<(String, String)> {
-    match (b.time_to_empty_secs, b.time_to_full_secs) {
-        (Some(secs), _) => Some((i18n::tr("sensors.empty_in"), format::uptime(secs))),
-        (_, Some(secs)) => Some((i18n::tr("sensors.to_full"), format::uptime(secs))),
-        (None, None) => None,
-    }
+/// The time was a cell of the grid, and the header carried zstats' raw
+/// word ("full", untranslated). A cell that comes and goes meant the
+/// grid was padded to six to hold its height, and on a full Mac that
+/// reports no cell temperature two of the six were blank under a
+/// hairline — read as a broken card. Here the time costs no cell.
+fn battery_status(b: &zstats::snapshot::BatterySnapshot) -> Option<String> {
+    let with_time = |bare: &str, timed: &str, secs: Option<u64>| match secs {
+        Some(secs) => t!(timed, time = format::uptime(secs)).to_string(),
+        None => i18n::tr(bare),
+    };
+    Some(match b.state.to_ascii_lowercase().as_str() {
+        "charging" => with_time(
+            "sensors.status_charging",
+            "sensors.status_charging_for",
+            b.time_to_full_secs,
+        ),
+        "discharging" => with_time(
+            "sensors.status_on_battery",
+            "sensors.status_on_battery_for",
+            b.time_to_empty_secs,
+        ),
+        "full" => i18n::tr("sensors.status_full"),
+        "paused" => i18n::tr("sensors.status_paused"),
+        "empty" => i18n::tr("sensors.status_empty"),
+        _ => return None,
+    })
 }
 
+/// The battery's facts two-up. Only the ones this machine reports, so
+/// the grid is the same size from one sample to the next without blank
+/// cells to hold it: the left column is the battery now (charge, power,
+/// and the cell temperature where there is one), the right its wear.
+/// An odd count leaves the bottom-right cell empty, so the two columns'
+/// hairlines still meet.
 fn battery_grid(b: &zstats::snapshot::BatterySnapshot) -> AnyElement {
+    widgets::kv_columns(battery_cells(b))
+}
+
+/// [`battery_grid`]'s cells, label and value, in `kv_columns` order.
+fn battery_cells(b: &zstats::snapshot::BatterySnapshot) -> Vec<(String, String)> {
     let charge = (i18n::tr("sensors.charge"), format::pct(b.charge_percent));
     // zstats' `power_watts` is the present flow either way, and `state`
     // says which: "Draw" beside "charging" read as the machine's own use.
@@ -326,16 +355,15 @@ fn battery_grid(b: &zstats::snapshot::BatterySnapshot) -> AnyElement {
     let temp = b
         .temperature_celsius
         .map(|c| (i18n::tr("sensors.cell_temp"), format!("{c:.1} °C")));
-    // Six slots so two-up is always three-and-three. The temperature and
-    // the time are the cells that come and go; empty pairs keep the row
-    // height when there is nothing to say.
-    let mut cells = vec![charge, draw, health, cycles];
+    let mut cells = vec![charge, draw];
     cells.extend(temp);
-    cells.extend(battery_time(b));
-    while cells.len() < 6 {
+    cells.extend([health, cycles]);
+    // `kv_columns` fills the left column first, so a blank pushed last
+    // lands bottom right.
+    if cells.len() % 2 == 1 {
         cells.push((String::new(), "\u{00a0}".into()));
     }
-    widgets::kv_columns(cells)
+    cells
 }
 
 /// The power cell's label for this battery state: the same zstats field
@@ -354,7 +382,7 @@ fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElem
         Some(b) => card()
             .child(widgets::card_header(
                 i18n::tr("sensors.battery"),
-                Some(widgets::note(b.state.clone())),
+                battery_status(b).map(widgets::note),
             ))
             .child(battery_grid(b))
             .pb_2()
@@ -369,9 +397,9 @@ mod tests {
     use super::*;
     use zstats::snapshot::BatterySnapshot;
 
-    fn battery(to_empty: Option<u64>, to_full: Option<u64>) -> BatterySnapshot {
+    fn battery(state: &str, to_empty: Option<u64>, to_full: Option<u64>) -> BatterySnapshot {
         BatterySnapshot {
-            state: "Full".into(),
+            state: state.into(),
             charge_percent: 100.0,
             health_percent: None,
             cycle_count: None,
@@ -389,25 +417,55 @@ mod tests {
         assert_eq!(power_label_key("Full"), "sensors.power");
     }
 
-    /// A battery is either emptying or filling. The card used to reserve
-    /// a cell for each, so one of them was always a dash — and on a full,
-    /// idle machine both were, spending a whole row of the card on two
-    /// dashes.
+    /// The header says where the power comes from, and the one time
+    /// that applies while there is one. zstats' words arrive lowercase
+    /// from the battery crate, though its doc capitalises them.
     #[test]
-    fn the_battery_shows_the_one_time_that_applies_and_otherwise_none() {
+    fn the_header_says_where_the_power_comes_from_and_for_how_long() {
+        let status = |state, to_empty, to_full| battery_status(&battery(state, to_empty, to_full));
         assert_eq!(
-            battery_time(&battery(Some(3600), None)).map(|(_, v)| v),
-            Some(format::uptime(3600)),
-            "discharging shows time left"
+            status("discharging", Some(3600), None),
+            Some(t!("sensors.status_on_battery_for", time = format::uptime(3600)).to_string())
         );
         assert_eq!(
-            battery_time(&battery(None, Some(900))).map(|(_, v)| v),
-            Some(format::uptime(900)),
-            "charging shows time to full"
+            status("Charging", None, Some(900)),
+            Some(t!("sensors.status_charging_for", time = format::uptime(900)).to_string())
         );
-        assert!(
-            battery_time(&battery(None, None)).is_none(),
-            "full and idle has nothing to say, so it says nothing"
+        assert_eq!(
+            status("discharging", None, None),
+            Some(i18n::tr("sensors.status_on_battery")),
+            "no estimate yet is the state alone"
+        );
+        assert_eq!(
+            status("full", None, None),
+            Some(i18n::tr("sensors.status_full"))
+        );
+        assert_eq!(
+            status("paused", None, None),
+            Some(i18n::tr("sensors.status_paused"))
+        );
+        assert_eq!(status("unknown", None, Some(900)), None, "no guess");
+    }
+
+    /// No blank cell holds the grid's height any more, so a Mac that
+    /// reports no cell temperature is a full two-by-two; one that does
+    /// leaves only the bottom-right cell empty.
+    #[test]
+    fn the_battery_grid_has_no_blank_but_the_one_an_odd_count_needs() {
+        let blank = |cells: &[(String, String)]| cells.iter().filter(|(k, _)| k.is_empty()).count();
+        let cells = battery_cells(&battery("full", None, None));
+        assert_eq!(cells.len(), 4);
+        assert_eq!(blank(&cells), 0);
+        let mut warm = battery("full", None, None);
+        warm.temperature_celsius = Some(31.4);
+        let cells = battery_cells(&warm);
+        assert_eq!(cells.len(), 6);
+        assert_eq!(blank(&cells), 1);
+        assert!(cells[5].0.is_empty(), "the blank is bottom right");
+        assert_eq!(
+            cells[2].0,
+            i18n::tr("sensors.cell_temp"),
+            "temperature sits with the now"
         );
     }
 
