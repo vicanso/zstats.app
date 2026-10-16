@@ -74,6 +74,8 @@ pub struct DiskCheckMoment {
     pub on_battery: bool,
     pub cpu_percent: Option<f32>,
     pub someone_looking: bool,
+    /// How much of the machine one thread is (`diskwatch::hold`).
+    pub logical_cores: u32,
 }
 
 /// The directory analyser (docs/disk-analysis.md). Deliberately NOT reset
@@ -161,6 +163,12 @@ pub(crate) struct Analysis {
     watch_last: Option<SystemTime>,
     /// The daily check in flight.
     watch_cancel: Option<Arc<AtomicBool>>,
+    /// Set while the check in flight holds still (`diskwatch::hold`);
+    /// its walk waits on it. One per check.
+    watch_hold: Arc<AtomicBool>,
+    /// Why it holds, for the log's two lines and the badge on this
+    /// app's row.
+    watch_held: Option<diskwatch::Hold>,
     /// When the daily check last stopped — finished, failed or
     /// cancelled. Its CPU outlives it in zstats' averages
     /// (`diskwatch::explains_own_cpu`).
@@ -238,6 +246,8 @@ impl Default for Analysis {
             trashed: 0,
             watch_last,
             watch_cancel: None,
+            watch_hold: Arc::new(AtomicBool::new(false)),
+            watch_held: None,
             watch_ended: None,
             growth: diskwatch::latest_report(),
             growth_pending: Vec::new(),
@@ -694,12 +704,18 @@ impl ZStatsAppState {
         if let Some(cancel) = self.analysis.watch_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
             self.analysis.watch_ended = Some(Instant::now());
+            self.analysis.watch_held = None;
         }
     }
 
     /// Start the daily background check if it is due (`diskwatch::due`).
     /// Called every tick; everything before the spawn is a few compares.
     pub fn maybe_check_disk(&mut self, moment: DiskCheckMoment, cx: &mut Context<Self>) {
+        // One in flight is asked whether to hold still instead.
+        if self.analysis.watch_cancel.is_some() {
+            self.hold_disk_check(&moment);
+            return;
+        }
         let walk_running = self.analysis.watch_cancel.is_some()
             || matches!(self.analysis.disk_analysis, DiskAnalysis::Running { .. })
             || self.dupes_running();
@@ -719,16 +735,14 @@ impl ZStatsAppState {
             return;
         };
         let cancel = Arc::new(AtomicBool::new(false));
+        let hold = Arc::new(AtomicBool::new(false));
         self.analysis.watch_cancel = Some(cancel.clone());
+        self.analysis.watch_hold = hold.clone();
+        self.analysis.watch_held = None;
         let started = Instant::now();
         tracing::info!("daily disk check: started");
         let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
-        diskscan::spawn_paced(
-            ScanScope::single(home),
-            diskscan::Pace::Background,
-            cancel.clone(),
-            tx,
-        );
+        diskscan::spawn_background(ScanScope::single(home), cancel.clone(), hold, tx);
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 match event {
@@ -748,6 +762,7 @@ impl ZStatsAppState {
                                 .is_some_and(|c| Arc::ptr_eq(c, &cancel))
                             {
                                 state.analysis.watch_cancel = None;
+                                state.analysis.watch_held = None;
                                 state.analysis.watch_ended = Some(Instant::now());
                                 // Not retried every tick: a failing walk
                                 // waits a day like a finished one.
@@ -760,6 +775,33 @@ impl ZStatsAppState {
             }
         })
         .detach();
+    }
+
+    /// Hold the check in flight still, or let it go on (`diskwatch::hold`),
+    /// logging each change at INFO — "why is zstats busy" and "why did
+    /// the check take an hour" are both asked of the installed build.
+    fn hold_disk_check(&mut self, moment: &DiskCheckMoment) {
+        let held = diskwatch::hold(
+            moment.on_battery,
+            moment.cpu_percent,
+            self.analysis.watch_held,
+            moment.logical_cores,
+        );
+        if held == self.analysis.watch_held {
+            return;
+        }
+        match held {
+            Some(why) => tracing::info!(
+                reason = why.as_str(),
+                cpu = ?moment.cpu_percent,
+                "daily disk check: holding"
+            ),
+            None => tracing::info!(cpu = ?moment.cpu_percent, "daily disk check: going on"),
+        }
+        self.analysis.watch_held = held;
+        self.analysis
+            .watch_hold
+            .store(held.is_some(), Ordering::Relaxed);
     }
 
     /// The daily check finished: record it as the home scope's result
@@ -784,7 +826,9 @@ impl ZStatsAppState {
             return;
         }
         self.analysis.watch_cancel = None;
+        self.analysis.watch_held = None;
         self.analysis.watch_ended = Some(Instant::now());
+        let walked = result.took;
         diskscan::save_cache(&result);
         self.note_home_walk(&result);
         // The window shows the home tree: the fresh walk replaces it,
@@ -817,6 +861,8 @@ impl ZStatsAppState {
         }
         tracing::info!(
             took_secs = started.elapsed().as_secs(),
+            // `took` less the stretches it held still.
+            walked_secs = walked.as_secs(),
             growing = self.analysis.growth.as_ref().map_or(0, |r| r.rows.len()),
             announced,
             "daily disk check: done"
@@ -838,6 +884,11 @@ impl ZStatsAppState {
     /// Whether the daily check is walking right now.
     pub fn disk_check_running(&self) -> bool {
         self.analysis.watch_cancel.is_some()
+    }
+
+    /// Why the daily check in flight is holding still, if it is.
+    pub fn disk_check_held(&self) -> Option<diskwatch::Hold> {
+        self.analysis.watch_held
     }
 
     /// Whether this process's CPU is the daily check's doing right now

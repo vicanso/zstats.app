@@ -27,6 +27,7 @@ use crate::alerttpl;
 use crate::awake;
 use crate::cachepreset;
 use crate::cleanhints;
+use crate::diskwatch;
 use crate::fullscan::{self, GroupScan, Scan};
 use crate::history;
 use crate::history::Spender;
@@ -1205,19 +1206,19 @@ impl ZStatsAppState {
                 .iter()
                 .any(|w| w.window_id() == handle.window_id())
         });
-        let (on_battery, cpu_percent) = self.latest().map_or((false, None), |tick| {
-            (
-                tick.snapshot
-                    .battery
-                    .as_ref()
-                    .is_some_and(|b| matches!(b.state.as_str(), "Discharging" | "Empty")),
-                Some(tick.snapshot.cpu.usage_percent),
-            )
-        });
+        let (on_battery, cpu_percent, logical_cores) =
+            self.latest().map_or((false, None, 1), |tick| {
+                (
+                    diskwatch::on_battery(tick.snapshot.battery.as_ref()),
+                    Some(tick.snapshot.cpu.usage_percent),
+                    tick.snapshot.cpu.logical_cores,
+                )
+            });
         let moment = analysis::DiskCheckMoment {
             on_battery,
             cpu_percent,
             someone_looking: panel_visible(cx) || storage_open,
+            logical_cores,
         };
         self.maybe_check_disk(moment, cx);
         if self.tab == Tab::Net && panel_visible(cx) {

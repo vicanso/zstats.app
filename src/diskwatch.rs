@@ -6,8 +6,8 @@
 //! week" before the volume is full. That needs a measurement taken on
 //! a schedule rather than when someone remembers to press Analyze, so
 //! once a day the home tree is walked in the background
-//! (`diskscan::Pace::Background` — one thread at background QoS, which
-//! macOS throttles behind anything a person is doing), and each walk
+//! (`diskscan::Pace::Background` — one thread at utility QoS, held
+//! still whenever the machine stops being quiet), and each walk
 //! leaves one small snapshot here: every directory of at least
 //! [`RECORD_FLOOR`] with its total, one file per local day under
 //! `~/.zstats/disk-history/`, kept [`KEEP_DAYS`].
@@ -27,7 +27,10 @@
 //! last one is [`CHECK_EVERY`] old, the machine is on power, not busy,
 //! and nobody has the panel or the disk-space window open. Any finished
 //! home walk counts, the user's own included: a check is not repeated
-//! the hour after someone pressed Analyze.
+//! the hour after someone pressed Analyze. Once started it holds still
+//! whenever the machine gets busy or is unplugged ([`hold`]) and goes on
+//! from where it stood when that passes; it ran to the end whatever
+//! happened until 2026-10-16, for most of an hour on the measured home.
 //!
 //! **What it says.** Growth is today against the snapshot nearest
 //! [`WINDOW`] old ([`baseline_in`]), deepest directory that carries the
@@ -38,10 +41,13 @@
 //! — not an `AlertEvent`: zstats owns alerting, and this is an observer
 //! of the same class as the memory-creep watcher.
 //!
-//! **Its own CPU is not news.** The walk is one thread working flat out.
-//! Background QoS slows it, it does not make it idle, and zstats counts
-//! CPU time: this process sits near one whole core for as long as the
-//! walk takes, which is over the default per-process bar. On the
+//! **Its own CPU is not news.** The walk is one thread working flat out,
+//! and zstats counts CPU time: this process sits near one whole core
+//! for as long as the walk takes, which is over the default per-process
+//! bar. (A lower QoS class does not change that, only how long it lasts
+//! — see `diskscan::lower_this_thread`.) The panel says so on this
+//! app's own row while it walks (`processes::disk_check_badge`), where
+//! that core is seen. On the
 //! installed app (2026-10-04 to 06) every check drew a banner naming
 //! zstats about two minutes in, and the one that ran past half an hour
 //! drew the engine's 30-minute reminder as well — the app interrupting
@@ -64,10 +70,17 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use zstats::snapshot::BatterySnapshot;
 
 /// How old the last home walk must be before the background repeats it.
-/// A day: growth worth a warning is measured in days, and one walk a day
-/// is a cost nobody notices (~25 s of throttled I/O on the measured Mac).
+/// A day: growth worth a warning is measured in days. What a walk costs
+/// is the other half of that sum, and it was not what this comment said
+/// (~25 s): over a developer's home (430k directories) the check logged
+/// 4 to 59 minutes at a whole core, every day, from background QoS and
+/// from partial tables nobody read (`diskscan::lower_this_thread`,
+/// `PARTIAL_EVERY`). Without both, the same walk measured 2.3 s of CPU
+/// per 26k directories, a minute or two for that home; the done line's
+/// `walked_secs` is the figure to check it against.
 pub const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The comparison span: "this week".
@@ -170,6 +183,70 @@ pub fn due(gate: &Gate) -> bool {
     gate.now
         .duration_since(last)
         .is_ok_and(|age| age >= CHECK_EVERY)
+}
+
+/// Why a running check is holding still ([`hold`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// Unplugged: the check starts only on power, and one that began
+    /// there does not go on on the battery.
+    OnBattery,
+    /// Something other than the check is keeping the machine busy.
+    Busy,
+}
+
+impl Hold {
+    /// The word the log line carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Hold::OnBattery => "battery",
+            Hold::Busy => "busy",
+        }
+    }
+}
+
+/// Whether a running check should hold still now, and why — asked on
+/// every tick while one walks. It started only on power and on a quiet
+/// machine ([`due`]), and until 2026-10-16 it then went on to the end
+/// whatever happened, for most of an hour on the measured home: a
+/// person who sat down and started working, or pulled the plug, had a
+/// core of theirs taken by housekeeping.
+///
+/// Busy is whole-machine use over [`BUSY_CPU`] plus the check's own
+/// share while it walks — one thread, at most `100 / logical_cores` of
+/// the machine — and over [`BUSY_CPU`] alone while it holds, the bar it
+/// started under. Without the share, a machine with four logical cores
+/// would hold the walk for the walk's own core; without dropping it, a
+/// held walk would go on at more than it was allowed to start at. A
+/// sample with no CPU figure changes nothing about being busy.
+pub fn hold(
+    on_battery: bool,
+    cpu_percent: Option<f32>,
+    held: Option<Hold>,
+    logical_cores: u32,
+) -> Option<Hold> {
+    if on_battery {
+        return Some(Hold::OnBattery);
+    }
+    let Some(cpu) = cpu_percent else {
+        return held.filter(|why| *why == Hold::Busy);
+    };
+    let bar = if held.is_some() {
+        BUSY_CPU
+    } else {
+        BUSY_CPU + 100.0 / logical_cores.max(1) as f32
+    };
+    (cpu > bar).then_some(Hold::Busy)
+}
+
+/// Whether this Mac is running on its battery, from zstats' state word.
+/// The battery crate writes it in lowercase ("discharging") whatever
+/// zstats' own doc capitalises, and until 2026-10-16 the two places
+/// that asked compared against "Discharging" — so the check's "on power
+/// only" never held, and the disk window never said it was waiting for
+/// power.
+pub fn on_battery(battery: Option<&BatterySnapshot>) -> bool {
+    battery.is_some_and(|b| b.state.eq_ignore_ascii_case("discharging"))
 }
 
 /// Whether a CPU alert about this process is the check's own doing: one
@@ -411,6 +488,51 @@ mod tests {
     use std::process;
 
     const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// A walking check holds for the battery at once, for a busy machine
+    /// only past its own share of it, and goes on once the machine is
+    /// back under the bar it started at.
+    #[test]
+    fn a_check_holds_for_the_battery_and_for_a_machine_busy_beyond_itself() {
+        // Fourteen cores: the walk's own thread is ~7% of the machine.
+        assert_eq!(hold(true, Some(5.0), None, 14), Some(Hold::OnBattery));
+        assert_eq!(hold(false, Some(30.0), None, 14), None, "25% + its own 7%");
+        assert_eq!(hold(false, Some(33.0), None, 14), Some(Hold::Busy));
+        // Held, it waits for the bar it started under.
+        assert_eq!(
+            hold(false, Some(28.0), Some(Hold::Busy), 14),
+            Some(Hold::Busy)
+        );
+        assert_eq!(hold(false, Some(20.0), Some(Hold::Busy), 14), None);
+        assert_eq!(hold(false, Some(20.0), Some(Hold::OnBattery), 14), None);
+        // Four cores: its own thread alone is 25%, which is not "busy".
+        assert_eq!(hold(false, Some(45.0), None, 4), None);
+        // No CPU figure keeps a busy hold and lets a battery hold go.
+        assert_eq!(hold(false, None, Some(Hold::Busy), 14), Some(Hold::Busy));
+        assert_eq!(hold(false, None, Some(Hold::OnBattery), 14), None);
+        assert_eq!(hold(false, None, None, 14), None);
+    }
+
+    /// The battery crate's words are lowercase; zstats' doc capitalises
+    /// them. Both read the same here.
+    #[test]
+    fn on_battery_reads_the_state_word_in_either_case() {
+        let battery = |state: &str| BatterySnapshot {
+            state: state.into(),
+            charge_percent: 80.0,
+            health_percent: None,
+            cycle_count: None,
+            temperature_celsius: None,
+            power_watts: None,
+            time_to_full_secs: None,
+            time_to_empty_secs: None,
+        };
+        assert!(on_battery(Some(&battery("discharging"))));
+        assert!(on_battery(Some(&battery("Discharging"))));
+        assert!(!on_battery(Some(&battery("charging"))));
+        assert!(!on_battery(Some(&battery("full"))));
+        assert!(!on_battery(None), "a desktop has no battery to run on");
+    }
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)

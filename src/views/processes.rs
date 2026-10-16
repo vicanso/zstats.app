@@ -630,6 +630,9 @@ fn process_row(
                                             }),
                                     )
                                     .when(is_self, |d| d.child(this_app_badge()))
+                                    .when(is_self && state.disk_check_running(), |d| {
+                                        d.child(disk_check_badge(state.disk_check_held().is_some()))
+                                    })
                                     .children(sustained.map(|dur| {
                                         // This never trips the alert — that asks
                                         // whether it is over the line right now,
@@ -1332,6 +1335,29 @@ fn pill(text: impl Into<gpui::SharedString>, accent: bool) -> AnyElement {
 
 fn this_app_badge() -> AnyElement {
     pill(i18n::tr("processes.this_app"), false)
+}
+
+/// What this app's row says while the daily disk check walks
+/// (`diskwatch`): that the core it is using is housekeeping, which, and
+/// where it is turned off. The check starts while nobody is looking, so
+/// its processor time was found afterwards — a zstats row at a whole
+/// core here, a tall bar in History — with nothing beside it to say
+/// whose it was. "Paused" while it holds still for a busy or unplugged
+/// Mac, so a quiet row under the badge does not read as a stalled one.
+pub(super) fn disk_check_badge(held: bool) -> AnyElement {
+    div()
+        .id("disk-check-badge")
+        .flex_none()
+        .tooltip(widgets::wrap_tooltip(i18n::tr("processes.disk_check_tip")))
+        .child(pill(
+            i18n::tr(if held {
+                "processes.disk_check_held"
+            } else {
+                "processes.disk_check"
+            }),
+            false,
+        ))
+        .into_any_element()
 }
 
 fn avg_chip() -> AnyElement {

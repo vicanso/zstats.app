@@ -32,6 +32,7 @@ use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::process;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
 /// Same one-core colour line as [`super::processes`] — a tree and a
@@ -452,6 +453,16 @@ fn app_row(
                                                 .truncate()
                                                 .text_color(theme::text_dim())
                                                 .child(tree_meta(g, ambiguous)),
+                                        )
+                                        // This app's own tree, while the
+                                        // daily disk check is its work.
+                                        .when(
+                                            root_pid == process::id() && state.disk_check_running(),
+                                            |d| {
+                                                d.child(processes::disk_check_badge(
+                                                    state.disk_check_held().is_some(),
+                                                ))
+                                            },
                                         ),
                                 )
                                 // Memory last and in the text ink: it is the

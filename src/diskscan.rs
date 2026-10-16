@@ -84,11 +84,21 @@ const TCC_DENY: &[&str] = &[
 const UF_DATALESS: u32 = 0x4000_0000;
 /// How often progress lands on the channel.
 const PROGRESS_EVERY: Duration = Duration::from_millis(500);
-/// How often a partial table snapshot lands. Costlier than the counter —
-/// each one clones the aggregates and runs the full ranking — so it gets
-/// its own, slower throttle; still cheap in absolute terms (a rollup over
-/// ~100k dirs is milliseconds).
+/// How long the walk runs between two partial table snapshots, counted
+/// from the end of the last one. A snapshot clones the aggregates and
+/// runs the full ranking on the walking thread, and it grows with the
+/// tree: over 430k directories (a developer's home, synthetic, release
+/// build) one took 0.6 s, and 3.0 s on a background-QoS thread. Counted
+/// from its *start*, as it was until 2026-10-16, a snapshot slower than
+/// this interval was due again the moment it finished, and the walk
+/// spent its time redrawing a table rather than walking — the daily
+/// check, which ran there and read none of them, took anywhere from 4
+/// to 59 minutes over the same home.
 const PARTIAL_EVERY: Duration = Duration::from_secs(2);
+
+/// How often a held walk looks again whether it may go on
+/// ([`spawn_background`]'s `hold`).
+const HOLD_POLL: Duration = Duration::from_secs(1);
 /// Dedicated rayon pool size: 3 threads, but never more than half the
 /// machine's cores (floor 1). The cap exists because the resident
 /// collector samples disk IO on its 2s tick, and a default-parallelism
@@ -352,45 +362,69 @@ pub enum Pace {
     /// ([`walk_threads`]).
     Foreground,
     /// The daily check nobody is watching (`diskwatch`): one thread, at
-    /// background QoS on macOS — the scheduler then throttles both its
-    /// CPU and its disk I/O behind anything a person is doing — and
-    /// nice 19 on Linux. Slower, and nobody is waiting for it.
+    /// utility QoS on macOS and nice 19 on Linux ([`lower_this_thread`]),
+    /// no partial tables (nothing reads them), and held still whenever
+    /// the store says so ([`spawn_background`]). Slower, and nobody is
+    /// waiting for it.
     Background,
 }
 
 pub fn spawn(scope: ScanScope, cancel: Arc<AtomicBool>, tx: smol::channel::Sender<ScanEvent>) {
-    spawn_paced(scope, Pace::Foreground, cancel, tx);
+    thread::spawn(move || deliver(run(&scope, Pace::Foreground, &cancel, &tx), &tx));
 }
 
-pub fn spawn_paced(
+/// The daily check's walk ([`Pace::Background`]). While `hold` is set it
+/// waits where it stands — the machine got busy or was unplugged — and
+/// goes on from there when it clears; `cancel` still ends it at once.
+/// The result's `took` is the walking time, the held stretches left
+/// out.
+pub fn spawn_background(
     scope: ScanScope,
-    pace: Pace,
     cancel: Arc<AtomicBool>,
+    hold: Arc<AtomicBool>,
     tx: smol::channel::Sender<ScanEvent>,
 ) {
     thread::spawn(move || {
-        if pace == Pace::Background {
-            lower_this_thread();
-        }
-        match run(&scope, pace, &cancel, &tx) {
-            Ok(Some(result)) => {
-                let _ = tx.send_blocking(ScanEvent::Done(Box::new(result)));
-            }
-            Ok(None) => {} // cancelled
-            Err(e) => {
-                let _ = tx.send_blocking(ScanEvent::Failed(e));
-            }
-        }
+        lower_this_thread();
+        deliver(
+            run_held(&scope, Pace::Background, &cancel, Some(&hold), &tx),
+            &tx,
+        );
     });
 }
 
-/// Drop the calling thread to the background tier. A serial walk runs
+fn deliver(outcome: Result<Option<ScanResult>, String>, tx: &smol::channel::Sender<ScanEvent>) {
+    match outcome {
+        Ok(Some(result)) => {
+            let _ = tx.send_blocking(ScanEvent::Done(Box::new(result)));
+        }
+        Ok(None) => {} // cancelled
+        Err(e) => {
+            let _ = tx.send_blocking(ScanEvent::Failed(e));
+        }
+    }
+}
+
+/// Lower the calling thread for the daily check. A serial walk runs
 /// entirely on this thread, so this is the whole walk's priority.
+///
+/// **Utility, not background**, on macOS. Background QoS was the first
+/// choice, as the class for work nobody is waiting on, and it made the
+/// same walk cost four to five times the CPU time: the thread is kept
+/// on the efficiency cores at a low clock (measured on an M4 Pro,
+/// release build, one thread: `~/github`, 26k directories, 11.0 s of
+/// CPU against 2.3 s at utility, which matched the default class;
+/// `~/.cargo`, 34k, 9.2 s against 1.9 s). Cheap per second, but the
+/// process then sat at a whole core for that much longer, and the home
+/// check ran for most of an hour where it is a matter of minutes.
+/// Utility still yields to anything a person is doing, its disk I/O
+/// included; the check starts only on power and when the machine is
+/// quiet, and holds still when either stops being true (`diskwatch`).
 fn lower_this_thread() {
     #[cfg(target_os = "macos")]
     // SAFETY: sets the calling thread's own QoS class; no pointers.
     unsafe {
-        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
     }
     #[cfg(target_os = "linux")]
     // SAFETY: adjusts the calling thread's own nice value (per-thread
@@ -495,6 +529,16 @@ fn run(
     cancel: &Arc<AtomicBool>,
     tx: &smol::channel::Sender<ScanEvent>,
 ) -> Result<Option<ScanResult>, String> {
+    run_held(scope, pace, cancel, None, tx)
+}
+
+fn run_held(
+    scope: &ScanScope,
+    pace: Pace,
+    cancel: &Arc<AtomicBool>,
+    hold: Option<&AtomicBool>,
+    tx: &smol::channel::Sender<ScanEvent>,
+) -> Result<Option<ScanResult>, String> {
     // Missing roots are skipped, not fatal (`~/.cache` on many machines);
     // only an entirely absent scope is an error.
     let walked: Vec<PathBuf> = scope.roots.iter().filter(|r| r.is_dir()).cloned().collect();
@@ -527,6 +571,8 @@ fn run(
     let started = Instant::now();
     let mut last_progress = started;
     let mut last_partial = started;
+    // Time spent held, which is not the walk's.
+    let mut held = Duration::ZERO;
 
     for root in &walked {
         let walk = {
@@ -574,6 +620,21 @@ fn run(
             if cancel.load(Ordering::Relaxed) {
                 return Ok(None);
             }
+            // A serial walk reads each directory on this thread as the
+            // iterator asks for it, so waiting here stops the walk
+            // itself, not only its bookkeeping.
+            if let Some(hold) = hold
+                && hold.load(Ordering::Relaxed)
+            {
+                let since = Instant::now();
+                while hold.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(None);
+                    }
+                    thread::sleep(HOLD_POLL);
+                }
+                held += since.elapsed();
+            }
             let mut entry = match entry {
                 Ok(e) => e,
                 Err(_) => {
@@ -588,8 +649,9 @@ fn run(
                     last_progress = Instant::now();
                     let _ = tx.try_send(ScanEvent::Progress { dirs_done });
                 }
-                if last_partial.elapsed() >= PARTIAL_EVERY {
-                    last_partial = Instant::now();
+                // Only for someone watching the table fill: the daily
+                // check reads none of them.
+                if pace == Pace::Foreground && last_partial.elapsed() >= PARTIAL_EVERY {
                     let partial = snapshot(Aggregates {
                         base: &scope.base,
                         roots: &scope.roots,
@@ -607,6 +669,7 @@ fn run(
                         build_index: false,
                     });
                     let _ = tx.try_send(ScanEvent::Partial(Box::new(partial)));
+                    last_partial = Instant::now();
                 }
                 if path == *root || fold_owner(&fold, &path, root).is_some() {
                     continue; // no structure recorded beneath a folded tree
@@ -678,7 +741,7 @@ fn run(
     Ok(Some(snapshot(Aggregates {
         base: &scope.base,
         roots: &scope.roots,
-        took: started.elapsed(),
+        took: started.elapsed().saturating_sub(held),
         skipped_excluded: excluded_hits.load(Ordering::Relaxed),
         own_bytes,
         plain_dirs: &plain_dirs,

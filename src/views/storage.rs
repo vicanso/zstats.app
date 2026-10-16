@@ -1140,9 +1140,7 @@ fn analysis_exclude_drawer(exclude: &Entity<InputState>) -> AnyElement {
 /// does, for display only.
 fn overdue_reason(state: &ZStatsAppState) -> &'static str {
     let tick = state.latest();
-    let on_battery = tick
-        .and_then(|t| t.snapshot.battery.as_ref())
-        .is_some_and(|b| matches!(b.state.as_str(), "Discharging" | "Empty"));
+    let on_battery = diskwatch::on_battery(tick.and_then(|t| t.snapshot.battery.as_ref()));
     let busy = tick.is_some_and(|t| t.snapshot.cpu.usage_percent > diskwatch::BUSY_CPU);
     if on_battery {
         "disk.watch_wait_power"
