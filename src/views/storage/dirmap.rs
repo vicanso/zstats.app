@@ -23,8 +23,8 @@
 //! be remembered.
 
 use super::{META_PT, ROW_PT, reveal_tip, scope_word, size_text};
-use crate::bigfiles;
 use crate::diskscan::ScanResult;
+use crate::finder;
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -314,7 +314,7 @@ fn crumbs(m: &Map, path: &Path, total: Option<u64>) -> AnyElement {
                         .ghost()
                         .xsmall()
                         .tooltip(reveal_tip())
-                        .on_click(move |_, _, _| bigfiles::reveal(&reveal)),
+                        .on_click(move |_, _, _| finder::reveal(&reveal)),
                 ),
         )
         .into_any_element()

@@ -16,7 +16,7 @@ mod analysis;
 mod dupes;
 
 pub use alerts::SeenAlert;
-pub use analysis::{BigFiles, DiskAnalysis, Expansion, GrowthNotice, StorageTab};
+pub use analysis::{DiskAnalysis, Expansion, GrowthNotice, StorageTab};
 pub use dupes::{DupeProgress, DupeSearch};
 
 use alerts::{AlertBook, keep_alert};

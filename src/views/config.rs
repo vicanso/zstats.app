@@ -24,10 +24,10 @@ use crate::alerttpl;
 #[cfg(target_os = "macos")]
 use crate::assets;
 use crate::autostart::{self, Status};
-use crate::bigfiles;
 use crate::cachepreset;
 use crate::cleanhints;
 use crate::confirm;
+use crate::finder;
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -921,7 +921,7 @@ fn file_note(id: &'static str, name: &'static str) -> AnyElement {
             cx.stop_propagation();
             let path = zstats::settings::default_dir().join(name);
             if path.is_file() {
-                bigfiles::reveal(&path);
+                finder::reveal(&path);
             } else if let Err(e) = opener::open([path.parent().unwrap_or(&path).as_os_str()]) {
                 tracing::warn!("open config dir: {e}");
             }

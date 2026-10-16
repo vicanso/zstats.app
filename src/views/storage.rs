@@ -34,18 +34,18 @@
 use super::widgets;
 use crate::active;
 use crate::assets::CustomIconName;
-use crate::bigfiles;
 use crate::cleanhints::{self, CleanHint};
 use crate::confirm;
 use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult, ScanScope};
 use crate::diskwatch;
 use crate::dupes::{DupeFile, DupeGroup, DupeScope};
+use crate::finder;
 use crate::font;
 use crate::format;
 use crate::i18n;
 use crate::prefs;
 use crate::state::{
-    BigFiles, DiskAnalysis, DupeProgress, DupeSearch, Expansion, StorageTab, ZStatsAppState,
+    DiskAnalysis, DupeProgress, DupeSearch, Expansion, StorageTab, ZStatsAppState,
     ZStatsGlobalStore,
 };
 use crate::theme;
@@ -64,7 +64,7 @@ use std::cell::Cell;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 mod dirmap;
 
@@ -88,7 +88,6 @@ pub fn render(state: &ZStatsAppState, frame: &Frame) -> Vec<AnyElement> {
     );
     cards.push(match state.storage_tab() {
         StorageTab::Analysis => analysis_card(state, frame),
-        StorageTab::LargeFiles => big_files_card(state, frame.scroll),
         StorageTab::Duplicates => dupes_card(state, frame.scroll),
     });
     cards
@@ -153,7 +152,6 @@ pub fn tab_strip(state: &ZStatsAppState) -> AnyElement {
     let active = state.storage_tab();
     let busy = |tab: StorageTab| match tab {
         StorageTab::Analysis => matches!(state.disk_analysis(), DiskAnalysis::Running { .. }),
-        StorageTab::LargeFiles => matches!(state.big_files(), BigFiles::Running),
         StorageTab::Duplicates => matches!(state.dupe_search(), DupeSearch::Running { .. }),
     };
     let bar = theme::mark().map_or(theme::text(), |(fill, _)| fill);
@@ -1218,7 +1216,7 @@ fn growth_section(report: &diskwatch::Report) -> Option<AnyElement> {
                                         .ghost()
                                         .xsmall()
                                         .tooltip(reveal_tip())
-                                        .on_click(move |_, _, _| bigfiles::reveal(&reveal))
+                                        .on_click(move |_, _, _| finder::reveal(&reveal))
                                         .into_any_element(),
                                 ),
                                 None,
@@ -1268,7 +1266,7 @@ fn analysis_pick_chip(running: bool) -> AnyElement {
 }
 
 /// Preset scopes (docs/disk-analysis.md's scope table): the home tree,
-/// `~/Library` — the blind-spot close-up — the merged cache roots, and
+/// `~/Library` — app data and caches, close up — the merged cache roots, and
 /// the writable volume. Clicking selects; the run control walks. No
 /// label in front: each chip's tooltip says what it covers, and "Whole
 /// disk" says why `/` is not a choice.
@@ -1609,12 +1607,18 @@ fn analysis_lists(
                     running: &running,
                     group_max: max,
                     root: &root,
-                    deletable: false,
+                    // A big file is the reader's own to remove, behind a
+                    // confirm that says so — but not from a walk still
+                    // under way.
+                    deletable: actions,
                     expandable: false,
                     open: false,
                     depth: 0,
                     // Files never sit in the suggestions.
                     suggested: false,
+                    file: Some(FileRow {
+                        modified: h.modified,
+                    }),
                 })
             })
             .collect()
@@ -1701,7 +1705,17 @@ fn analysis_lists(
             }),
         ))
         .children(section(
-            section_heading(i18n::tr("disk.ana_files"), None, None),
+            section_heading(
+                i18n::tr("disk.ana_files"),
+                Some(
+                    t!(
+                        "disk.ana_files_meta",
+                        bar = format::memory(diskscan::BIG_FILE_IN_TREE)
+                    )
+                    .to_string(),
+                ),
+                None,
+            ),
             file_rows(&result.files),
             None,
         ))
@@ -1805,7 +1819,7 @@ fn trashed_note(bytes: u64) -> Option<AnyElement> {
                         Button::new("disk-open-trash")
                             .xsmall()
                             .label(i18n::tr("disk.open_trash"))
-                            .on_click(|_, _, _| bigfiles::open_trash()),
+                            .on_click(|_, _, _| finder::open_trash()),
                     ),
             )
             .into_any_element(),
@@ -1883,6 +1897,7 @@ fn dir_row_tree(
         open,
         depth,
         suggested: ctx.id == "ana-sug",
+        file: None,
     })];
     if !open {
         return out;
@@ -2130,6 +2145,16 @@ struct AnalysisRow<'a> {
     /// be the same word on every row; the basis moves to the name's
     /// tooltip and only the exceptions ("running") stay as pills.
     suggested: bool,
+    /// A big file rather than a directory: it wears its modification
+    /// date, and its move to the Trash is confirmed as one of the
+    /// reader's own files — nothing rebuilds it.
+    file: Option<FileRow>,
+}
+
+/// What a big file's row carries beyond a directory's.
+#[derive(Clone, Copy)]
+struct FileRow {
+    modified: Option<SystemTime>,
 }
 
 /// The delta column's width: `-999.9 MB` at 9.5px mono, the widest a
@@ -2194,6 +2219,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         open,
         depth,
         suggested,
+        file,
     } = row;
     let label = path
         .strip_prefix(root)
@@ -2302,6 +2328,21 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                         .map(|hint| running_pill(&key, &hint.owner)),
                 )
                 .children(asset.map(|note| asset_pill(&key, note)))
+                // When a big file last changed — the usual way to decide
+                // whether it is still wanted, as on the duplicate rows.
+                .children(file.and_then(|f| f.modified).map(|at| {
+                    let day = format::date(at);
+                    div()
+                        .id(SharedString::from(format!("{key}-modified")))
+                        .flex_none()
+                        .font_family(font::MONO)
+                        .text_size(px(META_PT))
+                        .text_color(theme::text_dim())
+                        .tooltip(widgets::wrap_tooltip(
+                            t!("disk.dup_modified", date = day.clone()).to_string(),
+                        ))
+                        .child(day)
+                }))
                 // A fixed slot whenever the table has a baseline, filled or
                 // not: sized to the content, the column wandered with the
                 // pills beside it and no two deltas lined up.
@@ -2341,9 +2382,9 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                                 // The row itself opens; the button must not.
                                 cx.stop_propagation();
                                 if is_trash {
-                                    bigfiles::open_trash();
+                                    finder::open_trash();
                                 } else {
-                                    bigfiles::reveal(&reveal_path);
+                                    finder::reveal(&reveal_path);
                                 }
                             })
                             .into_any_element(),
@@ -2369,6 +2410,29 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                                 move |_, window, cx| {
                                     cx.stop_propagation();
                                     let path = trash_path.clone();
+                                    if file.is_some() {
+                                        // The reader's own file: the
+                                        // sentence says it does not come
+                                        // back by itself, as a cache would.
+                                        confirm::ask(
+                                            window,
+                                            cx,
+                                            i18n::tr("disk.big_trash_title"),
+                                            t!("disk.big_trash_body", name = confirm_label.clone())
+                                                .to_string(),
+                                            i18n::tr("disk.big_trash_ok"),
+                                            move |cx| {
+                                                let path = path.clone();
+                                                cx.global::<ZStatsGlobalStore>().clone().update(
+                                                    cx,
+                                                    |state, cx| {
+                                                        state.trash_analysis_file(&path, cx)
+                                                    },
+                                                );
+                                            },
+                                        );
+                                        return;
+                                    }
                                     confirm::ask(
                                         window,
                                         cx,
@@ -2910,7 +2974,7 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize, oldest: bool) -> An
                     .tooltip(reveal_tip())
                     .on_click({
                         let path = file.path.clone();
-                        move |_, _window, _cx| bigfiles::reveal(&path)
+                        move |_, _window, _cx| finder::reveal(&path)
                     })
                     .into_any_element(),
             ),
@@ -2952,316 +3016,6 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize, oldest: bool) -> An
         .into_any_element()
 }
 
-/// The index query's card: the empty state before the first query, the
-/// header and the rows after it.
-fn big_files_card(state: &ZStatsAppState, scroll: &ScrollHandle) -> AnyElement {
-    if matches!(state.big_files(), BigFiles::Off) {
-        let empty = empty_state(
-            i18n::tr("disk.big_empty_lead"),
-            i18n::tr("disk.big_empty_cost"),
-            i18n::tr("disk.big_hint"),
-            primary_button("bigfiles-start", i18n::tr("disk.big_scan"), |cx| {
-                cx.global::<ZStatsGlobalStore>()
-                    .clone()
-                    .update(cx, |state, cx| state.start_big_files(cx));
-            }),
-        );
-        return tab_card(Vec::new(), empty, scroll);
-    }
-    // A finished listing is twenty rows deep; the ✕ is how you put it
-    // away again — only for a *finished* one, because `mdfind` is spawned
-    // without a cancel and a control that cannot stop what it points at
-    // would be a lie.
-    let answered = matches!(
-        state.big_files(),
-        BigFiles::Ready { .. } | BigFiles::Failed { .. }
-    );
-    let running = matches!(state.big_files(), BigFiles::Running);
-    let label = match state.big_files() {
-        BigFiles::Running => i18n::tr("disk.big_scanning"),
-        BigFiles::Ready { .. } => i18n::tr("disk.big_rescan"),
-        BigFiles::Off | BigFiles::Failed { .. } => i18n::tr("disk.big_scan"),
-    };
-    let controls = h_flex()
-        .flex_none()
-        .items_center()
-        .gap(px(4.))
-        .child(
-            run_chip("bigfiles-scan", label, !running).when(!running, |d| {
-                d.on_click(|_, _window, cx| {
-                    cx.global::<ZStatsGlobalStore>()
-                        .clone()
-                        .update(cx, |state, cx| state.start_big_files(cx));
-                })
-            }),
-        )
-        .when(answered, |row| {
-            row.child(widgets::with_wrap_tooltip(
-                "bigfiles-dismiss-tip",
-                i18n::tr("disk.big_dismiss_hint"),
-                Button::new("bigfiles-dismiss")
-                    .icon(IconName::Close)
-                    .ghost()
-                    .xsmall()
-                    .on_click(|_, _window, cx| {
-                        cx.global::<ZStatsGlobalStore>()
-                            .clone()
-                            .update(cx, |state, cx| state.clear_big_files(cx));
-                    }),
-            ))
-        })
-        .into_any_element();
-    let head = tab_header(
-        // `mdfind -onlyin $HOME`: the query's scope, said as the
-        // analyser and the duplicate search say theirs.
-        i18n::tr("disk.ana_preset_home"),
-        big_files_caption(state),
-        ("big-files-basis", i18n::tr("disk.big_hint")),
-        controls,
-    );
-    let body = div()
-        .px(px(13.))
-        .pb(px(11.))
-        .child(big_files_body(state))
-        .into_any_element();
-    tab_card(vec![head], body, scroll)
-}
-
-/// The threshold the rows clear, how many there are, and what "new"
-/// is measured against.
-fn big_files_caption(state: &ZStatsAppState) -> String {
-    let BigFiles::Ready { scan, added, since } = state.big_files() else {
-        return match state.big_files() {
-            BigFiles::Running => i18n::tr("disk.big_running"),
-            _ => String::new(),
-        };
-    };
-    // The bar describes what the rows actually show — the smallest
-    // displayed PHYSICAL size, floored to a clean step. Quoting the query
-    // threshold here was a lie in both directions: sparse files enter on
-    // logical size and display far below it.
-    let bar = display_bar(scan.files.iter().map(|f| f.size).min().unwrap_or(0));
-    let mut parts = vec![if bar == 0 {
-        t!("disk.big_count_plain", count = scan.total).to_string()
-    } else {
-        t!(
-            "disk.big_count",
-            thr = format::memory(bar),
-            count = scan.total
-        )
-        .to_string()
-    }];
-    if scan.threshold == bigfiles::FALLBACK_THRESHOLD {
-        parts.push(i18n::tr("disk.big_fallback_note"));
-    }
-    if scan.total > scan.files.len() {
-        parts.push(t!("disk.big_shown", shown = scan.files.len()).to_string());
-    }
-    // What "new" means, in the one place it can be checked: the run it
-    // is measured against. Without this the marks would be a claim about
-    // an unnamed past.
-    if let Some(since) = since {
-        parts.push(
-            t!(
-                "disk.big_since",
-                ago = format::ago(since.elapsed().unwrap_or_default())
-            )
-            .to_string(),
-        );
-        if !added.is_empty() {
-            parts.push(t!("disk.big_added", count = added.len()).to_string());
-        }
-    }
-    parts.join(" · ")
-}
-
-fn big_files_body(state: &ZStatsAppState) -> AnyElement {
-    match state.big_files() {
-        // The empty state replaces the card body before the first query.
-        BigFiles::Off | BigFiles::Running => div().into_any_element(),
-        BigFiles::Failed { indexing_off: true } => widgets::note(i18n::tr("disk.big_index_off")),
-        BigFiles::Failed {
-            indexing_off: false,
-        } => widgets::note(i18n::tr("disk.big_failed")),
-        BigFiles::Ready { scan, .. } if scan.files.is_empty() => {
-            widgets::note(i18n::tr("disk.big_none"))
-        }
-        BigFiles::Ready { scan, added, since } => {
-            let since_label = since.map(|t| format::ago(t.elapsed().unwrap_or_default()));
-            let max = scan.files.iter().map(|f| f.size).max().unwrap_or(1).max(1);
-            let home = env::var("HOME").unwrap_or_default();
-            div()
-                .children(scan.files.iter().map(|f| {
-                    big_file_row(
-                        f,
-                        max,
-                        &home,
-                        added
-                            .contains(&f.path)
-                            .then(|| since_label.clone())
-                            .flatten(),
-                    )
-                }))
-                .into_any_element()
-        }
-    }
-}
-
-/// Floor a size to the step a caption can claim with a straight face:
-/// 100 MB granularity above 100 MB (220 → 200), 10 MB in the tens,
-/// 1 MB in the ones. Below 1 MB returns 0 — the caller drops the "≥"
-/// clause entirely rather than round a sparse sliver up into a lie.
-fn display_bar(bytes: u64) -> u64 {
-    const MIB: u64 = 1024 * 1024;
-    let step = if bytes >= 100 * MIB {
-        100 * MIB
-    } else if bytes >= 10 * MIB {
-        10 * MIB
-    } else {
-        MIB
-    };
-    (bytes / step) * step
-}
-
-/// One large file: where it is (the two-part path every row in this
-/// window uses — a bare name made four rows of "snapshot"), whether it
-/// is new since the last listing, its size, Reveal and Trash.
-///
-/// `new_since` carries the baseline's age when this row is one the
-/// previous listing would have shown and did not — the pill says "new",
-/// its tooltip says since when. `None` covers both "was there before"
-/// and "cannot tell", which the caption's absence of a baseline line
-/// already explains.
-fn big_file_row(
-    file: &bigfiles::BigFile,
-    max: u64,
-    home: &str,
-    new_since: Option<String>,
-) -> AnyElement {
-    let key = row_key("bigfile", &file.path);
-    let shown = format::tilde_path(&file.path.display().to_string(), home);
-    let mut full = shown.clone();
-    // Sparse and compressed files qualify by logical size but display
-    // physical — without both figures a "300 MB" row under a "≥ 500 MB"
-    // caption reads as the list breaking its own bar.
-    if format::memory(file.size) != format::memory(file.logical) {
-        full.push_str(" — ");
-        full.push_str(
-            t!(
-                "disk.big_sizes",
-                phys = format::memory(file.size),
-                logical = format::memory(file.logical)
-            )
-            .as_ref(),
-        );
-    }
-    let path = file.path.clone();
-    // The whole location, in the sentence the reader confirms: these are
-    // their files, not caches that rebuild.
-    let confirm_path = shown.clone();
-    v_flex()
-        .id(SharedString::from(format!("{key}-row")))
-        .group(key.clone())
-        .py(px(5.))
-        .child(
-            h_flex()
-                .items_center()
-                .gap(px(ROW_GAP))
-                .child(path_label(
-                    SharedString::from(format!("{key}-name")),
-                    &shown,
-                    full,
-                    ROW_PT,
-                ))
-                .children(new_since.map(|ago| {
-                    // Neutral, like the analyser's pills: accent is for
-                    // over-threshold, and a new file is news, not a
-                    // problem.
-                    row_pill(
-                        SharedString::from(format!("{key}-new")),
-                        i18n::tr("disk.big_new"),
-                        t!("disk.big_new_tip", ago = ago).to_string(),
-                        theme::text_muted(),
-                    )
-                }))
-                // When it last changed — the usual way to decide whether a
-                // big file is still wanted, as on the duplicate rows.
-                .children(file.modified.map(|at| {
-                    let day = format::date(at);
-                    div()
-                        .id(SharedString::from(format!("{key}-modified")))
-                        .flex_none()
-                        .font_family(font::MONO)
-                        .text_size(px(META_PT))
-                        .text_color(theme::text_dim())
-                        .tooltip(widgets::wrap_tooltip(
-                            t!("disk.dup_modified", date = day.clone()).to_string(),
-                        ))
-                        .child(day)
-                }))
-                .child(size_text(file.size))
-                .child(action_slots(
-                    &key,
-                    // Navigation, not an action — no confirm, just Finder
-                    // with the file selected. Left of the destructive
-                    // control, so "look first" comes before "remove".
-                    Some(
-                        Button::new(SharedString::from(format!("{key}-reveal")))
-                            .icon(IconName::Folder)
-                            .ghost()
-                            .xsmall()
-                            .tooltip(reveal_tip())
-                            .on_click({
-                                let path = file.path.clone();
-                                move |_, _window, _cx| bigfiles::reveal(&path)
-                            })
-                            .into_any_element(),
-                    ),
-                    // An explicit control with confirm, and the request is
-                    // Finder's own recoverable move-to-Trash — never a
-                    // direct unlink.
-                    Some(
-                        Button::new(SharedString::from(format!("{key}-trash")))
-                            .icon(CustomIconName::Trash)
-                            .ghost()
-                            .xsmall()
-                            .tooltip(i18n::tr("disk.big_trash"))
-                            .on_click(move |_, window, cx| {
-                                let path = path.clone();
-                                confirm::ask(
-                                    window,
-                                    cx,
-                                    i18n::tr("disk.big_trash_title"),
-                                    t!("disk.big_trash_body", name = confirm_path.clone())
-                                        .to_string(),
-                                    i18n::tr("disk.big_trash_ok"),
-                                    move |cx| {
-                                        let path = path.clone();
-                                        cx.global::<ZStatsGlobalStore>()
-                                            .clone()
-                                            .update(cx, |state, cx| {
-                                                state.trash_big_file(&path, cx)
-                                            });
-                                    },
-                                );
-                            })
-                            .into_any_element(),
-                    ),
-                )),
-        )
-        .child(
-            div()
-                .mt(px(3.))
-                .mr(px(ACTION_SLOT * 2. + ROW_GAP))
-                .child(widgets::meter(
-                    file.size as f32 / max as f32,
-                    meter_ink(),
-                    2.,
-                )),
-        )
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3295,17 +3049,6 @@ mod tests {
         let (hidden, bytes) = expand_hidden(&mixed).expect("two below the floor");
         assert_eq!(hidden, 2);
         assert_eq!(bytes, 1_300_000);
-    }
-
-    #[test]
-    fn display_bar_floors_to_a_clean_step() {
-        const MIB: u64 = 1024 * 1024;
-        assert_eq!(display_bar(220 * MIB), 200 * MIB);
-        assert_eq!(display_bar(1433 * MIB), 1400 * MIB);
-        assert_eq!(display_bar(95 * MIB), 90 * MIB);
-        assert_eq!(display_bar(5 * MIB + 1), 5 * MIB);
-        // Below a megabyte the caption drops its claim instead of lying.
-        assert_eq!(display_bar(500 * 1024), 0);
     }
 
     /// Every clause is a field the plist actually carried; the closing

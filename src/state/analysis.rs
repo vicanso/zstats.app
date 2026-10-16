@@ -6,14 +6,13 @@
 //! Grouped here so a change to either does not mean hunting through
 //! the rest of [`super::ZStatsAppState`].
 
-use crate::bigfiles;
-use crate::bigfiles::BigFilesScan;
 use crate::diskscan::{self, DiffBaseline, ScanEvent, ScanResult, ScanScope};
 use crate::diskwatch::{self, Growth, Report};
+use crate::finder;
 use crate::i18n;
 use crate::prefs;
 use gpui::Context;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,29 +43,27 @@ const GROWTH_CARD_FOR: Duration = diskwatch::CHECK_EVERY;
 pub enum StorageTab {
     #[default]
     Analysis,
-    LargeFiles,
     Duplicates,
 }
 
 impl StorageTab {
-    pub const ALL: [StorageTab; 3] = [
-        StorageTab::Analysis,
-        StorageTab::LargeFiles,
-        StorageTab::Duplicates,
-    ];
+    /// Two since 2026-10-16. "Large files" was a third, asking the
+    /// Spotlight index for files over 500 MB, while the analysis listed
+    /// the big files the index could not see — two lists of big files
+    /// split by an implementation detail. The analysis lists them all
+    /// now, and the tab went.
+    pub const ALL: [StorageTab; 2] = [StorageTab::Analysis, StorageTab::Duplicates];
 
     pub fn index(self) -> usize {
         match self {
             StorageTab::Analysis => 0,
-            StorageTab::LargeFiles => 1,
-            StorageTab::Duplicates => 2,
+            StorageTab::Duplicates => 1,
         }
     }
 
     pub fn label_key(self) -> &'static str {
         match self {
             StorageTab::Analysis => "disk.tab_analysis",
-            StorageTab::LargeFiles => "disk.tab_large",
             StorageTab::Duplicates => "disk.tab_dupes",
         }
     }
@@ -129,36 +126,12 @@ pub enum Expansion {
     Failed,
 }
 
-/// The Hardware tab's one-shot large-file query, same lifecycle shape as
-/// the full process scans: `Off → Running → Ready/Failed`, reset on hide.
-#[derive(Default)]
-pub enum BigFiles {
-    #[default]
-    Off,
-    Running,
-    Ready {
-        scan: BigFilesScan,
-        /// Rows the previous listing would have shown and did not — see
-        /// [`bigfiles::Baseline::is_new`]. Empty when there was nothing
-        /// to compare against, which is not the same as "nothing is new".
-        added: HashSet<PathBuf>,
-        /// When that previous listing was taken. `None` on a first run,
-        /// where marking everything new would say nothing at all.
-        since: Option<SystemTime>,
-    },
-    /// `indexing_off` selects the honest message: a disabled Spotlight
-    /// index would otherwise masquerade as "no big files".
-    Failed {
-        indexing_off: bool,
-    },
-}
-
-/// The store's disk-analysis cluster: the analyser (survives hide) and
-/// the large-file query (reset on hide). Fields stay on the store via
-/// this struct so later analysis work has one place to land.
+/// The store's disk-analysis cluster: the analyser (survives hide), the
+/// window's tab and what its rows have moved to the Trash. Fields stay
+/// on the store via this struct so later analysis work has one place to
+/// land.
 pub(crate) struct Analysis {
     storage_tab: StorageTab,
-    big_files: BigFiles,
     disk_analysis: DiskAnalysis,
     expanded: HashMap<PathBuf, Expansion>,
     expand_runs: u64,
@@ -242,7 +215,6 @@ impl Default for Analysis {
             .map(|result| result.scanned_at);
         Self {
             storage_tab: StorageTab::default(),
-            big_files: BigFiles::default(),
             // A fresh launch opens with the last finished analysis, if
             // one was cached — "see last time's numbers first".
             disk_analysis: (!launch_roots.is_empty())
@@ -297,7 +269,6 @@ impl ZStatsAppState {
                     self.start_disk_analysis(cx);
                 }
             }
-            StorageTab::LargeFiles => self.start_big_files(cx),
             StorageTab::Duplicates => {
                 if !self.dupes_running() {
                     self.start_dupes(cx);
@@ -898,94 +869,26 @@ impl ZStatsAppState {
         out
     }
 
-    // ---- large files ---------------------------------------------------
+    // ---- the Trash -----------------------------------------------------
 
-    pub fn big_files(&self) -> &BigFiles {
-        &self.analysis.big_files
-    }
-
-    /// Run (or re-run) the large-file query on the background executor.
-    pub fn start_big_files(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.analysis.big_files, BigFiles::Running) {
-            return;
-        }
-        self.analysis.big_files = BigFiles::Running;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let scanned = cx
-                .background_executor()
-                .spawn(async { bigfiles::scan() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
-                // Same landing guard as the full scans: a hide mid-query
-                // reset this to Off, and the result must not undo that.
-                if !matches!(state.analysis.big_files, BigFiles::Running) {
-                    return;
-                }
-                state.analysis.big_files = match scanned {
-                    Ok(scan) => {
-                        // Compare first, then rotate: the baseline this
-                        // run is measured against is the one on disk
-                        // before it, and every finished query becomes the
-                        // next one's — so "new" always means "since you
-                        // last looked", with the caption naming when that
-                        // was.
-                        let baseline = bigfiles::load_baseline();
-                        let added = baseline
-                            .as_ref()
-                            .map(|base| {
-                                scan.files
-                                    .iter()
-                                    .filter(|f| base.is_new(f))
-                                    .map(|f| f.path.clone())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let since = baseline.as_ref().map(bigfiles::Baseline::at);
-                        bigfiles::save_baseline(&scan);
-                        BigFiles::Ready { scan, added, since }
-                    }
-                    #[cfg(target_os = "macos")]
-                    Err(bigfiles::ScanError::IndexingOff) => {
-                        BigFiles::Failed { indexing_off: true }
-                    }
-                    Err(bigfiles::ScanError::Other(e)) => {
-                        tracing::error!("large-file query failed: {e}");
-                        BigFiles::Failed {
-                            indexing_off: false,
-                        }
-                    }
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Put the listing away — back to "not asked yet", which is what the
-    /// card shows before the first query. A view action only: the query
-    /// costs seconds to repeat, and the stored baseline stays, so the
-    /// next listing can still say what it added. Nothing on disk moves.
-    pub fn clear_big_files(&mut self, cx: &mut Context<Self>) {
-        self.analysis.big_files = BigFiles::Off;
-        cx.notify();
-    }
-
-    /// The delete button's confirmed action: move to the Trash, then drop
-    /// the row. A failed trash leaves the row — a file that is still there
-    /// must not vanish from the list.
-    pub fn trash_big_file(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if let Err(e) = bigfiles::trash(path) {
+    /// A big file's confirmed move to the Trash, from the analysis card:
+    /// Finder's own move, then the row goes — from the result on screen
+    /// and the cache that restores it. A failed move leaves the row: a
+    /// file still on disk must not vanish from the list. Only the row is
+    /// touched; the folders above it keep their scanned totals, with
+    /// `scanned_at` as the staleness boundary, as for the caches.
+    pub fn trash_analysis_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Err(e) = finder::trash(path) {
             tracing::warn!("trash {}: {e}", path.display());
             return;
         }
-        if let BigFiles::Ready { scan, added, .. } = &mut self.analysis.big_files {
-            if let Some(file) = scan.files.iter().find(|f| f.path == path) {
-                self.analysis.trashed = self.analysis.trashed.saturating_add(file.size);
+        let analysis = &mut self.analysis;
+        if let DiskAnalysis::Ready(result) = &mut analysis.disk_analysis {
+            if let Some(file) = result.files.iter().find(|f| f.path == path) {
+                analysis.trashed = analysis.trashed.saturating_add(file.bytes);
             }
-            scan.files.retain(|f| f.path != path);
-            scan.total = scan.total.saturating_sub(1);
-            added.remove(path);
+            result.files.retain(|f| f.path != path);
+            diskscan::resave_if_cached(result);
         }
         cx.notify();
     }
@@ -1009,7 +912,7 @@ impl ZStatsAppState {
     pub fn trash_regenerable(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let mut gone: Vec<&PathBuf> = Vec::new();
         for path in paths {
-            match bigfiles::trash(path) {
+            match finder::trash(path) {
                 Ok(()) => gone.push(path),
                 Err(e) => tracing::warn!("trash {}: {e}", path.display()),
             }
@@ -1039,8 +942,8 @@ impl ZStatsAppState {
         let prune = |result: &mut diskscan::ScanResult| {
             result.regenerable.retain(|h| !gone.contains(&&h.path));
             // A dominance chase can land the same tree in the directory
-            // table, and blind-spot files inside a trashed tree went with
-            // it — those rows would dangle.
+            // table, and big files inside a trashed tree went with it —
+            // those rows would dangle.
             result.dirs.retain(|h| !gone.contains(&&h.path));
             result
                 .files
@@ -1069,16 +972,14 @@ impl ZStatsAppState {
         cx.notify();
     }
 
-    /// A freshly built disk-space window starts without yesterday's
-    /// index query, and with the dirs table folded back to its default
-    /// length. Only on a *new* window: raising one that is already open
+    /// A freshly built disk-space window starts with the suggestions
+    /// and the dirs table folded back to their default length. Only on a *new* window: raising one that is already open
     /// must not wipe what its owner is reading.
     ///
     /// The analysis result itself survives on purpose — it costs minutes
     /// to produce and is cached to disk across restarts; the caption says
     /// how old it is.
     pub fn reset_storage_views(&mut self, cx: &mut Context<Self>) {
-        self.analysis.big_files = BigFiles::Off;
         self.analysis.analysis_show_all_sugs = false;
         self.analysis.analysis_exclude_open = false;
         // Opened rows are questions too — a window opened tomorrow should

@@ -23,7 +23,6 @@ mod assetinfo;
 mod assets;
 mod autostart;
 mod awake;
-mod bigfiles;
 mod cachepreset;
 mod cleanhints;
 mod confirm;
@@ -32,6 +31,7 @@ mod diskwatch;
 #[cfg(target_os = "macos")]
 mod dock;
 mod dupes;
+mod finder;
 mod font;
 mod format;
 mod fullscan;
@@ -70,6 +70,7 @@ use crate::assets::Assets;
 use crate::placement::{MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 use std::cell::Cell;
+use std::fs;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -252,7 +253,6 @@ actions!(
         GoTab7,
         StorageTab1,
         StorageTab2,
-        StorageTab3,
         StorageRerun,
     ]
 );
@@ -1477,7 +1477,7 @@ struct StorageWindow {
     /// One per tab (`StorageTab::index`): switching to Duplicates and
     /// back must not lose your place halfway down the analysis. Each
     /// drives the scroll inside that tab's card, not the window body.
-    scrolls: [ScrollHandle; 3],
+    scrolls: [ScrollHandle; 2],
     /// Where a directory to leave out of the analysis is typed.
     /// Committed on Enter, never on a keystroke — half a path is a path
     /// that excludes the wrong thing.
@@ -1527,11 +1527,7 @@ impl StorageWindow {
         window.focus(&focus_handle, cx);
         Self {
             focus_handle,
-            scrolls: [
-                ScrollHandle::new(),
-                ScrollHandle::new(),
-                ScrollHandle::new(),
-            ],
+            scrolls: [ScrollHandle::new(), ScrollHandle::new()],
             exclude_input,
             map_box: Rc::new(Cell::new(None)),
         }
@@ -1568,9 +1564,6 @@ impl Render for StorageWindow {
                 go_storage_tab(cx, state::StorageTab::Analysis);
             }))
             .on_action(cx.listener(|_, _: &StorageTab2, _window, cx| {
-                go_storage_tab(cx, state::StorageTab::LargeFiles);
-            }))
-            .on_action(cx.listener(|_, _: &StorageTab3, _window, cx| {
                 go_storage_tab(cx, state::StorageTab::Duplicates);
             }))
             .on_action(cx.listener(|_, _: &StorageRerun, _window, cx| {
@@ -2320,7 +2313,6 @@ fn main() {
             // `secondary-` for the panel's reason above.
             KeyBinding::new("secondary-1", StorageTab1, Some("StorageWindow")),
             KeyBinding::new("secondary-2", StorageTab2, Some("StorageWindow")),
-            KeyBinding::new("secondary-3", StorageTab3, Some("StorageWindow")),
             KeyBinding::new("secondary-r", StorageRerun, Some("StorageWindow")),
         ]);
         install_menus(cx);
@@ -2344,6 +2336,12 @@ fn main() {
         cx.background_executor()
             .spawn(async { updater::sweep_installer_mounts() })
             .detach();
+
+        // The Large files tab's last listing, kept so the next one could
+        // mark what it added. Nothing reads it since the tab went
+        // (2026-10-16); here rather than in the store, whose constructor
+        // the unit tests run against the real home.
+        let _ = fs::remove_file(zstats::settings::default_dir().join("bigfiles.toml"));
 
         // Release builds start with no window at all — the app lives in the
         // tray until the icon is clicked, and deliberately does not

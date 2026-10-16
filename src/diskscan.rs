@@ -33,8 +33,8 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
-/// Files worth a row of their own; everything smaller folds into its
-/// directory's total.
+/// Files worth a row of their own — the analysis card's Large files;
+/// everything smaller folds into its directory's total.
 pub const BIG_FILE_IN_TREE: u64 = 50 * 1024 * 1024;
 /// A directory whose single child holds at least this share is
 /// represented by that child — chased to the first real fork.
@@ -136,6 +136,10 @@ pub struct DirHit {
 pub struct FileHit {
     pub path: PathBuf,
     pub bytes: u64,
+    /// Last modified — whether a big file is still wanted is decided by
+    /// when it last changed far more often than by how big it is.
+    /// `None` when the file system would not say.
+    pub modified: Option<SystemTime>,
 }
 
 pub struct ScanResult {
@@ -174,7 +178,10 @@ pub struct ScanResult {
     /// The root's level-1 breakdown, each entry chased through dominant
     /// chains to its first fork.
     pub dirs: Vec<DirHit>,
-    /// Walk-only big files (Spotlight blind spots), largest first.
+    /// Every file of at least [`BIG_FILE_IN_TREE`] the walk met outside
+    /// a folded tree, largest first. Empty for a result restored from a
+    /// cache written before the walk kept them all
+    /// ([`CACHE_FILES_ALL`]).
     pub files: Vec<FileHit>,
     /// The one-click cleanup set: every signature-checked CACHEDIR.TAG
     /// tree plus every hint-trashable cache directory, nested entries
@@ -217,7 +224,7 @@ impl ScanResult {
 
 /// What survives a finished scan for instant drill-downs: subtree totals
 /// for every directory that cleared `INDEX_FLOOR` (plus all fold roots),
-/// the fold classifications, and the full blind-spot file list. A few
+/// the fold classifications, and the full list of big files. A few
 /// thousand entries — low MBs — deliberately not the tree; folded
 /// interiors were never recorded and still take a live walk.
 pub struct DirIndex {
@@ -650,8 +657,17 @@ fn run(
             if let Some(owner) = owner {
                 *own_bytes.entry(owner).or_default() += bytes;
             }
-            if folded.is_none() && bytes >= BIG_FILE_IN_TREE && in_blind_spot(&path) {
-                files.push(FileHit { path, bytes });
+            // Every big file, wherever it sits. These were only the ones
+            // Spotlight could not see (dot-paths, ~/Library) while a tab of
+            // their own asked the index for the rest: two lists of big
+            // files, split by an implementation detail, at two bars and in
+            // two units. The walk has seen every file anyway.
+            if folded.is_none() && bytes >= BIG_FILE_IN_TREE {
+                files.push(FileHit {
+                    path,
+                    bytes,
+                    modified: meta.modified().ok(),
+                });
             }
         }
     }
@@ -737,7 +753,7 @@ fn snapshot(agg: Aggregates) -> ScanResult {
     } else {
         Vec::new()
     };
-    // The index keeps the FULL blind-spot file list; the retention cap
+    // The index keeps the FULL big-file list; the retention cap
     // below only trims what a card (after "show more") can show.
     let index = build_index.then(|| {
         Arc::new(DirIndex::new(
@@ -1009,6 +1025,12 @@ fn tables(
 const PERSIST_SUGGESTIONS: usize = 500;
 const CACHE_VERSION: i64 = 1;
 
+/// Written beside a cache's file rows once the walk kept every big
+/// file rather than only Spotlight's blind spots. Not a version bump: a
+/// bump would throw away the whole cached result and its Δ baseline for
+/// one table that the next walk refills.
+const CACHE_FILES_ALL: &str = "files_all";
+
 fn cache_dir() -> PathBuf {
     zstats::settings::default_dir().join("diskscan")
 }
@@ -1239,6 +1261,7 @@ fn serialise(result: &ScanResult) -> String {
         "dir".into(),
         Value::Array(result.dirs.iter().map(dir_row).collect()),
     );
+    doc.insert(CACHE_FILES_ALL.into(), Value::Boolean(true));
     doc.insert(
         "file".into(),
         Value::Array(
@@ -1249,6 +1272,13 @@ fn serialise(result: &ScanResult) -> String {
                     let mut t = Table::new();
                     t.insert("path".into(), Value::String(f.path.display().to_string()));
                     t.insert("bytes".into(), clamp(f.bytes));
+                    if let Some(secs) = f
+                        .modified
+                        .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                    {
+                        t.insert("modified_unix".into(), clamp(secs));
+                    }
                     Value::Table(t)
                 })
                 .collect(),
@@ -1350,15 +1380,28 @@ fn load_cache_file(path: &Path, roots: &[PathBuf]) -> Option<ScanResult> {
             })
             .unwrap_or_default()
     };
+    // A cache from before the walk kept every big file lists only the
+    // ones Spotlight could not see, and under the card's "Large files"
+    // that would read as the whole answer. Dropped: the section stays
+    // away until the next walk — the daily check's, at the latest.
+    let files_all = doc
+        .get(CACHE_FILES_ALL)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
     let files = doc
         .get("file")
         .and_then(toml::Value::as_array)
+        .filter(|_| files_all)
         .map(|rows| {
             rows.iter()
                 .filter_map(|row| {
                     Some(FileHit {
                         path: PathBuf::from(row.get("path")?.as_str()?),
                         bytes: row.get("bytes")?.as_integer()?.max(0) as u64,
+                        modified: row
+                            .get("modified_unix")
+                            .and_then(toml::Value::as_integer)
+                            .map(|secs| UNIX_EPOCH + Duration::from_secs(secs.max(0) as u64)),
                     })
                 })
                 .collect()
@@ -1509,18 +1552,6 @@ pub(crate) fn has_cache_tag(dir: &Path) -> bool {
         return false;
     };
     bytes.starts_with(CACHE_TAG_SIGNATURE)
-}
-
-/// Spotlight cannot have reported this path: a dot-component, or under
-/// ~/Library. A path approximation on purpose — asking mdls per file is a
-/// subprocess per row, and the error direction here is listing more, not
-/// missing.
-fn in_blind_spot(path: &Path) -> bool {
-    path.components().any(|c| {
-        c.as_os_str()
-            .to_str()
-            .is_some_and(|s| s.starts_with('.') && s.len() > 1)
-    }) || env::var("HOME").is_ok_and(|h| path.starts_with(Path::new(&h).join("Library")))
 }
 
 pub(crate) fn is_dataless(meta: &fs::Metadata) -> bool {
@@ -1748,6 +1779,7 @@ mod tests {
         let files = vec![FileHit {
             path: p("/r/Library/Logs/huge.log"),
             bytes: mb(60),
+            modified: None,
         }];
         let parent = ScanResult {
             root: p("/r"),
@@ -1793,7 +1825,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(lib.regenerable.len(), 1, "the tagged tree stays listed");
-        assert_eq!(lib.files.len(), 1, "blind-spot files follow the root");
+        assert_eq!(lib.files.len(), 1, "big files follow the root");
         assert!(lib.index.is_some(), "deeper drills stay instant");
 
         // A folded leaf's interior was never recorded; a corner below the
@@ -1908,6 +1940,7 @@ mod tests {
             files: vec![FileHit {
                 path: p("/r/.blob"),
                 bytes: 30,
+                modified: Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             }],
             suggestions: vec![DirHit {
                 path: p("/r/cache"),
@@ -1932,8 +1965,21 @@ mod tests {
         assert_eq!(loaded.dirs[0].asset, result.dirs[0].asset);
         assert!(loaded.regenerable[0].asset.is_none());
         assert_eq!(loaded.files[0].bytes, 30);
+        assert_eq!(loaded.files[0].modified, result.files[0].modified);
         assert_eq!(loaded.suggestions.len(), 1);
         assert!(loaded.index.is_none(), "the drill index is never persisted");
+
+        // A cache written before the walk kept every big file listed only
+        // Spotlight's blind spots; under "Large files" that list would
+        // read as the whole answer, so it is dropped and the rest kept.
+        let path = cache_path_in(&dir, &[p("/r")]);
+        let old = fs::read_to_string(&path)
+            .unwrap()
+            .replace(&format!("{CACHE_FILES_ALL} = true"), "");
+        fs::write(&path, old).unwrap();
+        let older = load_cache_in(&dir, &[p("/r")]).expect("still a result");
+        assert!(older.files.is_empty());
+        assert_eq!(older.dirs.len(), loaded.dirs.len());
 
         // A different root must never read someone else's file.
         assert!(load_cache_in(&dir, &[p("/other")]).is_none());
@@ -1978,6 +2024,7 @@ mod tests {
             files: vec![FileHit {
                 path: p("/r/.blob"),
                 bytes: 30,
+                modified: Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
             }],
             suggestions: vec![],
             index: None,

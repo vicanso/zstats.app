@@ -10,8 +10,8 @@
 //! folder — the common case once someone is tidying — is seconds.
 
 use super::ZStatsAppState;
-use crate::bigfiles;
 use crate::dupes::{self, DupeEvent, DupeResult, DupeScope};
+use crate::finder;
 use gpui::Context;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -235,7 +235,7 @@ impl ZStatsAppState {
             .find(|f| f.path == path)
             .filter(|f| f.frees())
             .map_or(0, |f| f.bytes);
-        if let Err(e) = bigfiles::trash(path) {
+        if let Err(e) = finder::trash(path) {
             tracing::warn!("trash {}: {e}", path.display());
             return;
         }
