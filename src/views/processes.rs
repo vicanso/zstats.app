@@ -9,6 +9,7 @@
 use super::alerts::{BarSource, InForce, Resolved};
 use super::widgets;
 use crate::confirm;
+use crate::diskwatch::Hold;
 use crate::font;
 use crate::format;
 use crate::i18n;
@@ -28,6 +29,7 @@ use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::process;
+use std::time::Instant;
 use zstats::Tick;
 use zstats::snapshot::{Capabilities, ProcessSnapshot};
 
@@ -126,6 +128,20 @@ const HOT_PERCENT: f64 = 100.0;
 /// untouched, and the sustained watcher still notifies on its own terms.
 pub(super) fn is_hot(cpu: f64, sustained: bool) -> bool {
     cpu > HOT_PERCENT || sustained
+}
+
+/// Whether `pid` is this app and its CPU the daily disk check's
+/// (`diskwatch::explains_own_cpu`) — while it walks and for the engine's
+/// averaging tail after. That row, or this app's tree, then keeps the
+/// ink whatever [`is_hot`] says. The engine's report about that CPU is
+/// dropped as not news for the same window (`state::alerts::keep_alert`),
+/// and a red row said what the dropped banner would have: the colour of
+/// an alert on a page with none, for housekeeping the badge beside it
+/// names (`disk_check_badge`). Same narrowness as the alert's gate —
+/// this pid only, the scheduled check only — and the same cost: a real
+/// runaway of ours that starts in that window is not painted.
+pub(super) fn own_check_cpu(pid: u32, state: &ZStatsAppState) -> bool {
+    pid == process::id() && state.disk_check_explains_cpu(Instant::now())
 }
 
 /// Header plus caveat above the list: [`LIST_HEADER`] (39.5) and 34 for
@@ -530,7 +546,7 @@ fn process_row(
     parent_name: Option<&str>,
 ) -> AnyElement {
     let sustained = state.sustained_load(p.pid);
-    let hot = is_hot(cpu, sustained.is_some());
+    let hot = is_hot(cpu, sustained.is_some()) && !own_check_cpu(p.pid, state);
     // `Default` is `current()`, so a row painted before the first tick
     // reads this build's own capabilities — never a false "unsupported".
     let caps = state
@@ -630,9 +646,7 @@ fn process_row(
                                             }),
                                     )
                                     .when(is_self, |d| d.child(this_app_badge()))
-                                    .when(is_self && state.disk_check_running(), |d| {
-                                        d.child(disk_check_badge(state.disk_check_held().is_some()))
-                                    })
+                                    .when(is_self, |d| d.children(disk_check_badge(state)))
                                     .children(sustained.map(|dur| {
                                         // This never trips the alert — that asks
                                         // whether it is over the line right now,
@@ -1337,27 +1351,35 @@ fn this_app_badge() -> AnyElement {
     pill(i18n::tr("processes.this_app"), false)
 }
 
-/// What this app's row says while the daily disk check walks
-/// (`diskwatch`): that the core it is using is housekeeping, which, and
-/// where it is turned off. The check starts while nobody is looking, so
-/// its processor time was found afterwards — a zstats row at a whole
-/// core here, a tall bar in History — with nothing beside it to say
-/// whose it was. "Paused" while it holds still for a busy or unplugged
-/// Mac, so a quiet row under the badge does not read as a stalled one.
-pub(super) fn disk_check_badge(held: bool) -> AnyElement {
-    div()
-        .id("disk-check-badge")
-        .flex_none()
-        .tooltip(widgets::wrap_tooltip(i18n::tr("processes.disk_check_tip")))
-        .child(pill(
-            i18n::tr(if held {
-                "processes.disk_check_held"
-            } else {
-                "processes.disk_check"
-            }),
-            false,
-        ))
-        .into_any_element()
+/// What this app's row says while the daily disk check is in flight
+/// (`diskwatch`), `None` the rest of the time: that the core it is
+/// using is housekeeping, which, and where it is turned off. The check
+/// starts while nobody is looking, so its processor time was found
+/// afterwards — a zstats row at a whole core here, a tall bar in
+/// History — with nothing beside it to say whose it was.
+///
+/// While it holds still the badge says what it is waiting for (power,
+/// a quiet machine — the disk window's own reasons), so a quiet row
+/// under it does not read as a stalled one. It said "Disk check paused"
+/// for a day, which told the reader neither who had paused it nor
+/// whether anything would bring it back, and read as a fault.
+pub(super) fn disk_check_badge(state: &ZStatsAppState) -> Option<AnyElement> {
+    if !state.disk_check_running() {
+        return None;
+    }
+    let label = match state.disk_check_held() {
+        None => "processes.disk_check",
+        Some(Hold::OnBattery) => "processes.disk_check_power",
+        Some(Hold::Busy) => "processes.disk_check_quiet",
+    };
+    Some(
+        div()
+            .id("disk-check-badge")
+            .flex_none()
+            .tooltip(widgets::wrap_tooltip(i18n::tr("processes.disk_check_tip")))
+            .child(pill(i18n::tr(label), false))
+            .into_any_element(),
+    )
 }
 
 fn avg_chip() -> AnyElement {

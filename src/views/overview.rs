@@ -872,7 +872,8 @@ fn top_apps(state: &ZStatsAppState, rows: usize) -> AnyElement {
         .children(rows.into_iter().enumerate().map(|(i, (g, delta))| {
             // Burst only: a tree has no sustained flag of its own, and
             // walking members here would make Overview a second Apps tab.
-            let hot = processes::is_hot(f64::from(g.cpu_usage_percent), false);
+            let hot = processes::is_hot(f64::from(g.cpu_usage_percent), false)
+                && !processes::own_check_cpu(g.root_pid, state);
             let root_pid = g.root_pid;
             // Face, not [`trend::tree_key`]: a login compile shows as
             // cargo, a compile in Zed's terminal as `Zed · cargo`. The

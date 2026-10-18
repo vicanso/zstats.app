@@ -892,8 +892,10 @@ impl ZStatsAppState {
     }
 
     /// Whether this process's CPU is the daily check's doing right now
-    /// (`diskwatch::explains_own_cpu`).
-    pub(super) fn disk_check_explains_cpu(&self, now: Instant) -> bool {
+    /// (`diskwatch::explains_own_cpu`): the window a CPU alert about us
+    /// is dropped in, and the one this app's rows keep their ink in
+    /// (`processes::own_check_cpu`).
+    pub fn disk_check_explains_cpu(&self, now: Instant) -> bool {
         diskwatch::explains_own_cpu(
             self.analysis.watch_cancel.is_some(),
             self.analysis.watch_ended,

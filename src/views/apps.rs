@@ -367,45 +367,54 @@ fn app_row(
     sort: AppSort,
     bar_full: f32,
 ) -> AnyElement {
-    let hot = g.cpu_usage_percent > HOT_PERCENT;
+    let hot = g.cpu_usage_percent > HOT_PERCENT && !processes::own_check_cpu(g.root_pid, state);
     let expanded = state.selected_app() == Some(g.root_pid);
     let root_pid = g.root_pid;
     let face = face_of(g, state);
     let mark = widgets::app_mark(root_pid, &g.name, &face.title);
 
-    let mut row =
-        v_flex()
-            .id(("app", root_pid as usize))
-            .w_full()
-            .px(px(widgets::CARD_PAD))
-            // Same rhythm as a process row, meter included — the two lists
-            // used to disagree about whether a ranking has a trough. The
-            // share, the fixed height and the hairline over the row are
-            // that row's too (`processes::process_row`).
-            .py(px(slot.pad(processes::ROW_PAD)))
-            .flex_none()
-            .when_some(slot.height().filter(|_| !expanded), |d, h| d.h(px(h)))
-            .when(slot.index != 0, |d| {
-                d.border_t(px(1.)).border_color(theme::border_subtle())
-            })
-            .when(expanded, |d| d.bg(theme::surface_raised()))
-            .hover(|d| d.bg(theme::surface_raised()))
-            // The app's own icon, or its letter, beside the two lines it
-            // names; the meter under all three keeps the row's full width.
-            .child(
-                h_flex().items_start().gap(px(10.)).child(mark).child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            h_flex()
-                                .items_baseline()
-                                .justify_between()
-                                .gap(px(8.))
-                                // The name takes the slack, so the figure
-                                // keeps the right edge on every row.
-                                .child(div().flex_1().min_w_0().child(
-                                    widgets::truncating_name_tailed(
+    let mut row = v_flex()
+        .id(("app", root_pid as usize))
+        .w_full()
+        .px(px(widgets::CARD_PAD))
+        // Same rhythm as a process row, meter included — the two lists
+        // used to disagree about whether a ranking has a trough. The
+        // share, the fixed height and the hairline over the row are
+        // that row's too (`processes::process_row`).
+        .py(px(slot.pad(processes::ROW_PAD)))
+        .flex_none()
+        .when_some(slot.height().filter(|_| !expanded), |d, h| d.h(px(h)))
+        .when(slot.index != 0, |d| {
+            d.border_t(px(1.)).border_color(theme::border_subtle())
+        })
+        .when(expanded, |d| d.bg(theme::surface_raised()))
+        .hover(|d| d.bg(theme::surface_raised()))
+        // The app's own icon, or its letter, beside the two lines it
+        // names; the meter under all three keeps the row's full width.
+        .child(
+            h_flex().items_start().gap(px(10.)).child(mark).child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        h_flex()
+                            .items_baseline()
+                            .justify_between()
+                            .gap(px(8.))
+                            // The name takes the slack, so the figure
+                            // keeps the right edge on every row. This
+                            // app's own tree wears the disk check's
+                            // badge beside it while the check is its
+                            // work — on this line, because the one
+                            // under it is full of figures and cut
+                            // "1 process" to "1 p…".
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .items_baseline()
+                                    .gap(px(6.))
+                                    .child(div().min_w_0().child(widgets::truncating_name_tailed(
                                         ("app-name", root_pid as usize),
                                         // Bundle name, or a bare tree's job
                                         // (`cargo` instead of `login`); an app
@@ -420,82 +429,75 @@ fn app_row(
                                         12.,
                                         gpui::FontWeight::MEDIUM,
                                         Hsla::from(theme::text()),
+                                    )))
+                                    .when(root_pid == process::id(), |d| {
+                                        d.children(processes::disk_check_badge(state))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_features(font::tnum())
+                                    .text_size(px(13.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::text_for(hot))
+                                    .child(format::pct_col(g.cpu_usage_percent)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .mt(px(3.))
+                            .text_size(px(10.))
+                            // What opens, and the mark that says it
+                            // does (`widgets::expand_mark`).
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap(px(3.))
+                                    .child(widgets::expand_mark(expanded))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(theme::text_dim())
+                                            .child(tree_meta(g, ambiguous)),
                                     ),
-                                ))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .font_features(font::tnum())
-                                        .text_size(px(13.))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme::text_for(hot))
-                                        .child(format::pct_col(g.cpu_usage_percent)),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(8.))
-                                .mt(px(3.))
-                                .text_size(px(10.))
-                                // What opens, and the mark that says it
-                                // does (`widgets::expand_mark`).
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .items_center()
-                                        .gap(px(3.))
-                                        .child(widgets::expand_mark(expanded))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_color(theme::text_dim())
-                                                .child(tree_meta(g, ambiguous)),
-                                        )
-                                        // This app's own tree, while the
-                                        // daily disk check is its work.
-                                        .when(
-                                            root_pid == process::id() && state.disk_check_running(),
-                                            |d| {
-                                                d.child(processes::disk_check_badge(
-                                                    state.disk_check_held().is_some(),
-                                                ))
-                                            },
-                                        ),
-                                )
-                                // Memory last and in the text ink: it is the
-                                // figure the row is read for, and the
-                                // rightmost spot is what lets the eye run
-                                // down it as a column (`io_mem_line` says
-                                // why). IO stays muted beside it — it comes
-                                // and goes.
-                                .child(
-                                    h_flex()
-                                        .flex_none()
-                                        .gap(px(4.))
-                                        .font_features(font::tnum())
-                                        .text_size(px(9.5))
-                                        .text_color(theme::text_muted())
-                                        .children(
-                                            io_line(g.read_bytes_per_sec, g.write_bytes_per_sec)
-                                                .map(|io| format!("{io} ·")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(theme::text())
-                                                .child(format::memory(shown_memory(g))),
-                                        ),
-                                ),
-                        ),
-                ),
-            )
-            .child(div().mt(px(4.)).child(widgets::meter(
-                bar_fraction(sort, g, bar_full),
-                Hsla::from(theme::fill_for(hot)),
-                3.,
-            )));
+                            )
+                            // Memory last and in the text ink: it is the
+                            // figure the row is read for, and the
+                            // rightmost spot is what lets the eye run
+                            // down it as a column (`io_mem_line` says
+                            // why). IO stays muted beside it — it comes
+                            // and goes.
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .gap(px(4.))
+                                    .font_features(font::tnum())
+                                    .text_size(px(9.5))
+                                    .text_color(theme::text_muted())
+                                    .children(
+                                        io_line(g.read_bytes_per_sec, g.write_bytes_per_sec)
+                                            .map(|io| format!("{io} ·")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(theme::text())
+                                            .child(format::memory(shown_memory(g))),
+                                    ),
+                            ),
+                    ),
+            ),
+        )
+        .child(div().mt(px(4.)).child(widgets::meter(
+            bar_fraction(sort, g, bar_full),
+            Hsla::from(theme::fill_for(hot)),
+            3.,
+        )));
 
     if expanded {
         row = row.child(expand_block(g, state));

@@ -47,7 +47,9 @@
 //! bar. (A lower QoS class does not change that, only how long it lasts
 //! — see `diskscan::lower_this_thread`.) The panel says so on this
 //! app's own row while it walks (`processes::disk_check_badge`), where
-//! that core is seen. On the
+//! that core is seen, and keeps that row in ink for the same window the
+//! alert is dropped in (`processes::own_check_cpu`) — red there was the
+//! dropped banner's message, delivered by colour. On the
 //! installed app (2026-10-04 to 06) every check drew a banner naming
 //! zstats about two minutes in, and the one that ran past half an hour
 //! drew the engine's 30-minute reminder as well — the app interrupting
