@@ -135,8 +135,11 @@ const PRESSURE_CRITICAL: u32 = 4;
 enum Notice {
     /// The menu bar is on memory ([`ZStatsAppState::memory_needs_attention`]).
     Memory,
-    /// The menu bar is on a disk ([`ZStatsAppState::disk_needs_attention`]).
-    Disk,
+    /// The menu bar is on a disk ([`ZStatsAppState::disk_needs_attention`]);
+    /// `critical` once zstats has reported it under its critical line —
+    /// "almost full" and "almost out of space" are different news
+    /// (zstats 0.7.2 reports the second as its own, Critical, alert).
+    Disk { critical: bool },
     /// Live alert cards that do not turn the menu bar: `count` of them,
     /// the newest named.
     Alerts { count: usize, latest: String },
@@ -151,6 +154,8 @@ enum Notice {
 struct Signs {
     memory: bool,
     disk: bool,
+    /// The disk news is zstats' Critical report.
+    disk_critical: bool,
     /// Subjects of the live alert cards, newest first.
     alerts: Vec<String>,
     busy: Vec<String>,
@@ -181,7 +186,9 @@ fn notice(signs: Signs) -> Option<Notice> {
         return Some(Notice::Memory);
     }
     if signs.disk {
-        return Some(Notice::Disk);
+        return Some(Notice::Disk {
+            critical: signs.disk_critical,
+        });
     }
     if let Some(latest) = signs.alerts.first() {
         return Some(Notice::Alerts {
@@ -207,6 +214,7 @@ fn signs(state: &ZStatsAppState) -> Signs {
     Signs {
         memory: state.memory_is_news(),
         disk: state.disk_is_news(),
+        disk_critical: state.disk_news_is_critical(),
         alerts: state
             .alerts()
             .iter()
@@ -250,7 +258,7 @@ fn notice_row(state: &ZStatsAppState) -> Option<AnyElement> {
     let notice = notice(signs(state))?;
     // (the dot, its halo, the row's fill)
     let (dot, halo, fill) = match notice {
-        Notice::Memory | Notice::Disk | Notice::Alerts { .. } => (
+        Notice::Memory | Notice::Disk { .. } | Notice::Alerts { .. } => (
             theme::accent_light(),
             theme::accent_wash(18),
             theme::accent_wash(10),
@@ -259,7 +267,8 @@ fn notice_row(state: &ZStatsAppState) -> Option<AnyElement> {
     };
     let sentence = match notice {
         Notice::Memory => i18n::tr("overview.status_memory"),
-        Notice::Disk => i18n::tr("overview.status_disk"),
+        Notice::Disk { critical: false } => i18n::tr("overview.status_disk"),
+        Notice::Disk { critical: true } => i18n::tr("overview.status_disk_critical"),
         Notice::Alerts { count: 1, latest } => {
             t!("overview.status_alert", name = latest).to_string()
         }
@@ -2822,6 +2831,7 @@ mod tests {
         let everything = || Signs {
             memory: true,
             disk: true,
+            disk_critical: false,
             alerts: names(&["Google Chrome", "Zed"]),
             busy: names(&["mds"]),
             growing: names(&["Slack"]),
@@ -2832,7 +2842,16 @@ mod tests {
                 memory: false,
                 ..everything()
             }),
-            Some(Notice::Disk)
+            Some(Notice::Disk { critical: false })
+        );
+        // The second report of a filling volume says it is running out.
+        assert_eq!(
+            notice(Signs {
+                memory: false,
+                disk_critical: true,
+                ..everything()
+            }),
+            Some(Notice::Disk { critical: true })
         );
         // Newest first: the count is the list, the name its head.
         assert_eq!(

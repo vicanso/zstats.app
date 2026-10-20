@@ -273,11 +273,15 @@ fn detail_of(detail: &AlertDetail) -> Value {
             threshold_percent,
             available_bytes,
             total_bytes,
+            critical_below_bytes,
         } => json!({
             "used_percent": used_percent,
             "threshold_percent": threshold_percent,
             "available_bytes": available_bytes,
             "total_bytes": total_bytes,
+            // zstats 0.7.2's critical line, as free space; `level` is
+            // `critical` once `available_bytes` is under it.
+            "critical_below_bytes": critical_below_bytes,
         }),
         AlertDetail::Pressure {
             level,
@@ -648,6 +652,7 @@ mod tests {
                 threshold_percent: 90.0,
                 available_bytes: 30 << 30,
                 total_bytes: 494 << 30,
+                critical_below_bytes: 10 << 30,
             },
             repeat_after: None,
         };
@@ -655,6 +660,18 @@ mod tests {
         assert_eq!((notice.category, notice.level), ("disk", "warning"));
         assert_eq!(notice.subject["mount_point"], "/");
         assert_eq!(notice.detail["available_bytes"], 30u64 << 30);
+        assert_eq!(notice.detail["critical_below_bytes"], 10u64 << 30);
+
+        // Under its critical line the same volume is zstats' Critical.
+        let mut almost_out = disk.clone();
+        if let AlertDetail::Disk {
+            available_bytes, ..
+        } = &mut almost_out.detail
+        {
+            *available_bytes = 4 << 30;
+        }
+        let notice = Notice::alert(&almost_out, "t", "s", "m");
+        assert_eq!((notice.category, notice.level), ("disk", "critical"));
     }
 
     #[test]

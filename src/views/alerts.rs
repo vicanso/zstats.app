@@ -440,7 +440,7 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
             d.child(
                 div()
                     .mt(px(4.))
-                    .child(widgets::note(i18n::tr(advice_key(seen.event.kind())))),
+                    .child(widgets::note(i18n::tr(advice_key(&seen.event)))),
             )
         })
         .children(consumer_rows(i, &seen.event, seen.live))
@@ -457,12 +457,15 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
 }
 
 /// The one thing a reader can do about each kind of alert. Keyed on
-/// the kind zstats reported and nothing else: this is copy, not a
-/// second opinion about the condition.
-fn advice_key(kind: AlertKind) -> &'static str {
-    match kind {
+/// the kind and severity zstats reported and nothing else: this is
+/// copy, not a second opinion about the condition. A disk at its
+/// critical line gets its own: "have a look when you can" is the wrong
+/// sentence under "almost out of space".
+fn advice_key(event: &AlertEvent) -> &'static str {
+    match event.kind() {
         AlertKind::Cpu | AlertKind::AppCpu => "alerts.do_cpu",
         AlertKind::Memory | AlertKind::AppMemory => "alerts.do_mem",
+        AlertKind::Disk if event.severity() == Severity::Critical => "alerts.do_disk_critical",
         AlertKind::Disk => "alerts.do_disk",
         AlertKind::Pressure => "alerts.do_pressure",
     }
@@ -770,6 +773,27 @@ fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String, bool)>> {
             format!("{:.0}%", f64::from(f) * 100.0),
             false,
         ));
+        // The second line (zstats 0.7.2), for the startup disk: free
+        // space under which it is reported again, critical. zstats
+        // resolves it against the volume's size — half of what 90%
+        // leaves is 13 GB on a 256 GB disk and 100 GB on a 2 TB one,
+        // which the absolute floor then caps — so it is asked rather
+        // than worked out here, and there is nothing to say before the
+        // first sample lists the volume.
+        let startup = state
+            .latest()
+            .and_then(|tick| tick.snapshot.disks.as_deref())
+            .and_then(|disks| disks.iter().find(|d| d.mount_point == "/"));
+        if let Some(below) = startup
+            .map(|d| eff.disk_critical_below_bytes(f, d.total_bytes))
+            .filter(|below| *below > 0)
+        {
+            rows.push((
+                i18n::tr("alerts.kind_disk_critical"),
+                format!("< {}", format::capacity(below)),
+                false,
+            ));
+        }
     }
     rows.push((
         i18n::tr("alerts.kind_sustained"),
@@ -1188,19 +1212,54 @@ fn alert_sentence(event: &AlertEvent) -> String {
             }
         )
         .to_string(),
+        // zstats 0.7.2 gave the disk rule a second line: a volume that
+        // keeps filling is reported again, Critical, once its free space
+        // is under `critical_below_bytes`. The critical sentence leads
+        // with what is left, as zstats' own summary does — the figure the
+        // reader acts on. A warning says where the critical line is, so
+        // the second report does not arrive from nowhere. A card restored
+        // from a file written before the tier carries 0: no line to name.
+        AlertDetail::Disk {
+            used_percent,
+            available_bytes,
+            total_bytes,
+            critical_below_bytes,
+            ..
+        } if available_bytes < critical_below_bytes => t!(
+            "alerts.msg_disk_critical",
+            used = pct(*used_percent),
+            available = format::capacity(*available_bytes),
+            total = format::capacity(*total_bytes),
+            critical = format::capacity(*critical_below_bytes)
+        )
+        .to_string(),
         AlertDetail::Disk {
             used_percent,
             threshold_percent,
             available_bytes,
             total_bytes,
-        } => t!(
-            "alerts.msg_disk",
-            used = pct(*used_percent),
-            threshold = pct(*threshold_percent),
-            available = format::capacity(*available_bytes),
-            total = format::capacity(*total_bytes)
-        )
-        .to_string(),
+            critical_below_bytes,
+        } => {
+            let mut text = t!(
+                "alerts.msg_disk",
+                used = pct(*used_percent),
+                threshold = pct(*threshold_percent),
+                available = format::capacity(*available_bytes),
+                total = format::capacity(*total_bytes)
+            )
+            .to_string();
+            if *critical_below_bytes > 0 {
+                text.push_str(" · ");
+                text.push_str(
+                    t!(
+                        "alerts.msg_disk_next",
+                        critical = format::capacity(*critical_below_bytes)
+                    )
+                    .as_ref(),
+                );
+            }
+            text
+        }
         AlertDetail::Pressure {
             level: _,
             sustained,
@@ -1983,6 +2042,7 @@ mod tests {
                 threshold_percent: 90.0,
                 available_bytes: 0,
                 total_bytes: 1 << 30,
+                critical_below_bytes: 0,
             },
             repeat_after: None,
         };

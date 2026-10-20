@@ -696,6 +696,19 @@ fn notify_body(event: &AlertEvent) -> String {
             window = window_mins(*window)
         )
         .to_string(),
+        // The critical report leads with what is left, as zstats' own
+        // summary does: a banner truncates, and that is what is acted on.
+        AlertDetail::Disk {
+            used_percent,
+            available_bytes,
+            critical_below_bytes,
+            ..
+        } if available_bytes < critical_below_bytes => t!(
+            "alerts.notify_disk_critical",
+            used = format!("{used_percent:.0}"),
+            free = format::gb(*available_bytes)
+        )
+        .to_string(),
         AlertDetail::Disk {
             used_percent,
             available_bytes,

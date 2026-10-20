@@ -2138,9 +2138,10 @@ fn threshold_label(key: &str) -> String {
         "alert-app-mem" => "config.th_app_mem",
         "alert-app-mem-bytes" => "config.th_app_mem_bytes",
         "alert-disk" => "config.th_disk",
+        "alert-disk-free" => "config.th_disk_free",
         "alert-pressure" => "config.th_pressure",
         "alert-cooldown" => "config.th_cooldown",
-        // Unreachable for the nine rows above; a future key shows its
+        // Unreachable for the ten rows above; a future key shows its
         // own name rather than a blank until it is given one.
         other => return other.to_string(),
     })
@@ -2153,7 +2154,7 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
     // independent of the template layer (templates only refine per-name
     // overrides), so the builtin-template variant is exact and costs no IO.
     let eff = ActiveThresholds::from_config(a);
-    let rows: [(&'static str, Setting, usize); 9] = [
+    let rows: [(&'static str, Setting, usize); 10] = [
         (
             "alert-cpu",
             fmt_pct_setting(a.cpu, eff.cpu.base().map(f64::from)),
@@ -2194,6 +2195,16 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
             "alert-disk",
             fmt_pct_setting(a.disk, eff.disk.base().map(|f| f64::from(f) * 100.0)),
             a.disk_overrides.len(),
+        ),
+        (
+            // The disk rule's second line (zstats 0.7.2): a volume that
+            // keeps filling is reported again, critical, once its free
+            // space is under the lower of this and half the room the
+            // capacity line leaves. Under capacity because it refines it
+            // and dies with it — `alert-disk` 0 turns both off.
+            "alert-disk-free",
+            disk_free_setting(a.disk_free, eff.disk_free_bytes, eff.disk.base().is_some()),
+            0,
         ),
         (
             "alert-pressure",
@@ -2505,6 +2516,14 @@ fn threshold_chips(key: &'static str, current: &str) -> AnyElement {
             ("95%".into(), "95"),
             (off, "0"),
         ],
+        // 0 is "no floor", not "off": the half of what the capacity line
+        // leaves still makes a critical line.
+        "alert-disk-free" => vec![
+            ("5 GB".into(), "5g"),
+            ("10 GB".into(), "10g"),
+            ("20 GB".into(), "20g"),
+            (i18n::tr("config.th_disk_free_none"), "0"),
+        ],
         "alert-pressure" => vec![
             (i18n::tr("alerts.warning"), "warning"),
             (i18n::tr("alerts.critical"), "critical"),
@@ -2611,6 +2630,19 @@ fn fmt_bytes_setting(file: Option<u64>, effective: Option<u64>) -> Setting {
         }),
         Some(0) => Setting::set(i18n::tr("alerts.off")),
         Some(v) => Setting::set(clean(v)),
+    }
+}
+
+/// [`fmt_bytes_setting`] for `alert-disk-free`, whose 0 means something
+/// else: it removes the absolute floor and leaves the critical line at
+/// half the room the capacity line leaves, where every other byte key's
+/// 0 turns its rule off. Off only when the disk rule itself is, which
+/// takes this line with it.
+fn disk_free_setting(file: Option<u64>, effective: Option<u64>, rule_on: bool) -> Setting {
+    match file {
+        _ if !rule_on => Setting::set(i18n::tr("alerts.off")),
+        Some(0) => Setting::set(i18n::tr("config.th_disk_free_none")),
+        _ => fmt_bytes_setting(file, effective),
     }
 }
 

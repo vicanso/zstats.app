@@ -414,8 +414,14 @@ impl ZStatsAppState {
             seen.reports += 1;
             // A record restored from earlier today has just been
             // reported in this session: that is news once. A follow-up
-            // of a live episode is not — it keeps what it had.
-            if !seen.live {
+            // of a live episode is not — it keeps what it had — unless
+            // it is graver than what was shown: a volume's critical
+            // report (zstats 0.7.2) merges into the episode its warning
+            // opened, and "almost out of space" after "almost full" is
+            // the news the second report exists for.
+            let graver = event.severity() == Severity::Critical
+                && seen.event.severity() == Severity::Warning;
+            if !seen.live || graver {
                 seen.noticed = false;
             }
             // A live report just named this pid: the card may act again.
@@ -684,6 +690,15 @@ impl ZStatsAppState {
     pub fn disk_is_news(&self) -> bool {
         self.disk_episodes(SystemTime::now())
             .any(SeenAlert::is_news)
+    }
+
+    /// Whether that news is zstats' Critical report — the volume under
+    /// its critical line rather than past its warning one — for the
+    /// notice row's sentence.
+    pub fn disk_news_is_critical(&self) -> bool {
+        self.disk_episodes(SystemTime::now())
+            .filter(|seen| seen.is_news())
+            .any(|seen| seen.event.severity() == Severity::Critical)
     }
 
     /// Whether a disk episode's volume can still wear the face: not
@@ -1117,6 +1132,26 @@ mod tests {
                 threshold_percent: 90.0,
                 available_bytes: 0,
                 total_bytes: 1 << 30,
+                critical_below_bytes: 0,
+            },
+            repeat_after: None,
+        }
+    }
+
+    /// A disk report with `available` free on a 256 GiB volume whose
+    /// critical line is `critical_below`.
+    fn disk_at(mount: &str, available: u64, critical_below: u64) -> AlertEvent {
+        let total: u64 = 256 << 30;
+        AlertEvent {
+            subject: AlertSubject::Volume {
+                mount_point: mount.into(),
+            },
+            detail: AlertDetail::Disk {
+                used_percent: (total - available) as f64 / total as f64 * 100.0,
+                threshold_percent: 90.0,
+                available_bytes: available,
+                total_bytes: total,
+                critical_below_bytes: critical_below,
             },
             repeat_after: None,
         }
@@ -1434,6 +1469,29 @@ mod tests {
         state.see_alerts();
         assert!(state.memory_needs_attention());
         assert!(!state.memory_is_news());
+    }
+
+    /// zstats 0.7.2 reports a filling volume twice, the second time
+    /// Critical, into the one episode. That second report is news even
+    /// after the first was shown — and the row then says the disk is
+    /// running out rather than full — while an ordinary follow-up is not.
+    #[test]
+    fn a_disk_gone_critical_is_news_again() {
+        let mut state = ZStatsAppState::new();
+        let now = SystemTime::now();
+        state.record_alert(disk_at("/", 30 << 30, 10 << 30), now);
+        assert!(state.disk_is_news());
+        assert!(!state.disk_news_is_critical());
+
+        state.see_alerts();
+        assert!(!state.disk_is_news());
+        state.record_alert(disk_at("/", 25 << 30, 10 << 30), now);
+        assert!(!state.disk_is_news(), "fuller, still a warning");
+
+        state.record_alert(disk_at("/", 4 << 30, 10 << 30), now);
+        assert!(state.disk_is_news(), "under its critical line");
+        assert!(state.disk_news_is_critical());
+        assert_eq!(state.alerts().len(), 1, "one episode");
     }
 
     /// A watcher card that ended is forgotten, so the same process

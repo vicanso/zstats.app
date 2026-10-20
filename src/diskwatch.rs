@@ -108,8 +108,9 @@ pub const NOTIFY_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// Rows the disk window lists.
 pub const MAX_ROWS: usize = 5;
 
-/// A parent is represented by a child that carries this share of its
-/// growth — the same chase `diskscan` applies to sizes.
+/// A parent is represented by its listed children when together they
+/// carry this share of its growth ([`growth`]) — the same chase
+/// `diskscan` applies to sizes, for one child or several.
 const DOMINANCE_PERCENT: u64 = 90;
 
 /// Whole-machine CPU above which the check waits. A walk competes for
@@ -370,10 +371,19 @@ fn load(path: &Path) -> Option<Snapshot> {
 ///
 /// A directory missing from the baseline counts from zero — it was
 /// under [`RECORD_FLOOR`] or did not exist. The root itself is never a
-/// row (it is the sum of everything else). A directory is dropped when
-/// one of its own listed descendants carries [`DOMINANCE_PERCENT`] of
-/// its growth: the descendant is the answer, the ancestor only rose
-/// with it.
+/// row (it is the sum of everything else).
+///
+/// **No row is inside another.** A directory that grew past the floor
+/// is answered by the rows under it when those together carry
+/// [`DOMINANCE_PERCENT`] of its growth — one cache that lifted
+/// `Library` and `~` with it, or a build's `deps` and `incremental`
+/// that between them are all of `debug` — and otherwise stands alone,
+/// its own listed descendants dropped: what grew in it is spread over
+/// places none of which is worth a row. Until 2026-10-20 only a single
+/// child could answer for its parent, so a growth split between two
+/// listed `debug`, `debug/deps` and `debug/incremental` together, and
+/// three rows of +88, +47 and +38 GB read as 173 GB of growth that was
+/// 88.
 pub fn growth(root: &Path, now: &[(PathBuf, u64)], base: &Snapshot) -> Vec<Growth> {
     let candidates: Vec<Growth> = now
         .iter()
@@ -388,20 +398,49 @@ pub fn growth(root: &Path, now: &[(PathBuf, u64)], base: &Snapshot) -> Vec<Growt
             })
         })
         .collect();
-    let mut rows: Vec<Growth> = candidates
+    // The candidates as a tree: each one's nearest listed ancestor. A
+    // week's growth past a gigabyte is a few dozen directories at most,
+    // so the quadratic search costs nothing.
+    let parent: Vec<Option<usize>> = candidates
         .iter()
-        .filter(|parent| {
-            !candidates.iter().any(|child| {
-                child.path != parent.path
-                    && child.path.starts_with(&parent.path)
-                    && child.grew * 100 >= parent.grew * DOMINANCE_PERCENT
-            })
+        .map(|c| {
+            candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.path != c.path && c.path.starts_with(&a.path))
+                .max_by_key(|(_, a)| a.path.components().count())
+                .map(|(i, _)| i)
         })
-        .cloned()
+        .collect();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); candidates.len()];
+    for (child, of) in parent.iter().enumerate() {
+        if let Some(of) = of {
+            children[*of].push(child);
+        }
+    }
+    let mut rows: Vec<Growth> = (0..candidates.len())
+        .filter(|&i| parent[i].is_none())
+        .flat_map(|i| answer(i, &candidates, &children))
+        .map(|i| candidates[i].clone())
         .collect();
     rows.sort_by(|a, b| b.grew.cmp(&a.grew).then_with(|| a.path.cmp(&b.path)));
     rows.truncate(MAX_ROWS);
     rows
+}
+
+/// Candidate `i`, or — when the candidates listed directly under it
+/// together carry [`DOMINANCE_PERCENT`] of its growth — what answers for
+/// each of those, the same question one level down.
+fn answer(i: usize, candidates: &[Growth], children: &[Vec<usize>]) -> Vec<usize> {
+    let kids = &children[i];
+    let carried: u64 = kids.iter().map(|&k| candidates[k].grew).sum();
+    if !kids.is_empty() && carried * 100 >= candidates[i].grew * DOMINANCE_PERCENT {
+        kids.iter()
+            .flat_map(|&k| answer(k, candidates, children))
+            .collect()
+    } else {
+        vec![i]
+    }
 }
 
 /// What grew, read from the history alone: the newest snapshot against
@@ -669,19 +708,45 @@ mod tests {
         assert_eq!(rows[1].grew, 3 * GIB);
     }
 
+    /// Growth split between children that together carry it is named
+    /// by the children — the shape of a build directory, which put the
+    /// parent and both children on the list as three rows that read as
+    /// twice the growth there was.
     #[test]
-    fn diffuse_growth_keeps_the_parent() {
-        // Two children of 3 GB each: neither carries 90% of the 6 GB, so
-        // the parent is the honest answer, and both children still list.
-        let base = snapshot(&[("/h/a", 0), ("/h/a/x", 0), ("/h/a/y", 0)]);
+    fn growth_split_between_children_names_the_children_not_the_parent() {
+        let base = snapshot(&[("/h", 0)]);
+        let now = [
+            (p("/h/target"), 89 * GIB),
+            (p("/h/target/debug"), 88 * GIB),
+            (p("/h/target/debug/deps"), 47 * GIB),
+            (p("/h/target/debug/incremental"), 38 * GIB),
+        ];
+        let rows = growth(&p("/h"), &now, &base);
+        let paths: Vec<&Path> = rows.iter().map(|r| r.path.as_path()).collect();
+        assert_eq!(
+            paths,
+            [
+                p("/h/target/debug/deps").as_path(),
+                p("/h/target/debug/incremental").as_path(),
+            ]
+        );
+    }
+
+    /// Growth spread wider than the listed children keeps the parent,
+    /// alone: the child it does list is inside it, and the two together
+    /// would read as a sum.
+    #[test]
+    fn diffuse_growth_keeps_the_parent_alone() {
+        let base = snapshot(&[("/h/a", 0), ("/h/a/x", 0)]);
         let now = [
             (p("/h/a"), 6 * GIB),
             (p("/h/a/x"), 3 * GIB),
-            (p("/h/a/y"), 3 * GIB),
+            // The rest of the 6 GB is in directories under the floor.
+            (p("/h/a/y"), GIB / 2),
         ];
         let rows = growth(&p("/h"), &now, &base);
-        assert_eq!(rows[0].path, p("/h/a"));
-        assert_eq!(rows.len(), 3);
+        let paths: Vec<&Path> = rows.iter().map(|r| r.path.as_path()).collect();
+        assert_eq!(paths, [p("/h/a").as_path()]);
     }
 
     #[test]

@@ -33,6 +33,33 @@ pub struct GrowthNotice {
 /// announced something new.
 const GROWTH_CARD_FOR: Duration = diskwatch::CHECK_EVERY;
 
+/// The card's rows: announced within [`GROWTH_CARD_FOR`] of `now`, the
+/// newest batch first and a batch by how much it grew, each with how
+/// long ago it was announced.
+///
+/// Against one `now` and one stamp per batch. Each row used to take its
+/// own `elapsed()`, and the rows of one check its own `Instant::now()`
+/// a few microseconds apart, so within a batch the sort key was the
+/// difference of two timings and nothing else: the three directories of
+/// one check changed places from one repaint to the next.
+fn announced_order(
+    announced: &[(GrowthNotice, Instant)],
+    now: Instant,
+) -> Vec<(GrowthNotice, Duration)> {
+    let mut out: Vec<(GrowthNotice, Duration)> = announced
+        .iter()
+        .map(|(notice, at)| (notice.clone(), now.saturating_duration_since(*at)))
+        .filter(|(_, ago)| *ago < GROWTH_CARD_FOR)
+        .collect();
+    out.sort_by(|(a, a_ago), (b, b_ago)| {
+        a_ago
+            .cmp(b_ago)
+            .then_with(|| b.growth.grew.cmp(&a.growth.grew))
+            .then_with(|| a.growth.path.cmp(&b.growth.path))
+    });
+    out
+}
+
 /// The disk-space window's three tabs, in the order the answers are
 /// reached for: what is big by directory, the biggest single files,
 /// then files stored twice. Kept in the store, not the window: it is
@@ -847,14 +874,15 @@ impl ZStatsAppState {
         }
         let mut announced = 0usize;
         if let Some(report) = &self.analysis.growth {
+            // One stamp for the whole batch: they were announced together,
+            // and the card orders a batch by size (`announced_order`).
+            let at = Instant::now();
             for growth in diskwatch::unannounced(report, SystemTime::now()) {
                 let notice = GrowthNotice {
                     growth,
                     over: report.over,
                 };
-                self.analysis
-                    .growth_announced
-                    .push((notice.clone(), Instant::now()));
+                self.analysis.growth_announced.push((notice.clone(), at));
                 self.analysis.growth_pending.push(notice);
                 announced += 1;
             }
@@ -911,15 +939,7 @@ impl ZStatsAppState {
     /// Growth announced within [`GROWTH_CARD_FOR`], newest first — the
     /// Alerts tab's card, where the banner's click lands.
     pub fn disk_growth_announced(&self) -> Vec<(GrowthNotice, Duration)> {
-        let mut out: Vec<(GrowthNotice, Duration)> = self
-            .analysis
-            .growth_announced
-            .iter()
-            .filter(|(_, at)| at.elapsed() < GROWTH_CARD_FOR)
-            .map(|(notice, at)| (notice.clone(), at.elapsed()))
-            .collect();
-        out.sort_by_key(|(_, ago)| *ago);
-        out
+        announced_order(&self.analysis.growth_announced, Instant::now())
     }
 
     // ---- the Trash -----------------------------------------------------
@@ -1041,5 +1061,53 @@ impl ZStatsAppState {
         self.drop_expansions();
         self.reset_dupe_views();
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn notice(path: &str, grew: u64) -> GrowthNotice {
+        GrowthNotice {
+            growth: Growth {
+                path: PathBuf::from(path),
+                grew,
+                now: grew,
+            },
+            over: Duration::from_secs(7 * 86_400),
+        }
+    }
+
+    /// One check announces several directories at once. They keep one
+    /// order — the newest batch first, a batch by how much it grew —
+    /// however often the card is asked, and leave it once the card's
+    /// span is over.
+    #[test]
+    fn the_growth_card_keeps_one_order() {
+        // Counted forward from a base: an Instant cannot go back past
+        // the machine's boot, which a test runner may be close to.
+        let base = Instant::now();
+        let now = base + Duration::from_secs(48 * 3600);
+        let today = now - Duration::from_secs(60);
+        let yesterday = base + Duration::from_secs(28 * 3600);
+        let announced = vec![
+            (notice("/old", 9), base),
+            (notice("/c", 6), yesterday),
+            (notice("/a", 95), today),
+            (notice("/a/deps", 50), today),
+            (notice("/a/inc", 40), today),
+        ];
+        let paths = |rows: Vec<(GrowthNotice, Duration)>| -> Vec<PathBuf> {
+            rows.into_iter().map(|(n, _)| n.growth.path).collect()
+        };
+        let order = paths(announced_order(&announced, now));
+        assert_eq!(order, ["/a", "/a/deps", "/a/inc", "/c"].map(PathBuf::from));
+        assert_eq!(
+            paths(announced_order(&announced, now + Duration::from_secs(30))),
+            order,
+            "asked again, the same order"
+        );
     }
 }
