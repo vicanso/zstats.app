@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.12](https://github.com/vicanso/zstats.app/compare/v0.4.11..v0.4.12) - 2026-10-20
+
+### ⛰️  Features
+
+- A volume that keeps filling is shown again as critical (zstats 0.7.2), and the growth list neither nests nor reshuffles - ([771892a](https://github.com/vicanso/zstats.app/commit/771892a0b6222868e97b949587ff2bc640693be6))
+
+### 🐛 Bug Fixes
+
+- This app's rows stay uncoloured while the daily disk check explains its CPU, and the badge says what a held check waits for - ([aa654fb](https://github.com/vicanso/zstats.app/commit/aa654fb3277d59fb899c0ac8cbe64b81aa3976a9))
+
 ## [0.4.11](https://github.com/vicanso/zstats.app/compare/v0.4.9..v0.4.11) - 2026-10-16
 
 ### ⛰️  Features
