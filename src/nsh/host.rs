@@ -15,6 +15,12 @@
 //! same faces, menu and click handling, with what it asks for handed to
 //! [`on_tray`] here.
 //!
+//! The store is the shared one (`store.rs`): the collector's ticks are
+//! folded in on a thread of their own, a banner's click asks for the
+//! Alerts tab, and showing and hiding the panel do the bookkeeping the
+//! gpui front end's `mark_panel_shown` and auto-hide do — the collector's
+//! pace, the tab's entry work, the transient views, the toggle's grace.
+//!
 //! Where the panel goes is `placement.rs`'s, shared with the gpui front
 //! end: the same sizes, and the same hang under the icon with its
 //! multi-display, mixed-DPI scale picking. This side only lists AppKit's
@@ -22,12 +28,15 @@
 //! into AppKit's bottom-left one.
 
 use crate::geom::{Rect, point, size};
+use crate::metrics::{self, CollectorPace};
 use crate::nsh::panel::{self, HostAction};
 #[cfg(debug_assertions)]
 use crate::nsh::probe;
+use crate::nsh::store;
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
+use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
-use crate::{i18n, logger, palette, prefs};
+use crate::{active, autostart, i18n, logger, notify, palette, prefs, updater};
 use nsh_platform_macos::{AppOptions, AppView, Appearance, Root};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -39,7 +48,10 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use std::cell::{Cell, OnceCell};
+use std::fs;
 use std::rc::Rc;
+use std::sync::OnceLock;
+use std::thread;
 
 /// `NSPopUpMenuWindowLevel` (`kCGPopUpMenuWindowLevel`): above ordinary
 /// windows, as a status-item popover sits.
@@ -53,6 +65,10 @@ pub struct Host {
     _view: Rc<AppView>,
     _delegate: Retained<PanelDelegate>,
 }
+
+/// The collector's pace, for the show and hide paths (the store holds a
+/// clone of its own).
+static PACE: OnceLock<CollectorPace> = OnceLock::new();
 
 thread_local! {
     static HOST: OnceCell<Rc<Host>> = const { OnceCell::new() };
@@ -83,6 +99,10 @@ define_class!(
             if TOGGLING.with(Cell::get) || !auto_hides() {
                 return;
             }
+            // The tray click that caused this arrives next, and must not
+            // read the panel it just hid as one to show (`toggle`).
+            store::update(|state, _| state.mark_auto_hidden());
+            tracing::info!("panel auto-hidden");
             with_host(hide);
         }
     }
@@ -117,7 +137,23 @@ pub fn run() {
     // Golden Dark until the NSH front end follows the theme preference
     // and the appearance (phase 3 of docs/nsh-migration.md).
     palette::set_golden(true);
-    tracing::info!("NSH front end starting (docs/nsh-migration.md, phase 0)");
+    tracing::info!("NSH front end starting (docs/nsh-migration.md, phase 2)");
+
+    let mut state = ZStatsAppState::new();
+    // Today's alerts survive a restart, and the tab is the session's —
+    // its entry work waits for the panel to be shown (`mark_shown`).
+    state.restore_alerts();
+    state.restore_session_tab();
+    let tab = state.tab();
+    store::install(
+        state,
+        store::Host {
+            main: on_main,
+            fit_panel,
+            // No disk-space window in this front end yet (phase 2c).
+            storage_window_open: || false,
+        },
+    );
 
     panel::connect(|action| {
         // The engine thread asks; AppKit answers on the main queue.
@@ -139,6 +175,24 @@ pub fn run() {
     });
     // Without a tray the debug build still opens the panel by itself.
     tray::start(on_tray);
+    let clicks = notify::start();
+    spawn_named("banner-clicks", move || {
+        while clicks.recv_blocking().is_ok() {
+            on_main(Box::new(show_alerts));
+        }
+    });
+    // Before the collector, as in the gpui front end: the login-time
+    // status goes in the log, and the first slow-burn banner can already
+    // say whether its subject is in use.
+    autostart::refresh();
+    active::start();
+    start_collector(tab);
+    // Child processes that block for seconds, off the main thread.
+    spawn_named("installer-sweep", updater::sweep_installer_mounts);
+    // The Large files tab's last listing, which nothing reads since the
+    // tab went (2026-10-16) — the gpui front end's cleanup, kept here
+    // because this is the front end that stays.
+    let _ = fs::remove_file(zstats::settings::default_dir().join("bigfiles.toml"));
 
     // Release builds start with no window, in the menu bar until the icon
     // is clicked; debug builds open the panel at once, as the gpui front
@@ -150,6 +204,45 @@ pub fn run() {
     }
     app.run();
 }
+
+/// The collector, and the thread that folds its ticks into the store.
+/// `tab` is the session's, which seeds the registry channels.
+fn start_collector(tab: Tab) {
+    let metrics::Collector {
+        pace,
+        ticks,
+        settings,
+    } = metrics::spawn(tab);
+    store::update(|state, fx| {
+        if let Some(settings) = settings {
+            state.set_settings(settings);
+        }
+        state.set_pace(pace.clone());
+        state.start_abnormal_scan(fx);
+    });
+    let _ = PACE.set(pace);
+    spawn_named("ticks", move || {
+        while let Ok(tick) = ticks.recv_blocking() {
+            store::update(|state, fx| state.on_tick(tick, fx));
+        }
+    });
+}
+
+fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
+    if let Err(e) = thread::Builder::new().name(name.into()).spawn(f) {
+        tracing::error!("could not start the {name} thread: {e}");
+    }
+}
+
+/// The store's way onto the main thread (`store::Host::main`).
+fn on_main(job: Box<dyn FnOnce() + Send>) {
+    dispatch2::DispatchQueue::main().exec_async(job);
+}
+
+/// The panel's height following Overview's notice row: phase 2b of
+/// docs/nsh-migration.md. Until then the panel keeps the short form's
+/// size, which is the page the placeholder stands in for.
+fn fit_panel() {}
 
 /// The panel: a titled, non-activating panel whose title bar is hidden and
 /// whose content runs to the top edge — titled so it can become key (a
@@ -250,22 +343,63 @@ pub fn show(host: &Host, anchor: Option<TrayAnchor>, make_key: bool) {
     if make_key {
         host.panel.makeKeyWindow();
     }
+    mark_shown();
+}
+
+/// Panel on screen: the collector's fast cadence, the shown tab's entry
+/// work (it is being visited), and if that tab is Alerts the tray's spec
+/// has been seen. `shown` first — the entry work checks visibility.
+fn mark_shown() {
+    if let Some(pace) = PACE.get() {
+        pace.shown();
+    }
+    store::update(|state, fx| {
+        state.enter_shown_tab(fx);
+        state.see_alerts_if_showing(fx);
+    });
+    // The panel's engine skipped every change while it was hidden; this
+    // one brings it up to date before its first frame.
+    store::changed();
 }
 
 pub fn hide(host: &Host) {
     host.panel.orderOut(None);
+    // Yesterday's query must not greet the next open, and the collector
+    // drops to the hidden cadence.
+    store::update(|state, fx| state.reset_transient_views(fx));
+    if let Some(pace) = PACE.get() {
+        pace.hidden();
+    }
 }
 
+/// A click on the status item: hide the panel if it is up, show it if
+/// not — unless the click itself just auto-hid it, which is AppKit taking
+/// key status away before it delivers the click (`state::TOGGLE_GRACE`).
 fn toggle(anchor: Option<TrayAnchor>) {
     TOGGLING.with(|t| t.set(true));
     with_host(|host| {
         if host.panel.isVisible() {
             hide(host);
-        } else {
+        } else if !store::update(|state, _| state.took_recent_auto_hide(state::TOGGLE_GRACE)) {
             show(host, anchor, true);
         }
     });
     TOGGLING.with(|t| t.set(false));
+}
+
+/// Shows the panel under the icon, whatever it was doing: the menu's
+/// "Show Window" and a banner's click. An auto-hide mark left by the
+/// click that opened the menu must not swallow it.
+fn show_anchored() {
+    store::update(|state, _| state.took_recent_auto_hide(state::TOGGLE_GRACE));
+    with_host(|host| show(host, tray::anchor(), true));
+}
+
+/// A banner's click: the Alerts tab, then the panel — the tab first, so
+/// the panel's first frame is that tab.
+pub fn show_alerts() {
+    store::update(|state, fx| state.set_tab(Tab::Alerts, fx));
+    show_anchored();
 }
 
 /// What the status item asks for. tray-icon reports both of its events
@@ -275,9 +409,7 @@ fn on_tray(action: TrayAction) {
     match action {
         TrayAction::Toggle(anchor) => toggle(anchor),
         // Under the icon, as a click would put it (`show_main_window`).
-        TrayAction::Show => {
-            with_host(|host| show(host, tray::anchor(), true));
-        }
+        TrayAction::Show => show_anchored(),
         TrayAction::Storage => {
             tracing::info!("the disk-space window is not in the NSH front end yet");
         }

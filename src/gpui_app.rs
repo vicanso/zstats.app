@@ -21,9 +21,8 @@ use std::cell::Cell;
 use std::fs;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 #[cfg(target_os = "linux")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, Context, KeyBinding, Menu, MenuItem, QuitMode, ScrollHandle, SharedString,
@@ -106,12 +105,6 @@ const PANEL_MARGIN_RIGHT: f32 = 10.;
 /// so it would have to be configured rather than measured.
 #[cfg(target_os = "linux")]
 const PANEL_MARGIN_TOP: f32 = 10.;
-
-/// Clicking the tray icon first takes focus away from the window, which
-/// auto-hides it, and only then delivers the click. A click landing inside
-/// this window of an auto-hide is read as "the user wanted it gone" and does
-/// not reopen — that's what makes the tray icon toggle.
-const TOGGLE_GRACE: Duration = Duration::from_millis(300);
 
 /// How long a freshly mapped layer surface is immune to both auto-hide
 /// paths.
@@ -1934,7 +1927,7 @@ fn live_panel_handle(cx: &mut App) -> Option<gpui::AnyWindowHandle> {
 ///   - the click doesn't deactivate the window → it's still open here, so
 ///     close it outright;
 ///   - the click deactivates it first → auto-hide already closed it, and
-///     `TOGGLE_GRACE` stops this click from immediately reopening it.
+///     `state::TOGGLE_GRACE` stops this click from immediately reopening it.
 ///
 /// `anchor` is `None` wherever the platform cannot say where its own icon
 /// is — every SNI click, and a macOS click that arrives before AppKit has
@@ -1964,7 +1957,9 @@ pub fn toggle_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
         let just_auto_hid = cx
             .global::<ZStatsGlobalStore>()
             .clone()
-            .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
+            .update(cx, |state, _| {
+                state.took_recent_auto_hide(state::TOGGLE_GRACE)
+            });
         if just_auto_hid {
             return;
         }
@@ -2091,7 +2086,9 @@ pub fn show_main_window(cx: &mut App) {
     // by the toggle grace period.
     cx.global::<ZStatsGlobalStore>()
         .clone()
-        .update(cx, |state, _| state.took_recent_auto_hide(TOGGLE_GRACE));
+        .update(cx, |state, _| {
+            state.took_recent_auto_hide(state::TOGGLE_GRACE)
+        });
 
     // Anchored under the icon, exactly like a click on it: the panel
     // belongs to the menu bar item, and a "Show Window" that reopened it

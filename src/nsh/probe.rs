@@ -15,6 +15,7 @@
 //! click X Y | move X Y            a left click / a pointer move
 //! tray                            a left click on the status item, handed
 //!                                 to the item's own window
+//! banner                          what a click on a banner does
 //! type TEXT                       key events for each character
 //! info                            window number, frame, key and first responder
 //! quit
@@ -93,6 +94,7 @@ fn run(line: &str) {
             mouse(h, NSEventType::LeftMouseUp, num(0), num(1));
         }
         "tray" => click_status_item(MainThreadMarker::from(&*h.panel)),
+        "banner" => host::show_alerts(),
         "move" => {
             // A real pointer reaches NSH through its tracking areas; a
             // synthesised move is dispatched by the window, which only

@@ -677,6 +677,13 @@ fn member_table_next(table: &MemberTable, now: Instant, interval: Duration) -> M
     }
 }
 
+/// Clicking the tray icon first takes focus away from the panel, which
+/// auto-hides it, and only then delivers the click. A click landing inside
+/// this window of an auto-hide is read as "the user wanted it gone" and does
+/// not reopen — that's what makes the tray icon toggle. Both front ends
+/// ask [`ZStatsAppState::took_recent_auto_hide`] with it.
+pub const TOGGLE_GRACE: Duration = Duration::from_millis(300);
+
 pub struct ZStatsAppState {
     window_bounds: Option<Rect>,
     scale_factor: f32,
@@ -2948,7 +2955,7 @@ impl ZStatsAppState {
     /// `tmutil` probe, topology fetch) keys off this rather than the
     /// selected tab alone: the tab outlives a hide and, since it is
     /// remembered, a restart too.
-    fn panel_visible(&self) -> bool {
+    pub fn panel_visible(&self) -> bool {
         self.pace.as_ref().is_some_and(|p| p.is_visible())
     }
 
@@ -2982,7 +2989,7 @@ impl ZStatsAppState {
     }
 
     /// Did an auto-hide happen within `window`? Consumes the mark, so it
-    /// only ever answers `true` once — see `TOGGLE_GRACE` in `main.rs`.
+    /// only ever answers `true` once — see [`TOGGLE_GRACE`].
     pub fn took_recent_auto_hide(&mut self, window: Duration) -> bool {
         self.last_auto_hide
             .take()

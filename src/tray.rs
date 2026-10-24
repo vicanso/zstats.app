@@ -400,16 +400,30 @@ pub fn face_for(
 /// out immediately rather than on the next tick. Before the first
 /// sample there is a face but no figure. A no-op if the tray failed to
 /// build.
+///
+/// On the thread that keeps the tray. A front end whose store lives on
+/// another thread takes the two halves apart: [`look`] where the store
+/// is, [`wear`] on the tray's thread.
 pub fn sync(state: &ZStatsAppState) {
-    with_tray(|handle| wear_state(handle, state));
+    wear(look(state));
 }
 
-fn wear_state(handle: &TrayHandle, state: &ZStatsAppState) {
-    // Before anything is worn: a theme switch has to reach the bar on
-    // this pass, not on the one after it.
-    handle.ensure_ink();
+/// What the menu bar should wear, read off the store and nothing else —
+/// `Send`, so it can be carried to the tray's thread.
+pub struct Look {
+    /// Both mode: the second item exists and wears [`Self::cpu`].
+    both: bool,
+    face: TrayFace,
+    figure: Option<Figure>,
+    /// The unread-alert spec.
+    hot: bool,
+    /// The second item's figure; read only in Both mode.
+    cpu: Option<Figure>,
+}
+
+/// The first half of [`sync`]: the store's answer, on any thread.
+pub fn look(state: &ZStatsAppState) -> Look {
     let pref = prefs::tray();
-    handle.set_both(pref == TrayPref::Both);
     let figure = |face| {
         state.latest().map(|tick| match face {
             TrayFace::Cpu => Figure::cpu(tick.snapshot.cpu.usage_percent),
@@ -431,15 +445,35 @@ fn wear_state(handle: &TrayHandle, state: &ZStatsAppState) {
         state.memory_needs_attention(),
         state.disk_needs_attention(),
     );
-    // One spec, on the item that always exists. Both's second item is
-    // the same news twice — two adjacent dots would look like two
-    // alerts.
-    let hot = state.tray_alert_unseen();
-    let faces = handle.faces.borrow();
-    handle.primary.wear(face, figure(face), hot, &faces);
-    if let Some(second) = handle.second.borrow().as_ref() {
-        second.wear(TrayFace::Cpu, figure(TrayFace::Cpu), false, &faces);
+    let both = pref == TrayPref::Both;
+    Look {
+        both,
+        face,
+        figure: figure(face),
+        // One spec, on the item that always exists. Both's second item is
+        // the same news twice — two adjacent dots would look like two
+        // alerts.
+        hot: state.tray_alert_unseen(),
+        cpu: if both { figure(TrayFace::Cpu) } else { None },
     }
+}
+
+/// The second half of [`sync`]: `look` on the items, on the thread that
+/// keeps the tray.
+pub fn wear(look: Look) {
+    with_tray(|handle| {
+        // Before anything is worn: a theme switch has to reach the bar on
+        // this pass, not on the one after it.
+        handle.ensure_ink();
+        handle.set_both(look.both);
+        let faces = handle.faces.borrow();
+        handle
+            .primary
+            .wear(look.face, look.figure, look.hot, &faces);
+        if let Some(second) = handle.second.borrow().as_ref() {
+            second.wear(TrayFace::Cpu, look.cpu, false, &faces);
+        }
+    });
 }
 
 /// What the tray asks of the front end, through the handler [`start`] was
