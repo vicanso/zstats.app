@@ -432,6 +432,44 @@ pub fn mono_unless_cjk(words: Text) -> Text {
     }
 }
 
+/// gpui-kit's ghost icon button at its smallest (`Button::ghost().xsmall()`,
+/// the Alerts cards' controls): 20 square, the kit's 6 corner, the glyph at
+/// 12 in the first ink, a fill only under the pointer — the kit's accent
+/// background, at half strength on a dark scheme as the kit paints it.
+pub fn ghost_icon(
+    name: CustomIconName,
+    tip: TooltipElement,
+    on_press: impl Fn() + 'static,
+) -> AnyElement {
+    view()
+        .flex_none()
+        .tooltip(tip)
+        .child(
+            nsh_base::button()
+                .w(px(20.))
+                .h(px(20.))
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .hover(|s| s.bg(theme::color(ghost_hover)))
+                .on_press(on_press)
+                .child(icon(name, 12., palette::text)),
+        )
+        .into_element()
+}
+
+fn ghost_hover() -> Rgba {
+    let fill = palette::chip();
+    if palette::is_dark() {
+        Rgba {
+            a: fill.a * 0.5,
+            ..fill
+        }
+    } else {
+        fill
+    }
+}
+
 /// A card's "show more" toggle (`sensors::more_chip` and its siblings):
 /// outlined while off, the chip's fill while on, and a hover only while
 /// off — the "on" fill is the state.

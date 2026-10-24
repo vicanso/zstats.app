@@ -9,6 +9,7 @@
 //! have in common in `root.rs`, all reading the shared store
 //! (`store.rs`).
 
+mod alerts;
 mod apps;
 mod chart;
 mod chrome;
