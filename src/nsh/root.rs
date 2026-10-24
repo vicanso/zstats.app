@@ -97,6 +97,41 @@ pub fn ask(action: HostAction) {
     }
 }
 
+/// The panel's showings as they go (`ZStatsAppState::panel_visit`, bumped
+/// as it hides), heard whether or not it is on screen — `Live` hears
+/// nothing while it is hidden. What must not outlive a showing reads it.
+#[derive(Clone, Copy)]
+struct Visits(ReadSignal<u32>);
+
+/// Follows the panel's showings for the life of the current owner — the
+/// panel's root, for what is made under it ([`close_on_hide`]).
+pub fn follow_visits() {
+    let visit = signal(store::read(ZStatsAppState::panel_visit));
+    let changes = store::subscribe();
+    spawn(async move {
+        while changes.recv().await.is_ok() {
+            let now = store::read(ZStatsAppState::panel_visit);
+            if visit.try_get() != Some(now) {
+                let _ = visit.try_set(now);
+            }
+        }
+    });
+    provide_context(Visits(visit.read_only()));
+}
+
+/// Closes `open` as the panel hides: the panel is hidden, not destroyed,
+/// and a menu open as it went away was still open the next time it came
+/// up (gpui's dropdowns did the same; their ids carried the visit). Does
+/// nothing outside the panel.
+pub fn close_on_hide(open: Signal<bool>) {
+    if let Some(Visits(visit)) = use_context::<Visits>() {
+        effect(move || {
+            visit.get();
+            open.set(false);
+        });
+    }
+}
+
 /// The store, as the closures of one engine read it: reading through it
 /// subscribes the closure to the store's changes.
 #[derive(Clone, Copy)]

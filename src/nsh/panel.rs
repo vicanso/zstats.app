@@ -26,6 +26,7 @@ use std::env;
 #[component]
 pub fn Panel() -> impl IntoElement {
     let live = Live::follow(ZStatsAppState::panel_visible);
+    root::follow_visits();
     // The appearance this engine resolved, for the palette outside it: at
     // the first frame, and again whenever the system's turns.
     effect(|| root::ask(HostAction::Appearance(dark())));

@@ -7,8 +7,9 @@
 //! rebuilt on a tick: a selected tab, a lit pin, the cup's time left are
 //! bindings over the store's memos (`Live::memo`, `Live::watch`). That is
 //! also what keeps the keep-awake menu open across a tick — a footer made
-//! again would have closed it, as a gpui dropdown in a hidden panel stayed
-//! open (`panel_visit`).
+//! again would have closed it. A hide is another matter: the panel is not
+//! destroyed, so a menu open as it went away would come back open, and
+//! the cup's is closed as the panel hides (`root::close_on_hide`).
 
 use crate::assets::CustomIconName;
 use crate::color::Rgba;
@@ -17,7 +18,7 @@ use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::state::{Tab, ZStatsAppState};
 use crate::{awake, format, i18n, palette, prefs};
-use nsh_base::{TooltipElement, button, menu, menu_item, menu_separator};
+use nsh_base::{MenuEvent, TooltipElement, button, menu, menu_item, menu_separator};
 use nsh_core::ui::prelude::*;
 use rust_i18n::t;
 use std::time::SystemTime;
@@ -400,10 +401,15 @@ fn keep_awake(live: Live) -> AnyElement {
     // No tooltip under the open menu: it came up over the items it
     // describes.
     let open = signal(false);
+    root::close_on_hide(open);
     let mut popup = menu()
         .offset(px(4.))
-        .on_open(move || open.set(true))
-        .on_close(move || open.set(false))
+        .open(move || Some(open.get()))
+        .on_open_change(move |event: &MenuEvent| {
+            if let MenuEvent::OpenChange(next, _) = event {
+                open.set(*next);
+            }
+        })
         .popup_style(|s| {
             s.min_w(px(170.))
                 .p(px(4.))

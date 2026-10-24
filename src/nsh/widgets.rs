@@ -20,10 +20,10 @@
 use crate::appicon::{self, Icon};
 use crate::assets::{self, CustomIconName};
 use crate::color::{Rgba, rgba};
-use crate::nsh::root::CARD_PAD;
+use crate::nsh::root::{self, CARD_PAD};
 use crate::nsh::theme;
 use crate::{format, i18n, palette};
-use nsh_base::{TooltipElement, alert_dialog, menu, menu_item, tooltip};
+use nsh_base::{MenuEvent, TooltipElement, alert_dialog, menu, menu_item, tooltip};
 use nsh_core::ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -941,10 +941,15 @@ pub fn title_menu(
 /// The menu a trigger opens: `choices`, the one in force checked, with
 /// `open` following it.
 fn menu_of(open: Signal<bool>, trigger: View, choices: Vec<Choice>) -> AnyElement {
+    root::close_on_hide(open);
     let mut popup = menu()
         .offset(px(4.))
-        .on_open(move || open.set(true))
-        .on_close(move || open.set(false))
+        .open(move || Some(open.get()))
+        .on_open_change(move |event: &MenuEvent| {
+            if let MenuEvent::OpenChange(next, _) = event {
+                open.set(*next);
+            }
+        })
         .popup_style(|s| {
             s.min_w(px(140.))
                 .p(px(4.))
