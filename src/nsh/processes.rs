@@ -271,7 +271,11 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
             .max()
             .unwrap_or(0),
     );
-    let fit = rows::fit_rows(lists::rows_budget(state, body), COLLAPSED_ROW, ROW_PAD);
+    let fit = rows::fit_rows(
+        lists::rows_budget(body, state.proc_filter_open()),
+        COLLAPSED_ROW,
+        ROW_PAD,
+    );
     let rows: Vec<Row> = if only_abnormal {
         Vec::new()
     } else {

@@ -175,7 +175,11 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
         return Top::default();
     };
     let shown = applist::top_rows(state, groups);
-    let fit = rows::fit_rows(lists::rows_budget(state, body), COLLAPSED_ROW, ROW_PAD);
+    let fit = rows::fit_rows(
+        lists::rows_budget(body, state.proc_filter_open()),
+        COLLAPSED_ROW,
+        ROW_PAD,
+    );
     let repeated = repeated(&shown, state);
     let bar_full = applist::bar_full_for(state.app_sort(), shown.iter().copied());
     let rows: Vec<Row> = shown

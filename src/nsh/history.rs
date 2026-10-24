@@ -150,7 +150,7 @@ fn page_of(state: &ZStatsAppState, body: f32) -> Page {
     let lived = historylist::lived(&now);
     let now_clock = historylist::now_clock(&now);
     let budget =
-        (lists::rows_budget(state, body) - if today { AXIS_ROW } else { 0. }).max(ROWS_MIN);
+        (lists::rows_budget(body, false) - if today { AXIS_ROW } else { 0. }).max(ROWS_MIN);
     let fit = rows::fit_rows(budget, if today { BAND_ROW } else { METER_ROW }, ROW_PAD);
     let shown: Vec<Row> = ranked
         .shown

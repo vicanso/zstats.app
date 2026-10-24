@@ -37,14 +37,11 @@ pub const LIST_MIN: f32 = 120.;
 
 /// The rows region under the pinned header, from the page's height on
 /// screen: less the gap under the card, the header, and the filter row
-/// while it is open (`processes::rows_height`).
-pub fn rows_budget(state: &ZStatsAppState, body: f32) -> f32 {
-    let chrome = LIST_HEADER
-        + if state.proc_filter_open() {
-            FILTER_ROW
-        } else {
-            0.
-        };
+/// while one is open on the page (`processes::rows_height`). History has
+/// no filter, so it passes `false`: the gpui page borrowed Processes'
+/// answer and stood 34 short while that page's filter was open.
+pub fn rows_budget(body: f32, filter_open: bool) -> f32 {
+    let chrome = LIST_HEADER + if filter_open { FILTER_ROW } else { 0. };
     (body - CARD_GAP - chrome).max(LIST_MIN)
 }
 
