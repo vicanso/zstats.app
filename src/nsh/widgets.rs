@@ -396,6 +396,87 @@ pub fn name_tailed(
         }))
 }
 
+/// A name that may be cut short, as wide as its words (`truncating_name`):
+/// what follows it on the line hugs it rather than the line's far edge.
+/// The whole name on hover when it is likely cut.
+pub fn name(words: impl Fn() -> String + Clone + 'static, size: f32, weight: FontWeight) -> View {
+    let long = {
+        let words = words.clone();
+        move || {
+            let words = words();
+            format::display_name(&words).len() != words.len()
+                || words.chars().count() >= NAME_TIP_FROM
+        }
+    };
+    view()
+        .flex_shrink(1.)
+        .min_w(px(0.))
+        .tooltip(live_tooltip(words.clone()).disabled(move || !long()))
+        .child(
+            text(move || format::display_name(&words()).to_owned())
+                .number_of_lines(1u32)
+                .text_size(px(size))
+                .line_height(line(size))
+                .font_weight(weight)
+                .text_color(theme::color(palette::text)),
+        )
+}
+
+/// A body line in the mono face, unless the locale's words are CJK, which
+/// the bundled mono face cannot draw (`font::mono_unless_cjk`).
+pub fn mono_unless_cjk(words: Text) -> Text {
+    if i18n::is_cjk() {
+        words
+    } else {
+        words.font_family(MONO)
+    }
+}
+
+/// A card's "show more" toggle (`sensors::more_chip` and its siblings):
+/// outlined while off, the chip's fill while on, and a hover only while
+/// off — the "on" fill is the state.
+pub fn more_chip(label: String, showing: bool, toggle: fn()) -> AnyElement {
+    nsh_base::button()
+        .flex_none()
+        .rounded_full()
+        .border(px(1.))
+        .border_color(theme::color(move || {
+            if showing {
+                palette::border()
+            } else {
+                palette::border_subtle()
+            }
+        }))
+        .bg(theme::color(
+            move || if showing { palette::chip() } else { CLEAR },
+        ))
+        .hover(move |s| {
+            if showing {
+                s
+            } else {
+                s.bg(theme::color(palette::surface_raised))
+                    .border_color(theme::color(palette::border))
+            }
+        })
+        .px(px(7.))
+        .py(px(1.))
+        .on_press(toggle)
+        .child(
+            text(label)
+                .text_size(px(9.))
+                .line_height(line(9.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::color(move || {
+                    if showing {
+                        palette::text()
+                    } else {
+                        palette::text_dim()
+                    }
+                })),
+        )
+        .into_element()
+}
+
 /// A headline figure with its sign against it: "42" and "%".
 pub fn big_number(
     value: impl IntoReactive<SharedString>,

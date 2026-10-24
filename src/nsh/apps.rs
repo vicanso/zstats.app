@@ -204,7 +204,7 @@ fn controls(live: Live) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(px(5.))
-        .child(lists::filter_chip(live))
+        .child(lists::filter_chip(live, lists::NAME_FILTER))
         .child(sort_control(live))
         .child(full_scan_chip(live))
         .into_element()
@@ -244,7 +244,7 @@ fn top_card(live: Live, body: ReadSignal<f32>) -> View {
             ),
             Some(controls(live)),
         ))
-        .child(lists::filter_row(live))
+        .child(lists::filter_row(live, lists::NAME_FILTER))
         .child(
             scroll()
                 .max_h(move || px(top.with(|t| t.viewport)))
@@ -331,7 +331,7 @@ fn full_card(live: Live, body: ReadSignal<f32>) -> View {
                 .pb(px(8.))
                 .child(widgets::note(move || full.with(|f| f.note.clone()))),
         )
-        .child(lists::filter_row(live))
+        .child(lists::filter_row(live, lists::NAME_FILTER))
         .child(when(
             move || full.with(|f| f.rows.is_empty()),
             || lists::no_match("apps.filter_no_match"),

@@ -310,7 +310,9 @@ fn controls(live: Live, full: bool) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(px(5.))
-        .child(when(ranking, move || lists::filter_chip(live)))
+        .child(when(ranking, move || {
+            lists::filter_chip(live, lists::NAME_FILTER)
+        }))
         .child(when(move || !full && !only.get(), avg_chip))
         .child(when(
             move || !full && abnormal.get() > 0,
@@ -345,7 +347,7 @@ fn top_card(live: Live, body: ReadSignal<f32>) -> View {
             ),
             Some(controls(live, false)),
         ))
-        .child(lists::filter_row(live))
+        .child(lists::filter_row(live, lists::NAME_FILTER))
         .child(
             scroll()
                 .max_h(move || px(top.with(|t| t.viewport)))
@@ -456,7 +458,7 @@ fn full_card(live: Live, body: ReadSignal<f32>) -> View {
                 .pb(px(8.))
                 .child(widgets::note(move || full.with(|f| f.note.clone()))),
         )
-        .child(lists::filter_row(live))
+        .child(lists::filter_row(live, lists::NAME_FILTER))
         .child(when(
             move || full.with(|f| f.rows.is_empty()),
             || lists::no_match("processes.filter_no_match"),

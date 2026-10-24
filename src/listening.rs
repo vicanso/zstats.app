@@ -393,6 +393,7 @@ fn matching(rows: Vec<Row>, query: &str) -> Vec<Row> {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::process::Command;
     use zstats::ListenerSnapshot;
 
     fn socket(
@@ -553,9 +554,13 @@ mod tests {
             endpoints: Vec::new(),
             ages: BTreeMap::new(),
         };
-        // The test runner: alive, ours to signal, and never actually
-        // signalled here — this only asks whether the button would exist
-        let runner = std::os::unix::process::parent_id();
+        // A child of our own: alive and ours to signal, never pid 1 or this
+        // process. The test runner's parent was used, and in the Linux
+        // container one test run's parent is pid 1, which is never offered.
+        // This only asks whether the button would exist; the child is
+        // ended below.
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let runner = child.id();
         let named = |n: &str| Owner::Name(n.to_string());
         assert_eq!(
             quit_target(&row(named("runner"), &[runner])),
@@ -576,6 +581,8 @@ mod tests {
             None
         );
         assert_eq!(quit_target(&row(named("launchd"), &[1])), None);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

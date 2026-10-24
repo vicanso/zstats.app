@@ -19,6 +19,7 @@ mod host;
 #[cfg(target_os = "linux")]
 mod linux;
 mod lists;
+mod network;
 mod overview;
 mod panel;
 #[cfg(all(target_os = "macos", debug_assertions))]

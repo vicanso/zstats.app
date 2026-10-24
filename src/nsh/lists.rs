@@ -1,7 +1,7 @@
 //! What the NSH Apps and Processes pages share — on the gpui front end,
 //! what `views/processes.rs` exports for `views/apps.rs`: the measures of
 //! a list under a pinned header, the name filter (one filter, both
-//! lists), the All chip's shape, the disk check's badge, and an open
+//! lists; the listening card has one of the same shape), the All chip's shape, the disk check's badge, and an open
 //! row's pieces — its figures, its alert bars, the chips that edit them,
 //! and the outlined button that asks a program to quit.
 
@@ -11,7 +11,7 @@ use crate::diskwatch::Hold;
 use crate::nsh::root::{CARD_GAP, CARD_PAD, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
-use crate::state::ZStatsAppState;
+use crate::state::{Effects, ZStatsAppState};
 use crate::{format, i18n, palette};
 use nsh_base::TooltipElement;
 use nsh_core::ui::prelude::*;
@@ -68,12 +68,47 @@ pub fn no_match(key: &'static str) -> View {
         .child(widgets::note(i18n::tr(key)))
 }
 
-/// The header control that opens the name filter.
-pub fn filter_chip(live: Live) -> AnyElement {
-    let on = live.memo(ZStatsAppState::proc_filter_open);
+/// A search's end in the store, and its words: the name filter Apps and
+/// Processes share, or the listening card's.
+#[derive(Clone, Copy)]
+pub struct Filter {
+    open: fn(&ZStatsAppState) -> bool,
+    text: fn(&ZStatsAppState) -> &str,
+    show: fn(&mut ZStatsAppState, &mut dyn Effects),
+    hide: fn(&mut ZStatsAppState, &mut dyn Effects),
+    set: fn(&mut ZStatsAppState, &str, &mut dyn Effects),
+    tip: &'static str,
+    placeholder: &'static str,
+}
+
+/// The name filter over Apps and Processes.
+pub const NAME_FILTER: Filter = Filter {
+    open: ZStatsAppState::proc_filter_open,
+    text: ZStatsAppState::proc_filter_text,
+    show: ZStatsAppState::open_proc_filter,
+    hide: ZStatsAppState::close_proc_filter,
+    set: ZStatsAppState::set_proc_filter_text,
+    tip: "processes.filter_tip",
+    placeholder: "processes.filter_placeholder",
+};
+
+/// The listening card's search.
+pub const LISTEN_FILTER: Filter = Filter {
+    open: ZStatsAppState::listen_filter_open,
+    text: ZStatsAppState::listen_filter_text,
+    show: ZStatsAppState::open_listen_filter,
+    hide: ZStatsAppState::close_listen_filter,
+    set: ZStatsAppState::set_listen_filter_text,
+    tip: "listen.filter_tip",
+    placeholder: "listen.filter_placeholder",
+};
+
+/// The header control that opens a search.
+pub fn filter_chip(live: Live, filter: Filter) -> AnyElement {
+    let on = live.memo(filter.open);
     view()
         .flex_none()
-        .tooltip(widgets::wrap_tooltip(i18n::tr("processes.filter_tip")))
+        .tooltip(widgets::wrap_tooltip(i18n::tr(filter.tip)))
         .child(
             nsh_base::button()
                 .rounded(px(4.))
@@ -84,9 +119,9 @@ pub fn filter_chip(live: Live) -> AnyElement {
                     let open = on.get_untracked();
                     store::update(|state, fx| {
                         if open {
-                            state.close_proc_filter(fx);
+                            (filter.hide)(state, fx);
                         } else {
-                            state.open_proc_filter(fx);
+                            (filter.show)(state, fx);
                         }
                     });
                 })
@@ -101,16 +136,21 @@ pub fn filter_chip(live: Live) -> AnyElement {
         .into_element()
 }
 
-/// The name filter's field while it is open, focused as it appears; the
-/// clear empties it, as Escape does on the gpui front end.
-pub fn filter_row(live: Live) -> AnyElement {
-    let on = live.memo(ZStatsAppState::proc_filter_open);
-    let query = live.memo(|state: &ZStatsAppState| state.proc_filter_text().to_owned());
+/// A search's field while it is open, focused as it appears; the clear
+/// empties it, as Escape does on the gpui front end, and leaves the caret
+/// in it as gpui-kit's clear button does.
+pub fn filter_row(live: Live, filter: Filter) -> AnyElement {
+    let on = live.memo(filter.open);
+    let query = computed(move || {
+        live.track();
+        store::read(|state| (filter.text)(state).to_owned())
+    });
     let typed = signal(String::new());
     when(
         move || on.get(),
         move || {
             typed.set(String::new());
+            let field = element_ref();
             view()
                 .h(px(FILTER_ROW))
                 .px(px(CARD_PAD))
@@ -132,16 +172,17 @@ pub fn filter_row(live: Live) -> AnyElement {
                         ))
                         .child(
                             input()
+                                .element_ref(&field)
                                 .flex_1()
                                 .value(move || typed.get())
-                                .placeholder(i18n::tr("processes.filter_placeholder"))
+                                .placeholder(i18n::tr(filter.placeholder))
                                 .auto_focus(true)
                                 .auto_correct(false)
                                 .text_size(px(12.))
                                 .text_color(theme::color(palette::text))
                                 .on_change(move |text: &str| {
                                     typed.set(text.to_owned());
-                                    store::update(|state, fx| state.set_proc_filter_text(text, fx));
+                                    store::update(|state, fx| (filter.set)(state, text, fx));
                                 }),
                         )
                         .child(when(
@@ -154,9 +195,8 @@ pub fn filter_row(live: Live) -> AnyElement {
                                     .hover(|s| s.bg(theme::color(palette::surface_raised)))
                                     .on_press(move || {
                                         typed.set(String::new());
-                                        store::update(|state, fx| {
-                                            state.set_proc_filter_text("", fx)
-                                        });
+                                        store::update(|state, fx| (filter.set)(state, "", fx));
+                                        field.focus();
                                     })
                                     .child(widgets::icon(
                                         CustomIconName::Close,

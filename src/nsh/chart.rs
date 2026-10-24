@@ -72,7 +72,7 @@ pub fn well(
 }
 
 /// A palette colour as the canvas takes it.
-fn ink(c: Rgba) -> Hsla {
+pub fn ink(c: Rgba) -> Hsla {
     let c: nsh_core::Rgba = c.into();
     c.into()
 }

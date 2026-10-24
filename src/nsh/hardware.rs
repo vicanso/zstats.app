@@ -14,7 +14,7 @@
 use crate::assets::CustomIconName;
 use crate::nsh::lists;
 use crate::nsh::root::{self, AuxWindow, CARD_GAP, CARD_PAD, HostAction, Live};
-use crate::nsh::widgets::{self, CLEAR};
+use crate::nsh::widgets;
 use crate::nsh::{store, theme};
 use crate::state::ZStatsAppState;
 use crate::{format, hardware, hot, i18n, palette};
@@ -50,16 +50,6 @@ pub fn page(live: Live) -> AnyElement {
             .child(battery(live))
             .into_element()
     })
-}
-
-/// A body line in the mono face, unless the locale's words are CJK, which
-/// the bundled mono face cannot draw (`font::mono_unless_cjk`).
-fn mono_unless_cjk(words: Text) -> Text {
-    if i18n::is_cjk() {
-        words
-    } else {
-        words.font_family(widgets::MONO)
-    }
 }
 
 /// What the volume cards show.
@@ -216,7 +206,7 @@ fn volume_card(volume: ReadSignal<Volume>, space: Memo<Option<String>>) -> AnyEl
                 .flex_row()
                 .justify_between()
                 .mt(px(7.))
-                .child(mono_unless_cjk(
+                .child(widgets::mono_unless_cjk(
                     text(move || volume.with(|v| v.rw.clone()))
                         .text_size(px(10.))
                         .line_height(widgets::line(10.))
@@ -465,7 +455,7 @@ fn lists_note(words: String, size: f32) -> Text {
 fn drive_row(drive: ReadSignal<Drive>) -> AnyElement {
     let measuring = move || drive.with(|d| d.measuring);
     let small = |words: Box<dyn Fn() -> String>| {
-        mono_unless_cjk(
+        widgets::mono_unless_cjk(
             text(words)
                 .text_size(px(10.))
                 .line_height(widgets::line(10.))
@@ -897,49 +887,14 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
     if hideable == 0 {
         return widgets::note(i18n::tr("sensors.hottest_first")).into_element();
     }
-    nsh_base::button()
-        .flex_none()
-        .rounded_full()
-        .border(px(1.))
-        .border_color(theme::color(move || {
-            if showing {
-                palette::border()
-            } else {
-                palette::border_subtle()
-            }
-        }))
-        .bg(theme::color(
-            move || if showing { palette::chip() } else { CLEAR },
-        ))
-        .hover(move |s| {
-            if showing {
-                s
-            } else {
-                s.bg(theme::color(palette::surface_raised))
-                    .border_color(theme::color(palette::border))
-            }
-        })
-        .px(px(7.))
-        .py(px(1.))
-        .on_press(|| store::update(|state, fx| state.toggle_all_sensors(fx)))
-        .child(
-            text(if showing {
-                i18n::tr("sensors.hide_more")
-            } else {
-                t!("sensors.show_more", count = hideable).to_string()
-            })
-            .text_size(px(9.))
-            .line_height(widgets::line(9.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme::color(move || {
-                if showing {
-                    palette::text()
-                } else {
-                    palette::text_dim()
-                }
-            })),
-        )
-        .into_element()
+    let label = if showing {
+        i18n::tr("sensors.hide_more")
+    } else {
+        t!("sensors.show_more", count = hideable).to_string()
+    };
+    widgets::more_chip(label, showing, || {
+        store::update(|state, fx| state.toggle_all_sensors(fx))
+    })
 }
 
 /// What the battery card shows: `None` without a battery.

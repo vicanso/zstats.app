@@ -15,7 +15,9 @@
 //! compositor's on a Hyprland desktop).
 
 use crate::nsh::root::{self, CARD_GAP, GUTTER, HostAction, Live};
-use crate::nsh::{apps, chrome, gallery, hardware, overview, processes, store, theme, widgets};
+use crate::nsh::{
+    apps, chrome, gallery, hardware, network, overview, processes, store, theme, widgets,
+};
 use crate::palette;
 use crate::prefs;
 use crate::state::{Tab, ZStatsAppState};
@@ -67,6 +69,7 @@ fn page(tab: Tab, live: Live, body: ReadSignal<f32>) -> AnyElement {
         Tab::Apps => apps::page(live, body),
         Tab::Processes => processes::page(live, body),
         Tab::Hardware => hardware::page(live),
+        Tab::Net => network::page(live),
         other => not_yet(other),
     }
 }
