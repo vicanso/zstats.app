@@ -37,32 +37,19 @@
 //! process's name: a pid can be reused, and a recycled pid under another
 //! program misses and asks again.
 //!
-//! Shared by both front ends since phase 3d of docs/nsh-migration.md: the
-//! drawing is a PNG, kept as gpui's `Image` and as the `data:` URI the NSH
-//! front end shows, each made once with it. One cache for the process, behind a lock: NSH asks from each
+//! The drawing is a PNG, kept as the `data:` URI NSH shows, made once
+//! with it. One cache for the process, behind a lock: NSH asks from each
 //! window's engine thread, and the drawing needs no particular thread —
 //! this module's test draws Finder's icon on a test runner's.
 
-#[cfg(feature = "nsh")]
 use crate::assets;
-#[cfg(feature = "gpui")]
-use gpui::Image;
-use std::sync::Arc;
-#[cfg(feature = "nsh")]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-/// An application's icon, drawn once as a small PNG and kept in the forms
-/// the front ends take it in.
+/// An application's icon, drawn once as a small PNG.
 #[derive(Clone)]
 pub struct Icon {
-    /// The drawing for gpui's `img`, made when the PNG was: gpui
-    /// keys its decoded images by this value, so one made per paint would
-    /// be decoded per paint.
-    #[cfg(feature = "gpui")]
-    pub image: Arc<Image>,
-    /// The same drawing as a `data:` URI, the way the NSH front end hands
-    /// an image over — made once, not per row per frame.
-    #[cfg(feature = "nsh")]
+    /// The drawing as a `data:` URI, the way NSH takes an image — made
+    /// once, not per row per frame.
     pub data_uri: Arc<str>,
 }
 
@@ -85,18 +72,6 @@ pub fn icon_for_pid(pid: u32, name: &str) -> Option<Icon> {
 /// about the record that nothing behind it makes.
 pub fn icon_for_record(pid: u32, name: &str) -> Option<Icon> {
     cached(pid, name, true)
-}
-
-/// [`icon_for_pid`]'s drawing, as gpui's image.
-#[cfg(feature = "gpui")]
-pub fn for_pid(pid: u32, name: &str) -> Option<Arc<Image>> {
-    icon_for_pid(pid, name).map(|icon| icon.image)
-}
-
-/// [`icon_for_record`]'s drawing, as gpui's image.
-#[cfg(feature = "gpui")]
-pub fn for_record(pid: u32, name: &str) -> Option<Arc<Image>> {
-    icon_for_record(pid, name).map(|icon| icon.image)
 }
 
 /// Both lookups, cached apart: a record that failed the name check must
@@ -146,9 +121,6 @@ fn cached(pid: u32, name: &str, recorded: bool) -> Option<Icon> {
             return hit.clone();
         }
         let icon = native::icon_png(&bundle).map(|png| Icon {
-            #[cfg(feature = "gpui")]
-            image: Arc::new(Image::from_bytes(gpui::ImageFormat::Png, png.clone())),
-            #[cfg(feature = "nsh")]
             data_uri: Arc::from(format!("data:image/png;base64,{}", base64(&png))),
         });
         if cache.icons.len() >= BUNDLE_CAP {
@@ -160,8 +132,7 @@ fn cached(pid: u32, name: &str, recorded: bool) -> Option<Icon> {
 }
 
 /// This app's own icon — the bundle's artwork, embedded as
-/// `zstats-icon.png` — as a `data:` URI, for the NSH About page; made once.
-#[cfg(feature = "nsh")]
+/// `zstats-icon.png` — as a `data:` URI, for the About page; made once.
 pub fn own_data_uri() -> Arc<str> {
     static URI: OnceLock<Arc<str>> = OnceLock::new();
     URI.get_or_init(|| {
@@ -172,7 +143,6 @@ pub fn own_data_uri() -> Arc<str> {
 }
 
 /// Standard base64 with padding (RFC 4648 §4), for [`Icon::data_uri`].
-#[cfg(feature = "nsh")]
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -439,7 +409,7 @@ mod native {
     }
 }
 
-#[cfg(all(test, feature = "nsh"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -28,7 +28,7 @@ env:
 jobs:
   test:
     runs-on: macos-latest
-    # Generous because a cold gpui build is slow; warm-cache runs are
+    # Generous because a cold build is slow; warm-cache runs are
     # minutes. The ceiling exists so a hung build cannot sit for six hours.
     timeout-minutes: 60
     steps:
@@ -70,19 +70,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: system dependencies
-        # xkbcommon links at build time (gpui turns the crate's default
-        # features off, so there is no dlopen shim), and gpui's x11
-        # backend pulls `xkbcommon-x11` and `xcb` in with it — the link
-        # step is where a missing one shows up, long after everything
-        # has compiled. fontconfig backs font-kit. Wayland and Vulkan are
-        # dlopened at runtime, so they are not needed to build. GTK 4 and
-        # gtk4-layer-shell are the NSH front end's host (24.04 ships GTK
-        # 4.14, the version NSH's GTK backend asks for).
+        # GTK 4 and gtk4-layer-shell: NSH's GTK backend and the panel's
+        # layer surface (24.04 ships GTK 4.14, the version NSH asks for).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
-            libfontconfig1-dev libgtk-4-dev libgtk4-layer-shell-dev
+            pkg-config libgtk-4-dev libgtk4-layer-shell-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -94,9 +87,3 @@ jobs:
         run: cargo build --all-targets
       - name: test
         run: cargo test --workspace
-      # The NSH front end (docs/nsh-migration.md): its GTK host
-      # (`src/nsh/linux.rs`, phase 2d) and the shared modules without gpui.
-      - name: build (nsh)
-        run: cargo build --all-targets --no-default-features --features nsh
-      - name: test (nsh)
-        run: cargo test --workspace --no-default-features --features nsh

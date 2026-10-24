@@ -1,8 +1,7 @@
 //! Rectangles in logical points, top-left origin with y growing down — the
-//! space gpui lays windows out in, and the one `placement.rs` does its
-//! arithmetic in. Shared so the panel's sizes and the hang-it-off-the-tray
-//! geometry serve both front ends (docs/nsh-migration.md, phase 1b); the
-//! gpui one converts at its edge through the `From` impls below.
+//! space `placement.rs` does its arithmetic in (gpui's, which it was moved
+//! off in phase 1b of docs/nsh-migration.md); the AppKit host converts at
+//! its edge.
 
 /// A point.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -52,54 +51,6 @@ impl Rect {
     }
 }
 
-#[cfg(feature = "gpui")]
-mod gpui_edge {
-    use super::{Point, Rect, Size, point, size};
-    use gpui::{Bounds, Pixels, px};
-
-    impl From<Point> for gpui::Point<Pixels> {
-        fn from(p: Point) -> Self {
-            gpui::point(px(p.x), px(p.y))
-        }
-    }
-
-    impl From<gpui::Point<Pixels>> for Point {
-        fn from(p: gpui::Point<Pixels>) -> Self {
-            point(f32::from(p.x), f32::from(p.y))
-        }
-    }
-
-    impl From<Size> for gpui::Size<Pixels> {
-        fn from(s: Size) -> Self {
-            gpui::size(px(s.width), px(s.height))
-        }
-    }
-
-    impl From<gpui::Size<Pixels>> for Size {
-        fn from(s: gpui::Size<Pixels>) -> Self {
-            size(f32::from(s.width), f32::from(s.height))
-        }
-    }
-
-    impl From<Rect> for Bounds<Pixels> {
-        fn from(r: Rect) -> Self {
-            Bounds {
-                origin: r.origin.into(),
-                size: r.size.into(),
-            }
-        }
-    }
-
-    impl From<Bounds<Pixels>> for Rect {
-        fn from(b: Bounds<Pixels>) -> Self {
-            Rect {
-                origin: b.origin.into(),
-                size: b.size.into(),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,29 +69,5 @@ mod tests {
         assert!(!left.contains(&seam));
         assert!(right.contains(&seam));
         assert_eq!(left.center(), point(720., 450.));
-    }
-
-    /// The same answers gpui's own rectangle gives, so geometry moved off
-    /// gpui's types places the panel exactly where it did on them.
-    #[cfg(feature = "gpui")]
-    #[test]
-    fn contains_and_center_match_gpuis() {
-        use gpui::{Bounds, Pixels};
-        let r = Rect {
-            origin: point(10., 24.),
-            size: size(358., 828.),
-        };
-        let b: Bounds<Pixels> = r.into();
-        for p in [
-            point(10., 24.),
-            point(368., 24.),
-            point(9.9, 30.),
-            point(200., 852.),
-            point(200., 851.9),
-        ] {
-            assert_eq!(r.contains(&p), b.contains(&p.into()), "{p:?}");
-        }
-        assert_eq!(Point::from(b.center()), r.center());
-        assert_eq!(Rect::from(b), r);
     }
 }

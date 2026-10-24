@@ -194,10 +194,11 @@ fi
 # --- shared libraries, the one thing that really is per-distribution ------
 #
 # Everything above is XDG and identical on every distribution. Library
-# *package names* are not, and this binary needs some: xkbcommon, xcb and
-# fontconfig/freetype are linked at build time, Wayland and Vulkan are
-# dlopened at run time. Without them the first launch dies in the dynamic
-# linker, which says nothing a user can act on.
+# *package names* are not, and this binary needs some: GTK 4 (4.14 or
+# later — the interface is NSH's GTK backend) and gtk4-layer-shell (the
+# panel is a layer surface), both linked at build time. Without them the
+# first launch dies in the dynamic linker, which says nothing a user can
+# act on.
 #
 # Reported, never installed. A user-level installer that starts calling a
 # package manager needs root it was designed not to need, and a guess at
@@ -212,13 +213,13 @@ distro_packages() {
     fi
     case " $id $like " in
         *" arch "*|*" archlinux "*)
-            echo "sudo pacman -S --needed libxkbcommon libxkbcommon-x11 libxcb fontconfig vulkan-icd-loader" ;;
+            echo "sudo pacman -S --needed gtk4 gtk4-layer-shell" ;;
         *" debian "*|*" ubuntu "*)
-            echo "sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcb1 libfontconfig1 libvulkan1" ;;
+            echo "sudo apt install libgtk-4-1 libgtk4-layer-shell0" ;;
         *" fedora "*|*" rhel "*|*" centos "*)
-            echo "sudo dnf install libxkbcommon libxkbcommon-x11 libxcb fontconfig vulkan-loader" ;;
+            echo "sudo dnf install gtk4 gtk4-layer-shell" ;;
         *" suse "*|*" opensuse "*)
-            echo "sudo zypper install libxkbcommon0 libxkbcommon-x11-0 libxcb1 fontconfig libvulkan1" ;;
+            echo "sudo zypper install libgtk-4-1 libgtk4-layer-shell0" ;;
         *)
             echo "" ;;
     esac
@@ -236,13 +237,9 @@ report_missing_libs() {
         say "Install them with:"
         say "  $pkgs"
     else
-        say "Install your distribution's xkbcommon, xkbcommon-x11, xcb,"
-        say "fontconfig and Vulkan loader packages."
+        say "Install your distribution's GTK 4 (4.14 or later) and"
+        say "gtk4-layer-shell packages."
     fi
-    # Not exhaustive on purpose: Wayland and Vulkan are dlopened, so a
-    # missing one of those never appears here and shows up as a failure
-    # to start instead. They are in the package lists above for that
-    # reason.
 }
 
 report_missing_libs "$BIN_DIR/$APP"

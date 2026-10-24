@@ -772,12 +772,6 @@ pub fn webhook_verdict(test: Option<&WebhookTest>) -> Option<(String, bool)> {
     })
 }
 
-/// Whether the webhook's test can be sent: a valid URL, none in flight,
-/// and something to send to.
-pub fn webhook_can_test(valid: bool, test: Option<&WebhookTest>) -> bool {
-    valid && !matches!(test, Some(WebhookTest::Sending)) && !prefs::webhook().is_empty()
-}
-
 // --- Permissions ------------------------------------------------------------------
 
 /// Last Full Disk Access probe. Distinct from the real 0/1 so the first

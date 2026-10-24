@@ -1,17 +1,12 @@
 // Release builds detach from the console on Windows — otherwise launching the
 // app pops an empty terminal behind the window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// While the interface moves from gpui to NSH (docs/nsh-migration.md), a
-// shared module carries what either front end calls, and a build with one
-// of them compiles all of it: the NSH-only build has the store's
-// re-exports only gpui's views import, the gpui-only build the palette's
-// halves only NSH reads. Dead code is reported where both are built —
-// the configuration `make lint` checks, where nothing shared is unused
-// unless it really is.
-#![cfg_attr(
-    not(all(feature = "gpui", feature = "nsh")),
-    allow(dead_code, unused_imports)
-)]
+// The macOS host uses all of what the shared modules carry; the Linux one
+// a part — no tray rect to hang the panel from (the compositor places
+// it), no dragged size to remember. That geometry still compiles and is
+// still tested there; it is linted for dead code on macOS, where it is
+// called.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 // macOS and Linux. Anything else fails here rather than six files later,
 // with the same reasoning the macOS-only guard carried before: a scatter
@@ -26,13 +21,7 @@ compile_error!(
      positioning and process scanning, not just satisfying the compiler."
 );
 
-#[cfg(not(any(feature = "gpui", feature = "nsh")))]
-compile_error!(
-    "zstats-app needs a front end: the `gpui` feature (the default) or `nsh` \
-     (docs/nsh-migration.md)."
-);
-
-// Shared by both front ends: none of these knows which one is drawing.
+// What the interface stands on: none of these draws.
 mod about;
 mod active;
 mod alertbars;
@@ -99,32 +88,8 @@ mod volflag;
 mod watch;
 mod webhook;
 
-// The gpui front end. Phase 1 of docs/nsh-migration.md moves what is not
-// about drawing — the store, the tray's face, the colours, the placement
-// geometry — out of these and into the shared half.
-#[cfg(feature = "gpui")]
-mod confirm;
-#[cfg(all(feature = "gpui", target_os = "macos"))]
-mod dock;
-#[cfg(feature = "gpui")]
-mod font;
-#[cfg(feature = "gpui")]
-mod gpui_app;
-#[cfg(feature = "gpui")]
-mod gpui_ui;
-#[cfg(feature = "gpui")]
-mod theme;
-#[cfg(feature = "gpui")]
-mod views;
-#[cfg(all(feature = "gpui", target_os = "macos"))]
-mod window_ext;
-
-// The NSH front end (docs/nsh-migration.md).
-#[cfg(feature = "nsh")]
+// The interface (docs/nsh-migration.md: gpui-kit until 2026-10-25).
 mod nsh;
-
-#[cfg(all(feature = "gpui", feature = "nsh"))]
-use std::env;
 
 // Pointed at the empty `locales_stub/` so the macro embeds no translations.
 // Real files live in `assets/locales/` and inflate via `i18n_loader`.
@@ -138,26 +103,6 @@ rust_i18n::i18n!(
 /// title bar.
 pub const APP_NAME: &str = "zstats";
 
-// What other modules call on the gpui front end, at the paths they used
-// while it was this file.
-#[cfg(feature = "gpui")]
-pub(crate) use gpui_app::{
-    open_settings_window, open_storage_window, reset_panel_size_pref, set_autostart_pref,
-    set_disk_watch_pref, set_keep_awake, set_language_pref, set_notifications_pref,
-    set_opacity_pref, set_overview_detail_pref, set_sustained_after_pref,
-    set_sustained_divisor_pref, set_theme_pref, set_tray_pref, sync_panel_notice,
-};
-
 fn main() {
-    // Both front ends built in: gpui unless asked otherwise, so a build
-    // with everything on behaves as the release does.
-    #[cfg(all(feature = "gpui", feature = "nsh"))]
-    if env::var_os("ZSTATS_UI").is_some_and(|ui| ui == "nsh") {
-        nsh::run();
-        return;
-    }
-    #[cfg(feature = "gpui")]
-    gpui_app::run();
-    #[cfg(all(feature = "nsh", not(feature = "gpui")))]
     nsh::run();
 }

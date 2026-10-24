@@ -280,11 +280,11 @@ jobs:
       - name: write LSUIElement into Info.plist
         # `make bundle` does this for local builds but hard-codes the
         # no-`--target` bundle path, so CI replicates it here. LSUIElement
-        # is what keeps the Dock icon from flashing on launch:
-        # hide_dock_icon() only runs ~50ms in, after gpui has built
-        # NSApplication and started the runloop, and the icon would sit
-        # in the Dock for all of it. Must happen BEFORE codesign — editing
-        # Info.plist afterwards invalidates the signature.
+        # is what keeps the Dock icon from flashing on launch: the host
+        # sets the accessory activation policy itself, but only once it
+        # runs, and LaunchServices would have put the icon in the Dock
+        # before that. Must happen BEFORE codesign — editing Info.plist
+        # afterwards invalidates the signature.
         run: |
           PLIST="target/${{ matrix.target }}/release/bundle/osx/${{ env.APP_NAME }}.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$PLIST" >/dev/null 2>&1 || true
@@ -396,18 +396,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: system dependencies
-        # The same list test.yml installs, for the same reasons:
-        # xkbcommon links at build time (gpui turns the crate's default
-        # features off, so there is no dlopen shim) and gpui's x11
-        # backend pulls `xkbcommon-x11` and `xcb` in with it — a missing
-        # one of those surfaces at the *link* step, long after everything
-        # has compiled. fontconfig backs font-kit. Wayland and Vulkan are
-        # dlopened at runtime, so they are not needed to build.
+        # The same list test.yml installs: GTK 4 and gtk4-layer-shell,
+        # NSH's GTK backend and the panel's layer surface. The binary
+        # links them, so the machine it runs on needs them too
+        # (`scripts/install-linux.sh` says so).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
-            libfontconfig1-dev
+            pkg-config libgtk-4-dev libgtk4-layer-shell-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

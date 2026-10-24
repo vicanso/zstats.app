@@ -1,18 +1,8 @@
 //! Bundled static files: fonts, locales, and app icons.
 //!
 //! rust-embed's `compression` feature zstd-compresses each file into the
-//! binary; [`get`] inflates on first read. With the gpui front end it also
-//! implements gpui's `AssetSource`, so gpui can load `icons/power.svg` the
-//! same way it loads `IconName` SVGs from gpui-kit.
+//! binary; [`get`] inflates on first read.
 
-#[cfg(feature = "gpui")]
-use anyhow::anyhow;
-#[cfg(feature = "gpui")]
-use gpui::{AssetSource, Result, SharedString};
-#[cfg(feature = "gpui")]
-use gpui_kit::assets::Assets as ComponentAssets;
-#[cfg(feature = "gpui")]
-use gpui_kit::component::Icon;
 use rust_embed::RustEmbed;
 use std::borrow::Cow;
 
@@ -20,15 +10,12 @@ use std::borrow::Cow;
 ///
 /// rust-embed walks the directory and keeps every regular file it finds — it
 /// does **not** skip dotfiles, so the Finder's `.DS_Store` droppings (22 KB
-/// across three directories here) would be compressed into the binary and
-/// listed by gpui's `AssetSource::list`, which is what gpui enumerates icons
-/// with.
+/// across three directories here) would be compressed into the binary.
 /// Naming the extensions instead of excluding known junk means nothing new
 /// can be embedded by accident.
 ///
-/// The `include` attributes need rust-embed's `include-exclude` feature. It
-/// is declared in `Cargo.toml` rather than left to feature unification with
-/// gpui-kit-assets, which happens to enable it today.
+/// The `include` attributes need rust-embed's `include-exclude` feature,
+/// declared in `Cargo.toml`.
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/*.svg"]
@@ -44,40 +31,16 @@ pub fn get(path: &str) -> Option<Cow<'static, [u8]>> {
     Assets::get(path).map(|f| f.data)
 }
 
-#[cfg(feature = "gpui")]
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path.is_empty() {
-            return Ok(None);
-        }
-        if let Some(file) = ComponentAssets::get(path) {
-            return Ok(Some(file.data));
-        }
-        // An unknown path is an error rather than `Ok(None)`: gpui renders a
-        // missing SVG as empty space either way, but only the error reaches
-        // the log and says which path it was.
-        Self::get(path)
-            .map(|f| Some(f.data))
-            .ok_or_else(|| anyhow!(r#"could not find asset at path "{path}""#))
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut files: Vec<SharedString> = ComponentAssets::iter()
-            .filter_map(|p| p.starts_with(path).then(|| p.into()))
-            .collect();
-        files.extend(Self::iter().filter_map(|p| p.starts_with(path).then(|| p.into())));
-        Ok(files)
-    }
-}
-
-/// The SVGs this app ships itself, because gpui-kit's `IconName` has no
-/// equivalent for them.
+/// The SVGs the interface draws — lucide's, bundled because NSH has no
+/// icon set of its own (`nsh::widgets::icon` hands each one over as a
+/// `data:` URI and tints it); the tray rasterises its faces from the same
+/// files. Where a variant's note names a gpui-kit `IconName`, that is the
+/// glyph the gpui front end drew in its place until 2026-10-25.
 ///
 /// Named rather than written out as paths at the call site: the filename then
 /// exists once, so renaming or dropping an SVG fails to compile here instead
-/// of silently leaving a hole in the tab strip. gpui's `Icon::path()`
-/// resolves through `AssetSource` at paint time and cannot be checked any
-/// earlier.
+/// of silently leaving a hole in the tab strip; a test checks every name is
+/// embedded.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CustomIconName {
     AppWindow,
@@ -185,13 +148,6 @@ impl CustomIconName {
             CustomIconName::FolderOpen => "icons/folder-open.svg",
             CustomIconName::Check => "icons/check.svg",
         }
-    }
-}
-
-#[cfg(feature = "gpui")]
-impl From<CustomIconName> for Icon {
-    fn from(val: CustomIconName) -> Self {
-        Icon::empty().path(val.path())
     }
 }
 

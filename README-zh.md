@@ -10,7 +10,7 @@ macOS 菜单栏系统监控，围绕「按应用定规则」构建：托盘实�
 
 收在菜单栏、面板合上时，CPU 占用很低。安装版一次实测：连续运行 14 小时 37 分，CPU 时间 5 分 38 秒，平均只占一颗核的 **0.64%**。
 
-> macOS · Apple Silicon 与 Intel · Universal，已签名公证——另有 Linux 预览版，见「安装」
+> macOS 14 及以上 · Apple Silicon 与 Intel · Universal，已签名公证——另有 Linux 预览版，见「安装」
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/42259bb0-acb7-4675-9c3c-6ad791cca455" autoplay loop muted playsinline width="100%"></video>
@@ -68,7 +68,7 @@ macOS 菜单栏系统监控，围绕「按应用定规则」构建：托盘实�
 
 ## 安装
 
-从 [Releases](../../releases) 下载 `zstats.dmg`，拖进「应用程序」。
+从 [Releases](../../releases) 下载 `zstats.dmg`，拖进「应用程序」。需要 macOS 14（Sonoma）或更新版本。
 
 GitHub 打不开的话，每次发版都会把同样的文件同步一份到 [Gitee](https://gitee.com/vicanso/zstats.app/releases)：三个 DMG 和它们对应的 `SHA256SUMS`。应用内的检查更新和下载在 GitHub 连不上时会自动改用这个镜像，校验和两边是同一份。
 
@@ -80,7 +80,7 @@ make bundle          # 或从源码构建（需要 cargo-bundle）
 
 ### Linux（预览版）
 
-仅 Wayland：托盘是 StatusNotifier 项，面板是由合成器锚在右上角的 layer-shell 表面。在 Omarchy（Hyprland）上开发和验证；其它合成器与桌面未经测试。每次发版都带 `zstats-linux-x86_64.tar.gz` 和 `zstats-linux-aarch64.tar.gz`，列在同一份 `SHA256SUMS` 里，同样镜像到 Gitee。
+仅 Wayland：托盘是 StatusNotifier 项，面板是由合成器锚在右上角的 layer-shell 表面。需要 GTK 4.14 及以上和 gtk4-layer-shell——缺哪个，安装脚本会给出要装的包名。在 Omarchy（Hyprland）上开发；其它合成器与桌面未经测试。每次发版都带 `zstats-linux-x86_64.tar.gz` 和 `zstats-linux-aarch64.tar.gz`，列在同一份 `SHA256SUMS` 里，同样镜像到 Gitee。
 
 最省事的是单独运行安装脚本：它按本机架构下载最新 release（先 GitHub，连不上再走 Gitee 镜像），并拒绝安装任何 `SHA256SUMS` 没有担保的文件。
 
@@ -116,4 +116,4 @@ make lint && make test
 
 设计记录：[docs/design.md](docs/design.md) · [docs/disk-analysis.md](docs/disk-analysis.md)
 
-Apache-2.0 · [gpui](https://github.com/zed-industries/zed) · [zstats](https://crates.io/crates/zstats)
+Apache-2.0 · [NSH](https://github.com/longbridge/nsh) · [zstats](https://crates.io/crates/zstats)

@@ -1,7 +1,7 @@
 # Release version — Cargo.toml is the single source of truth.
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 
-.PHONY: dev debug run nsh fmt lint test check release bundle bloat udeps clean linux-check linux-clean \
+.PHONY: dev debug run fmt lint test check release bundle bloat udeps clean linux-check linux-clean \
 	version version-patch version-minor version-major tag changelog
 
 # --- develop ---------------------------------------------------------------
@@ -16,21 +16,13 @@ debug:
 
 run: dev
 
-# The NSH front end alone (docs/nsh-migration.md). Debug builds open the
-# panel at launch, as `make dev` does for the gpui one.
-nsh:
-	cargo run --no-default-features --features nsh
-
 # --- quality ---------------------------------------------------------------
 
 fmt:
 	cargo fmt
 
-# Both front ends at once, then the NSH one alone: only the second shows
-# that the shared modules still build without gpui.
 lint:
-	cargo clippy --all-targets --all-features -- --deny=warnings
-	cargo clippy --all-targets --no-default-features --features nsh -- --deny=warnings
+	cargo clippy --all-targets -- --deny=warnings
 
 # Type-check only — far faster than a full build when iterating on code.
 check:
@@ -38,7 +30,6 @@ check:
 
 test:
 	cargo test --workspace
-	cargo test --workspace --no-default-features --features nsh
 
 # --- release ---------------------------------------------------------------
 
@@ -47,12 +38,10 @@ release:
 
 # Desktop app bundle (.app / .deb / .msi). Requires `cargo install cargo-bundle`.
 #
-# The LSUIElement step is what keeps the Dock icon from flashing on launch.
-# `hide_dock_icon()` only runs ~50ms in — after gpui has built NSApplication,
-# installed its delegate and started the runloop — and the icon is in the Dock
-# for all of it. LSUIElement makes LaunchServices skip creating it in the first
-# place, so all that's left is gpui's own setActivationPolicy(Regular), which
-# our callback undoes microseconds later in the same call stack.
+# The LSUIElement step is what keeps the Dock icon from flashing on launch:
+# the host sets the accessory activation policy itself, but only once it
+# runs, and LaunchServices would have put the icon in the Dock before that.
+# LSUIElement makes it skip creating it in the first place.
 bundle:
 	cargo bundle --release
 	@TARGET=$$(cargo metadata --format-version 1 --no-deps \
@@ -93,8 +82,9 @@ bundle:
 # Three things here were learned the hard way. crates.io times out inside
 # that VM, so dependencies are vendored on the host and the build runs
 # `--offline` against them — vendored on every run, because a vendor tree
-# older than Cargo.lock fails the offline build on the first new crate. `naga` needs more than the default memory or
-# the OOM killer takes it mid-compile. And the work directory lives outside
+# older than Cargo.lock fails the offline build on the first new crate. The
+# build wants more than the default memory or the OOM killer takes it
+# mid-compile (`naga`, in gpui's day). And the work directory lives outside
 # the repo so a Linux target tree never collides with the macOS one.
 LINUX_WORK ?= $(HOME)/.cache/zstats-linux
 
@@ -117,9 +107,7 @@ linux-check: $(LINUX_WORK)/image.stamp
 		-v "$(LINUX_WORK)/cargo-home":/cargo-home \
 		-w /src -e CARGO_TARGET_DIR=/target -e CARGO_HOME=/cargo-home \
 		zstats-linux \
-		bash -c "cargo build --all-targets --offline && cargo test --offline \
-			&& cargo clippy --all-targets --offline --no-default-features --features nsh -- --deny=warnings \
-			&& cargo test --offline --no-default-features --features nsh"
+		bash -c "cargo clippy --all-targets --offline -- --deny=warnings && cargo test --offline"
 
 # Drop the container work tree (vendored crates and the Linux target dir).
 linux-clean:

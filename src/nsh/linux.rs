@@ -30,7 +30,7 @@ use crate::nsh::{store, theme};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
 use crate::{
-    APP_NAME, active, autostart, i18n, ipc, logger, notice, notify, palette, placement, prefs,
+    APP_NAME, about, active, autostart, i18n, ipc, logger, notice, notify, placement, prefs,
     updater,
 };
 use gtk::glib;
@@ -124,7 +124,7 @@ pub fn run() {
     // Dark until the panel's engine says which (`follow_appearance`) —
     // unless the preference already does.
     theme::follow(theme::appearance() != Appearance::Light);
-    tracing::info!("NSH front end starting on GTK (docs/nsh-migration.md, phase 3)");
+    tracing::info!(version = about::version(), "starting on GTK");
 
     let mut state = ZStatsAppState::new();
     state.restore_alerts();

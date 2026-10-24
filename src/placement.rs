@@ -14,12 +14,6 @@
 //! [`bounds_below_tray`], gated at the end of this file.
 
 use crate::geom::{Point, Rect, Size, point, size};
-#[cfg(feature = "gpui")]
-use crate::state::ZStatsGlobalStore;
-#[cfg(all(feature = "gpui", target_os = "macos"))]
-use crate::window_ext;
-#[cfg(feature = "gpui")]
-use gpui::{App, Bounds, Pixels};
 use std::env;
 
 /// Screen rectangle of the tray icon, in **physical** pixels with a top-left
@@ -485,59 +479,6 @@ pub fn below_tray(
         }
     }
     bounds
-}
-
-/// The screens as AppKit lists them, for [`below_tray`].
-#[cfg(all(feature = "gpui", target_os = "macos"))]
-fn load_screens() -> Vec<ScreenGeom> {
-    window_ext::screens()
-        .into_iter()
-        .map(|(frame, visible, scale)| ScreenGeom {
-            frame: frame.into(),
-            visible: visible.into(),
-            scale,
-        })
-        .collect()
-}
-
-#[cfg(all(feature = "gpui", not(target_os = "macos")))]
-fn load_screens() -> Vec<ScreenGeom> {
-    Vec::new()
-}
-
-/// [`below_tray`] with the two things that need an `App`: the window's
-/// last-known scale, and finding the icon's display.
-#[cfg(feature = "gpui")]
-pub fn bounds_below_tray(
-    anchor: TrayAnchor,
-    window_size: gpui::Size<Pixels>,
-    cx: &App,
-) -> Bounds<Pixels> {
-    let scale = cx.global::<ZStatsGlobalStore>().read(cx).scale_factor();
-    below_tray(
-        anchor,
-        window_size.into(),
-        &load_screens(),
-        scale,
-        |origin| {
-            // Resolved through AppKit rather than `cx.displays()`, which
-            // reports every screen at the same origin — see `window_ext`.
-            #[cfg(target_os = "macos")]
-            {
-                window_ext::visible_bounds_containing(origin.into()).map(Rect::from)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let origin: gpui::Point<Pixels> = origin.into();
-                cx.displays()
-                    .into_iter()
-                    .find(|d| d.bounds().contains(&origin))
-                    .or_else(|| cx.primary_display())
-                    .map(|d| d.visible_bounds().into())
-            }
-        },
-    )
-    .into()
 }
 
 #[cfg(test)]

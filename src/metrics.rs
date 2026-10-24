@@ -20,10 +20,6 @@
 // tick over a channel; reading it on the thread that keeps the store is
 // the front end's ([`start`] for gpui).
 use crate::state::Tab;
-#[cfg(feature = "gpui")]
-use crate::state::ZStatsGlobalStore;
-#[cfg(feature = "gpui")]
-use gpui::{App, Global};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -144,9 +140,6 @@ pub struct CollectorPace {
     registry_tab: Arc<AtomicBool>,
     wake: mpsc::Sender<()>,
 }
-
-#[cfg(feature = "gpui")]
-impl Global for CollectorPace {}
 
 impl CollectorPace {
     /// The panel came on screen: sample now, and hold the fast cadence.
@@ -334,33 +327,6 @@ pub fn spawn(tab: Tab) -> Collector {
         ticks: rx,
         settings,
     }
-}
-
-/// Spawn the collector and the task that folds its output into the store.
-#[cfg(feature = "gpui")]
-pub fn start(cx: &mut App) {
-    let store = cx.global::<ZStatsGlobalStore>().clone();
-    let Collector {
-        pace,
-        ticks,
-        settings,
-    } = spawn(store.read(cx).tab());
-    store.update(cx, |state, cx| {
-        if let Some(settings) = settings {
-            state.set_settings(settings);
-        }
-        // The store reads it too — whether the panel is on screen, and
-        // which tab to tell the collector about — without asking gpui.
-        state.set_pace(pace.clone());
-        state.start_abnormal_scan(cx);
-    });
-    cx.set_global(pace);
-    cx.spawn(async move |cx| {
-        while let Ok(tick) = ticks.recv().await {
-            cx.update(|cx| store.update(cx, |state, cx| state.on_tick(tick, cx)));
-        }
-    })
-    .detach();
 }
 
 #[cfg(test)]

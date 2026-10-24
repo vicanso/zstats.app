@@ -10,7 +10,7 @@ The tray shows live CPU. Click for the panel — it tucks away when you look els
 
 In the menu bar, panel tucked away, the CPU cost stays low. One measured run of the installed app: up for 14 hours 37 minutes, 5 minutes 38 seconds of CPU time, **0.64% of one core**.
 
-> macOS · Apple Silicon and Intel · Universal, signed and notarized — and a Linux preview, see Install
+> macOS 14 or later · Apple Silicon and Intel · Universal, signed and notarized — and a Linux preview, see Install
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/42259bb0-acb7-4675-9c3c-6ad791cca455" autoplay loop muted playsinline width="100%"></video>
@@ -68,7 +68,7 @@ Nothing is cleaned or killed automatically. Mail, Messages and other protected d
 
 ## Install
 
-Download `zstats.dmg` from [Releases](../../releases) and drag it into Applications.
+Download `zstats.dmg` from [Releases](../../releases) and drag it into Applications. It needs macOS 14 (Sonoma) or later.
 
 Behind the Great Firewall, the same files are mirrored to [Gitee](https://gitee.com/vicanso/zstats.app/releases) on every release: the three DMGs and the `SHA256SUMS` they are listed in. The in-app updater falls back to that mirror on its own when GitHub cannot be reached, and verifies the download against the same checksum either way.
 
@@ -80,7 +80,7 @@ Language, theme, the tray's face, panel opacity and the sustained-load knobs liv
 
 ### Linux (preview)
 
-Wayland only: the tray is a StatusNotifier item, the panel a layer-shell surface anchored top-right by the compositor. Developed and checked against Omarchy (Hyprland); other compositors and desktops are untested. Every release carries `zstats-linux-x86_64.tar.gz` and `zstats-linux-aarch64.tar.gz`, listed in the same `SHA256SUMS` and mirrored to Gitee.
+Wayland only: the tray is a StatusNotifier item, the panel a layer-shell surface anchored top-right by the compositor. It needs GTK 4.14 or later and gtk4-layer-shell — the install script names the packages if either is missing. Developed against Omarchy (Hyprland); other compositors and desktops are untested. Every release carries `zstats-linux-x86_64.tar.gz` and `zstats-linux-aarch64.tar.gz`, listed in the same `SHA256SUMS` and mirrored to Gitee.
 
 The quickest route is the install script on its own: it downloads the latest release for this machine's architecture — GitHub first, then the Gitee mirror — and refuses to install anything `SHA256SUMS` does not vouch for.
 
@@ -116,4 +116,4 @@ make lint && make test
 
 Design notes: [docs/design.md](docs/design.md) · [docs/disk-analysis.md](docs/disk-analysis.md)
 
-Apache-2.0 · [gpui](https://github.com/zed-industries/zed) · [zstats](https://crates.io/crates/zstats)
+Apache-2.0 · [NSH](https://github.com/longbridge/nsh) · [zstats](https://crates.io/crates/zstats)

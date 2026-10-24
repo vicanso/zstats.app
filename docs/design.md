@@ -1,28 +1,27 @@
 # zstats.app
 
-macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats Popover v3 shadcn`，指标由 [zstats](https://crates.io/crates/zstats) 嵌入式采集。基于 [gpui-kit](https://gpui-kit.com)（crates.io 上的 `gpui-pre-*` 快照 + gpui-component）。
+macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats Popover v3 shadcn`，指标由 [zstats](https://crates.io/crates/zstats) 嵌入式采集。界面基于 [NSH](https://github.com/longbridge/nsh)（macOS 上是 AppKit，Linux 上是 GTK 4），最低 macOS 14。
 
-**支持平台：macOS。** 其它平台**当前编译不过**（见「已知问题 / TODO」）：托盘（Linux）、窗口显隐、多屏定位、异常进程扫描、Dock 隐藏都只有 macOS 实现，而其中三个模块被六处无条件 import 引用。
+**界面在 2026-10-25 从 gpui-kit 换成了 NSH**（`docs/nsh-migration.md` 是这次迁移的全过程：为什么换、分了哪些阶段、每页怎么对照验收、踩过的坑）。下文不少段落记录的是 gpui 时代的做法——三层毛玻璃、窗口复用、多屏下 gpui 报错的屏幕坐标、`dock.rs` 的 Dock 抑制——那些代码已经随 gpui 一起删掉，段落留着是因为“为什么”还有用；NSH 上的对应做法在迁移文档里对应的阶段下。
+
+**支持平台：macOS**（Linux 是预览版，见 README 与 `docs/omarchy-port.md`）。
 
 ## 源码结构
 
 | 文件 | 职责 |
 |---|---|
-| `main.rs` | 模块声明、按 feature 选择前端（gpui / NSH，见 `nsh-migration.md`） |
-| `gpui_app.rs` | gpui 前端：启动、窗口生命周期、显隐与定位的调度 |
-| `nsh/` | NSH 前端（迁移中，见 `nsh-migration.md`） |
-| `placement.rs` | 窗口尺寸与「挂在托盘图标下方」的纯几何（可单测，两个前端共享，基于 `geom.rs`） |
-| `palette.rs` / `color.rs` | 配色方案与全部颜色 token（两个前端共享）；`theme.rs` 是 gpui 前端的转换层 |
-| `chart.rs` | Overview 三张图的分桶、坐标轴与曲线几何（两个前端共享） |
-| `window_ext.rs` | 通过 AppKit 直接显示 / 隐藏 / 移动 `NSWindow` |
-| `dock.rs` | 两条独立路径的 Dock 图标抑制 |
+| `main.rs` | 模块声明，启动 `nsh::run` |
+| `nsh/` | 界面：宿主（`host.rs` 是 AppKit，`linux.rs` 是 GTK 4）、面板与两个普通窗口的根组件、各页、基础件（`widgets.rs`） |
+| `placement.rs` | 窗口尺寸与「挂在托盘图标下方」的纯几何（可单测，基于 `geom.rs`） |
+| `palette.rs` / `color.rs` | 配色方案与全部颜色 token |
+| `chart.rs` | Overview 三张图的分桶、坐标轴与曲线几何 |
+| `*page.rs`、`*list.rs`、`dirmap.rs` 等 | 各页自己的规则（显示什么、怎么排、话怎么说），不碰绘制，可单测 |
 | `metrics.rs` | 常驻采集线程、自适应节奏、异常进程扫描调度 |
 | `procscan.rs` | `sysctl(KERN_PROC_ALL)` 扫僵尸 / 停止进程 |
 | `watch.rs` | 三个 zstats 告警看不到的观察器：持续负载、异常进程、接口活跃度 |
 | `fullscan.rs` | 一次性全量进程扫描，只在点「全部」时执行 |
 | `history.rs` | 读当天历史文件，按累计 CPU 时间排名 |
 | `state/` | 全局状态：采集结果、告警 episode（`alerts.rs`）、磁盘分析（`analysis.rs`）、窗口几何、UI 选择态 |
-| `views/` | 八个视图 + 共用控件 + 设计 token（`theme.rs`） |
 | `format.rs` | 所有数字 → 字符串的规则，纯函数、有单测 |
 | `notify.rs` | 系统横幅：单线程有界队列 |
 

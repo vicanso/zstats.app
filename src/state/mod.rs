@@ -19,7 +19,7 @@ pub mod effects;
 pub use alerts::SeenAlert;
 pub use analysis::{DiskAnalysis, Expansion, GrowthNotice, StorageTab};
 pub use dupes::{DupeProgress, DupeSearch};
-pub use effects::{Apply, Effects, Reply};
+pub use effects::{Effects, Reply};
 
 use alerts::{AlertBook, keep_alert};
 use analysis::Analysis;
@@ -47,16 +47,11 @@ use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedRule, SustainedWatch};
 use crate::webhook;
-#[cfg(feature = "gpui")]
-use gpui::{Entity, Global};
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::collections::hash_map::{DefaultHasher, Entry};
-use std::hash::{Hash, Hasher};
+use std::collections::hash_map::Entry;
 use std::mem;
-#[cfg(feature = "gpui")]
-use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::thread;
@@ -198,19 +193,6 @@ impl Tab {
     /// Stable index, used to key per-tab UI state such as scroll position.
     pub fn index(self) -> usize {
         Tab::ALL.iter().position(|t| *t == self).unwrap_or_default()
-    }
-
-    /// Stable element id — English, not translated.
-    pub fn label(self) -> &'static str {
-        match self {
-            Tab::Overview => "Overview",
-            Tab::Apps => "Apps",
-            Tab::Processes => "Processes",
-            Tab::Hardware => "Hardware",
-            Tab::Net => "Network",
-            Tab::Alerts => "Alerts",
-            Tab::History => "History",
-        }
     }
 
     /// File key in `app.toml`; `None` for Overview, which is the default
@@ -1970,36 +1952,6 @@ impl ZStatsAppState {
         self.panel_visit
     }
 
-    /// What the settings window actually paints from this store. A
-    /// collector tick changes `latest` and must not match; an update
-    /// download, a template fetch, a config.toml write, or a pref chip
-    /// must. Compared by the window's observer so it can skip `notify`.
-    pub fn settings_paint_token(&self) -> u64 {
-        let mut h = DefaultHasher::new();
-        self.ui_epoch.hash(&mut h);
-        self.settings
-            .as_ref()
-            .map(|s| s as *const FileConfig as usize)
-            .unwrap_or(0)
-            .hash(&mut h);
-        self.update_nudge.hash(&mut h);
-        self.update_ignored.hash(&mut h);
-        self.template_nudge.hash(&mut h);
-        hash_update_status(&self.update_status, &mut h);
-        hash_template_sync(&self.template_sync, &mut h);
-        match &self.hints_sync {
-            None => 0u8.hash(&mut h),
-            Some(HintsSync::Running) => 1u8.hash(&mut h),
-            Some(HintsSync::Done(_)) => 2u8.hash(&mut h),
-        }
-        match &self.caches_sync {
-            None => 0u8.hash(&mut h),
-            Some(CachesSync::Running) => 1u8.hash(&mut h),
-            Some(CachesSync::Done(_)) => 2u8.hash(&mut h),
-        }
-        h.finish()
-    }
-
     /// Back to a clean slate for the next open. The name filter and the
     /// one-shot full listings are "looking at something right now" state:
     /// a panel reopened hours later with yesterday's query looks broken,
@@ -3001,14 +2953,6 @@ impl ZStatsAppState {
         self.window_bounds
     }
 
-    /// Last known display scale factor, mirrored from the main window. Only
-    /// a fallback for placement when AppKit has no screen list (off the
-    /// main thread, or not macOS). On macOS the tray's scale is resolved
-    /// per display — see `placement::resolve_icon`.
-    pub fn scale_factor(&self) -> f32 {
-        self.scale_factor
-    }
-
     /// Called from the root view's `render` on every frame — only notify
     /// when something changed, or observers would wake up continuously.
     pub fn set_window_metrics(&mut self, bounds: Rect, scale_factor: f32, fx: &mut dyn Effects) {
@@ -3051,85 +2995,6 @@ fn filtered_group_indices(groups: &[ProcessGroupSnapshot], filter: &str) -> Vec<
         .filter(|(_, g)| filter.is_empty() || g.name.to_lowercase().contains(filter))
         .map(|(i, _)| i)
         .collect()
-}
-
-/// `Global` wrapper around the state entity: `cx.global::<ZStatsGlobalStore>()`
-/// reaches it from anywhere that holds an `App`, including the tray handler
-/// and the collection task, which both run with no window at all. The gpui
-/// front end's way of holding the store, so gated in place here.
-#[cfg(feature = "gpui")]
-#[derive(Clone)]
-pub struct ZStatsGlobalStore(Entity<ZStatsAppState>);
-
-#[cfg(feature = "gpui")]
-impl ZStatsGlobalStore {
-    pub fn new(state: Entity<ZStatsAppState>) -> Self {
-        Self(state)
-    }
-}
-
-#[cfg(feature = "gpui")]
-impl Global for ZStatsGlobalStore {}
-
-#[cfg(feature = "gpui")]
-impl Deref for ZStatsGlobalStore {
-    type Target = Entity<ZStatsAppState>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-fn hash_update_status(status: &Option<UpdateStatus>, h: &mut impl Hasher) {
-    match status {
-        None => 0u8.hash(h),
-        Some(UpdateStatus::Checking) => 1u8.hash(h),
-        Some(UpdateStatus::Done(check)) => {
-            2u8.hash(h);
-            match check {
-                updater::UpdateCheck::UpToDate => 0u8.hash(h),
-                updater::UpdateCheck::Newer { version, .. } => {
-                    1u8.hash(h);
-                    version.hash(h);
-                }
-                updater::UpdateCheck::Failed(e) => {
-                    2u8.hash(h);
-                    e.hash(h);
-                }
-            }
-        }
-        Some(UpdateStatus::Downloading {
-            received, total, ..
-        }) => {
-            3u8.hash(h);
-            received.hash(h);
-            total.hash(h);
-        }
-        Some(UpdateStatus::Installing { .. }) => 4u8.hash(h),
-        Some(UpdateStatus::Installed { manual }) => {
-            5u8.hash(h);
-            manual.hash(h);
-        }
-        Some(UpdateStatus::DownloadFailed { version, error, .. }) => {
-            6u8.hash(h);
-            version.hash(h);
-            error.hash(h);
-        }
-    }
-}
-
-fn hash_template_sync(sync: &Option<TemplateSync>, h: &mut impl Hasher) {
-    match sync {
-        None => 0u8.hash(h),
-        Some(TemplateSync::Running) => 1u8.hash(h),
-        Some(TemplateSync::Done(_)) => 2u8.hash(h),
-        Some(TemplateSync::Reverted) => 3u8.hash(h),
-        Some(TemplateSync::NothingToRevert) => 4u8.hash(h),
-        Some(TemplateSync::RevertFailed(e)) => {
-            5u8.hash(h);
-            e.hash(h);
-        }
-    }
 }
 
 /// Write one `zstats -add` key into `<dir>/config.toml` and return the
@@ -3351,54 +3216,6 @@ mod tests {
         let state = ZStatsAppState::new();
         // No config loaded yet: zstats' own default of 30%, thirded.
         assert!((state.sustained_bar() - 10.0).abs() < f64::EPSILON);
-    }
-
-    /// The settings window observes this token instead of every store
-    /// notify. A collector tick (tab, selection, filters) must not
-    /// match; a pref chip, a download byte, or a config.toml write must.
-    #[test]
-    fn settings_paint_token_ignores_collector_ticks() {
-        let mut state = ZStatsAppState::new();
-        let a = state.settings_paint_token();
-        state.tab = Tab::Alerts;
-        state.selected_pid = Some(1);
-        state.only_abnormal = true;
-        assert_eq!(
-            state.settings_paint_token(),
-            a,
-            "panel selection is not settings"
-        );
-        state.bump_ui();
-        assert_ne!(
-            state.settings_paint_token(),
-            a,
-            "a pref chip must repaint settings"
-        );
-        let b = state.settings_paint_token();
-        state.update_status = Some(UpdateStatus::Downloading {
-            received: 10,
-            total: 100,
-            notes: String::new(),
-        });
-        assert_ne!(
-            state.settings_paint_token(),
-            b,
-            "download progress must move the About bar"
-        );
-        let c = state.settings_paint_token();
-        state.update_status = Some(UpdateStatus::Downloading {
-            received: 50,
-            total: 100,
-            notes: String::new(),
-        });
-        assert_ne!(state.settings_paint_token(), c);
-        let d = state.settings_paint_token();
-        state.settings = Some(FileConfig::default());
-        assert_ne!(
-            state.settings_paint_token(),
-            d,
-            "a config.toml write must repaint Config"
-        );
     }
 
     /// The menus list `ALL`, so an ordering missing from it cannot be

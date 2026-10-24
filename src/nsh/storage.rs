@@ -1335,14 +1335,9 @@ fn analysis_card(
                     i18n::tr("disk.ana_empty_lead"),
                     i18n::tr("disk.ana_empty_cost"),
                     i18n::tr("disk.ana_hint"),
-                    primary_button(
-                        t!(
-                            "disk.ana_scan_scope",
-                            scope = store::read(storagepage::selected_word)
-                        )
-                        .to_string(),
-                        || store::update(|state, fx| state.start_disk_analysis(fx)),
-                    ),
+                    primary_button(store::read(storagepage::start_label), || {
+                        store::update(|state, fx| state.start_disk_analysis(fx))
+                    }),
                 ),
             ),
             Phase::Failed => tab_card(

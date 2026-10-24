@@ -50,7 +50,7 @@ use crate::nsh::{store, theme};
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
-use crate::{active, autostart, i18n, logger, notice, notify, prefs, updater};
+use crate::{about, active, autostart, i18n, logger, notice, notify, prefs, updater};
 use nsh_platform_macos::{AppOptions, AppView, Appearance};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -193,7 +193,7 @@ pub fn run() {
     let dark = theme::appearance() != Appearance::Light;
     LAST_DARK.store(dark, Ordering::Relaxed);
     theme::follow(dark);
-    tracing::info!("NSH front end starting (docs/nsh-migration.md, phase 3)");
+    tracing::info!(version = about::version(), "starting");
 
     let mut state = ZStatsAppState::new();
     // Today's alerts survive a restart, and the tab is the session's —

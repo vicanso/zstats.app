@@ -151,6 +151,7 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 - 删掉 gpui 前端、`patches/gpui-pre-linux`、`dock.rs` 和其他只为 gpui 存在的绕路代码。
 
 - **5a 删之前的核对（2026-10-25）。** 对着 `gpui_app.rs` 逐个函数看 NSH 宿主有没有接上。缺的一处：gpui 版每次打开面板会重读 Omarchy 的当前配色（`refresh_omarchy_palette`，换了桌面主题下次打开就跟上，不监视文件），NSH 宿主没有。补上：`nsh::theme::omarchy_moved`（偏好是 Omarchy、磁盘上的配色已不是正在画的那份），两个宿主在面板从隐藏到打开时检查，变了就走 `restyle()`。验证：隔离 HOME 里放一份 Tokyo Night 的 `colors.toml`，面板开着时把它改成一份浅色配色，`hide` 再 `show`，面板换成新配色、外观也翻成浅色。另一处：gpui 版在 Linux 上绑了 Ctrl+Q（任何窗口退出）和 Ctrl+W（关设置 / 磁盘空间窗口），macOS 上这两个键由宿主的菜单负责，而 Linux 宿主没有菜单——补上 `root::bind_window_keys`，三个根组件只在非 macOS 上绑定。其余（快捷键、托盘、横幅点击、钥匙串之外的启动顺序、Linux 的单实例、安装包残留清理、窗口记忆的尺寸、提示行的高度、保持唤醒、外观跟随）两个宿主都已经有了。
+- **5b 切换：gpui 前端删除（2026-10-25）。** 删掉 `views/`、`gpui_app.rs`、`gpui_ui.rs`、`theme.rs`、`window_ext.rs`、`dock.rs`、`confirm.rs`、`font.rs` 和 `patches/gpui-pre-linux`（连同 `[patch.crates-io]`）；`Cargo.toml` 去掉 gpui 一家（`gpui-pre*`、`gpui-kit`）、两个 feature 和只为它们存在的 `anyhow`、`raw-window-handle`，NSH 的依赖不再是可选的；`main.rs` 直接 `nsh::run()`，没有 `ZSTATS_UI` 了。共享模块里为 gpui 留的门控项（`ZStatsGlobalStore`、`metrics::start`、`placement::bounds_below_tray`、`AssetSource`、颜色和几何对 gpui 类型的转换、`appicon` 的 gpui 图像）删掉，NSH 那一半去掉门控；随之暴露出来的、只有 gpui 前端调用过的共享函数也删了（设置窗口的“重绘令牌”和它的测试、`RowSlot`、`Tab::label`、`webhook_can_test`）。macOS 最低版本改成 14.0，Info.plist 写的就是它；`make bundle` 出的 release 包 16 MB，改名的 release 二进制在隔离 HOME 里启动正常、常驻 32 MB。Makefile 的 lint / test 只剩一种构建，`make nsh` 去掉；`make linux-check` 的镜像只装 GTK 4 和 gtk4-layer-shell；CI 的 Linux 任务同样只装这两个并只跑一种构建；发布流程的 Linux 构建换成这两个依赖；`install-linux.sh` 缺库时报的包名换成 GTK 4 和 gtk4-layer-shell 的。Linux 上，只有 macOS 宿主调用的托盘定位和拖动尺寸的几何在 crate 根放宽了 `dead_code`（照样编译、照样测试，死代码在 macOS 上查）——第一次 `make linux-check` 就是因为原来那块“单前端构建放宽”的属性随 gpui 一起没了，报了 24 处。README 两份写上 macOS 14 和 Linux 的 GTK 依赖，致谢换成 NSH；`docs/design.md` 开头说明界面已换、下文 gpui 段落是当时的记录；ui-polish 技能指向 NSH。测试：macOS 439 个；`make linux-check` 433 个，clippy 通过。
 
 ## 待你判断
 
@@ -170,4 +171,4 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 | 2 宿主 | 2a、2b、2c 完成；2d 已写完、只编译过，等 Omarchy 真机 |
 | 3 基础件 | 完成（2026-10-24） |
 | 4 逐页 | 4a（外壳）、4b、4c（Overview 两种形态）、4d（Apps）、4e（Processes）、4f（Hardware）、4g（Network）、4h（Alerts）、4i（History）、4j（设置窗口）、4k（磁盘空间窗口）完成——所有界面都有了 NSH 版 |
-| 5 切换 | 未开始 |
+| 5 切换 | 5a（删前核对）、5b（gpui 前端删除、NSH 成为唯一界面、macOS 14）完成；CLAUDE.md 改写进行中 |

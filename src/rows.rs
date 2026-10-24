@@ -65,27 +65,6 @@ impl RowFit {
     }
 }
 
-/// Where a row stands in its list, and the fit the list made — `None`
-/// in the full listings, whose rows keep their own height.
-#[derive(Clone, Copy)]
-pub struct RowSlot {
-    pub index: usize,
-    pub fit: Option<RowFit>,
-}
-
-impl RowSlot {
-    /// What stands above and below the row's lines: `own` where the list
-    /// made no fit.
-    pub fn pad(self, own: f32) -> f32 {
-        self.fit.map_or(own, |fit| fit.pad(self.index))
-    }
-
-    /// The collapsed row's height, where the list gave it one.
-    pub fn height(self) -> Option<f32> {
-        self.fit.map(|fit| fit.height(self.index))
-    }
-}
-
 /// Divide `budget` among whole rows of about `natural`, `pad` of which
 /// stands above and below each row's lines.
 ///
