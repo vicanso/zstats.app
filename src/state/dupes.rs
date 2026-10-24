@@ -10,9 +10,9 @@
 //! folder — the common case once someone is tidying — is seconds.
 
 use super::ZStatsAppState;
+use super::effects::{self, Effects};
 use crate::dupes::{self, DupeEvent, DupeResult, DupeScope};
 use crate::finder;
-use gpui::Context;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,45 +87,45 @@ impl ZStatsAppState {
         matches!(self.dupes.search, DupeSearch::Running { .. })
     }
 
-    pub fn show_more_dupes(&mut self, cx: &mut Context<Self>) {
+    pub fn show_more_dupes(&mut self, fx: &mut dyn Effects) {
         self.dupes.shown += DUPES_SHOWN;
-        cx.notify();
+        fx.changed();
     }
 
     /// Search the current scope (the card's Find button).
-    pub fn start_dupes(&mut self, cx: &mut Context<Self>) {
+    pub fn start_dupes(&mut self, fx: &mut dyn Effects) {
         let scope = self.dupes.scope.clone();
-        self.launch_dupes(scope, cx);
+        self.launch_dupes(scope, fx);
     }
 
     /// A folder was picked: search it at once. Picking *is* the ask —
     /// there is no other scope to confirm, and a picked folder is
     /// usually seconds.
-    pub fn search_dupes_in(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+    pub fn search_dupes_in(&mut self, folder: PathBuf, fx: &mut dyn Effects) {
         self.dupes.scope = DupeScope::Folder(folder);
         let scope = self.dupes.scope.clone();
-        self.launch_dupes(scope, cx);
+        self.launch_dupes(scope, fx);
     }
 
     /// Back to the home folder. A picked folder's result goes with it:
     /// under the home chip it would read as the home folder's answer.
     /// The home search is not started — it is the slow one, and Find is
     /// right there.
-    pub fn reset_dupe_scope(&mut self, cx: &mut Context<Self>) {
+    pub fn reset_dupe_scope(&mut self, fx: &mut dyn Effects) {
         self.dupes.scope = DupeScope::Home;
-        self.clear_dupes(cx);
+        self.clear_dupes(fx);
     }
 
     /// Cancel a running search, or put a finished one away. Nothing on
     /// disk moves.
-    pub fn clear_dupes(&mut self, cx: &mut Context<Self>) {
+    pub fn clear_dupes(&mut self, fx: &mut dyn Effects) {
         if let DupeSearch::Running { cancel, .. } = &self.dupes.search {
             cancel.store(true, Ordering::Relaxed);
         }
         self.dupes.search = DupeSearch::Off;
         self.dupes.stale = false;
         self.dupes.shown = DUPES_SHOWN;
-        cx.notify();
+        fx.changed();
     }
 
     /// A fresh disk-space window folds the list back; the result itself
@@ -135,7 +135,7 @@ impl ZStatsAppState {
         self.dupes.stale = false;
     }
 
-    fn launch_dupes(&mut self, scope: DupeScope, cx: &mut Context<Self>) {
+    fn launch_dupes(&mut self, scope: DupeScope, fx: &mut dyn Effects) {
         if let DupeSearch::Running { cancel, .. } = &self.dupes.search {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -153,14 +153,14 @@ impl ZStatsAppState {
         };
         self.dupes.stale = false;
         self.dupes.shown = DUPES_SHOWN;
-        cx.notify();
+        fx.changed();
 
         let (tx, rx) = smol::channel::unbounded::<DupeEvent>();
         dupes::spawn(scope, cancel, tx);
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
+        effects::background(fx, move |reply| {
+            while let Ok(event) = rx.recv_blocking() {
                 let done = matches!(event, DupeEvent::Done(_) | DupeEvent::Failed(_));
-                let _ = this.update(cx, |state, cx| {
+                reply.apply(move |state, fx| {
                     // Only the run that owns the Running state may write;
                     // a cancelled or superseded run stays silent.
                     let DupeSearch::Running {
@@ -196,21 +196,20 @@ impl ZStatsAppState {
                             state.dupes.search = DupeSearch::Failed(e);
                         }
                     }
-                    cx.notify();
+                    fx.changed();
                 });
                 if done {
                     break;
                 }
             }
-        })
-        .detach();
+        });
     }
 
     /// One copy's confirmed move to the Trash. Refused — the row stays,
     /// the card asks for a new search — unless this copy and another are
     /// still what the search compared (`DupeGroup::spare`): that is what
     /// keeps "never the last copy" true after the result was taken.
-    pub fn trash_dupe(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub fn trash_dupe(&mut self, path: &Path, fx: &mut dyn Effects) {
         let DupeSearch::Ready(result) = &mut self.dupes.search else {
             return;
         };
@@ -223,7 +222,7 @@ impl ZStatsAppState {
                 "duplicate not moved: it or every other copy changed since the search"
             );
             self.dupes.stale = true;
-            cx.notify();
+            fx.changed();
             return;
         }
         // What the move gives back once the Trash is emptied: nothing for
@@ -241,6 +240,6 @@ impl ZStatsAppState {
         }
         result.remove(path);
         self.note_trashed(frees);
-        cx.notify();
+        fx.changed();
     }
 }

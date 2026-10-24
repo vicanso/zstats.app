@@ -5,10 +5,9 @@
 //! change face. Kept out of the store file so later alert-list work
 //! has one place to land.
 
+use super::effects::Effects;
 use crate::alertlog;
-use crate::tray;
 use crate::volflag;
-use gpui::Context;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process;
 #[cfg(test)]
@@ -487,10 +486,10 @@ impl ZStatsAppState {
     /// report. Without this the list has no acknowledgement path at
     /// all — it outlives restarts now, so the tab's alert tint would
     /// otherwise stay lit for the rest of the day.
-    pub fn dismiss_alert(&mut self, seq: u64, cx: &mut Context<Self>) {
+    pub fn dismiss_alert(&mut self, seq: u64, fx: &mut dyn Effects) {
         if self.drop_alert(seq) {
             self.persist_alerts();
-            cx.notify();
+            fx.changed();
         }
     }
 
@@ -829,7 +828,7 @@ impl ZStatsAppState {
     /// Quiet this episode's banners for `hours`. Suppression is delivery-
     /// layer only: the engine keeps evaluating and the Alerts list keeps
     /// recording — the interruption is what stops.
-    pub fn snooze_banners(&mut self, event: &AlertEvent, hours: u64, cx: &mut Context<Self>) {
+    pub fn snooze_banners(&mut self, event: &AlertEvent, hours: u64, fx: &mut dyn Effects) {
         let until_label = jiff::Zoned::now()
             .checked_add(jiff::Span::new().hours(hours as i64))
             .map(|z| z.strftime("%H:%M").to_string())
@@ -841,12 +840,12 @@ impl ZStatsAppState {
                 until_label,
             },
         );
-        cx.notify();
+        fx.changed();
     }
 
-    pub fn unsnooze_banners(&mut self, event: &AlertEvent, cx: &mut Context<Self>) {
+    pub fn unsnooze_banners(&mut self, event: &AlertEvent, fx: &mut dyn Effects) {
         self.resume_banners(event);
-        cx.notify();
+        fx.changed();
     }
 
     /// The un-mute proper, minus the repaint. "Resume" is unambiguous, so
@@ -995,15 +994,15 @@ impl ZStatsAppState {
     /// Reveal path: opening the panel onto Alerts is the same as
     /// switching to it. Other tabs leave the spec — that is the
     /// reminder to go look.
-    pub fn see_alerts_if_showing(&mut self, cx: &mut Context<Self>) {
+    pub fn see_alerts_if_showing(&mut self, fx: &mut dyn Effects) {
         if self.tab == Tab::Alerts {
             self.see_alerts();
-            tray::sync(cx, self);
+            fx.sync_tray(self);
         }
     }
 
-    pub(super) fn alerts_are_showing(&self, cx: &Context<Self>) -> bool {
-        self.tab == Tab::Alerts && super::panel_visible(cx)
+    pub(super) fn alerts_are_showing(&self) -> bool {
+        self.tab == Tab::Alerts && self.panel_visible()
     }
 
     pub fn selected_alert(&self) -> Option<&(String, String)> {
@@ -1011,14 +1010,14 @@ impl ZStatsAppState {
     }
 
     /// Clicking the open card closes it, as with process rows.
-    pub fn toggle_alert(&mut self, key: &str, name: &str, cx: &mut Context<Self>) {
+    pub fn toggle_alert(&mut self, key: &str, name: &str, fx: &mut dyn Effects) {
         let id = (key.to_string(), name.to_string());
         self.alert_book.selected_alert = if self.alert_book.selected_alert.as_ref() == Some(&id) {
             None
         } else {
             Some(id)
         };
-        cx.notify();
+        fx.changed();
     }
 }
 

@@ -6,12 +6,12 @@
 //! Grouped here so a change to either does not mean hunting through
 //! the rest of [`super::ZStatsAppState`].
 
+use super::effects::{self, Effects};
 use crate::diskscan::{self, DiffBaseline, ScanEvent, ScanResult, ScanScope};
 use crate::diskwatch::{self, Growth, Report};
 use crate::finder;
 use crate::i18n;
 use crate::prefs;
-use gpui::Context;
 use std::collections::HashMap;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -289,26 +289,26 @@ impl ZStatsAppState {
         self.analysis.storage_tab
     }
 
-    pub fn set_storage_tab(&mut self, tab: StorageTab, cx: &mut Context<Self>) {
+    pub fn set_storage_tab(&mut self, tab: StorageTab, fx: &mut dyn Effects) {
         if self.analysis.storage_tab != tab {
             self.analysis.storage_tab = tab;
-            cx.notify();
+            fx.changed();
         }
     }
 
     /// ⌘R in the disk-space window: run the selected tab again. Never a
     /// cancel — a stray ⌘R must not throw away a walk minutes in — so a
     /// tab that is already working ignores it.
-    pub fn rerun_storage_tab(&mut self, cx: &mut Context<Self>) {
+    pub fn rerun_storage_tab(&mut self, fx: &mut dyn Effects) {
         match self.analysis.storage_tab {
             StorageTab::Analysis => {
                 if !matches!(self.analysis.disk_analysis, DiskAnalysis::Running { .. }) {
-                    self.start_disk_analysis(cx);
+                    self.start_disk_analysis(fx);
                 }
             }
             StorageTab::Duplicates => {
                 if !self.dupes_running() {
-                    self.start_dupes(cx);
+                    self.start_dupes(fx);
                 }
             }
         }
@@ -343,15 +343,15 @@ impl ZStatsAppState {
     /// Remember a scope without walking it. Analyze is what starts the
     /// walk — picking a chip used to launch immediately, which made a
     /// mis-tap cost minutes and hid the selected state.
-    pub fn set_disk_analysis_scope(&mut self, scope: ScanScope, cx: &mut Context<Self>) {
+    pub fn set_disk_analysis_scope(&mut self, scope: ScanScope, fx: &mut dyn Effects) {
         self.analysis.disk_analysis_root = Some(scope);
-        cx.notify();
+        fx.changed();
     }
 
     /// Start (or restart) the top-level analysis — of the session's
     /// picked scope, or the home tree by default. A drill-down is left
     /// via "back", not by rescanning, so the stack is dropped here.
-    pub fn start_disk_analysis(&mut self, cx: &mut Context<Self>) {
+    pub fn start_disk_analysis(&mut self, fx: &mut dyn Effects) {
         let Some(scope) = self
             .analysis
             .disk_analysis_root
@@ -359,10 +359,10 @@ impl ZStatsAppState {
             .or_else(|| diskscan::default_root().map(ScanScope::single))
         else {
             self.analysis.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
-            cx.notify();
+            fx.changed();
             return;
         };
-        self.launch_disk_analysis(scope, true, cx);
+        self.launch_disk_analysis(scope, true, fx);
     }
 
     /// Point Analyze at a user-chosen root — the folder picker's
@@ -371,34 +371,34 @@ impl ZStatsAppState {
     /// double-count, and /System plus TCC would distort every figure
     /// (docs/disk-analysis.md's scope table) — the answer would be
     /// wrong, not merely slow.
-    pub fn set_disk_analysis_at(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    pub fn set_disk_analysis_at(&mut self, root: PathBuf, fx: &mut dyn Effects) {
         if root == Path::new("/") {
             self.cancel_disk_analysis_walk();
             self.drop_expansions();
             self.analysis.disk_analysis =
                 DiskAnalysis::Failed(i18n::tr("disk.ana_root_unsupported"));
-            cx.notify();
+            fx.changed();
             return;
         }
-        self.set_disk_analysis_scope(ScanScope::single(root), cx);
+        self.set_disk_analysis_scope(ScanScope::single(root), fx);
     }
 
     /// Point Analyze at the whole writable volume — the scope that can
     /// see what no home-shaped one can (`diskscan::whole_disk_root`
     /// explains why its root is not `/`).
-    pub fn set_disk_analysis_whole_disk(&mut self, cx: &mut Context<Self>) {
-        self.set_disk_analysis_scope(diskscan::ScanScope::whole_disk(), cx);
+    pub fn set_disk_analysis_whole_disk(&mut self, fx: &mut dyn Effects) {
+        self.set_disk_analysis_scope(diskscan::ScanScope::whole_disk(), fx);
     }
 
     /// Point Analyze at the cache-set preset — the explicit cache roots
     /// merged into one ranked view (docs/disk-analysis.md's scope table).
-    pub fn set_disk_analysis_caches(&mut self, cx: &mut Context<Self>) {
+    pub fn set_disk_analysis_caches(&mut self, fx: &mut dyn Effects) {
         let Some(scope) = ScanScope::cache_set() else {
             self.analysis.disk_analysis = DiskAnalysis::Failed("HOME is not set".into());
-            cx.notify();
+            fx.changed();
             return;
         };
-        self.set_disk_analysis_scope(scope, cx);
+        self.set_disk_analysis_scope(scope, fx);
     }
 
     /// Open or close one ranked directory, in place.
@@ -420,9 +420,9 @@ impl ZStatsAppState {
     ///
     /// Only a finished result can be opened: mid-walk tables are lower
     /// bounds with no index behind them.
-    pub fn toggle_expansion(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub fn toggle_expansion(&mut self, path: PathBuf, fx: &mut dyn Effects) {
         if self.analysis.expanded.remove(&path).is_some() {
-            cx.notify();
+            fx.changed();
             return;
         }
         let DiskAnalysis::Ready(current) = &self.analysis.disk_analysis else {
@@ -433,16 +433,16 @@ impl ZStatsAppState {
                 self.analysis
                     .expanded
                     .insert(path, Expansion::Ready(derived.dirs));
-                cx.notify();
+                fx.changed();
             }
-            None => self.walk_expansion(path, cx),
+            None => self.walk_expansion(path, fx),
         }
     }
 
     /// The index had nothing under this row, so walk it. One at a time:
     /// a second open cancels the first, whose thread stops and whose
     /// events are dropped by the run-id guard either way.
-    fn walk_expansion(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn walk_expansion(&mut self, path: PathBuf, fx: &mut dyn Effects) {
         if let Some(cancel) = self.analysis.expand_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -453,12 +453,12 @@ impl ZStatsAppState {
         self.analysis
             .expanded
             .insert(path.clone(), Expansion::Walking);
-        cx.notify();
+        fx.changed();
 
         let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
         diskscan::spawn(ScanScope::single(path.clone()), cancel, tx);
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
+        effects::background(fx, move |reply| {
+            while let Ok(event) = rx.recv_blocking() {
                 // Progress and partials are dropped on purpose: a subtree
                 // is seconds, and a row that reshuffles under the cursor
                 // costs more than the wait it saves.
@@ -470,7 +470,7 @@ impl ZStatsAppState {
                     }
                     _ => continue,
                 };
-                let _ = this.update(cx, |state, cx| {
+                reply.apply(move |state, fx| {
                     // Superseded by a newer open, or the row was closed
                     // while the walk ran — either way this lands nowhere.
                     if state.analysis.expand_runs != run_id
@@ -479,12 +479,11 @@ impl ZStatsAppState {
                         return;
                     }
                     state.analysis.expanded.insert(path.clone(), landed);
-                    cx.notify();
+                    fx.changed();
                 });
                 break;
             }
-        })
-        .detach();
+        });
     }
 
     /// What is under an opened row, or `None` when it is closed.
@@ -513,24 +512,24 @@ impl ZStatsAppState {
     /// it sits in, outermost first. Where the index has nothing recorded
     /// under the new level, the same one-at-a-time walk a row's
     /// expansion takes measures it, and the map says so until it lands.
-    pub fn open_in_map(&mut self, chain: Vec<(PathBuf, u64)>, cx: &mut Context<Self>) {
+    pub fn open_in_map(&mut self, chain: Vec<(PathBuf, u64)>, fx: &mut dyn Effects) {
         if chain.is_empty() || !matches!(self.analysis.disk_analysis, DiskAnalysis::Ready(_)) {
             return;
         }
         self.analysis.map_trail.extend(chain);
-        self.measure_map_level(cx);
-        cx.notify();
+        self.measure_map_level(fx);
+        fx.changed();
     }
 
     /// Back up the map to `depth` levels below the root (0 is the root).
-    pub fn map_back_to(&mut self, depth: usize, cx: &mut Context<Self>) {
+    pub fn map_back_to(&mut self, depth: usize, fx: &mut dyn Effects) {
         self.analysis.map_trail.truncate(depth);
-        cx.notify();
+        fx.changed();
     }
 
     /// Walk the map's current level when neither the index nor an earlier
     /// walk can say what is in it — also the map's retry after a failure.
-    pub fn measure_map_level(&mut self, cx: &mut Context<Self>) {
+    pub fn measure_map_level(&mut self, fx: &mut dyn Effects) {
         let Some((path, _)) = self.analysis.map_trail.last().cloned() else {
             return;
         };
@@ -547,7 +546,7 @@ impl ZStatsAppState {
             Some(Expansion::Ready(_) | Expansion::Walking)
         );
         if !indexed && !measured {
-            self.walk_expansion(path, cx);
+            self.walk_expansion(path, fx);
         }
     }
 
@@ -555,25 +554,25 @@ impl ZStatsAppState {
         self.analysis.analysis_show_all_sugs
     }
 
-    pub fn toggle_analysis_show_all_sugs(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_analysis_show_all_sugs(&mut self, fx: &mut dyn Effects) {
         self.analysis.analysis_show_all_sugs = !self.analysis.analysis_show_all_sugs;
-        cx.notify();
+        fx.changed();
     }
 
     pub fn analysis_exclude_open(&self) -> bool {
         self.analysis.analysis_exclude_open
     }
 
-    pub fn toggle_analysis_exclude(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_analysis_exclude(&mut self, fx: &mut dyn Effects) {
         self.analysis.analysis_exclude_open = !self.analysis.analysis_exclude_open;
-        cx.notify();
+        fx.changed();
     }
 
     /// Dismiss the analysis entirely — straight to Off, opened rows and
     /// all. This is a view action, not a disk one: nothing is touched on
     /// disk, and dropping the result also releases the retained index
     /// every opened row was served from.
-    pub fn clear_disk_analysis(&mut self, cx: &mut Context<Self>) {
+    pub fn clear_disk_analysis(&mut self, fx: &mut dyn Effects) {
         self.cancel_disk_analysis_walk();
         // Clean slate includes the saved result — otherwise the next
         // launch would resurrect what the user just dismissed.
@@ -593,14 +592,14 @@ impl ZStatsAppState {
         self.analysis.disk_analysis_root = None;
         prefs::set_analysis_roots(&[]);
         self.analysis.disk_analysis = DiskAnalysis::Off;
-        cx.notify();
+        fx.changed();
     }
 
     /// The walk itself. Runs on its own thread; everything this state
     /// learns — progress, completion, failure — arrives over the channel
     /// drained below, guarded by `run_id` so a superseded run's late
     /// events fall on the floor.
-    fn launch_disk_analysis(&mut self, scope: ScanScope, persist: bool, cx: &mut Context<Self>) {
+    fn launch_disk_analysis(&mut self, scope: ScanScope, persist: bool, fx: &mut dyn Effects) {
         self.cancel_disk_analysis_walk();
         // The user's walk wins over the daily check, which can run
         // tomorrow; two walks would only compete for the disk.
@@ -624,14 +623,14 @@ impl ZStatsAppState {
             persist,
             cancel: cancel.clone(),
         };
-        cx.notify();
+        fx.changed();
 
         let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
         diskscan::spawn(scope, cancel, tx);
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
+        effects::background(fx, move |reply| {
+            while let Ok(event) = rx.recv_blocking() {
                 let done = matches!(event, ScanEvent::Done(_) | ScanEvent::Failed(_));
-                let _ = this.update(cx, |state, cx| {
+                reply.apply(move |state, fx| {
                     // Only the run that owns the current Running state may
                     // write; a cancelled or superseded run stays silent.
                     let owns = matches!(
@@ -689,23 +688,22 @@ impl ZStatsAppState {
                             state.analysis.disk_analysis = DiskAnalysis::Failed(e);
                         }
                     }
-                    cx.notify();
+                    fx.changed();
                 });
                 if done {
                     break;
                 }
             }
-        })
-        .detach();
+        });
     }
 
     /// The explicit cancel — the only way a walk stops early. Partial
     /// results are never kept, so this goes to Off rather than showing
     /// half a table.
-    pub fn cancel_disk_analysis(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_disk_analysis(&mut self, fx: &mut dyn Effects) {
         self.cancel_disk_analysis_walk();
         self.analysis.disk_analysis = DiskAnalysis::Off;
-        cx.notify();
+        fx.changed();
     }
 
     fn cancel_disk_analysis_walk(&self) {
@@ -737,7 +735,7 @@ impl ZStatsAppState {
 
     /// Start the daily background check if it is due (`diskwatch::due`).
     /// Called every tick; everything before the spawn is a few compares.
-    pub fn maybe_check_disk(&mut self, moment: DiskCheckMoment, cx: &mut Context<Self>) {
+    pub fn maybe_check_disk(&mut self, moment: DiskCheckMoment, fx: &mut dyn Effects) {
         // One in flight is asked whether to hold still instead.
         if self.analysis.watch_cancel.is_some() {
             self.hold_disk_check(&moment);
@@ -770,18 +768,18 @@ impl ZStatsAppState {
         tracing::info!("daily disk check: started");
         let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
         diskscan::spawn_background(ScanScope::single(home), cancel.clone(), hold, tx);
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
+        effects::background(fx, move |reply| {
+            while let Ok(event) = rx.recv_blocking() {
                 match event {
                     ScanEvent::Progress { .. } | ScanEvent::Partial(_) => continue,
                     ScanEvent::Done(result) => {
-                        let _ = this.update(cx, |state, cx| {
-                            state.finish_disk_check(*result, &cancel, started, cx)
+                        reply.apply(move |state, fx| {
+                            state.finish_disk_check(*result, &cancel, started, fx)
                         });
                     }
                     ScanEvent::Failed(e) => {
                         tracing::warn!(error = %e, "daily disk check failed");
-                        let _ = this.update(cx, |state, _| {
+                        reply.apply(move |state, _| {
                             if state
                                 .analysis
                                 .watch_cancel
@@ -800,8 +798,7 @@ impl ZStatsAppState {
                 }
                 break;
             }
-        })
-        .detach();
+        });
     }
 
     /// Hold the check in flight still, or let it go on (`diskwatch::hold`),
@@ -840,7 +837,7 @@ impl ZStatsAppState {
         result: ScanResult,
         cancel: &Arc<AtomicBool>,
         started: Instant,
-        cx: &mut Context<Self>,
+        fx: &mut dyn Effects,
     ) {
         // A user's walk cancelled this one; its own result is the answer.
         if cancel.load(Ordering::Relaxed)
@@ -895,7 +892,7 @@ impl ZStatsAppState {
             announced,
             "daily disk check: done"
         );
-        cx.notify();
+        fx.changed();
     }
 
     /// What grew since about a week ago, for the disk-space window.
@@ -950,7 +947,7 @@ impl ZStatsAppState {
     /// file still on disk must not vanish from the list. Only the row is
     /// touched; the folders above it keep their scanned totals, with
     /// `scanned_at` as the staleness boundary, as for the caches.
-    pub fn trash_analysis_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub fn trash_analysis_file(&mut self, path: &Path, fx: &mut dyn Effects) {
         if let Err(e) = finder::trash(path) {
             tracing::warn!("trash {}: {e}", path.display());
             return;
@@ -963,7 +960,7 @@ impl ZStatsAppState {
             result.files.retain(|f| f.path != path);
             diskscan::resave_if_cached(result);
         }
-        cx.notify();
+        fx.changed();
     }
 
     /// What [`Analysis::trashed`] has counted this session.
@@ -982,7 +979,7 @@ impl ZStatsAppState {
     /// must not vanish from the list. Only rows are touched; every other
     /// figure stays as scanned, with `scanned_at` as the staleness
     /// boundary.
-    pub fn trash_regenerable(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+    pub fn trash_regenerable(&mut self, paths: &[PathBuf], fx: &mut dyn Effects) {
         let mut gone: Vec<&PathBuf> = Vec::new();
         for path in paths {
             match finder::trash(path) {
@@ -1042,7 +1039,7 @@ impl ZStatsAppState {
                 rows.retain(|h| !gone.iter().any(|g| h.path.starts_with(g)));
             }
         }
-        cx.notify();
+        fx.changed();
     }
 
     /// A freshly built disk-space window starts with the suggestions
@@ -1052,7 +1049,7 @@ impl ZStatsAppState {
     /// The analysis result itself survives on purpose — it costs minutes
     /// to produce and is cached to disk across restarts; the caption says
     /// how old it is.
-    pub fn reset_storage_views(&mut self, cx: &mut Context<Self>) {
+    pub fn reset_storage_views(&mut self, fx: &mut dyn Effects) {
         self.analysis.analysis_show_all_sugs = false;
         self.analysis.analysis_exclude_open = false;
         // Opened rows are questions too — a window opened tomorrow should
@@ -1060,7 +1057,7 @@ impl ZStatsAppState {
         // somebody unfolded yesterday.
         self.drop_expansions();
         self.reset_dupe_views();
-        cx.notify();
+        fx.changed();
     }
 }
 

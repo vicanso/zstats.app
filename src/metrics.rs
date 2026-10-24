@@ -24,8 +24,9 @@ use crate::notify;
 use crate::prefs;
 #[cfg(feature = "gpui")]
 use crate::procscan;
+use crate::state::Tab;
 #[cfg(feature = "gpui")]
-use crate::state::{Tab, ZStatsGlobalStore};
+use crate::state::ZStatsGlobalStore;
 #[cfg(feature = "gpui")]
 use crate::tray;
 #[cfg(feature = "gpui")]
@@ -200,7 +201,6 @@ impl CollectorPace {
     /// The selected tab changed. Switching *to* a tab that shows GPUs or
     /// drives while the panel is up wakes the collector, so the GPU gauge
     /// is there on the first paint rather than a visible tick later.
-    #[cfg(feature = "gpui")]
     pub fn tab_selected(&self, tab: Tab) {
         let reads = tab_reads_registry(tab);
         let was = self.registry_tab.swap(reads, Ordering::Relaxed);
@@ -213,7 +213,6 @@ impl CollectorPace {
 /// The tabs that display GPU or drive figures — the one place that
 /// decides when `ioreg` runs, so adding those figures to another tab is
 /// a change here and nowhere else.
-#[cfg(feature = "gpui")]
 pub(crate) fn tab_reads_registry(tab: Tab) -> bool {
     tab == Tab::Hardware
 }
@@ -259,11 +258,17 @@ pub fn start(cx: &mut App) {
         cx.global::<ZStatsGlobalStore>().read(cx).tab(),
     )));
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
-    cx.set_global(CollectorPace {
+    let pace = CollectorPace {
         visible: visible.clone(),
         registry_tab: registry_tab.clone(),
         wake: wake_tx,
-    });
+    };
+    // The store reads it too — whether the panel is on screen, and which
+    // tab to tell the collector about — without asking gpui for it.
+    cx.global::<ZStatsGlobalStore>()
+        .clone()
+        .update(cx, |state, _| state.set_pace(pace.clone()));
+    cx.set_global(pace);
 
     let (tx, rx) = smol::channel::unbounded::<zstats::Tick>();
 
@@ -519,7 +524,6 @@ mod tests {
         assert!(c.collect_gpu && c.collect_drives);
     }
 
-    #[cfg(feature = "gpui")]
     #[test]
     fn only_hardware_reads_the_registry() {
         for tab in Tab::ALL {
@@ -527,7 +531,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gpui")]
     #[test]
     fn selecting_a_registry_tab_wakes_the_collector_only_when_it_matters() {
         let (wake, woken) = mpsc::channel();

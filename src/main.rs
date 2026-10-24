@@ -3,9 +3,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // While the interface moves from gpui to NSH (docs/nsh-migration.md), a
 // build without the gpui front end compiles every shared module but calls
-// only the part of each that the NSH front end has reached so far. The
-// rest is the gpui front end's, and is not dead.
-#![cfg_attr(not(feature = "gpui"), allow(dead_code))]
+// only the part of each that the NSH front end has reached so far — and
+// re-exports, from the store above all, that only gpui's views import.
+// The rest is the gpui front end's, and is not dead.
+#![cfg_attr(not(feature = "gpui"), allow(dead_code, unused_imports))]
 
 // macOS and Linux. Anything else fails here rather than six files later,
 // with the same reasoning the macOS-only guard carried before: a scatter
@@ -62,6 +63,7 @@ mod proxy;
 mod series;
 mod spaceinfo;
 mod squarify;
+mod state;
 mod terminate;
 mod traffic;
 mod trend;
@@ -89,8 +91,6 @@ mod gpui_ui;
 mod ipc;
 #[cfg(feature = "gpui")]
 mod notify;
-#[cfg(feature = "gpui")]
-mod state;
 #[cfg(feature = "gpui")]
 mod theme;
 #[cfg(feature = "gpui")]

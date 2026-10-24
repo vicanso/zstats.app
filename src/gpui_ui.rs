@@ -23,14 +23,18 @@
 //! seconds, the panel repainting per tick.
 
 use crate::i18n;
-use crate::state::{FullAppScanData, FullScanData, Tab, ZStatsGlobalStore};
+use crate::state::{
+    Apply, Effects, FullAppScanData, FullScanData, Reply, Tab, ZStatsAppState, ZStatsGlobalStore,
+};
+use crate::tray;
 use gpui::{
-    AnyWindowHandle, App, AppContext, Entity, Focusable, ListAlignment, ListState, ScrollHandle,
-    Window, px,
+    AnyWindowHandle, App, AppContext, Context, Entity, Focusable, ListAlignment, ListState,
+    ScrollHandle, Window, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use std::array;
 use std::cell::RefCell;
+use std::thread;
 
 struct Ui {
     /// One scroll offset per tab, indexed by [`Tab::index`].
@@ -256,4 +260,46 @@ pub fn reset_transient_views(window: &mut Window, cx: &mut App) {
         }
     }
     store.update(cx, |state, cx| state.reset_transient_views(cx));
+}
+
+/// The store's side effects, on gpui: a change repaints through the
+/// entity, a background job runs on a thread of its own and its changes
+/// come back to the main thread through a task, in the order sent. The
+/// store's call sites pass `cx` as they always did; it is this.
+impl Effects for Context<'_, ZStatsAppState> {
+    fn changed(&mut self) {
+        self.notify();
+    }
+
+    fn background(&mut self, job: Box<dyn FnOnce(Reply) + Send>) {
+        let (tx, rx) = smol::channel::unbounded::<Apply>();
+        let reply = Reply::new(move |change| tx.send_blocking(change).is_ok());
+        if let Err(e) = thread::Builder::new()
+            .name("store-job".into())
+            .spawn(move || job(reply))
+        {
+            tracing::error!("could not start a background job: {e}");
+            return;
+        }
+        self.spawn(async move |this, cx| {
+            while let Ok(change) = rx.recv().await {
+                if this.update(cx, |state, cx| change(state, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn sync_tray(&mut self, state: &ZStatsAppState) {
+        tray::sync(self, state);
+    }
+
+    fn fit_panel(&mut self) {
+        self.defer(crate::sync_panel_notice);
+    }
+
+    fn storage_window_open(&self) -> bool {
+        storage_window_open(self)
+    }
 }
