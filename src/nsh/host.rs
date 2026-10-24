@@ -600,6 +600,9 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
 /// the top left of the primary screen) or in the main screen's top-right
 /// corner.
 pub fn show(host: &Host, anchor: Option<TrayAnchor>, make_key: bool) {
+    if !host.panel.isVisible() && theme::omarchy_moved() {
+        restyle();
+    }
     let mtm = MainThreadMarker::from(&*host.panel);
     let (width, height) = panel_size();
     let screens = Screens::list(mtm);

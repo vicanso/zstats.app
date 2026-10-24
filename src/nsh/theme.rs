@@ -20,6 +20,16 @@ use crate::prefs::{self, ThemePref};
 use crate::{omarchy, palette};
 use nsh_core::ui::prelude::*;
 
+/// The Omarchy theme follows the desktop's palette, read again as the
+/// panel opens (gpui's `refresh_omarchy_palette`) rather than watched:
+/// whether the palette on disk is no longer the one painted, so the host
+/// loads its roots again — a desktop theme switch shows the next time
+/// anyone looks, with no file watcher idling in the tray.
+pub fn omarchy_moved() -> bool {
+    prefs::theme_in_force() == ThemePref::Omarchy
+        && !palette::omarchy_palette_is(&omarchy::palette())
+}
+
 /// The appearance a root is loaded in: the one the theme preference pins
 /// (Light, Dark, or an Omarchy palette's own), the system's otherwise —
 /// Golden is a pair, not a third appearance, and follows it as System

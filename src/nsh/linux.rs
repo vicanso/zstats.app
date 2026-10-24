@@ -433,6 +433,10 @@ fn auto_hide(path: &str) {
 }
 
 fn show() {
+    let opening = with_panel(|panel| !panel.window.is_visible()) == Some(true);
+    if opening && theme::omarchy_moved() {
+        restyle();
+    }
     let shown = with_panel(|panel| {
         // A panel already up keeps its graces: "Show Window" or a banner's
         // click over it is not a new map.

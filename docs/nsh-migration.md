@@ -150,6 +150,8 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 - 更新 `CLAUDE.md`、`README.md` / `README-zh.md`、`docs/design.md`、`.claude/skills/ui-polish`。
 - 删掉 gpui 前端、`patches/gpui-pre-linux`、`dock.rs` 和其他只为 gpui 存在的绕路代码。
 
+- **5a 删之前的核对（2026-10-25）。** 对着 `gpui_app.rs` 逐个函数看 NSH 宿主有没有接上。缺的一处：gpui 版每次打开面板会重读 Omarchy 的当前配色（`refresh_omarchy_palette`，换了桌面主题下次打开就跟上，不监视文件），NSH 宿主没有。补上：`nsh::theme::omarchy_moved`（偏好是 Omarchy、磁盘上的配色已不是正在画的那份），两个宿主在面板从隐藏到打开时检查，变了就走 `restyle()`。验证：隔离 HOME 里放一份 Tokyo Night 的 `colors.toml`，面板开着时把它改成一份浅色配色，`hide` 再 `show`，面板换成新配色、外观也翻成浅色。
+
 ## 待你判断
 
 迁移中遇到、需要你拍板但不挡迁移的事，记在这里，迁移照原样（与 gpui 版一致）继续。
