@@ -215,7 +215,17 @@ distro_packages() {
         *" arch "*|*" archlinux "*)
             echo "sudo pacman -S --needed gtk4 gtk4-layer-shell" ;;
         *" debian "*|*" ubuntu "*)
-            echo "sudo apt install libgtk-4-1 libgtk4-layer-shell0" ;;
+            # Ubuntu 24.04 — and what is built on it, Mint 22 or Pop!_OS
+            # 24.04, all of which name it in UBUNTU_CODENAME — has GTK
+            # 4.14 but no gtk4-layer-shell package: Ubuntu first carried
+            # it in 24.10 (Launchpad's publishing history, 2026-10-25).
+            # Naming a package apt cannot find is the sentence this
+            # function exists to avoid.
+            if [ "$(sed -n 's/^UBUNTU_CODENAME=//p' /etc/os-release 2>/dev/null | tr -d '"')" = noble ]; then
+                echo "noble"
+            else
+                echo "sudo apt install libgtk-4-1 libgtk4-layer-shell0"
+            fi ;;
         *" fedora "*|*" rhel "*|*" centos "*)
             echo "sudo dnf install gtk4 gtk4-layer-shell" ;;
         *" suse "*|*" opensuse "*)
@@ -233,7 +243,13 @@ report_missing_libs() {
     say "warning: $APP cannot start yet — these shared libraries are missing:"
     echo "$missing" | sed 's/^/  /'
     pkgs=$(distro_packages)
-    if [ -n "$pkgs" ]; then
+    if [ "$pkgs" = noble ]; then
+        say "Ubuntu 24.04 has no gtk4-layer-shell package (Ubuntu carries it"
+        say "from 24.10). Install GTK 4 with:"
+        say "  sudo apt install libgtk-4-1"
+        say "and build gtk4-layer-shell from"
+        say "  https://github.com/wmww/gtk4-layer-shell"
+    elif [ -n "$pkgs" ]; then
         say "Install them with:"
         say "  $pkgs"
     else

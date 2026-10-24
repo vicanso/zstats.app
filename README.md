@@ -80,7 +80,7 @@ Language, theme, the tray's face, panel opacity and the sustained-load knobs liv
 
 ### Linux (preview)
 
-Wayland only: the tray is a StatusNotifier item, the panel a layer-shell surface anchored top-right by the compositor. It needs GTK 4.14 or later and gtk4-layer-shell — the install script names the packages if either is missing. Developed against Omarchy (Hyprland); other compositors and desktops are untested. Every release carries `zstats-linux-x86_64.tar.gz` and `zstats-linux-aarch64.tar.gz`, listed in the same `SHA256SUMS` and mirrored to Gitee.
+Wayland only: the tray is a StatusNotifier item, the panel a layer-shell surface anchored top-right by the compositor. It needs GTK 4.14 or later and gtk4-layer-shell — the install script names the packages if either is missing. Ubuntu 24.04 has GTK 4.14 but no gtk4-layer-shell package (Ubuntu carries it from 24.10), so there it has to be built from [its source](https://github.com/wmww/gtk4-layer-shell). Developed against Omarchy (Hyprland); other compositors and desktops are untested. Every release carries `zstats-linux-x86_64.tar.gz` and `zstats-linux-aarch64.tar.gz`, listed in the same `SHA256SUMS` and mirrored to Gitee.
 
 The quickest route is the install script on its own: it downloads the latest release for this machine's architecture — GitHub first, then the Gitee mirror — and refuses to install anything `SHA256SUMS` does not vouch for.
 

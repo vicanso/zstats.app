@@ -80,7 +80,7 @@ make bundle          # 或从源码构建（需要 cargo-bundle）
 
 ### Linux（预览版）
 
-仅 Wayland：托盘是 StatusNotifier 项，面板是由合成器锚在右上角的 layer-shell 表面。需要 GTK 4.14 及以上和 gtk4-layer-shell——缺哪个，安装脚本会给出要装的包名。在 Omarchy（Hyprland）上开发；其它合成器与桌面未经测试。每次发版都带 `zstats-linux-x86_64.tar.gz` 和 `zstats-linux-aarch64.tar.gz`，列在同一份 `SHA256SUMS` 里，同样镜像到 Gitee。
+仅 Wayland：托盘是 StatusNotifier 项，面板是由合成器锚在右上角的 layer-shell 表面。需要 GTK 4.14 及以上和 gtk4-layer-shell——缺哪个，安装脚本会给出要装的包名。Ubuntu 24.04 有 GTK 4.14，但没有 gtk4-layer-shell 的包（Ubuntu 从 24.10 起才有），在那里要从[源码](https://github.com/wmww/gtk4-layer-shell)编译。在 Omarchy（Hyprland）上开发；其它合成器与桌面未经测试。每次发版都带 `zstats-linux-x86_64.tar.gz` 和 `zstats-linux-aarch64.tar.gz`，列在同一份 `SHA256SUMS` 里，同样镜像到 Gitee。
 
 最省事的是单独运行安装脚本：它按本机架构下载最新 release（先 GitHub，连不上再走 Gitee 镜像），并拒绝安装任何 `SHA256SUMS` 没有担保的文件。
 

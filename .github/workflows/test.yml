@@ -71,11 +71,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: system dependencies
         # GTK 4 and gtk4-layer-shell: NSH's GTK backend and the panel's
-        # layer surface (24.04 ships GTK 4.14, the version NSH asks for).
+        # layer surface. 24.04 ships GTK 4.14, the version NSH asks for,
+        # but no gtk4-layer-shell package, so that one is built from
+        # source (the script says which version and why).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libgtk-4-dev libgtk4-layer-shell-dev
+            pkg-config libgtk-4-dev
+          scripts/ci-gtk4-layer-shell.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

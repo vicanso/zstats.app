@@ -396,14 +396,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: system dependencies
-        # The same list test.yml installs: GTK 4 and gtk4-layer-shell,
-        # NSH's GTK backend and the panel's layer surface. The binary
-        # links them, so the machine it runs on needs them too
+        # What test.yml installs: GTK 4 from apt and gtk4-layer-shell
+        # built from source (24.04 has no package for it), NSH's GTK
+        # backend and the panel's layer surface. The binary links them,
+        # so the machine it runs on needs them too
         # (`scripts/install-linux.sh` says so).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libgtk-4-dev libgtk4-layer-shell-dev
+            pkg-config libgtk-4-dev
+          scripts/ci-gtk4-layer-shell.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
