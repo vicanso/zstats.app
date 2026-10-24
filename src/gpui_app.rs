@@ -12,11 +12,11 @@ use crate::placement::{MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 use crate::tray::TrayAction;
 use crate::{
-    active, autostart, awake, font, gpui_ui, i18n, logger, metrics, notify, omarchy, placement,
-    prefs, proxy, state, theme, tray, updater, views, watch, webhook,
+    active, autostart, awake, font, gpui_ui, i18n, logger, metrics, notice, notify, omarchy,
+    placement, prefs, proxy, state, theme, tray, updater, views, watch, webhook,
 };
 #[cfg(target_os = "macos")]
-use crate::{dock, window_ext};
+use crate::{appkit, dock, window_ext};
 use std::cell::Cell;
 use std::fs;
 use std::rc::Rc;
@@ -697,13 +697,13 @@ pub fn set_overview_detail_pref(on: bool, cx: &mut App) {
 }
 
 /// Whether the panel's height includes the short Overview's notice row
-/// (`views::overview_has_notice`), as of the last time this file sized
+/// (`notice::row_shown`), as of the last time this file sized
 /// it. Window bookkeeping, not app state: it is what
 /// [`sync_panel_notice`] compares the page against.
 static NOTICE_FITTED: AtomicBool = AtomicBool::new(false);
 
 fn overview_has_notice(cx: &App) -> bool {
-    views::overview_has_notice(cx.global::<ZStatsGlobalStore>().read(cx))
+    notice::row_shown(cx.global::<ZStatsGlobalStore>().read(cx))
 }
 
 /// Where the panel was last dragged to: its width, and the height of
@@ -844,7 +844,7 @@ fn set_panel_size(width: f32, height: f32, cx: &mut App) {
         // makes for `setFrameOrigin`.
         if let Some(ns) = ns {
             after_app_borrow(cx, move || {
-                window_ext::set_size_keeping_top(&ns, width, height, placement::TRAY_GAP)
+                appkit::set_size_keeping_top(&ns, width, height, placement::TRAY_GAP)
             });
         }
     }

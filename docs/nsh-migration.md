@@ -63,9 +63,11 @@
 ## 阶段 2：NSH 宿主
 
 - **2a 共享状态接进 NSH（**已完成**，2026-10-24）。** `nsh/store.rs`：一个 `ZStatsAppState` 放在静态的 `Mutex` 里，所有线程都经 `store::read` / `store::update` 取用。`update` 期间状态方法要的副作用（`Effects`）先记下来，放锁之后再做：通知订阅者、在主线程换托盘（`tray::look` 持锁时算好，`tray::wear` 交给主线程——`tray.rs` 为此把 `sync` 拆成两半）、面板高度跟随。后台任务的改动在任务自己的线程上持锁应用，顺序即发送顺序。`std` 的锁不可重入，从 `update` / `read` 里面再取一次会死锁，这里改成 panic 并说明原因（有测试）。引擎这边：根组件里一个任务等 `store::subscribe` 的 channel（容量 1、不等待发送，所以一串变化只唤醒一次），面板显示时把一个 revision signal 加一，凡是读状态的闭包都先读它（`panel.rs` 的 `Live`）——相当于 gpui 的“每个 tick 整个面板重绘”，只是重算的范围缩小到变了的那些；面板隐藏时什么都不重算，显示时补发一次。宿主照 gpui 版的启动顺序：恢复今天的告警和上次的标签页、托盘、横幅点击（落到告警页）、`autostart::refresh`、`active::start`、采集线程（tick 在专门的线程上持锁走 `on_tick`）、异常进程扫描、清理安装镜像。显示和隐藏补上了和 gpui 版一样的记账：采集节奏、所在标签页的进入工作、看过告警、重置临时视图，以及点托盘时“刚自动隐藏就别再打开”的宽限（`TOGGLE_GRACE` 移进 `state`，两个前端共用）。占位页上加了几行实时数字（CPU、内存、告警数、当前标签页、第几次打开），用来看数据流。
-- **2b 面板行为（macOS）**：高度随 Overview 的形态和提示行变化（`fit_panel`）、拖动改大小并记住、Pin、外观跟随。
+- **2b 面板尺寸（macOS，**已完成**，2026-10-24）。** 面板的大小照 gpui 版的规则走，用的是同一批共享答案：Overview 的形态和提示行（`placement::window_size`；提示行的判定从 `views/overview.rs` 挪进共享的 `notice.rs`——它决定面板高度，两个前端的宿主都要问；`notify::subject_title` 与原来视图里的 `subject_name` 逐字等价，直接复用）、拖动过的尺寸（`prefs::panel_width` / `panel_height`）、提示行出现或消失时按 `placement::notice_step` 增减高度并保持上边缘（`set_size_keeping_top` 从 `window_ext.rs` 挪进共享的 `appkit.rs`）、短形态的最小高度。窗口一创建就是可拖动改大小的（gpui 版要在第一帧之后补 style mask）；拖动中、拖动结束分别是面板委托自己的 `windowDidResize:`、`windowDidEndLiveResize:`：拖动中跨过长形态的高度就切形态，拖动结束记下宽度和当前形态的高度（不含提示行）。面板每次移动或改大小都把位置和缩放写回状态，页面靠它算列表能放几行。显示时按当前形态应有的尺寸重新定位。Pin 早已遵守（`prefs::pinned`），Pin 的按钮和 ⌘P 跟着底栏和快捷键走（2c / 阶段 4）；外观跟随归到阶段 3 的主题。
 - **2c 设置窗口、磁盘空间窗口的外壳和键盘快捷键。**
 - **2d Linux**：GTK 4 面板加 `gtk4-layer-shell` 锚在右上角，ksni 托盘，`ipc.rs` 的单实例和 `--toggle`。可以先用 `make linux-check`（Apple 的 `container`，arm64）在本机编译，镜像要加 GTK 4 开发包；CI 同样要装；Omarchy 真机验收。
+
+**2b 结果**：默认构建 438 个测试、只开 `nsh` 的构建 347 个。只开 `nsh` 的 debug 构建在隔离 HOME（`disk = 1.0`）下用 probe 实测，每一步都和 gpui 版的预期一致：第一个 tick 报出启动盘告警后，短形态多出提示行，面板从 539 变成 585，上边缘不动（505+539 = 459+585）；`banner` 切到告警页、告警看过之后，下一个 tick 面板缩回 539，并挂到图标下；`detail 1` 切长形态是 828；probe 新加的 `drag 400 900`（改尺寸后发出 `NSWindowDidEndLiveResizeNotification`，和真人松手时一样）之后，`app.toml` 里写进了 `panel_width = 400`、`panel_height_detail = 900`；`detail 0` 切回短形态是 400×539（宽度沿用）；截图里 NSH 的内容跟着窗口变宽。**未验证**：真人拖动——拖动中的最小高度限制、拖动中跨线切形态，需要用手拖一次。
 
 **2a 结果**：默认构建 438 个测试、只开 `nsh` 的构建 346 个。只开 `nsh` 的 debug 构建在隔离 HOME（`config.toml` 里 `disk = 1.0`）下实测：第一个 tick 就报了启动盘告警（横幅判定 delivered），托盘换成磁盘脸并带上 “88G”——这一步是持锁算好、交回主线程换的；面板上的 CPU 和内存随 tick 变化（两张间隔 4 秒的截图 14.8% → 20.9%）；probe 点托盘隐藏、再点显示（挂在图标下、成为 key），显示后内存那一行立即刷新、“第几次打开”从 0 变 1（隐藏时重置了临时视图）；probe 的新命令 `banner` 模拟横幅点击，面板切到告警页。日志里没有 ERROR / WARN。
 
@@ -91,7 +93,7 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 |---|---|
 | 0 双前端骨架 | 完成（2026-10-24） |
 | 1 核心 | 完成（2026-10-24） |
-| 2 宿主 | 2a 完成；2b、2c、2d 未开始 |
+| 2 宿主 | 2a、2b 完成；2c、2d 未开始 |
 | 3 基础件 | 未开始 |
 | 4 逐页 | 未开始 |
 | 5 切换 | 未开始 |

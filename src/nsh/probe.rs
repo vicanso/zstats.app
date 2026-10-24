@@ -16,17 +16,25 @@
 //! tray                            a left click on the status item, handed
 //!                                 to the item's own window
 //! banner                          what a click on a banner does
+//! drag W H                        resized to W×H, top edge held, as a
+//!                                 person's drag of an edge ends there
+//! detail 0|1                      Overview's short or long form, then
+//!                                 shown again at that form's size
 //! type TEXT                       key events for each character
 //! info                            window number, frame, key and first responder
 //! quit
 //! ```
 
 use crate::nsh::host::{self, Host};
-use crate::placement::TrayAnchor;
+use crate::placement::{self, TrayAnchor};
+use crate::{appkit, prefs};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow};
-use objc2_foundation::{NSPoint, NSProcessInfo, NSString};
+use objc2_app_kit::{
+    NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow,
+    NSWindowDidEndLiveResizeNotification,
+};
+use objc2_foundation::{NSNotificationCenter, NSPoint, NSProcessInfo, NSString};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -95,6 +103,28 @@ fn run(line: &str) {
         }
         "tray" => click_status_item(MainThreadMarker::from(&*h.panel)),
         "banner" => host::show_alerts(),
+        "drag" => {
+            appkit::set_size_keeping_top(
+                &h.panel,
+                num(0) as f32,
+                num(1) as f32,
+                placement::TRAY_GAP,
+            );
+            // What AppKit posts when a person lets go of an edge; the
+            // panel's delegate hears it as it would that.
+            // SAFETY: an AppKit constant, posted for the window it names,
+            // as AppKit itself posts it.
+            unsafe {
+                NSNotificationCenter::defaultCenter().postNotificationName_object(
+                    NSWindowDidEndLiveResizeNotification,
+                    Some(&h.panel),
+                );
+            }
+        }
+        "detail" => {
+            prefs::set_overview_detail(rest.first() == Some(&"1"));
+            host::show(h, None, false);
+        }
         "move" => {
             // A real pointer reaches NSH through its tracking areas; a
             // synthesised move is dispatched by the window, which only
@@ -125,7 +155,7 @@ fn info(h: &Host) {
         .firstResponder()
         .map(|r| r.class().name().to_string_lossy().into_owned());
     tracing::info!(
-        "probe info: window {} · frame ({:.0}, {:.0}) {:.0}×{:.0} · visible {} · key {} · first responder {:?}",
+        "probe info: window {} · frame ({:.0}, {:.0}) {:.0}×{:.0} · visible {} · key {} · first responder {:?} · detail {} · dragged {:?}×{:?}/{:?}",
         h.panel.windowNumber(),
         frame.origin.x,
         frame.origin.y,
@@ -134,6 +164,10 @@ fn info(h: &Host) {
         h.panel.isVisible(),
         h.panel.isKeyWindow(),
         responder,
+        prefs::overview_detail(),
+        prefs::panel_width(),
+        prefs::panel_height(false),
+        prefs::panel_height(true),
     );
 }
 

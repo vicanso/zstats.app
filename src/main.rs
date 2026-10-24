@@ -32,6 +32,8 @@ mod about;
 mod active;
 mod alertlog;
 mod alerttpl;
+#[cfg(target_os = "macos")]
+mod appkit;
 mod assetinfo;
 mod assets;
 mod autostart;
@@ -53,6 +55,7 @@ mod i18n;
 mod i18n_loader;
 mod logger;
 mod metrics;
+mod notice;
 mod notify;
 mod omarchy;
 mod opener;

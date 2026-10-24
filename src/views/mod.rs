@@ -104,14 +104,6 @@ pub(super) fn body_height(state: &ZStatsAppState) -> Option<f32> {
     })
 }
 
-/// Whether the short Overview is showing its notice row. The one fact
-/// about a page the window needs: the panel is that row taller while it
-/// is (`crate::sync_panel_notice`), so the question is asked here and
-/// answered by the page itself.
-pub fn overview_has_notice(state: &ZStatsAppState) -> bool {
-    !prefs::overview_detail() && overview::has_notice(state)
-}
-
 /// Build the whole panel.
 pub fn root(cx: &App) -> AnyElement {
     let state = cx.global::<ZStatsGlobalStore>().read(cx);

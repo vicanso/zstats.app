@@ -605,7 +605,9 @@ fn episode_banner_id(event: &AlertEvent) -> String {
     }
 }
 
-fn subject_title(subject: &AlertSubject) -> String {
+/// Who an alert is about, as a banner names it — and the notice row
+/// (`notice.rs`), which is the same news.
+pub fn subject_title(subject: &AlertSubject) -> String {
     match subject {
         // The banner is pure presentation — the display name where the
         // executable's own says nothing (zstats 0.5.3).

@@ -21,12 +21,23 @@
 //! gpui front end's `mark_panel_shown` and auto-hide do — the collector's
 //! pace, the tab's entry work, the transient views, the toggle's grace.
 //!
+//! How big the panel is follows the gpui front end's rules, from the same
+//! shared answers: Overview's form and its notice row
+//! (`placement::window_size`, `notice::row_shown`), what a person dragged
+//! it to (`prefs::panel_width` / `panel_height`, kept when a drag ends),
+//! the form switching as a drag crosses the long form's height, and the
+//! least height the short form needs. The window is resizable from its
+//! creation rather than patched after its first frame
+//! (`window_ext::let_size_be_dragged`), and the drag's start, middle and
+//! end are the delegate's own notifications.
+//!
 //! Where the panel goes is `placement.rs`'s, shared with the gpui front
 //! end: the same sizes, and the same hang under the icon with its
 //! multi-display, mixed-DPI scale picking. This side only lists AppKit's
 //! screens in the space that module works in, and turns its answer back
 //! into AppKit's bottom-left one.
 
+use crate::appkit;
 use crate::geom::{Rect, point, size};
 use crate::metrics::{self, CollectorPace};
 use crate::nsh::panel::{self, HostAction};
@@ -36,7 +47,7 @@ use crate::nsh::store;
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
-use crate::{active, autostart, i18n, logger, notify, palette, prefs, updater};
+use crate::{active, autostart, i18n, logger, notice, notify, palette, prefs, updater};
 use nsh_platform_macos::{AppOptions, AppView, Appearance, Root};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -51,6 +62,7 @@ use std::cell::{Cell, OnceCell};
 use std::fs;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 /// `NSPopUpMenuWindowLevel` (`kCGPopUpMenuWindowLevel`): above ordinary
@@ -69,6 +81,11 @@ pub struct Host {
 /// The collector's pace, for the show and hide paths (the store holds a
 /// clone of its own).
 static PACE: OnceLock<CollectorPace> = OnceLock::new();
+
+/// Whether the panel's height includes the short Overview's notice row,
+/// as of the last time it was sized: what [`fit_panel`] compares the page
+/// against. Window bookkeeping, as in the gpui front end.
+static NOTICE_FITTED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static HOST: OnceCell<Rc<Host>> = const { OnceCell::new() };
@@ -104,6 +121,31 @@ define_class!(
             store::update(|state, _| state.mark_auto_hidden());
             tracing::info!("panel auto-hidden");
             with_host(hide);
+        }
+
+        /// A person dragging an edge, or the panel's own resize: the
+        /// store learns the frame, and a drag carries Overview's form
+        /// across the long form's height.
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _notification: &NSNotification) {
+            with_host(|host| {
+                if host.panel.inLiveResize() {
+                    follow_dragged_height(host);
+                }
+                record_frame(host);
+            });
+        }
+
+        #[unsafe(method(windowDidMove:))]
+        fn window_did_move(&self, _notification: &NSNotification) {
+            with_host(record_frame);
+        }
+
+        /// Only a person's drag ends a live resize; the panel's own
+        /// resizes never start one.
+        #[unsafe(method(windowDidEndLiveResize:))]
+        fn window_did_end_live_resize(&self, _notification: &NSNotification) {
+            with_host(remember_dragged_size);
         }
     }
 );
@@ -239,10 +281,98 @@ fn on_main(job: Box<dyn FnOnce() + Send>) {
     dispatch2::DispatchQueue::main().exec_async(job);
 }
 
-/// The panel's height following Overview's notice row: phase 2b of
-/// docs/nsh-migration.md. Until then the panel keeps the short form's
-/// size, which is the page the placeholder stands in for.
-fn fit_panel() {}
+/// Where the panel was last dragged to: its width, and the height of
+/// this form of Overview.
+fn dragged(detail: bool) -> Dragged {
+    Dragged {
+        width: prefs::panel_width(),
+        height: prefs::panel_height(detail),
+    }
+}
+
+/// The size Overview's form wants now — its page, the notice row while
+/// the short form shows one, or what a person dragged it to — noting
+/// whether the row is in it.
+fn panel_size() -> (f32, f32) {
+    let notice = store::read(notice::row_shown);
+    NOTICE_FITTED.store(notice, Ordering::Relaxed);
+    let detail = prefs::overview_detail();
+    placement::window_size(detail, notice, dragged(detail))
+}
+
+/// The least height a drag can reach: the short Overview's page, and the
+/// notice row while [`NOTICE_FITTED`] says it is shown.
+fn apply_min_height(host: &Host) {
+    let height = placement::min_height(NOTICE_FITTED.load(Ordering::Relaxed));
+    host.panel.setContentMinSize(NSSize::new(
+        f64::from(placement::MIN_WINDOW_SIZE.0),
+        f64::from(height),
+    ));
+}
+
+/// The store's `fit_panel`, after every tick: the short Overview's notice
+/// row came or went, so the panel steps by its height, top edge held.
+/// Nothing on all but the few ticks where the answer changed. A step from
+/// the height the panel has (`placement::notice_step`), so a panel dragged
+/// taller keeps what was added — the gpui front end's `sync_panel_notice`.
+fn fit_panel() {
+    let notice = store::read(notice::row_shown);
+    if NOTICE_FITTED.swap(notice, Ordering::Relaxed) == notice {
+        return;
+    }
+    with_host(|host| {
+        apply_min_height(host);
+        let frame = host.panel.frame();
+        let height =
+            placement::notice_step(frame.size.height as f32, notice, dragged(false).height);
+        appkit::set_size_keeping_top(
+            &host.panel,
+            frame.size.width as f32,
+            height,
+            placement::TRAY_GAP,
+        );
+    });
+}
+
+/// While a person drags the panel's edge, Overview's form follows the
+/// height: the long form once the panel is as tall as that page needs
+/// (`placement::detail_fits`), the short one under it. The height stays
+/// the person's — the notice row the new form shows or hides is drawn
+/// inside it, which is what [`NOTICE_FITTED`] is set to say.
+fn follow_dragged_height(host: &Host) {
+    let detail = placement::detail_fits(host.panel.frame().size.height as f32);
+    if detail == prefs::overview_detail() {
+        return;
+    }
+    prefs::set_overview_detail(detail);
+    NOTICE_FITTED.store(store::read(notice::row_shown), Ordering::Relaxed);
+    apply_min_height(host);
+    // The pages read the form.
+    store::changed();
+}
+
+/// A drag ended: its width is the panel's, and its height that of the
+/// form on screen, from now on and after a restart — kept without the
+/// short form's notice row, which comes and goes on top of it.
+fn remember_dragged_size(host: &Host) {
+    let size = host.panel.frame().size;
+    let detail = prefs::overview_detail();
+    let row = if !detail && NOTICE_FITTED.load(Ordering::Relaxed) {
+        placement::NOTICE_HEIGHT
+    } else {
+        0.
+    };
+    prefs::set_panel_size(detail, size.width as f32, size.height as f32 - row);
+}
+
+/// The panel's frame and scale, for the store: the pages size their
+/// lists from it, and placement falls back to the scale.
+fn record_frame(host: &Host) {
+    let screens = Screens::list(MainThreadMarker::from(&*host.panel));
+    let bounds = screens.placement_rect(host.panel.frame());
+    let scale = host.panel.backingScaleFactor() as f32;
+    store::update(|state, fx| state.set_window_metrics(bounds, scale, fx));
+}
 
 /// The panel: a titled, non-activating panel whose title bar is hidden and
 /// whose content runs to the top edge — titled so it can become key (a
@@ -256,7 +386,8 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
     );
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::FullSizeContentView
-        | NSWindowStyleMask::NonactivatingPanel;
+        | NSWindowStyleMask::NonactivatingPanel
+        | NSWindowStyleMask::Resizable;
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
         NSPanel::alloc(mtm),
         frame,
@@ -279,6 +410,10 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
     }
     panel.setMovable(false);
     panel.setHidesOnDeactivate(false);
+    panel.setContentMinSize(NSSize::new(
+        f64::from(placement::MIN_WINDOW_SIZE.0),
+        f64::from(placement::min_height(NOTICE_FITTED.load(Ordering::Relaxed))),
+    ));
     // Key only when a click lands on something that takes the keyboard, or
     // when the tray click asks for it. Without this, ordering the panel
     // front made it key by itself — and a key non-activating panel takes
@@ -314,11 +449,6 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
     (panel, view)
 }
 
-/// The short Overview's size, the design's (`placement::window_size`).
-fn panel_size() -> (f32, f32) {
-    placement::window_size(false, false, Dragged::default())
-}
-
 /// Shows the panel, under the status item's `anchor` (physical pixels from
 /// the top left of the primary screen) or in the main screen's top-right
 /// corner.
@@ -336,13 +466,18 @@ pub fn show(host: &Host, anchor: Option<TrayAnchor>, make_key: bool) {
         )),
         None => screens.corner(width, height),
     };
-    if let Some(rect) = rect {
-        host.panel.setFrame_display(screens.to_appkit(rect), true);
+    apply_min_height(host);
+    match rect {
+        Some(rect) => host.panel.setFrame_display(screens.to_appkit(rect), true),
+        // No screen to place it on: where it was, at the size it wants.
+        None => appkit::set_size_keeping_top(&host.panel, width, height, placement::TRAY_GAP),
     }
     host.panel.orderFrontRegardless();
     if make_key {
         host.panel.makeKeyWindow();
     }
+    // A frame that did not change posts no notification.
+    record_frame(host);
     mark_shown();
 }
 
@@ -437,13 +572,7 @@ impl Screens {
     fn list(mtm: MainThreadMarker) -> Screens {
         let screens = NSScreen::screens(mtm);
         let primary_height = screens.firstObject().map_or(0.0, |s| s.frame().size.height);
-        let flip = |r: NSRect| Rect {
-            origin: point(
-                r.origin.x as f32,
-                (primary_height - (r.origin.y + r.size.height)) as f32,
-            ),
-            size: size(r.size.width as f32, r.size.height as f32),
-        };
+        let flip = |r: NSRect| flip(primary_height, r);
         let geoms = screens
             .iter()
             .map(|s| ScreenGeom {
@@ -474,6 +603,10 @@ impl Screens {
         })
     }
 
+    fn placement_rect(&self, r: NSRect) -> Rect {
+        flip(self.primary_height, r)
+    }
+
     fn to_appkit(&self, r: Rect) -> NSRect {
         NSRect::new(
             NSPoint::new(
@@ -482,5 +615,17 @@ impl Screens {
             ),
             NSSize::new(f64::from(r.size.width), f64::from(r.size.height)),
         )
+    }
+}
+
+/// An AppKit rect in `placement.rs`'s space, against the primary screen's
+/// height.
+fn flip(primary_height: f64, r: NSRect) -> Rect {
+    Rect {
+        origin: point(
+            r.origin.x as f32,
+            (primary_height - (r.origin.y + r.size.height)) as f32,
+        ),
+        size: size(r.size.width as f32, r.size.height as f32),
     }
 }
