@@ -34,6 +34,9 @@ pub enum HostAction {
     /// The appearance NSH resolved for the panel, dark or not — at its
     /// first frame and whenever it turns ([`theme::follow`]).
     Appearance(bool),
+    /// Overview's form changed (the footer's toggle): the panel takes that
+    /// form's height.
+    FitForm,
 }
 
 /// The two ordinary windows beside the panel.
@@ -92,15 +95,35 @@ impl Live {
         self.0.get();
     }
 
+    /// `f` of the store as a memo: read again on every change, but what
+    /// reads the memo hears only of a different answer — a region keyed
+    /// on the tab is made again when the tab changes, not on every tick.
+    pub fn memo<T: PartialEq + 'static>(self, f: fn(&ZStatsAppState) -> T) -> Memo<T> {
+        computed(move || {
+            self.track();
+            store::read(f)
+        })
+    }
+
+    /// [`Live::memo`] for something outside the store that changes when it
+    /// does: a preference, the keep-awake hold.
+    pub fn watch<T: PartialEq + 'static>(self, f: impl Fn() -> T + 'static) -> Memo<T> {
+        computed(move || {
+            self.track();
+            f()
+        })
+    }
+
     /// [`Live::read`] for a text.
     pub fn text(self, f: fn(&ZStatsAppState) -> String) -> impl Fn() -> String + Clone + 'static {
         self.read(f)
     }
 }
 
-/// `views::GUTTER` and `widgets::CARD_PAD`.
+/// `views::GUTTER`, `widgets::CARD_PAD` and `views::CARD_GAP`.
 pub const GUTTER: f32 = 12.;
 pub const CARD_PAD: f32 = 12.;
+pub const CARD_GAP: f32 = 10.;
 
 /// Root `C`, in the appearance the theme preference asks for
 /// ([`theme::appearance`]) and with the bundled mono face. Every window's

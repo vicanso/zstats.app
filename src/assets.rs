@@ -116,6 +116,15 @@ pub enum CustomIconName {
     /// draws the glyphs this file names.
     ChevronDown,
     ChevronRight,
+    /// The NSH panel's tab strip and footer (`nsh/chrome.rs`), lucide's:
+    /// Overview, the Network and Alerts tabs, Settings. gpui takes these
+    /// from gpui-kit (`IconName::LayoutDashboard`, `Network`, `Bell`,
+    /// `Settings2`); Processes and Hardware reuse [`Self::Cpu`] and
+    /// [`Self::HardDrive`], the same lucide glyphs.
+    LayoutDashboard,
+    Network,
+    Bell,
+    Settings,
 }
 
 impl CustomIconName {
@@ -137,6 +146,10 @@ impl CustomIconName {
             CustomIconName::Collapse => "icons/chevrons-down-up.svg",
             CustomIconName::ChevronDown => "icons/chevron-down.svg",
             CustomIconName::ChevronRight => "icons/chevron-right.svg",
+            CustomIconName::LayoutDashboard => "icons/layout-dashboard.svg",
+            CustomIconName::Network => "icons/network.svg",
+            CustomIconName::Bell => "icons/bell.svg",
+            CustomIconName::Settings => "icons/settings-2.svg",
         }
     }
 }
@@ -178,6 +191,10 @@ mod tests {
             CustomIconName::Collapse,
             CustomIconName::ChevronDown,
             CustomIconName::ChevronRight,
+            CustomIconName::LayoutDashboard,
+            CustomIconName::Network,
+            CustomIconName::Bell,
+            CustomIconName::Settings,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

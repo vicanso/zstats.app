@@ -144,6 +144,7 @@ pub fn run() {
             HostAction::Open(aux) => open_aux(aux),
             HostAction::Close(aux) => close_aux(aux),
             HostAction::Appearance(dark) => follow_appearance(dark),
+            HostAction::FitForm => fit_form(),
         }));
     });
 
@@ -249,6 +250,13 @@ fn panel_size() -> (i32, i32) {
         placement::Dragged::default(),
     );
     (width as i32, height as i32)
+}
+
+/// The footer's form toggle: the panel takes the height of Overview's
+/// form; the compositor keeps its top edge.
+fn fit_form() {
+    let (width, height) = panel_size();
+    with_panel(|panel| panel.window.set_default_size(width, height));
 }
 
 /// The store's `fit_panel`, after every tick: the notice row came or went,

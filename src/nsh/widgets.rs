@@ -23,7 +23,7 @@ use crate::color::Rgba;
 use crate::nsh::root::CARD_PAD;
 use crate::nsh::theme;
 use crate::{i18n, palette};
-use nsh_base::{alert_dialog, menu, menu_item};
+use nsh_base::{TooltipElement, alert_dialog, menu, menu_item, tooltip};
 use nsh_core::ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -75,12 +75,14 @@ fn percent_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// A bundled glyph, `size` points square, in `ink`.
-pub fn icon(name: CustomIconName, size: f32, ink: impl Fn() -> Rgba) -> AnyElement {
+/// A bundled glyph, `size` points square, in `ink` — read again when
+/// what it reads changes (a tab turning red).
+pub fn icon(name: CustomIconName, size: f32, ink: impl Fn() -> Rgba + 'static) -> AnyElement {
     image(icon_uri(name))
+        .flex_none()
         .w(px(size))
         .h(px(size))
-        .tint_color(theme::color(ink))
+        .tint_color(move || theme::color(&ink))
         .into_element()
 }
 
@@ -327,26 +329,41 @@ const TIP_DETAIL_OPACITY: f32 = 0.66;
 
 /// A tooltip that wraps inside the panel, in two tiers split by a blank
 /// line in the string: a sentence anyone can read, then the precise
-/// account, dimmer (CLAUDE.md, i18n). For an element's `.tooltip(..)`:
-/// the bubble itself, which NSH puts in a hint overlay with its own delay
-/// and placement — `nsh_base`'s `Tooltip` *is* such an overlay, and
-/// handed over as an element it ends up inside a second one that never
-/// shows.
-pub fn wrap_tooltip(tip: impl AsRef<str>) -> AnyElement {
+/// account, dimmer (CLAUDE.md, i18n). `nsh_base`'s `Tooltip`, which is the
+/// hint overlay itself and so must be handed to `.tooltip(..)` as it is:
+/// turned into a plain element first, NSH wraps it in a second overlay
+/// that never shows. It can be `.disabled(..)` — under an open menu.
+pub fn wrap_tooltip(tip: impl AsRef<str>) -> TooltipElement {
     let tiers: Vec<String> = tip.as_ref().split("\n\n").map(str::to_owned).collect();
-    let mut bubble = view().max_w(px(TIP_WIDTH)).gap(px(6.));
-    for (i, tier) in tiers.into_iter().enumerate() {
-        let line = text(tier)
-            .text_size(px(11.))
-            .line_height(relative(1.35))
-            .text_color(theme::color(palette::text));
-        bubble = bubble.child(if i > 0 {
-            line.opacity(TIP_DETAIL_OPACITY)
-        } else {
-            line
-        });
-    }
-    bubble
+    bubble().child(
+        view()
+            .max_w(px(TIP_WIDTH))
+            .gap(px(6.))
+            .children(tiers.into_iter().enumerate().map(tier).collect::<Vec<_>>()),
+    )
+}
+
+/// [`wrap_tooltip`] whose words follow what `tip` reads: Pin's and
+/// Unpin's, the gear's with or without its dot.
+pub fn live_tooltip(tip: impl Fn() -> String + 'static) -> TooltipElement {
+    bubble().child(
+        view()
+            .max_w(px(TIP_WIDTH))
+            .gap(px(6.))
+            .child(dynamic(move || {
+                tip()
+                    .split("\n\n")
+                    .map(str::to_owned)
+                    .enumerate()
+                    .map(tier)
+                    .collect::<Vec<_>>()
+            })),
+    )
+}
+
+/// The tooltip's bubble: the opaque popover fill, a hairline.
+fn bubble() -> TooltipElement {
+    tooltip()
         .px(px(8.))
         .py(px(4.))
         .rounded(px(6.))
@@ -354,7 +371,15 @@ pub fn wrap_tooltip(tip: impl AsRef<str>) -> AnyElement {
         .outline(px(1.))
         .outline_offset(px(-1.))
         .outline_color(theme::color(palette::border))
-        .into_element()
+}
+
+/// One tier of a tooltip; every tier after the first dimmer.
+fn tier((i, words): (usize, String)) -> Text {
+    text(words)
+        .text_size(px(11.))
+        .line_height(relative(1.35))
+        .text_color(theme::color(palette::text))
+        .opacity(if i > 0 { TIP_DETAIL_OPACITY } else { 1. })
 }
 
 /// One entry of a [`menu_trigger`]'s menu: its label, whether it is the

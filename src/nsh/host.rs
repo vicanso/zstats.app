@@ -215,6 +215,7 @@ pub fn run() {
             HostAction::Open(aux) => windows::open(aux),
             HostAction::Close(aux) => windows::close(aux),
             HostAction::Appearance(dark) => follow_appearance(dark),
+            HostAction::FitForm => fit_form(),
         })
     });
     install_menu(mtm);
@@ -385,6 +386,16 @@ fn apply_min_height(host: &Host) {
         f64::from(placement::MIN_WINDOW_SIZE.0),
         f64::from(height),
     ));
+}
+
+/// The footer's form toggle: the panel takes the height of Overview's
+/// form, top edge held (`set_overview_detail_pref` on the gpui front end).
+fn fit_form() {
+    let (width, height) = panel_size();
+    with_host(|host| {
+        apply_min_height(host);
+        appkit::set_size_keeping_top(&host.panel, width, height, placement::TRAY_GAP);
+    });
 }
 
 /// The store's `fit_panel`, after every tick: the short Overview's notice
