@@ -147,6 +147,9 @@ pub enum CustomIconName {
     /// and `FolderOpen`.
     Folder,
     FolderOpen,
+    /// The NSH bulk-trash sheet's ticks: lucide `check`, gpui-kit's
+    /// `IconName::Check` inside its `Checkbox`.
+    Check,
 }
 
 impl CustomIconName {
@@ -180,6 +183,7 @@ impl CustomIconName {
             CustomIconName::ExternalLink => "icons/external-link.svg",
             CustomIconName::Folder => "icons/folder.svg",
             CustomIconName::FolderOpen => "icons/folder-open.svg",
+            CustomIconName::Check => "icons/check.svg",
         }
     }
 }
@@ -233,6 +237,7 @@ mod tests {
             CustomIconName::ExternalLink,
             CustomIconName::Folder,
             CustomIconName::FolderOpen,
+            CustomIconName::Check,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

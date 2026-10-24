@@ -4,9 +4,9 @@
 //! and does not repeat their reasons. The window's rules are shared
 //! (`storagepage.rs`, the directory map's layout in `dirmap.rs`); the
 //! state is the store's, so a walk or a search outlives the window. The
-//! tabs arrive in phase 4k of docs/nsh-migration.md: the frame and
-//! Duplicates first; the analysis is a card that says so until it is
-//! ported.
+//! tabs arrived in phase 4k of docs/nsh-migration.md: the frame and
+//! Duplicates first, then the analysis's lists; the directory map's box
+//! stands empty until the map is ported.
 //!
 //! The tab strip stays put, and so does each card's head: only the
 //! result scrolls, inside the card's border. A folder is picked in the
@@ -17,13 +17,19 @@
 //! the host's Window menu).
 
 use crate::assets::CustomIconName;
+use crate::cleanhints;
+use crate::dirmap::NARROW_MAP_H;
+use crate::diskscan::{self, DirHit};
 use crate::dupes::DupeScope;
 use crate::nsh::root::{self, AuxWindow, FolderPick, HostAction, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{chrome, store, theme};
-use crate::state::{DiskAnalysis, DupeSearch, StorageTab, ZStatsAppState};
-use crate::storagepage::{self, DUPE_FILES_SHOWN, HEAD_PT, META_PT, ROW_PT};
-use crate::{color, finder, format, i18n, palette};
+use crate::state::{DiskAnalysis, DupeSearch, Expansion, StorageTab, ZStatsAppState};
+use crate::storagepage::{
+    self, DUPE_FILES_SHOWN, HEAD_PT, META_PT, Preset, ROW_PT, SIDE_BY_SIDE_MIN_W, SIDE_W,
+};
+use crate::{active, color, finder, format, i18n, opener, palette, prefs};
+use nsh_base::TooltipElement;
 use nsh_core::ui::prelude::*;
 use rust_i18n::t;
 use std::env;
@@ -57,6 +63,8 @@ const NAME_MAX: f32 = 240.;
 /// The words the system's folder panel confirms with, for `pick`.
 pub fn pick_prompt(pick: FolderPick) -> String {
     i18n::tr(match pick {
+        FolderPick::Analysis => "disk.ana_pick_go",
+        FolderPick::Exclude => "disk.ana_exclude_pick_go",
         FolderPick::Dupes => "disk.dup_pick_go",
     })
 }
@@ -64,6 +72,16 @@ pub fn pick_prompt(pick: FolderPick) -> String {
 /// What the host's folder panel answered, for `pick`. Any thread.
 pub fn picked(pick: FolderPick, paths: Vec<PathBuf>) {
     match pick {
+        FolderPick::Analysis => {
+            if let Some(root) = paths.into_iter().next() {
+                store::update(|state, fx| state.set_disk_analysis_at(root, fx));
+            }
+        }
+        FolderPick::Exclude => {
+            if storagepage::add_exclude(paths.iter().map(|p| p.display().to_string())) {
+                store::changed();
+            }
+        }
         FolderPick::Dupes => {
             if let Some(folder) = paths.into_iter().next() {
                 store::update(|state, fx| state.search_dupes_in(folder, fx));
@@ -93,9 +111,15 @@ pub fn Storage() -> impl IntoElement {
     let tab = live.memo(ZStatsAppState::storage_tab);
     let trashed =
         live.memo(|state: &ZStatsAppState| storagepage::trashed_note(state.trashed_this_session()));
+    // Room for the map beside the lists rather than above them.
+    let width = signal(0.0_f32);
+    let wide = computed(move || width.get() >= SIDE_BY_SIDE_MIN_W);
+    // The bulk sheet, open while it holds what it would move.
+    let sheet: Signal<Option<Sheet>> = signal(None);
     view()
         .size_full()
         .bg(theme::color(palette::ground))
+        .on_layout(move |b: &Bounds<Points>| width.set(b.size.width.0))
         .child(
             view()
                 .flex_none()
@@ -116,19 +140,14 @@ pub fn Storage() -> impl IntoElement {
                     move || trashed_note(trashed),
                 ))
                 .child(dynamic(move || match tab.get() {
-                    StorageTab::Analysis => not_yet(),
+                    StorageTab::Analysis => analysis_card(live, wide, sheet),
                     StorageTab::Duplicates => dupes_card(live),
                 })),
         )
-}
-
-/// The analysis until it is ported. Not translated — a development
-/// build's card, gone with the tab's port.
-fn not_yet() -> AnyElement {
-    widgets::empty_card(
-        i18n::tr("disk.tab_analysis"),
-        "Not on the NSH front end yet — phase 4k of docs/nsh-migration.md.".into(),
-    )
+        .child(when(
+            move || sheet.with(Option::is_some),
+            move || pick_sheet(sheet),
+        ))
 }
 
 /// The two tabs, underlined (`storage::tab_strip`): the one on screen on
@@ -412,6 +431,11 @@ fn header_rows(scope: String, caption: AnyElement, controls: AnyElement) -> AnyE
 /// The caption under a head: what the run found, then the method behind
 /// an ⓘ.
 fn caption_line(rest: String, tip: Option<String>) -> AnyElement {
+    caption_with(rest, tip, None)
+}
+
+/// [`caption_line`], with what a walk left out after its words.
+fn caption_with(rest: String, tip: Option<String>, extra: Option<AnyElement>) -> AnyElement {
     let mut row = view()
         .flex_row()
         .flex_wrap()
@@ -425,6 +449,9 @@ fn caption_line(rest: String, tip: Option<String>) -> AnyElement {
                 .line_height(px(14.))
                 .text_color(theme::color(palette::text_dim)),
         );
+    if let Some(extra) = extra {
+        row = row.child(extra);
+    }
     if let Some(tip) = tip {
         row = row.child(widgets::info_icon(widgets::wrap_tooltip(tip)));
     }
@@ -488,7 +515,7 @@ fn run_chip_with(
 fn toolbar_chip(
     content: AnyElement,
     on: bool,
-    tip: Option<String>,
+    tip: Option<TooltipElement>,
     on_press: Option<Box<dyn Fn()>>,
 ) -> AnyElement {
     let mut chip = nsh_base::button()
@@ -511,11 +538,7 @@ fn toolbar_chip(
         chip = chip.on_press(press);
     }
     match tip {
-        Some(tip) => view()
-            .flex_none()
-            .tooltip(widgets::wrap_tooltip(tip))
-            .child(chip)
-            .into_element(),
+        Some(tip) => view().flex_none().tooltip(tip).child(chip).into_element(),
         None => chip.into_element(),
     }
 }
@@ -908,7 +931,7 @@ fn dupes_scope_row(h: &DupesHead) -> AnyElement {
         .child(toolbar_chip(
             chip_words(i18n::tr("disk.ana_preset_home"), !picked).into_element(),
             !picked,
-            Some(i18n::tr("disk.dup_scope_home_tip")),
+            Some(widgets::wrap_tooltip(i18n::tr("disk.dup_scope_home_tip"))),
             (picked && !running).then(|| {
                 Box::new(|| store::update(|state, fx| state.reset_dupe_scope(fx))) as Box<dyn Fn()>
             }),
@@ -920,7 +943,7 @@ fn dupes_scope_row(h: &DupesHead) -> AnyElement {
                 .child(chip_words(folder, true))
                 .into_element(),
             true,
-            Some(i18n::tr("disk.dup_scope_folder_tip")),
+            Some(widgets::wrap_tooltip(i18n::tr("disk.dup_scope_folder_tip"))),
             None,
         ));
     }
@@ -1124,4 +1147,1255 @@ fn dupe_copy(copy: DupeCopy) -> AnyElement {
         )),
     ))
     .into_element()
+}
+
+// ---- the analysis ---------------------------------------------------------
+
+/// The chevron's slot, held on every analysis row.
+const CHEVRON_SLOT: f32 = 12.;
+
+/// The delta column's width: `-999.9 MB` at the meta size in mono.
+const DELTA_W: f32 = 56.;
+
+/// One indent step's width, for a row `depth` levels in.
+fn indent(depth: usize) -> f32 {
+    depth as f32 * INDENT_STEP
+}
+
+/// The ink at the share a ranking's bars keep: context for the figures,
+/// not the loudest thing in the window.
+fn meter_ink() -> color::Rgba {
+    let ink = palette::ink();
+    color::Rgba {
+        a: ink.a * 0.45,
+        ..ink
+    }
+}
+
+/// A row's share bar: 2px, the dimmed ink, from under the label to under
+/// the size.
+fn row_meter(fraction: f32) -> AnyElement {
+    view()
+        .mt(px(3.))
+        .ml(px(CHEVRON_SLOT + ROW_GAP))
+        .mr(px(ACTION_SLOT * 2. + ROW_GAP))
+        .child(widgets::meter(move || fraction, meter_ink, 2.))
+        .into_element()
+}
+
+/// The analysis card's head and notes as they stand.
+#[derive(Clone, PartialEq)]
+struct AnaHead {
+    caption: Option<(String, String)>,
+    ready: bool,
+    failed: bool,
+    running: bool,
+    progress: Option<f32>,
+    skips: Option<(String, Vec<String>)>,
+    run: String,
+    stale: bool,
+    presets: Vec<(Preset, bool)>,
+    custom: Option<String>,
+    exclude: String,
+    exclude_open: bool,
+    excludes: Vec<(String, bool)>,
+    watch: bool,
+    watch_status: String,
+    fda: Option<String>,
+    mismatch: Option<String>,
+    phase: Phase,
+}
+
+/// What the card's body is.
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    /// Before the first walk: the empty state.
+    Off,
+    Failed,
+    /// Walking, nothing to show yet.
+    Waiting,
+    /// A result: finished (rows open, actions) or a partial, dimmed when
+    /// it is not the selected scope's.
+    Result {
+        finished: bool,
+        dim: bool,
+    },
+}
+
+fn ana_head(state: &ZStatsAppState) -> AnaHead {
+    let mismatch = storagepage::mismatch_note(state);
+    let phase = match state.disk_analysis() {
+        DiskAnalysis::Off => Phase::Off,
+        DiskAnalysis::Failed(_) => Phase::Failed,
+        DiskAnalysis::Running { partial: None, .. } => Phase::Waiting,
+        DiskAnalysis::Running { .. } => Phase::Result {
+            finished: false,
+            dim: false,
+        },
+        DiskAnalysis::Ready(_) => Phase::Result {
+            finished: true,
+            dim: mismatch.is_some(),
+        },
+    };
+    AnaHead {
+        caption: storagepage::caption(state),
+        ready: matches!(state.disk_analysis(), DiskAnalysis::Ready(_)),
+        failed: matches!(state.disk_analysis(), DiskAnalysis::Failed(_)),
+        running: matches!(state.disk_analysis(), DiskAnalysis::Running { .. }),
+        progress: storagepage::progress(state),
+        skips: match state.disk_analysis() {
+            DiskAnalysis::Ready(result) => storagepage::skips(result),
+            _ => None,
+        },
+        run: storagepage::run_label(state),
+        stale: storagepage::stale(state),
+        presets: Preset::ALL.into_iter().map(|p| (p, p.on(state))).collect(),
+        custom: storagepage::custom_scope(state),
+        exclude: storagepage::exclude_label(),
+        exclude_open: state.analysis_exclude_open(),
+        excludes: storagepage::exclude_entries(),
+        watch: prefs::disk_watch(),
+        watch_status: storagepage::watch_status(state),
+        fda: storagepage::fda_note(state),
+        mismatch,
+        phase,
+    }
+}
+
+/// The analyser's card: what the shown result is and its run control, one
+/// toolbar line of scope and settings (the exclusions as a drawer under
+/// it), the notes about the result, then the result — beside the map
+/// when the window is wide, under it otherwise.
+fn analysis_card(live: Live, wide: Memo<bool>, sheet: Signal<Option<Sheet>>) -> AnyElement {
+    let head = live.memo(ana_head);
+    let lists = live.memo(lists_of);
+    dynamic(move || {
+        let h = head.get();
+        let mut parts: Vec<AnyElement> = Vec::new();
+        if let Some(header) = analysis_header(&h) {
+            parts.push(header);
+        }
+        parts.push(analysis_toolbar(&h));
+        if h.exclude_open && !h.running {
+            parts.push(exclude_drawer(&h.excludes));
+        }
+        let notes = analysis_notes(&h);
+        match h.phase {
+            Phase::Off => tab_card(
+                parts,
+                empty_state(
+                    i18n::tr("disk.ana_empty_lead"),
+                    i18n::tr("disk.ana_empty_cost"),
+                    i18n::tr("disk.ana_hint"),
+                    primary_button(
+                        t!(
+                            "disk.ana_scan_scope",
+                            scope = store::read(storagepage::selected_word)
+                        )
+                        .to_string(),
+                        || store::update(|state, fx| state.start_disk_analysis(fx)),
+                    ),
+                ),
+            ),
+            Phase::Failed => tab_card(
+                parts,
+                view()
+                    .children(notes)
+                    .child(
+                        view()
+                            .px(px(INSET))
+                            .pb(px(12.))
+                            .child(widgets::note(i18n::tr("disk.ana_failed_body"))),
+                    )
+                    .into_element(),
+            ),
+            Phase::Waiting => tab_card(parts, view().children(notes).into_element()),
+            Phase::Result { dim, .. } => {
+                let lists = view()
+                    .opacity(if dim { 0.5 } else { 1. })
+                    .child(dynamic(move || analysis_lists(lists.get(), sheet)))
+                    .into_element();
+                let map = view()
+                    .opacity(if dim { 0.5 } else { 1. })
+                    .px(px(INSET))
+                    .pb(px(INSET))
+                    .child(map_box(wide.get()));
+                if !wide.get() {
+                    return tab_card(
+                        parts,
+                        view()
+                            .children(notes)
+                            .child(map.into_element())
+                            .child(lists)
+                            .into_element(),
+                    );
+                }
+                widgets::list_shell()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .pt(px(4.))
+                    .children(
+                        parts
+                            .into_iter()
+                            .map(|part| view().flex_none().child(part).into_element())
+                            .collect::<Vec<_>>(),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .child(view().flex_1().min_w(px(0.)).child(map.flex_1()))
+                            .child(
+                                scroll()
+                                    .flex_none()
+                                    .w(px(SIDE_W))
+                                    .min_h(px(0.))
+                                    .child(view().children(notes).child(lists)),
+                            ),
+                    )
+                    .into_element()
+            }
+        }
+    })
+    .into_element()
+}
+
+/// The directory map's box: its size beside the lists (the height it is
+/// given) or above them. Empty until the map is ported.
+fn map_box(fill: bool) -> AnyElement {
+    let area = view().rounded(px(6.)).bg(theme::color(palette::inset));
+    if fill {
+        area.flex_1().min_h(px(0.)).into_element()
+    } else {
+        area.flex_none().h(px(NARROW_MAP_H)).into_element()
+    }
+}
+
+/// The notes about the result on screen: the Full Disk Access gap, and a
+/// result that is not the selected scope's.
+fn analysis_notes(h: &AnaHead) -> Vec<AnyElement> {
+    let mut notes = Vec::new();
+    if let Some(fda) = h.fda.clone() {
+        notes.push(
+            view()
+                .px(px(INSET))
+                .pb(px(8.))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .mt(px(4.))
+                        .child(view().flex_1().min_w(px(0.)).child(widgets::note(fda)))
+                        .child(small_button(
+                            i18n::tr("disk.ana_fda_open"),
+                            Some(CustomIconName::Shield),
+                            opener::full_disk_access_settings,
+                        )),
+                )
+                .into_element(),
+        );
+    }
+    if let Some(line) = h.mismatch.clone() {
+        notes.push(
+            view()
+                .px(px(INSET))
+                .pb(px(8.))
+                .child(widgets::note(line))
+                .into_element(),
+        );
+    }
+    notes
+}
+
+/// The caption and the run control; nothing before the first walk.
+fn analysis_header(h: &AnaHead) -> Option<AnyElement> {
+    let (scope, rest) = h.caption.clone()?;
+    let mut controls = view()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(px(4.))
+        .child(run_chip_with(
+            h.run.clone(),
+            h.stale,
+            Some(storagepage::run_tip(h.stale)),
+            || store::update(|state, fx| storagepage::run_or_cancel(state, fx)),
+        ));
+    if h.ready {
+        // Drops a result that took minutes, after a confirm.
+        controls = controls.child(widgets::ghost_icon(
+            CustomIconName::Close,
+            widgets::wrap_tooltip(i18n::tr("disk.ana_dismiss_hint")),
+            || {
+                widgets::confirm(
+                    i18n::tr("disk.ana_clear_title"),
+                    i18n::tr("disk.ana_clear_body"),
+                    i18n::tr("disk.ana_clear_ok"),
+                    || store::update(|state, fx| state.clear_disk_analysis(fx)),
+                )
+            },
+        ));
+    }
+    if h.failed {
+        // A failed walk has nothing to lose: no confirm.
+        controls = controls.child(widgets::ghost_icon(
+            CustomIconName::Close,
+            widgets::wrap_tooltip(i18n::tr("disk.ana_dismiss_hint")),
+            || store::update(|state, fx| state.clear_disk_analysis(fx)),
+        ));
+    }
+    let skips = h.skips.clone().map(|(label, lines)| {
+        view()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(px(3.))
+            .tooltip(widgets::tooltip_lines(move || lines.clone()))
+            .child(
+                text(format!("· {label}"))
+                    .text_size(px(META_PT))
+                    .line_height(px(14.))
+                    .text_color(theme::color(palette::text_dim)),
+            )
+            .child(widgets::icon(CustomIconName::Info, 10., palette::text_dim))
+            .into_element()
+    });
+    let mut out = view().child(header_rows(
+        scope,
+        caption_with(rest, None, skips),
+        controls.into_element(),
+    ));
+    if let Some(fraction) = h.progress {
+        // Against the last walk of this scope: an estimate, never quite
+        // full until the walk is.
+        out = out.child(view().px(px(INSET)).pb(px(8.)).child(widgets::meter(
+            move || fraction.min(0.97),
+            meter_ink,
+            2.,
+        )));
+    }
+    Some(out.into_element())
+}
+
+/// Scope, exclusions and the daily check, as one line of chips — dimmed
+/// and inert while a walk runs.
+fn analysis_toolbar(h: &AnaHead) -> AnyElement {
+    let running = h.running;
+    let press = |act: Box<dyn Fn()>| (!running).then_some(act);
+    let mut row = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.))
+        .px(px(INSET))
+        .pb(px(8.))
+        .opacity(if running { 0.45 } else { 1. });
+    for (preset, on) in h.presets.iter().copied() {
+        row = row.child(toolbar_chip(
+            chip_words(preset.label(), on).into_element(),
+            on,
+            Some(widgets::wrap_tooltip(preset.tip())),
+            press(Box::new(move || {
+                store::update(|state, fx| preset.select(state, fx))
+            })),
+        ));
+    }
+    if let Some(custom) = h.custom.clone() {
+        row = row.child(toolbar_chip(
+            view()
+                .max_w(px(140.))
+                .child(chip_words(custom, true))
+                .into_element(),
+            true,
+            None,
+            None,
+        ));
+    }
+    row = row.child(widgets::ghost_icon(
+        CustomIconName::FolderOpen,
+        widgets::wrap_tooltip(i18n::tr("disk.ana_pick_hint")),
+        move || {
+            if !running {
+                root::ask(HostAction::PickFolder(FolderPick::Analysis));
+            }
+        },
+    ));
+    row = row.child(
+        view()
+            .flex_none()
+            .w(px(1.))
+            .h(px(12.))
+            .mx(px(4.))
+            .bg(theme::color(palette::border)),
+    );
+    row = row.child(toolbar_chip(
+        chip_words(h.exclude.clone(), h.exclude_open).into_element(),
+        h.exclude_open,
+        Some(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_note"))),
+        press(Box::new(|| {
+            store::update(|state, fx| state.toggle_analysis_exclude(fx))
+        })),
+    ));
+    // The daily check: a dot for on or off, its state on hover.
+    let on = h.watch;
+    let status = h.watch_status.clone();
+    row.child(toolbar_chip(
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(5.))
+            .child(
+                view()
+                    .flex_none()
+                    .w(px(6.))
+                    .h(px(6.))
+                    .rounded_full()
+                    .border(px(if on { 0. } else { 1. }))
+                    .border_color(theme::color(palette::text_dim))
+                    .bg(theme::color(
+                        move || if on { palette::text_muted() } else { CLEAR },
+                    )),
+            )
+            .child(chip_words(i18n::tr("disk.watch"), false))
+            .into_element(),
+        false,
+        Some(widgets::tooltip_lines(move || {
+            vec![status.clone(), i18n::tr("disk.watch_tip")]
+        })),
+        press(Box::new(move || {
+            prefs::set_disk_watch(!on);
+            store::changed();
+        })),
+    ))
+    .into_element()
+}
+
+/// Directories the walk leaves alone: a chip each, the field to add one
+/// (committed on Return, never on a keystroke), and the folder panel.
+fn exclude_drawer(entries: &[(String, bool)]) -> AnyElement {
+    let typed = signal(String::new());
+    let chips: Vec<AnyElement> = entries
+        .iter()
+        .map(|(raw, present)| {
+            let present = *present;
+            let drop_me = raw.clone();
+            let mut chip = view()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(px(3.))
+                .rounded(px(4.))
+                .bg(theme::color(palette::chip))
+                .px(px(5.))
+                .py(px(1.))
+                .child(
+                    text(raw.clone())
+                        .text_size(px(META_PT + 1.))
+                        .line_height(widgets::line(META_PT + 1.))
+                        .text_color(theme::color(move || {
+                            if present {
+                                palette::text()
+                            } else {
+                                palette::text_dim()
+                            }
+                        })),
+                )
+                .child(
+                    view()
+                        .flex_none()
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_drop")))
+                        .child(
+                            nsh_base::button()
+                                .on_press(move || {
+                                    storagepage::drop_exclude(&drop_me);
+                                    store::changed();
+                                })
+                                .child(widgets::icon(CustomIconName::Close, 9., palette::text_dim)),
+                        ),
+                );
+            if !present {
+                chip = chip.tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_missing")));
+            }
+            chip.into_element()
+        })
+        .collect();
+    view()
+        .px(px(INSET))
+        .pb(px(8.))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap(px(4.))
+                .p(px(6.))
+                .rounded(px(7.))
+                .bg(theme::color(palette::inset))
+                .children(chips)
+                .child(
+                    // Small and fixed: a field used once a month must not
+                    // out-shout the table.
+                    view().flex_none().w(px(180.)).child(
+                        input()
+                            .h(px(20.))
+                            .px(px(4.))
+                            .rounded(px(6.))
+                            .border(px(1.))
+                            .border_color(theme::color(palette::border))
+                            .value(move || typed.get())
+                            .placeholder(i18n::tr("disk.ana_exclude_placeholder"))
+                            .auto_correct(false)
+                            .text_size(px(12.))
+                            .text_color(theme::color(palette::text))
+                            .on_change(move |text: &str| typed.set(text.to_owned()))
+                            .on_submit(move |text: &str| {
+                                if storagepage::add_exclude([text.to_owned()]) {
+                                    // A compose box, not a value: what was
+                                    // added is a chip now.
+                                    typed.set(String::new());
+                                    store::changed();
+                                }
+                            }),
+                    ),
+                )
+                .child(widgets::ghost_icon(
+                    CustomIconName::FolderOpen,
+                    widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_pick")),
+                    || root::ask(HostAction::PickFolder(FolderPick::Exclude)),
+                )),
+        )
+        .into_element()
+}
+
+/// One line of an analysis table: a row, or the dim line an open row
+/// shows in place of (or after) its children.
+#[derive(Clone, PartialEq)]
+enum Line {
+    Row(Box<Row>),
+    Note { depth: usize, text: String },
+}
+
+/// One ranked row as it shows.
+#[derive(Clone, PartialEq)]
+struct Row {
+    path: PathBuf,
+    label: String,
+    tip: String,
+    bytes: u64,
+    fraction: f32,
+    /// The ± column, when the table has a baseline: what it says, if
+    /// anything.
+    delta: Option<Option<String>>,
+    /// The basis pill (outside the suggestions), as `(word, reason)`.
+    basis: Option<(String, String)>,
+    /// The owner of a cache whose app is running.
+    running: Option<String>,
+    /// What the system declares, for a MobileAsset row.
+    asset: Option<String>,
+    modified: Option<String>,
+    depth: usize,
+    expandable: bool,
+    open: bool,
+    /// The trash confirm's sentence, where the row may go to the Trash.
+    trash: Option<String>,
+    /// A big file rather than a directory.
+    file: bool,
+    reveal_tip: String,
+}
+
+/// The growth since about a week ago.
+#[derive(Clone, PartialEq)]
+struct GrowthRow {
+    path: PathBuf,
+    shown: String,
+    grew: u64,
+    now: u64,
+    fraction: f32,
+}
+
+/// The analysis's tables as they stand.
+#[derive(Clone, PartialEq, Default)]
+struct Lists {
+    growth: Option<(String, Vec<GrowthRow>)>,
+    sugs: Vec<Line>,
+    sug_count: usize,
+    sug_total: u64,
+    /// The bulk sheet's rows and paths: the whole set.
+    sug_picks: Vec<(String, u64, Option<String>)>,
+    sug_paths: Vec<PathBuf>,
+    sug_more: Option<String>,
+    files: Vec<Line>,
+    finished: bool,
+}
+
+fn lists_of(state: &ZStatsAppState) -> Lists {
+    let (result, finished) = match state.disk_analysis() {
+        DiskAnalysis::Ready(result) => (result, true),
+        DiskAnalysis::Running {
+            partial: Some(result),
+            ..
+        } => (result, false),
+        _ => return Lists::default(),
+    };
+    let diff = finished.then(|| state.analysis_diff_for(result)).flatten();
+    let running = active::running_bundle_ids();
+    let home = env::var("HOME").unwrap_or_default();
+    let growth = state
+        .disk_growth()
+        .filter(|_| finished && storagepage::home_result(result))
+        .filter(|report| !report.rows.is_empty())
+        .map(|report| {
+            let max = report.rows.iter().map(|g| g.grew).max().unwrap_or(1).max(1);
+            (
+                storagepage::growth_title(report),
+                report
+                    .rows
+                    .iter()
+                    .map(|g| GrowthRow {
+                        path: g.path.clone(),
+                        shown: format::tilde_path(&g.path.display().to_string(), &home),
+                        grew: g.grew,
+                        now: g.now,
+                        fraction: g.grew as f32 / max as f32,
+                    })
+                    .collect(),
+            )
+        });
+    let sugs = storagepage::suggestions(result, state.analysis_show_all_sugs());
+    let ctx = Ctx {
+        state,
+        diff,
+        running: &running,
+        suggested: true,
+        deletable: finished,
+        expandable: finished,
+    };
+    let sug_max = sugs.rows.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
+    let mut sug_lines = Vec::new();
+    for hit in &sugs.rows[..sugs.shown] {
+        dir_lines(&ctx, hit, &result.root, sug_max, 0, &mut sug_lines);
+    }
+    let file_max = result
+        .files
+        .iter()
+        .map(|h| h.bytes)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let files = result
+        .files
+        .iter()
+        .map(|hit| {
+            let label = storagepage::row_label(&hit.path, &result.root);
+            Line::Row(Box::new(Row {
+                tip: storagepage::row_tip(&hit.path, None, false, None, None),
+                trash: finished.then(|| storagepage::file_trash_body(&label)),
+                label,
+                path: hit.path.clone(),
+                bytes: hit.bytes,
+                fraction: hit.bytes as f32 / file_max as f32,
+                delta: diff.map(|d| storagepage::delta_label(hit.bytes, d.bytes_for(&hit.path))),
+                basis: None,
+                running: None,
+                asset: None,
+                modified: hit.modified.map(format::date),
+                depth: 0,
+                expandable: false,
+                open: false,
+                file: true,
+                reveal_tip: storagepage::reveal_row_tip(&hit.path),
+            }))
+        })
+        .collect();
+    Lists {
+        growth,
+        sug_more: (sugs.rows.len() > storagepage::SUG_ROWS).then(|| {
+            storagepage::more_label(
+                state.analysis_show_all_sugs(),
+                sugs.rows.len() - storagepage::SUG_ROWS,
+            )
+        }),
+        sug_count: sugs.rows.len(),
+        sug_total: sugs.total,
+        sug_picks: storagepage::pick_items(&sugs.rows, &running),
+        sug_paths: sugs.rows.iter().map(|h| h.path.clone()).collect(),
+        sugs: sug_lines,
+        files,
+        finished,
+    }
+}
+
+/// What every row of one table shares.
+struct Ctx<'a> {
+    state: &'a ZStatsAppState,
+    diff: Option<&'a diskscan::DiffBaseline>,
+    running: &'a [String],
+    suggested: bool,
+    deletable: bool,
+    expandable: bool,
+}
+
+/// One directory row and, when it is open, its children under it.
+fn dir_lines(
+    ctx: &Ctx,
+    hit: &DirHit,
+    parent: &Path,
+    group_max: u64,
+    depth: usize,
+    out: &mut Vec<Line>,
+) {
+    let open = ctx.expandable && ctx.state.expansion(&hit.path).is_some();
+    let hint = cleanhints::lookup(&hit.path);
+    let owner_running = hint
+        .as_ref()
+        .filter(|hint| hint.running_in(ctx.running))
+        .map(|hint| hint.owner.clone());
+    let label = storagepage::row_label(&hit.path, parent);
+    out.push(Line::Row(Box::new(Row {
+        tip: storagepage::row_tip(
+            &hit.path,
+            Some(hit.kind),
+            ctx.suggested,
+            hint.as_ref(),
+            hit.asset.as_ref(),
+        ),
+        basis: (!ctx.suggested)
+            .then(|| storagepage::basis(Some(hit.kind), hint.as_ref()))
+            .flatten(),
+        trash: ctx
+            .deletable
+            .then(|| storagepage::dir_trash_body(&label, hit.bytes, owner_running.as_deref())),
+        running: owner_running,
+        asset: hit.asset.as_ref().map(storagepage::asset_clause),
+        label,
+        path: hit.path.clone(),
+        bytes: hit.bytes,
+        fraction: hit.bytes as f32 / group_max as f32,
+        delta: ctx
+            .diff
+            .map(|d| storagepage::delta_label(hit.bytes, d.bytes_for(&hit.path))),
+        modified: None,
+        depth,
+        expandable: ctx.expandable,
+        open,
+        file: false,
+        reveal_tip: storagepage::reveal_row_tip(&hit.path),
+    })));
+    if !open {
+        return;
+    }
+    let note = |text: String| Line::Note {
+        depth: depth + 1,
+        text,
+    };
+    match ctx.state.expansion(&hit.path) {
+        // Children are measured against the row they open from.
+        Some(Expansion::Ready(rows)) if !rows.is_empty() => {
+            let max = hit.bytes.max(1);
+            for child in rows.iter().take(storagepage::expand_shown(rows)) {
+                dir_lines(ctx, child, &hit.path, max, depth + 1, out);
+            }
+            if let Some((hidden, bytes)) = storagepage::expand_hidden(rows) {
+                out.push(note(storagepage::expand_rest(hidden, bytes)));
+            }
+        }
+        Some(Expansion::Ready(_)) => out.push(note(i18n::tr("disk.ana_expand_empty"))),
+        Some(Expansion::Walking) => out.push(note(i18n::tr("disk.ana_expanding"))),
+        Some(Expansion::Failed) => out.push(note(i18n::tr("disk.ana_expand_failed"))),
+        None => {}
+    }
+}
+
+/// The growth, the suggestions and the big files, then the closing note.
+fn analysis_lists(lists: Lists, sheet: Signal<Option<Sheet>>) -> AnyElement {
+    let Lists {
+        growth,
+        sugs,
+        sug_count,
+        sug_total,
+        sug_picks,
+        sug_paths,
+        sug_more,
+        files,
+        finished,
+    } = lists;
+    let mut out = view();
+    if let Some((title, rows)) = growth {
+        out = out.child(growth_section(title, rows));
+    }
+    if !sugs.is_empty() {
+        let mut right = view()
+            .flex_row()
+            .items_center()
+            .gap(px(10.))
+            .child(size_text(sug_total));
+        if finished {
+            right = right.child(small_button(
+                i18n::tr("disk.sug_clear"),
+                Some(CustomIconName::Trash),
+                move || {
+                    sheet.set(Some(Sheet {
+                        title: i18n::tr("disk.sug_clear_title"),
+                        body: i18n::tr("disk.sug_pick_body"),
+                        ticks: sug_picks.iter().map(|(_, _, c)| c.is_none()).collect(),
+                        items: sug_picks.clone(),
+                        paths: sug_paths.clone(),
+                    }))
+                },
+            ));
+        }
+        let mut section = view()
+            .px(px(INSET))
+            .pb(px(6.))
+            .child(section_heading(
+                i18n::tr("disk.sug_title"),
+                Some(t!("disk.sug_meta", n = sug_count).to_string()),
+                Some(right.into_element()),
+            ))
+            .children(sugs.into_iter().map(line).collect::<Vec<_>>());
+        if let Some(more) = sug_more {
+            let open = more == i18n::tr("disk.ana_less");
+            section = section.child(view().flex_row().pt(px(6.)).child(widgets::more_chip(
+                more,
+                open,
+                || store::update(|state, fx| state.toggle_analysis_show_all_sugs(fx)),
+            )));
+        }
+        out = out.child(section);
+    }
+    if !files.is_empty() {
+        out = out.child(
+            view()
+                .px(px(INSET))
+                .pb(px(6.))
+                .child(section_heading(
+                    i18n::tr("disk.ana_files"),
+                    Some(
+                        t!(
+                            "disk.ana_files_meta",
+                            bar = format::memory(diskscan::BIG_FILE_IN_TREE)
+                        )
+                        .to_string(),
+                    ),
+                    None,
+                ))
+                .children(files.into_iter().map(line).collect::<Vec<_>>()),
+        );
+    }
+    out.child(
+        view()
+            .px(px(INSET))
+            .pb(px(10.))
+            .child(widgets::note(i18n::tr("disk.ana_note"))),
+    )
+    .into_element()
+}
+
+/// What grew in the home tree since about a week ago: read-only rows,
+/// a reveal each.
+fn growth_section(title: String, rows: Vec<GrowthRow>) -> AnyElement {
+    view()
+        .px(px(INSET))
+        .pb(px(6.))
+        .child(
+            view()
+                .tooltip(widgets::wrap_tooltip(i18n::tr("disk.growth_tip")))
+                .child(section_heading(title, None, None)),
+        )
+        .children(
+            rows.into_iter()
+                .map(|row| {
+                    view()
+                        .group()
+                        .py(px(5.))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(ROW_GAP))
+                                .child(view().flex_none().w(px(CHEVRON_SLOT)))
+                                .child(path_label(&row.shown, row.shown.clone(), ROW_PT))
+                                .child(
+                                    text(format!("+{}", format::memory(row.grew)))
+                                        .flex_none()
+                                        .font_family(widgets::MONO)
+                                        .text_size(px(META_PT))
+                                        .line_height(widgets::line(META_PT))
+                                        .text_color(theme::color(palette::text_muted)),
+                                )
+                                .child(size_text(row.now))
+                                .child(action_slots(
+                                    Some(reveal_button(row.path, storagepage::reveal_tip())),
+                                    None,
+                                )),
+                        )
+                        .child(row_meter(row.fraction))
+                        .into_element()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_element()
+}
+
+fn line(line: Line) -> AnyElement {
+    match line {
+        Line::Row(row) => analysis_row(*row),
+        Line::Note { depth, text: words } => text(words)
+            .pl(px(4. + indent(depth)))
+            .py(px(3.))
+            .text_size(px(10.))
+            .line_height(widgets::line(10.))
+            .text_color(theme::color(palette::text_dim))
+            .into_element(),
+    }
+}
+
+/// One ranked row: its path from the row above it, its pills, its size
+/// and share bar, Reveal and — where it may go — Trash; a row that opens
+/// does so in place, on a click anywhere on it.
+fn analysis_row(row: Row) -> AnyElement {
+    let Row {
+        path,
+        label,
+        tip,
+        bytes,
+        fraction,
+        delta,
+        basis,
+        running,
+        asset,
+        modified,
+        depth,
+        expandable,
+        open,
+        trash,
+        file,
+        reveal_tip,
+    } = row;
+    let mut parts = view()
+        .flex_row()
+        .items_center()
+        .gap(px(ROW_GAP))
+        .child({
+            let slot = view().flex_row().flex_none().w(px(CHEVRON_SLOT));
+            if expandable {
+                slot.child(widgets::icon(
+                    if open {
+                        CustomIconName::ChevronDown
+                    } else {
+                        CustomIconName::ChevronRight
+                    },
+                    11.,
+                    palette::text_dim,
+                ))
+            } else {
+                slot
+            }
+        })
+        .child(path_label(&label, tip, ROW_PT));
+    if let Some((word, reason)) = basis {
+        parts = parts.child(row_pill(word, reason, palette::text_muted));
+    }
+    if let Some(owner) = running {
+        parts = parts.child(row_pill(
+            i18n::tr("disk.running"),
+            storagepage::running_tip(&owner),
+            palette::text,
+        ));
+    }
+    if let Some(clause) = asset {
+        parts = parts.child(row_pill(
+            i18n::tr("disk.asset_pill"),
+            clause,
+            palette::text_muted,
+        ));
+    }
+    if let Some(day) = modified {
+        parts = parts.child(modified_label(day));
+    }
+    if let Some(delta) = delta {
+        let mut slot = view()
+            .flex_row()
+            .flex_none()
+            .w(px(DELTA_W))
+            .justify_end()
+            .tooltip(widgets::live_tooltip(move || {
+                store::read(|state| match state.disk_analysis() {
+                    DiskAnalysis::Ready(result) => state
+                        .analysis_diff_for(result)
+                        .map(storagepage::delta_tip)
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                })
+            }));
+        if let Some(delta) = delta {
+            slot = slot.child(
+                text(delta)
+                    .font_family(widgets::MONO)
+                    .text_size(px(META_PT))
+                    .line_height(widgets::line(META_PT))
+                    .text_color(theme::color(palette::text_muted)),
+            );
+        }
+        parts = parts.child(slot);
+    }
+    let is_trash = storagepage::is_trash_dir(&path);
+    let reveal_path = path.clone();
+    let reveal = widgets::ghost_icon(
+        CustomIconName::Folder,
+        widgets::wrap_tooltip(reveal_tip),
+        move || {
+            if is_trash {
+                finder::open_trash();
+            } else {
+                finder::reveal(&reveal_path);
+            }
+        },
+    );
+    let trash = trash.map(|body| {
+        let path = path.clone();
+        widgets::ghost_icon(
+            CustomIconName::Trash,
+            widgets::wrap_tooltip(i18n::tr("disk.big_trash")),
+            move || {
+                let path = path.clone();
+                widgets::confirm(
+                    i18n::tr("disk.big_trash_title"),
+                    body.clone(),
+                    i18n::tr("disk.big_trash_ok"),
+                    move || {
+                        if file {
+                            store::update(|state, fx| state.trash_analysis_file(&path, fx));
+                        } else {
+                            let paths = vec![path.clone()];
+                            store::update(|state, fx| state.trash_regenerable(&paths, fx));
+                        }
+                    },
+                );
+            },
+        )
+    });
+    parts = parts
+        .child(size_text(bytes))
+        .child(action_slots(Some(reveal), trash));
+    let body = view().child(parts).child(row_meter(fraction));
+    let row = nsh_base::button()
+        .py(px(4.))
+        .px(px(4.))
+        .mx(px(-4.))
+        .pl(px(4. + indent(depth)))
+        .rounded(px(5.));
+    let row = if expandable {
+        row.hover(|s| s.bg(theme::color(palette::surface_raised)))
+            .on_press(move || {
+                let path = path.clone();
+                store::update(|state, fx| state.toggle_expansion(path, fx));
+            })
+    } else {
+        row
+    };
+    view().group().child(row.child(body)).into_element()
+}
+
+// ---- the bulk trash sheet ---------------------------------------------
+
+/// The bulk sheet (`confirm::ask_pick`): every row it would move with its
+/// size and a tick, a running app's cache unticked to start with.
+#[derive(Clone, PartialEq)]
+struct Sheet {
+    title: String,
+    body: String,
+    items: Vec<(String, u64, Option<String>)>,
+    ticks: Vec<bool>,
+    paths: Vec<PathBuf>,
+}
+
+/// Rows this tall before the list scrolls.
+const PICK_LIST_MAX_H: f32 = 240.;
+
+/// The sheet over the window, on the ground NSH's own confirm dims it
+/// with; Escape and Cancel close it, the action moves what is ticked.
+fn pick_sheet(sheet: Signal<Option<Sheet>>) -> AnyElement {
+    let Some(start) = sheet.get_untracked() else {
+        return view().into_element();
+    };
+    let ticks = signal(start.ticks.clone());
+    let items = start.items.clone();
+    let paths = start.paths.clone();
+    let chosen =
+        move || ticks.with(|t: &Vec<bool>| (0..t.len()).filter(|&i| t[i]).collect::<Vec<usize>>());
+    let total = {
+        let items = items.clone();
+        move || chosen().iter().map(|&i| items[i].1).sum::<u64>()
+    };
+    let rows: Vec<AnyElement> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (label, bytes, caution))| {
+            let on = move || ticks.with(|t: &Vec<bool>| t[i]);
+            let mut row = view().py(px(3.)).child(
+                nsh_base::button()
+                    .on_press(move || ticks.update(|t: &mut Vec<bool>| t[i] = !t[i]))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(tick(on))
+                            .child(
+                                text(label.clone())
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .number_of_lines(1u32)
+                                    .text_size(px(11.))
+                                    .line_height(widgets::line(11.))
+                                    .text_color(theme::color(palette::text)),
+                            )
+                            .child(
+                                text(format::memory(*bytes))
+                                    .flex_none()
+                                    .font_family(widgets::MONO)
+                                    .text_size(px(10.5))
+                                    .line_height(widgets::line(10.5))
+                                    .text_color(theme::color(palette::text_muted)),
+                            ),
+                    ),
+            );
+            if let Some(caution) = caution.clone() {
+                row = row.child(
+                    text(caution)
+                        .pl(px(20.))
+                        .text_size(px(10.))
+                        .line_height(widgets::line(10.))
+                        .text_color(theme::color(|| palette::tiny_label(palette::text_muted()))),
+                );
+            }
+            row.into_element()
+        })
+        .collect();
+    let close = move || sheet.set(None);
+    let ok_label = {
+        let total = total.clone();
+        move || storagepage::pick_ok(chosen().len(), total())
+    };
+    let none = move || chosen().is_empty();
+    overlay()
+        .absolute()
+        .inset_0()
+        .on_cancel(close)
+        .child(
+            view()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .bg(theme::color(|| color::Rgba {
+                    r: 0.,
+                    g: 0.,
+                    b: 0.,
+                    a: 0.35,
+                }))
+                .child(
+                    view()
+                        .w(px(360.))
+                        .rounded(px(12.))
+                        .bg(theme::color(palette::popover))
+                        .p(px(16.))
+                        .gap(px(8.))
+                        .child(
+                            text(start.title)
+                                .text_size(px(13.))
+                                .line_height(widgets::line(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::color(palette::text)),
+                        )
+                        .child(
+                            text(start.body)
+                                .text_size(px(11.))
+                                .line_height(px(15.))
+                                .text_color(theme::color(palette::text_muted)),
+                        )
+                        .child(
+                            scroll()
+                                .max_h(px(PICK_LIST_MAX_H))
+                                .child(view().children(rows)),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .justify_end()
+                                .gap(px(6.))
+                                .pt(px(4.))
+                                .child(small_button(i18n::tr("common.cancel"), None, close))
+                                .child(
+                                    nsh_base::button()
+                                        .flex_none()
+                                        .h(px(20.))
+                                        .px(px(6.))
+                                        .rounded(px(6.))
+                                        .bg(theme::color(|| palette::accent_wash(16)))
+                                        .items_center()
+                                        .justify_center()
+                                        .hover(|s| s.bg(theme::color(|| palette::accent_wash(24))))
+                                        .on_press(move || {
+                                            let picked: Vec<PathBuf> = chosen()
+                                                .iter()
+                                                .map(|&i| paths[i].clone())
+                                                .collect();
+                                            if picked.is_empty() {
+                                                return;
+                                            }
+                                            sheet.set(None);
+                                            store::update(|state, fx| {
+                                                state.trash_regenerable(&picked, fx)
+                                            });
+                                        })
+                                        .child(
+                                            text(ok_label)
+                                                .text_size(px(12.))
+                                                .line_height(px(15.))
+                                                .text_color(move || {
+                                                    theme::color(move || {
+                                                        if none() {
+                                                            palette::text_dim()
+                                                        } else {
+                                                            palette::accent_light()
+                                                        }
+                                                    })
+                                                }),
+                                        ),
+                                ),
+                        ),
+                ),
+        )
+        .into_element()
+}
+
+/// gpui-kit's smallest checkbox: a 14 box, filled with the theme's
+/// primary and its check while ticked.
+fn tick(on: impl Fn() -> bool + Copy + 'static) -> AnyElement {
+    view()
+        .flex_none()
+        .w(px(14.))
+        .h(px(14.))
+        .rounded(px(4.))
+        .border(px(1.))
+        .border_color(move || {
+            theme::color(move || {
+                if on() {
+                    palette::primary()
+                } else {
+                    palette::border()
+                }
+            })
+        })
+        .bg(move || theme::color(move || if on() { palette::primary() } else { CLEAR }))
+        .items_center()
+        .justify_center()
+        .child(when(on, || {
+            widgets::icon(CustomIconName::Check, 10., palette::primary_ink)
+        }))
+        .into_element()
 }

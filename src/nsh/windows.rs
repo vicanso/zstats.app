@@ -219,7 +219,7 @@ pub fn pick_folder(pick: FolderPick) {
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseFiles(false);
     panel.setCanChooseDirectories(true);
-    panel.setAllowsMultipleSelection(false);
+    panel.setAllowsMultipleSelection(pick == FolderPick::Exclude);
     panel.setPrompt(Some(&NSString::from_str(&storage::pick_prompt(pick))));
     if panel.runModal() != NSModalResponseOK {
         return;

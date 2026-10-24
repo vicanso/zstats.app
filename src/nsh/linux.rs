@@ -585,17 +585,34 @@ fn pick_folder(pick: FolderPick) {
         .accept_label(prompt.as_str())
         .modal(true)
         .build();
-    dialog.select_folder(
-        parent.as_ref(),
-        gtk::gio::Cancellable::NONE,
-        move |result| {
-            if let Ok(file) = result
-                && let Some(path) = file.path()
-            {
-                storage::picked(pick, vec![path]);
-            }
-        },
-    );
+    if pick == FolderPick::Exclude {
+        dialog.select_multiple_folders(
+            parent.as_ref(),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                if let Ok(list) = result {
+                    let paths = (0..list.n_items())
+                        .filter_map(|i| list.item(i))
+                        .filter_map(|item| item.downcast::<gtk::gio::File>().ok())
+                        .filter_map(|file| file.path())
+                        .collect();
+                    storage::picked(pick, paths);
+                }
+            },
+        );
+    } else {
+        dialog.select_folder(
+            parent.as_ref(),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                if let Ok(file) = result
+                    && let Some(path) = file.path()
+                {
+                    storage::picked(pick, vec![path]);
+                }
+            },
+        );
+    }
 }
 
 fn close_aux(aux: AuxWindow) {

@@ -48,7 +48,7 @@ use crate::prefs;
 use crate::state::{
     DiskAnalysis, DupeSearch, Expansion, StorageTab, ZStatsAppState, ZStatsGlobalStore,
 };
-use crate::storagepage::{self, DUPE_FILES_SHOWN, HEAD_PT, META_PT, Preset, ROW_PT};
+use crate::storagepage::{self, DUPE_FILES_SHOWN, HEAD_PT, META_PT, Preset, ROW_PT, SIDE_W};
 use crate::theme;
 use gpui::Entity;
 use gpui::prelude::FluentBuilder;
@@ -105,14 +105,6 @@ pub struct Frame<'a> {
     /// Room for the map beside the lists rather than above them.
     pub wide: bool,
 }
-
-/// Width of the lists beside the map: the suggestions' rows — path,
-/// pills, size, two buttons — at the width they had in the 507pt window.
-const SIDE_W: f32 = 440.;
-
-/// Window width from which the map sits beside the lists. Under it the
-/// map would be narrower than the lists beside it, so it goes above them.
-pub const SIDE_BY_SIDE_MIN_W: f32 = 1000.;
 
 /// A tab's card: `head` stays put, `body` scrolls inside the card under
 /// an overlay scrollbar. The card keeps its natural height while it fits

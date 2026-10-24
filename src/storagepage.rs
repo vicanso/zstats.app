@@ -22,6 +22,15 @@ pub const META_PT: f32 = 10.;
 pub const ROW_PT: f32 = 12.;
 pub const HEAD_PT: f32 = 13.;
 
+/// Width of the lists beside the directory map: the suggestions' rows —
+/// path, pills, size, two buttons — at the width they had in the 507pt
+/// window.
+pub const SIDE_W: f32 = 440.;
+
+/// Window width from which the map sits beside the lists. Under it the
+/// map would be narrower than the lists beside it, so it goes above them.
+pub const SIDE_BY_SIDE_MIN_W: f32 = 1000.;
+
 /// Results older than this get a "consider re-analyzing" nudge on the
 /// run chip — display only: a minutes-long walk never starts itself.
 pub const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);

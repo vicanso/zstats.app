@@ -13,7 +13,8 @@ use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 use crate::tray::TrayAction;
 use crate::{
     active, autostart, awake, font, gpui_ui, i18n, logger, metrics, notice, notify, omarchy,
-    placement, prefs, proxy, settingspage, state, theme, tray, updater, views, watch, webhook,
+    placement, prefs, proxy, settingspage, state, storagepage, theme, tray, updater, views, watch,
+    webhook,
 };
 #[cfg(target_os = "macos")]
 use crate::{appkit, dock, window_ext};
@@ -1308,7 +1309,7 @@ impl Render for StorageWindow {
             exclude: &self.exclude_input,
             scroll: &self.scrolls[state.storage_tab().index()],
             map_box: self.map_box.clone(),
-            wide: window.viewport_size().width >= px(views::storage::SIDE_BY_SIDE_MIN_W),
+            wide: window.viewport_size().width >= px(storagepage::SIDE_BY_SIDE_MIN_W),
         };
         let cards = views::storage::render(state, &frame);
         gpui_kit::component::v_flex()

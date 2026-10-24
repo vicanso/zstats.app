@@ -54,6 +54,10 @@ pub enum HostAction {
 /// window).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FolderPick {
+    /// The analysis's scope: picking selects, the run chip walks.
+    Analysis,
+    /// Folders the analysis leaves out — several at once.
+    Exclude,
     /// Where to look for duplicates: picking is the ask, the search runs.
     Dupes,
 }
