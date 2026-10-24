@@ -20,12 +20,19 @@
 //!                                 person's drag of an edge ends there
 //! detail 0|1                      Overview's short or long form, then
 //!                                 shown again at that form's size
+//! key SPEC [settings|storage]     a keystroke (`mod+1`, `escape`) posted to
+//!                                 the app's event queue for the key window
+//!                                 or the one named, so shortcuts and menus
+//!                                 see it as typed
+//! open settings|storage           the settings or disk-space window
 //! type TEXT                       key events for each character
 //! info                            window number, frame, key and first responder
 //! quit
 //! ```
 
 use crate::nsh::host::{self, Host};
+use crate::nsh::root::AuxWindow;
+use crate::nsh::windows;
 use crate::placement::{self, TrayAnchor};
 use crate::{appkit, prefs};
 use objc2::MainThreadMarker;
@@ -121,6 +128,14 @@ fn run(line: &str) {
                 );
             }
         }
+        "key" => post_key(
+            MainThreadMarker::from(&*h.panel),
+            rest.first().copied().unwrap_or(""),
+            rest.get(1).and_then(|name| aux_named(name)),
+        ),
+        "open" => windows::open(
+            aux_named(rest.first().copied().unwrap_or("")).unwrap_or(AuxWindow::Settings),
+        ),
         "detail" => {
             prefs::set_overview_detail(rest.first() == Some(&"1"));
             host::show(h, None, false);
@@ -149,6 +164,16 @@ fn run(line: &str) {
 }
 
 fn info(h: &Host) {
+    let key_window = NSApplication::sharedApplication(MainThreadMarker::from(&*h.panel))
+        .keyWindow()
+        .map(|w| {
+            (
+                w.title().to_string(),
+                w.frame().size.width,
+                w.frame().size.height,
+            )
+        });
+    tracing::info!("probe info: key window {key_window:?}");
     let frame = h.panel.frame();
     let responder = h
         .panel
@@ -261,5 +286,78 @@ fn key(h: &Host, kind: NSEventType, ch: char) {
     );
     if let Some(event) = event {
         h.panel.sendEvent(&event);
+    }
+}
+
+fn aux_named(name: &str) -> Option<AuxWindow> {
+    match name {
+        "settings" => Some(AuxWindow::Settings),
+        "storage" => Some(AuxWindow::Storage),
+        _ => None,
+    }
+}
+
+/// A keystroke such as `mod+1` or `escape`, posted to the app's event
+/// queue for `aux`, or else the key window. Not handed to the window as
+/// clicks are: NSH matches its shortcuts in a local event monitor, and
+/// menus their key equivalents in the application's `sendEvent:`, and
+/// both only see events that come through the queue.
+///
+/// A window this opened is often not the key window: macOS 14 grants an
+/// app's request to come forward only in answer to the person's own
+/// input, and the probe's is not that — so a window is named instead.
+fn post_key(mtm: MainThreadMarker, spec: &str, aux: Option<AuxWindow>) {
+    let mut flags = NSEventModifierFlags::empty();
+    let mut key = "";
+    for part in spec.split('+') {
+        match part {
+            "mod" | "cmd" => flags |= NSEventModifierFlags::Command,
+            "shift" => flags |= NSEventModifierFlags::Shift,
+            "ctrl" => flags |= NSEventModifierFlags::Control,
+            "alt" => flags |= NSEventModifierFlags::Option,
+            other => key = other,
+        }
+    }
+    // The US layout's virtual key codes, for the keys the shortcuts use.
+    let (chars, code) = match key {
+        "escape" => ("\u{1b}", 53),
+        "1" => ("1", 18),
+        "2" => ("2", 19),
+        "3" => ("3", 20),
+        "4" => ("4", 21),
+        "5" => ("5", 23),
+        "6" => ("6", 22),
+        "7" => ("7", 26),
+        "p" => ("p", 35),
+        "r" => ("r", 15),
+        "w" => ("w", 13),
+        _ => {
+            tracing::warn!("probe: no key code for {spec:?}");
+            return;
+        }
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let window = match aux {
+        Some(aux) => windows::number(aux),
+        None => app.keyWindow().map(|w| w.windowNumber()),
+    }
+    .unwrap_or(0);
+    let chars = NSString::from_str(chars);
+    for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind,
+            NSPoint::new(0.0, 0.0),
+            flags,
+            uptime(),
+            window,
+            None,
+            &chars,
+            &chars,
+            false,
+            code,
+        );
+        if let Some(event) = event {
+            app.postEvent_atStart(&event, false);
+        }
     }
 }

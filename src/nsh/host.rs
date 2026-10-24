@@ -40,10 +40,12 @@
 use crate::appkit;
 use crate::geom::{Rect, point, size};
 use crate::metrics::{self, CollectorPace};
-use crate::nsh::panel::{self, HostAction};
+use crate::nsh::panel;
 #[cfg(debug_assertions)]
 use crate::nsh::probe;
+use crate::nsh::root::{self, AuxWindow, HostAction};
 use crate::nsh::store;
+use crate::nsh::windows;
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
@@ -51,13 +53,16 @@ use crate::{active, autostart, i18n, logger, notice, notify, palette, prefs, upd
 use nsh_platform_macos::{AppOptions, AppView, Appearance, Root};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2::sel;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSPanel, NSScreen,
-    NSWindowButton, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
-    NSWindowTitleVisibility,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSMenu, NSMenuItem,
+    NSPanel, NSScreen, NSWindowButton, NSWindowCollectionBehavior, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
 use std::cell::{Cell, OnceCell};
 use std::fs;
 use std::rc::Rc;
@@ -192,17 +197,19 @@ pub fn run() {
         store::Host {
             main: on_main,
             fit_panel,
-            // No disk-space window in this front end yet (phase 2c).
-            storage_window_open: || false,
+            storage_window_open: windows::storage_open,
         },
     );
 
-    panel::connect(|action| {
-        // The engine thread asks; AppKit answers on the main queue.
+    root::connect(|action| {
+        // An engine thread asks; AppKit answers on the main queue.
         dispatch2::DispatchQueue::main().exec_async(move || match action {
             HostAction::Quit => quit(),
+            HostAction::Open(aux) => windows::open(aux),
+            HostAction::Close(aux) => windows::close(aux),
         })
     });
+    install_menu(mtm);
 
     let (panel, view) = build_panel(mtm);
     let delegate = PanelDelegate::new(mtm);
@@ -545,9 +552,7 @@ fn on_tray(action: TrayAction) {
         TrayAction::Toggle(anchor) => toggle(anchor),
         // Under the icon, as a click would put it (`show_main_window`).
         TrayAction::Show => show_anchored(),
-        TrayAction::Storage => {
-            tracing::info!("the disk-space window is not in the NSH front end yet");
-        }
+        TrayAction::Storage => windows::open(AuxWindow::Storage),
         TrayAction::Quit => quit(),
     }
 }
@@ -556,6 +561,49 @@ fn quit() {
     if let Some(mtm) = MainThreadMarker::new() {
         NSApplication::sharedApplication(mtm).terminate(None);
     }
+}
+
+/// The app's menu. A menu-bar app never shows a menu bar, but its key
+/// equivalents still answer: ⌘Q, ⌘W for the two ordinary windows (the
+/// gpui front end binds it in their key contexts), and the Edit menu,
+/// without which ⌘C / ⌘V / ⌘Z never reach a text field. The titles are
+/// never seen, so only Quit's is translated, as the gpui front end's one
+/// menu item is.
+fn install_menu(mtm: MainThreadMarker) {
+    let bar = NSMenu::new(mtm);
+    let item = |menu: &NSMenu, title: &str, action: objc2::runtime::Sel, key: &str| {
+        // SAFETY: AppKit's standard actions, sent down the responder
+        // chain.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            )
+        };
+        menu.addItem(&item);
+    };
+    let submenu = |title: &str| {
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+        let holder = NSMenuItem::new(mtm);
+        holder.setSubmenu(Some(&menu));
+        bar.addItem(&holder);
+        menu
+    };
+    let app = submenu(crate::APP_NAME);
+    item(&app, &i18n::tr("common.quit"), sel!(terminate:), "q");
+    let edit = submenu("Edit");
+    item(&edit, "Undo", sel!(undo:), "z");
+    // An upper-case key equivalent is Shift with it.
+    item(&edit, "Redo", sel!(redo:), "Z");
+    item(&edit, "Cut", sel!(cut:), "x");
+    item(&edit, "Copy", sel!(copy:), "c");
+    item(&edit, "Paste", sel!(paste:), "v");
+    item(&edit, "Select All", sel!(selectAll:), "a");
+    let window = submenu("Window");
+    item(&window, "Close", sel!(performClose:), "w");
+    NSApplication::sharedApplication(mtm).setMainMenu(Some(&bar));
 }
 
 /// AppKit's screens in `placement.rs`'s space: top-left origin, y growing

@@ -1,93 +1,18 @@
 //! The panel's content as an NSH Rust root: a placeholder on Golden Dark's
 //! ground that says what this build is, a few live figures from the
-//! shared store, and Quit. Overview takes its place in phase 4 of
-//! docs/nsh-migration.md.
+//! shared store, the ways to the other two windows, and Quit. Overview
+//! takes its place in phase 4 of docs/nsh-migration.md.
 //!
-//! The root runs on its engine thread and never touches AppKit itself: what
-//! it needs of the window or the process goes to the host as a
-//! [`HostAction`], which `host.rs` carries to the main queue.
-//!
-//! **How it follows the store** is the shape the pages will take. The
-//! store is not a signal; a task on the engine thread waits on
-//! `store::subscribe` and, while the panel is on screen, bumps one
-//! revision signal that every closure reading the store also reads
-//! ([`Live`]). A change re-runs those closures and NSH redraws what came
-//! out different — the gpui front end's "repaint the panel on every tick",
-//! with the repaint narrowed to what moved. A hidden panel lays nothing
-//! out, as the gpui one does not repaint (`CollectorPace::is_visible`);
-//! showing it sends one more change (`host::mark_shown`).
+//! Its keys are the gpui panel's: `mod+1` … `mod+7` pick a tab and
+//! `mod+p` pins the panel — `mod` is ⌘ on macOS and Ctrl elsewhere, the
+//! gpui front end's `secondary-` for the same reason (Super is the
+//! compositor's on a Hyprland desktop).
 
-use crate::color;
+use crate::nsh::root::{self, AuxWindow, CARD_PAD, GROUND, GUTTER, HostAction, Live, paint};
 use crate::nsh::store;
-use crate::state::ZStatsAppState;
-use crate::{APP_NAME, format, i18n, palette};
-use nsh_base::button;
+use crate::state::{Tab, ZStatsAppState};
+use crate::{APP_NAME, format, i18n, palette, prefs};
 use nsh_core::ui::prelude::*;
-use std::sync::OnceLock;
-
-/// What the panel asks of the AppKit side, which owns the window and the
-/// process.
-#[derive(Clone, Copy, Debug)]
-pub enum HostAction {
-    Quit,
-}
-
-static HOST: OnceLock<Box<dyn Fn(HostAction) + Send + Sync>> = OnceLock::new();
-
-/// Wires the panel to the host, before the root mounts.
-pub fn connect(host: impl Fn(HostAction) + Send + Sync + 'static) {
-    let _ = HOST.set(Box::new(host));
-}
-
-fn host(action: HostAction) {
-    if let Some(host) = HOST.get() {
-        host(action);
-    }
-}
-
-/// Golden Dark's ground, `#1c1c1e`. The gpui front end takes it from the
-/// kit's theme file (`themes/golden.json`) rather than from the palette,
-/// so there is no token for it yet; phase 3 of docs/nsh-migration.md gives
-/// the panel its themes and this a place in `palette.rs`.
-const GROUND: u32 = 0x1c1c1eff;
-
-/// A palette token as NSH's colour.
-fn paint(c: color::Rgba) -> Rgba {
-    c.into()
-}
-
-/// `views::GUTTER` and `widgets::CARD_PAD`.
-const GUTTER: f32 = 12.;
-const CARD_PAD: f32 = 12.;
-
-/// The store, as the closures of one engine read it: reading through it
-/// subscribes the closure to the store's changes.
-#[derive(Clone, Copy)]
-struct Live(Signal<u64>);
-
-impl Live {
-    /// Starts following the store, for the life of the current owner.
-    fn follow() -> Live {
-        let revision = signal(0_u64);
-        let changes = store::subscribe();
-        spawn(async move {
-            while changes.recv().await.is_ok() {
-                if store::read(ZStatsAppState::panel_visible) {
-                    revision.update(|n| *n += 1);
-                }
-            }
-        });
-        Live(revision)
-    }
-
-    /// A closure of `f` over the store, for a text to bind.
-    fn text(self, f: fn(&ZStatsAppState) -> String) -> impl Fn() -> String + 'static {
-        move || {
-            self.0.get();
-            store::read(f)
-        }
-    }
-}
 
 /// The figures the placeholder shows, enough to see the store move.
 /// Not translated: a development build's lines, gone with it.
@@ -112,16 +37,26 @@ fn memory_line(state: &ZStatsAppState) -> String {
 
 fn store_line(state: &ZStatsAppState) -> String {
     format!(
-        "{} alert cards · tab {:?} · visit {}",
+        "{} alert cards · tab {:?} · visit {}{}",
         state.alerts().len(),
         state.tab(),
-        state.panel_visit()
+        state.panel_visit(),
+        if prefs::pinned() { " · pinned" } else { "" }
     )
 }
 
 #[component]
 pub fn Panel() -> impl IntoElement {
-    let live = Live::follow();
+    let live = Live::follow(ZStatsAppState::panel_visible);
+    for (i, tab) in Tab::ALL.into_iter().enumerate() {
+        on_key(&format!("mod+{}", i + 1), move |_| {
+            store::update(|state, fx| state.set_tab(tab, fx));
+        });
+    }
+    on_key("mod+p", |_| {
+        prefs::set_pinned(!prefs::pinned());
+        store::changed();
+    });
     let figure = move |f: fn(&ZStatsAppState) -> String| {
         text(live.text(f))
             .text_size(px(12.))
@@ -166,18 +101,18 @@ pub fn Panel() -> impl IntoElement {
         )
         .child(view().flex_1())
         .child(
-            view().flex_row().justify_end().child(
-                button()
-                    .h(px(24.))
-                    .px(px(10.))
-                    .rounded(px(6.))
-                    .hover(|s| s.bg(paint(palette::chip())))
-                    .on_press(|| host(HostAction::Quit))
-                    .child(
-                        text(i18n::tr("common.quit"))
-                            .text_size(px(12.))
-                            .text_color(paint(palette::text_muted())),
-                    ),
-            ),
+            view()
+                .flex_row()
+                .gap(px(4.))
+                .child(root::quiet_button(i18n::tr("tabs.settings"), || {
+                    root::ask(HostAction::Open(AuxWindow::Settings));
+                }))
+                .child(root::quiet_button(i18n::tr("disk.storage_title"), || {
+                    root::ask(HostAction::Open(AuxWindow::Storage));
+                }))
+                .child(view().flex_1())
+                .child(root::quiet_button(i18n::tr("common.quit"), || {
+                    root::ask(HostAction::Quit);
+                })),
         )
 }

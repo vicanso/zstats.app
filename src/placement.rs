@@ -194,6 +194,28 @@ pub fn min_height(notice: bool) -> f32 {
 /// the screen's own height would leave the footer hanging off it. Under
 /// this a screen is not one the panel can be right on.
 const CUT_FLOOR: f32 = 320.;
+/// Where the settings window opens. Disk space shared it until its
+/// paths needed the width ([`STORAGE_WINDOW_SIZE`]); the two are now
+/// different shapes, which reads as a decision, where two nearly-equal
+/// sizes read as an accident. Still resizable — this is where it opens,
+/// not where it must stay.
+pub const SETTINGS_WINDOW_SIZE: (f32, f32) = (507., 620.);
+/// The disk-space window's size before it zooms to fill the screen, and
+/// the size the zoom button returns it to. It opens zoomed because the
+/// analysis tab is a directory map beside its lists, and a map is read
+/// by area — 720×480 left it a postcard. Wide rather than tall when
+/// un-zoomed: at 507 a path got what was left after its size, pills and
+/// two buttons; 720 reads `Library/Application Support/GIMP/2.10/cache/
+/// fontconfig` whole. Sizing to the content was weighed and dropped:
+/// once run, every tab's list outgrows any cap, so the window would only
+/// move in the empty and running states — growing when a walk lands,
+/// shrinking on a tab switch.
+pub const STORAGE_WINDOW_SIZE: (f32, f32) = (720., 480.);
+/// Floor for both auxiliary windows. Has to stay under both opening
+/// sizes: a minimum wider than the opening width would silently widen
+/// the window.
+pub const AUX_MIN_WINDOW_SIZE: (f32, f32) = (460., 420.);
+
 /// Gap between the tray icon and the top of the window.
 pub const TRAY_GAP: f32 = 6.;
 /// Hang the window under the tray icon: horizontally centred on it, `TRAY_GAP`

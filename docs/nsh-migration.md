@@ -64,8 +64,10 @@
 
 - **2a 共享状态接进 NSH（**已完成**，2026-10-24）。** `nsh/store.rs`：一个 `ZStatsAppState` 放在静态的 `Mutex` 里，所有线程都经 `store::read` / `store::update` 取用。`update` 期间状态方法要的副作用（`Effects`）先记下来，放锁之后再做：通知订阅者、在主线程换托盘（`tray::look` 持锁时算好，`tray::wear` 交给主线程——`tray.rs` 为此把 `sync` 拆成两半）、面板高度跟随。后台任务的改动在任务自己的线程上持锁应用，顺序即发送顺序。`std` 的锁不可重入，从 `update` / `read` 里面再取一次会死锁，这里改成 panic 并说明原因（有测试）。引擎这边：根组件里一个任务等 `store::subscribe` 的 channel（容量 1、不等待发送，所以一串变化只唤醒一次），面板显示时把一个 revision signal 加一，凡是读状态的闭包都先读它（`panel.rs` 的 `Live`）——相当于 gpui 的“每个 tick 整个面板重绘”，只是重算的范围缩小到变了的那些；面板隐藏时什么都不重算，显示时补发一次。宿主照 gpui 版的启动顺序：恢复今天的告警和上次的标签页、托盘、横幅点击（落到告警页）、`autostart::refresh`、`active::start`、采集线程（tick 在专门的线程上持锁走 `on_tick`）、异常进程扫描、清理安装镜像。显示和隐藏补上了和 gpui 版一样的记账：采集节奏、所在标签页的进入工作、看过告警、重置临时视图，以及点托盘时“刚自动隐藏就别再打开”的宽限（`TOGGLE_GRACE` 移进 `state`，两个前端共用）。占位页上加了几行实时数字（CPU、内存、告警数、当前标签页、第几次打开），用来看数据流。
 - **2b 面板尺寸（macOS，**已完成**，2026-10-24）。** 面板的大小照 gpui 版的规则走，用的是同一批共享答案：Overview 的形态和提示行（`placement::window_size`；提示行的判定从 `views/overview.rs` 挪进共享的 `notice.rs`——它决定面板高度，两个前端的宿主都要问；`notify::subject_title` 与原来视图里的 `subject_name` 逐字等价，直接复用）、拖动过的尺寸（`prefs::panel_width` / `panel_height`）、提示行出现或消失时按 `placement::notice_step` 增减高度并保持上边缘（`set_size_keeping_top` 从 `window_ext.rs` 挪进共享的 `appkit.rs`）、短形态的最小高度。窗口一创建就是可拖动改大小的（gpui 版要在第一帧之后补 style mask）；拖动中、拖动结束分别是面板委托自己的 `windowDidResize:`、`windowDidEndLiveResize:`：拖动中跨过长形态的高度就切形态，拖动结束记下宽度和当前形态的高度（不含提示行）。面板每次移动或改大小都把位置和缩放写回状态，页面靠它算列表能放几行。显示时按当前形态应有的尺寸重新定位。Pin 早已遵守（`prefs::pinned`），Pin 的按钮和 ⌘P 跟着底栏和快捷键走（2c / 阶段 4）；外观跟随归到阶段 3 的主题。
-- **2c 设置窗口、磁盘空间窗口的外壳和键盘快捷键。**
+- **2c 两个普通窗口和快捷键（**已完成**，2026-10-24）。** 设置窗口和磁盘空间窗口在 NSH 宿主里各是一个 `NSWindow` 加自己的 `AppView`（`nsh/windows.rs`），根组件是占位页（`nsh/settings.rs`、`nsh/storage.rs`），各窗口根组件共用的部分——宿主通道 `HostAction`、跟随状态的 `Live`（订阅条件改成参数：面板是“在屏幕上”，普通窗口是“开着就算”）、几样 Golden Dark 的取值——从 `panel.rs` 抽到 `nsh/root.rs`。沿用 gpui 版的约定：再开一次是把开着的那个提到前面，关闭就真关掉，下次重建（NSH 重建 `AppView` 的内存原型量过，几次之后就封顶）；关闭时窗口和委托推迟到主队列的下一轮才释放，不能在它自己的 `windowWillClose:` 里放掉最后一个引用。设置窗口打开时、重新成为 key 时都 `autostart::refresh`；磁盘空间窗口打开时 `reset_storage_views`、铺满可见区域（缩放按钮回到 720×480），开着的时候告诉状态（`storage_window_open`）。三个窗口尺寸常量从 `gpui_app.rs` 挪进 `placement.rs`。快捷键用 NSH 的 `on_key`：面板 `mod+1`…`mod+7` 切页、`mod+p` Pin；磁盘空间窗口 `mod+1` / `mod+2` 切页、`mod+r` 重跑；两个普通窗口 Escape 关闭。`mod` 在 macOS 是 ⌘、别处是 Ctrl，对应 gpui 版的 `secondary-`。宿主自己装了主菜单：菜单栏应用看不到菜单栏，但 key equivalent 照样生效——⌘Q、⌘W（`performClose:`），以及编辑菜单，没有它文本框里的 ⌘C / ⌘V / ⌘Z 都不起作用。托盘菜单的“磁盘空间”和占位面板上新加的两个按钮通往这两个窗口。
 - **2d Linux**：GTK 4 面板加 `gtk4-layer-shell` 锚在右上角，ksni 托盘，`ipc.rs` 的单实例和 `--toggle`。可以先用 `make linux-check`（Apple 的 `container`，arm64）在本机编译，镜像要加 GTK 4 开发包；CI 同样要装；Omarchy 真机验收。
+
+**2c 结果**：默认构建 438 个测试、只开 `nsh` 的构建 347 个，release 构建无警告。只开 `nsh` 的 debug 构建在隔离 HOME 下用 probe 实测：`key mod+3` 切到 Processes、`key mod+p` 打开 Pin（都写进了 `app.toml`）——probe 新加的 `key` 把按键投进应用的事件队列，因为 NSH 的快捷键是在本地事件监视器里匹配的，直接 `sendEvent:` 给窗口它看不到；设置窗口 507×620（加标题栏 652）居中打开，Escape 关掉；磁盘空间窗口打开即铺满可见区域（1845×1050），`mod+2` 切到 Duplicates（截图可见）；点面板上的 Settings 按钮，设置窗口重建出来（新窗口号），再点一次只是提到前面；开着窗口退出，日志里没有 ERROR / WARN。**一个只能手动验证的地方**：macOS 14 起应用激活是协商式的，只有回应用户自己的输入时 `activate()` 才会被允许。probe 合成的事件不算，所以实测中新窗口打开了却不是 key 窗口（前台还是终端），probe 的 `key` 因此可以指定目标窗口；⌘W 走菜单要求应用在前台，同样没能自动验证。真人点击面板或托盘菜单是真实输入，预期能激活，需要手动确认一次。
 
 **2b 结果**：默认构建 438 个测试、只开 `nsh` 的构建 347 个。只开 `nsh` 的 debug 构建在隔离 HOME（`disk = 1.0`）下用 probe 实测，每一步都和 gpui 版的预期一致：第一个 tick 报出启动盘告警后，短形态多出提示行，面板从 539 变成 585，上边缘不动（505+539 = 459+585）；`banner` 切到告警页、告警看过之后，下一个 tick 面板缩回 539，并挂到图标下；`detail 1` 切长形态是 828；probe 新加的 `drag 400 900`（改尺寸后发出 `NSWindowDidEndLiveResizeNotification`，和真人松手时一样）之后，`app.toml` 里写进了 `panel_width = 400`、`panel_height_detail = 900`；`detail 0` 切回短形态是 400×539（宽度沿用）；截图里 NSH 的内容跟着窗口变宽。**未验证**：真人拖动——拖动中的最小高度限制、拖动中跨线切形态，需要用手拖一次。
 
@@ -93,7 +95,7 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 |---|---|
 | 0 双前端骨架 | 完成（2026-10-24） |
 | 1 核心 | 完成（2026-10-24） |
-| 2 宿主 | 2a、2b 完成；2c、2d 未开始 |
+| 2 宿主 | 2a、2b、2c 完成；2d 未开始 |
 | 3 基础件 | 未开始 |
 | 4 逐页 | 未开始 |
 | 5 切换 | 未开始 |

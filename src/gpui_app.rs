@@ -147,28 +147,6 @@ const POINTER_LEAVE_GRACE: Duration = Duration::from_millis(400);
 /// budget has to subtract exactly it.
 const AUX_BODY_PAD: f32 = 14.;
 
-/// Where the settings window opens. Disk space shared it until its
-/// paths needed the width ([`STORAGE_WINDOW_SIZE`]); the two are now
-/// different shapes, which reads as a decision, where two nearly-equal
-/// sizes read as an accident. Still resizable — this is where it opens,
-/// not where it must stay.
-const SETTINGS_WINDOW_SIZE: (f32, f32) = (507., 620.);
-/// The disk-space window's size before it zooms to fill the screen, and
-/// the size the zoom button returns it to. It opens zoomed because the
-/// analysis tab is a directory map beside its lists, and a map is read
-/// by area — 720×480 left it a postcard. Wide rather than tall when
-/// un-zoomed: at 507 a path got what was left after its size, pills and
-/// two buttons; 720 reads `Library/Application Support/GIMP/2.10/cache/
-/// fontconfig` whole. Sizing to the content was weighed and dropped:
-/// once run, every tab's list outgrows any cap, so the window would only
-/// move in the empty and running states — growing when a walk lands,
-/// shrinking on a tab switch.
-const STORAGE_WINDOW_SIZE: (f32, f32) = (720., 480.);
-/// Floor for both auxiliary windows. Has to stay under both opening
-/// sizes: a minimum wider than the opening width would silently widen
-/// the window.
-const AUX_MIN_WINDOW_SIZE: (f32, f32) = (460., 420.);
-
 actions!(
     zstats,
     [
@@ -1523,12 +1501,12 @@ impl Render for StorageWindow {
 }
 
 fn settings_window_size() -> gpui::Size<gpui::Pixels> {
-    let (w, h) = SETTINGS_WINDOW_SIZE;
+    let (w, h) = placement::SETTINGS_WINDOW_SIZE;
     size(px(w), px(h))
 }
 
 fn aux_min_window_size() -> gpui::Size<gpui::Pixels> {
-    let (w, h) = AUX_MIN_WINDOW_SIZE;
+    let (w, h) = placement::AUX_MIN_WINDOW_SIZE;
     size(px(w), px(h))
 }
 
@@ -1583,7 +1561,7 @@ pub fn open_settings_window(cx: &mut App) {
 /// not die to the popover's auto-hide, and neither must the reading of
 /// its result.
 ///
-/// Opens at [`STORAGE_WINDOW_SIZE`] — wider than settings, because three
+/// Opens at [`placement::STORAGE_WINDOW_SIZE`] — wider than settings, because three
 /// ranked tables of paths are what it is for. Anyone who wants more rows
 /// can drag it taller, and macOS remembers nothing here on purpose —
 /// every open starts from the same known-good frame.
@@ -1607,7 +1585,7 @@ pub fn open_storage_window(cx: &mut App) {
     cx.global::<ZStatsGlobalStore>()
         .clone()
         .update(cx, |state, cx| state.reset_storage_views(cx));
-    let (w, h) = STORAGE_WINDOW_SIZE;
+    let (w, h) = placement::STORAGE_WINDOW_SIZE;
     let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
     let opened = cx.open_window(
         with_app_identity(WindowOptions {

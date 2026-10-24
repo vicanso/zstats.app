@@ -2,8 +2,10 @@
 //! of gpui — AppKit on macOS, GTK 4 on Linux — around the same shared core.
 //!
 //! On macOS the application, the status item and the panel window
-//! (`host.rs`), with a placeholder page in it (`panel.rs`) that reads the
-//! shared store (`store.rs`) — the pages replace it in phase 4.
+//! (`host.rs`), the settings and disk-space windows (`windows.rs`), and a
+//! placeholder root in each (`panel.rs`, `settings.rs`, `storage.rs`,
+//! with what they share in `root.rs`) that reads the shared store
+//! (`store.rs`) — the pages replace them in phase 4.
 //! The Linux host is phase 2d; until then a Linux build with this front
 //! end says so and exits.
 
@@ -13,6 +15,14 @@ mod host;
 mod panel;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe;
+#[cfg(target_os = "macos")]
+mod root;
+#[cfg(target_os = "macos")]
+mod settings;
+#[cfg(target_os = "macos")]
+mod storage;
+#[cfg(target_os = "macos")]
+mod windows;
 // Not the host's: the Linux host (phase 2d) shares it.
 mod store;
 
