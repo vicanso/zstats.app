@@ -19,33 +19,21 @@ identifier = "com.github.vicanso.zstats"
 icon = ["icons/zstats.icns"]
 copyright = "Copyright © 2026 Tree xie. All rights reserved."
 category = "public.app-category.utilities"
-osx_minimum_system_version = "12.0"
-short_description = "A menu bar metrics panel written in Rust and GPUI."
+# NSH's AppKit backend: macOS 14 (docs/nsh-migration.md, decided 2026-10-24).
+osx_minimum_system_version = "14.0"
+short_description = "A menu bar metrics panel written in Rust and NSH."
 
 [dependencies]
 
-# GPUI comes from crates.io as the `gpui-pre-*` family: zed publishes `gpui`
-# too slowly for gpui-kit, so gpui-kit ships a matching snapshot under those
-# names (0.3.x) and depends on it itself. The `package =` renames keep the
-# crate names the source uses (`gpui::`, `gpui_platform::`) and must stay on
-# the exact family gpui-kit's own manifest pins, or two GPUIs end up in the
-# tree — `cargo tree -i gpui-pre` must show one.
-gpui = { package = "gpui-pre", version = "0.3.9" }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.9", features = [
-    "font-kit",
-    "x11",
-    "wayland",
-    "runtime_shaders",
-] }
-gpui_macros = { package = "gpui-pre-macros", version = "0.3.9" }
-# gpui-kit bundles gpui-base + gpui-component (`gpui_kit::component::*`) and
-# the component icon assets (`gpui_kit::assets::Assets`). No `tree-sitter`:
-# that feature is LanguageConfig / the highlighter, which nothing here uses.
-gpui-kit = "0.7.3"
+# The interface: NSH (`src/nsh/`, docs/nsh-migration.md — gpui-kit until
+# 2026-10-25). No `js` on the platform crates: every root is Rust, and
+# QuickJS stays out of the binary.
+nsh-core = "0.2.0"
+nsh-base = "0.2.0"
 # tinyvec 1.13.0 (crates.io, 2026-09-03) does not compile on rustc 1.98:
 # `use alloc::vec::{self, Vec}` shadows the `vec!` macro (Lokathor/tinyvec#225).
 # 1.13.1 restored `vec!`; keep a floor so `cargo update` cannot pick 1.13.0.
-# Pulled in by fontdb → usvg → gpui-pre / resvg.
+# Pulled in by fontdb → usvg → resvg.
 tinyvec = "1.13.3"
 
 # Embedded metrics collection. `frontend` brings the alert rule engine,
@@ -57,15 +45,13 @@ zstats = { version = "0.7.2", default-features = false, features = ["frontend"] 
 # zstats already pins, so this resolves to the one copy it is already
 # building — confirm with `cargo tree -i jiff` after any bump.
 jiff = "0.2.37"
-# Hands collected ticks (and tray events) from their blocking threads onto
-# gpui's main-thread executor. Already in the tree via gpui.
+# The collector's tick channel and the banners' click channel
+# (`metrics::spawn`, `notify::start`), received on threads of their own.
 smol = "2.0.2"
 # Embeds `assets/` (fonts now; locales next) and zstd-compresses them in
 # release. `default-features` off so debug builds embed too, instead of
 # reading the folder at runtime.
 # `include-exclude` powers the `#[include]` allowlist in `src/assets.rs`.
-# Declared here rather than relied on through feature unification with
-# gpui-kit-assets, which is the only other crate turning it on.
 rust-embed = { version = "8.12.0", default-features = false, features = [
     "compression",
     "include-exclude",
@@ -96,25 +82,18 @@ sys-locale = "0.3.2"
 toml = "1.1.6"
 # The alert webhook's JSON body (webhook.rs): strings a user's process
 # names and paths end up in, so escaping is not something to write by
-# hand. Already in the tree several times over (gpui, zstats); `serde`
+# hand. Already in the tree (zstats); `serde`
 # itself stays an indirect dependency — the body is built with `json!`,
 # nothing here derives. `preserve_order` by name: the body's keys are
 # written in reading order and a receiver that prints it shows them in
-# that order. The feature is already on in the tree (gpui asks for it),
-# but an order somebody else's manifest happens to give is not one to
-# build on.
+# that order — asked for by name, not left to whichever other manifest
+# happens to turn it on.
 serde_json = { version = "1", features = ["preserve_order"] }
 # Parallel directory walk for the Hardware tab's analyser (docs/
 # disk-analysis.md). Same engine diskonaut uses; pinned to a dedicated
 # 3-thread rayon pool at the call site so the resident collector's 2s
 # disk-IO sampling never competes with a default-parallelism walk.
 jwalk = "0.9"
-# `AssetSource` returns `gpui::Result`, which is anyhow's — gpui re-exports
-# the crate itself only under its `private` module ("here be dragons"), so
-# naming a missing asset in the error needs the direct dependency. Already in
-# the tree via gpui, so nothing extra gets built.
-anyhow = "1"
-
 # `kill(pid, 0)` and SIGTERM (`terminate.rs`), `statfs`/`statvfs` flags
 # (`volflag.rs`), and `_SC_CLK_TCK` for `/proc` ages (`procscan`). Both
 # supported platforms need it, so it sits here rather than in one of the
@@ -135,9 +114,6 @@ time = "0.3"
 # Rasterises the tray SVG at startup — tray-icon only accepts raw RGBA, on
 # every backend. Not under a target gate: the Linux tray is a
 # StatusNotifierItem and needs the same bitmap the menu bar does.
-# NOT the version gpui pulls in: it builds resvg 0.45, so the tree carries
-# both. Worth ~200 KB of duplicate SVG stack; aligning to 0.45 would drop
-# it, but only until gpui moves again.
 resvg = "0.46"
 
 # Content hashes for the disk window's duplicate finder (dupes.rs): a
@@ -161,8 +137,9 @@ tray-icon = "0.25.1"
 # The same crate on Linux, on its other backend. `ksni` speaks
 # StatusNotifierItem over D-Bus and needs no GTK main loop — which is what
 # this module was excluded over, since the default features
-# (`libappindicator` + `muda-gtk3`) are that loop and it cannot coexist
-# with gpui's. The two backends are alternatives, not a stack, hence
+# (`libappindicator` + `muda-gtk3`) are that loop, a GTK 3 one, and it
+# cannot coexist with the GTK 4 loop the NSH host runs. The two backends
+# are alternatives, not a stack, hence
 # `default-features = false`.
 #
 # Needs an SNI host on the session bus. Omarchy 4's Quickshell is one
@@ -179,10 +156,19 @@ tray-icon = { version = "0.25.1", default-features = false, features = [
 # The blocking API is the right one for two calls made from the UI
 # thread when a switch is flipped.
 zbus = "5.19"
+# The NSH front end's Linux backend (GTK 4 widgets, Pango text), without
+# its JS engine, as on macOS. It asks for GTK 4.14 (`gtk4`'s `v4_14`):
+# Ubuntu 24.04 and Arch have it, Debian bookworm does not.
+nsh-platform-linux = { version = "0.2.0", default-features = false }
+# The panel as a wlr-layer-shell surface: anchored top-right by the
+# compositor, which is the only one that may place it. On the `gtk4` NSH
+# itself is built with, so the tree keeps one GTK binding.
+gtk4-layer-shell = "0.8.1"
 
-# Only for the menu bar's scale factor: the tray reports physical pixels and
-# gpui's `PlatformDisplay` doesn't expose a scale factor. Same versions gpui
-# itself pins, so nothing new gets built.
+# AppKit and Foundation, spoken directly: the panel's window, the menu
+# bar's scale factor (the tray reports physical pixels), notifications,
+# the Trash. Same versions NSH itself is built on, so the tree keeps one
+# objc2 of each.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 # NSGeometry: NSPoint / NSRect for positioning the panel window.
@@ -207,8 +193,12 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSDictionary",
     "NSValue",
+    # The NSH front end: its panel delegate's notifications, and the
+    # uptime its debug probe stamps synthesised events with.
+    "NSNotification",
+    "NSObject",
+    "NSProcessInfo",
 ] }
-raw-window-handle = "0.6"
 # Banner delivery. NSUserNotification — the deprecated API a bare binary
 # could use — is a silent no-op on macOS 26 (measured: "delivered" logged,
 # nothing shown, no ncprefs entry ever created; see docs/design.md
@@ -221,6 +211,10 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNNotificationRequest",
     "UNNotificationResponse",
     "UNNotificationSound",
+    # `UNNotificationRequest::requestWithIdentifier_content_trigger`
+    # needs it beside the content one. gpui's own notification code turned
+    # it on for us until a build without gpui showed nothing here asked.
+    "UNNotificationTrigger",
     "block2",
     "std",
 ] }
@@ -258,6 +252,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     # The quit button on memory alert cards: terminate.rs sends the
     # ⌘Q-equivalent request through NSRunningApplication.
     "NSRunningApplication",
+    # NSRunningApplication's pid accessors take and return `pid_t`, which
+    # only exist with this feature. gpui's tree turned it on for us until
+    # a build without gpui showed nothing here asked for it.
+    "libc",
     "NSScreen",
     "NSVisualEffectView",
     "NSWindow",
@@ -265,6 +263,33 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     # that says when that changes — public API, no entitlement.
     "NSWorkspace",
     "objc2-core-foundation",
+    # The NSH front end's own panel (src/nsh/): a non-activating NSPanel
+    # whose content view is NSH's AppView, the material under it, and the
+    # synthesised events its debug probe drives it with.
+    "objc2-quartz-core",
+    "NSButton",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    # The disk-space window's folder pickers (`nsh/windows.rs`).
+    "NSOpenPanel",
+    "NSSavePanel",
+    "NSPanel",
+    "NSResponder",
+    "NSView",
+] }
+# The NSH front end's macOS backend (AppKit views, CoreText text), and the
+# main queue its engine threads hand AppKit work to. Same versions NSH
+# itself is built on, so the tree keeps one objc2 of each.
+nsh-platform-macos = { version = "0.2.0", default-features = false }
+dispatch2 = "0.3.1"
+# A canvas's content layer, whose asynchronous drawing the NSH front end
+# turns off (src/nsh/host.rs, `draw_canvases_in_place`).
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CALayer",
 ] }
 
 # XDG banners. macOS delivery is UNUserNotificationCenter in notify.rs;
@@ -278,18 +303,3 @@ codegen-units = 1
 lto = true
 strip = true
 panic = "abort"
-
-# gpui's Wayland backend, with one fix: a layer surface reports server
-# decorations and no client inset (`patches/gpui-pre-linux`, grep
-# "zstats-app patch"). gpui-kit 0.7 frames every window through
-# gpui-component's Root plugin unless the platform says Server, and
-# gpui told it Client for the panel's layer surface — the 20px CSD
-# inset then went into a buffer the compositor had anchored by the
-# un-inflated size (measured on Omarchy: a 358×600 panel committed as
-# 398×640, 30px past the right edge of the screen, 20px low). Only the
-# Linux build compiles this crate. Must track the gpui-pre version
-# above: after a bump, re-vendor the new release and re-apply the two
-# hunks, or drop this once gpui reports layer surfaces as undecorated
-# itself — `cargo tree -i gpui-pre-linux` must show the path source.
-[patch.crates-io]
-gpui-pre-linux = { path = "patches/gpui-pre-linux" }

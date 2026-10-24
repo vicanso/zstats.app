@@ -2,12 +2,15 @@
 //!
 //! `zstats::process_traffic()` (zstats ≥ 0.7.0) returns each process's
 //! cumulative received and transmitted bytes and keeps nothing between
-//! calls. A rate is the difference of two calls over the wall clock
-//! between them — the crate's contract, not a figure the snapshot
-//! already carries, so this diff is not a second source of a number
-//! zstats computed. The store owns the baseline and a ten-minute curve
-//! ([`CurveBook`]); this module only does the arithmetic, which is why
-//! it touches no gpui types.
+//! calls. A rate is the difference of two calls over the wall clock between
+//! them — the crate's contract, not a figure the snapshot already carries,
+//! so this diff is not a second source of a number zstats computed. The
+//! store owns the baseline and a ten-minute curve ([`CurveBook`]); this
+//! module does the arithmetic, and holds the card's rules — which rows show
+//! before "show more", the line's scale and shape, the card's words (moved
+//! out of the gpui card for the NSH Network page, phase 4g of
+//! docs/nsh-migration.md; the gpui card, `views/traffic.rs`, says why it
+//! looks the way it does).
 //!
 //! Three rules, or the number lies (zstats `docs/listeners.md` §3.6):
 //!
@@ -36,9 +39,13 @@
 //! only ever been quiet never starts a series — idle socket owners are
 //! most of the table.
 
+use crate::i18n;
+use rust_i18n::t;
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::mem;
 use std::time::{Duration, Instant};
+use zstats::OwnerCoverage;
 
 /// Shorter than this, the quotient is a scheduling spike, not a rate.
 pub const MIN_WINDOW: Duration = Duration::from_millis(500);
@@ -512,6 +519,142 @@ fn flush_run(out: &mut Vec<Vec<(Instant, u64)>>, run: &mut Vec<(Instant, u64)>) 
     } else {
         run.clear();
     }
+}
+
+/// A program averaging more than this over [`AVERAGE_WINDOW`] gets a
+/// row before "show more". 10 kB/s as the card prints it — `format::rate`
+/// is binary — so a row reading "9.8 kB/s" all minute is not one. Below
+/// it is housekeeping. No cap above it: every program over the floor is
+/// what the card is for, and the floor is already the cut.
+const SHOWN_FLOOR: u64 = 10 * 1024;
+
+/// The last minute of each row's curve. Long enough that a row does not
+/// come and go with each 2s reading, short enough that a download which
+/// finished minutes ago stops holding a row its live rate no longer earns.
+const AVERAGE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Rows shown even when fewer programs clear the floor, filled by the
+/// highest averages. A quiet machine still says who is talking at all,
+/// rather than collapsing to a chip.
+const MIN_ROWS: usize = 3;
+
+/// Floor for a row's curve. Same value as the interface card's bars:
+/// below 64 KiB/s the line stays on the axis, and a few kB/s of
+/// housekeeping must not get to define "full" for itself.
+const SCALE_FLOOR_BYTES: f32 = 64.0 * 1024.0;
+
+/// Each row's average over the last minute, which picks the preview.
+/// Every row moved bytes on the reading that ranked it, and that reading
+/// is on its curve; the row's own rate covers a curve that somehow has
+/// nothing in the window. `curves` is the rows' own, in their order.
+pub fn averages(rows: &[ProgramRate], curves: &[&[CurvePoint]], now: Instant) -> Vec<u64> {
+    rows.iter()
+        .zip(curves)
+        .map(|(row, points)| {
+            recent_average(points, now, AVERAGE_WINDOW).unwrap_or_else(|| total(row))
+        })
+        .collect()
+}
+
+/// Which rows show before "show more", as indices in ranking order:
+/// every program over [`SHOWN_FLOOR`], then the next-highest averages
+/// until there are [`MIN_ROWS`]. The minute's average picks the rows;
+/// the live ranking still orders them, as it orders the expanded list.
+pub fn preview(averages: &[u64]) -> Vec<usize> {
+    let over = averages.iter().filter(|&&avg| avg > SHOWN_FLOOR).count();
+    let mut by_average: Vec<usize> = (0..averages.len()).collect();
+    // Stable, so a tie goes to the busier row in the live ranking.
+    by_average.sort_by_key(|&index| Reverse(averages[index]));
+    by_average.truncate(over.max(MIN_ROWS));
+    by_average.sort_unstable();
+    by_average
+}
+
+/// The row's own peak, but never under the floor. A quiet program then
+/// sits on the axis instead of turning a few hundred bytes into a wave.
+pub fn curve_scale(points: &[CurvePoint]) -> f32 {
+    points
+        .iter()
+        .filter_map(|point| point.bytes_per_sec)
+        .max()
+        .map_or(SCALE_FLOOR_BYTES, |peak| {
+            (peak as f32).max(SCALE_FLOOR_BYTES)
+        })
+}
+
+/// A row's line on a unit square, as runs to stroke: x from 0 at the
+/// span's start to 1 now, y from 0 on the axis to 1 at [`curve_scale`].
+/// Every row shares `span` and `now`, so a point sits on the same x in
+/// each.
+///
+/// Before its first moved byte a program was quiet or not in the table —
+/// 0 either way, as [`CurveBook::record`] draws it once a line exists —
+/// so the first run starts at the left edge, flat, and rises where the
+/// program did, instead of appearing mid-row. The left edge is the
+/// book's oldest sample, so a line that started there needs nothing.
+pub fn trace(points: &[CurvePoint], span: Duration, now: Instant) -> Vec<Vec<(f32, f32)>> {
+    let span_secs = span.as_secs_f64();
+    if span_secs <= 0.0 {
+        return Vec::new();
+    }
+    let scale = curve_scale(points);
+    let x_of = |at: Instant| {
+        let age = now.saturating_duration_since(at).as_secs_f64();
+        (1.0 - age / span_secs).clamp(0.0, 1.0) as f32
+    };
+    let y_of = |rate: u64| (rate as f32 / scale).clamp(0.0, 1.0);
+    let mut runs = Vec::new();
+    if let Some(first) = points.first()
+        && let Some(rate) = first.bytes_per_sec
+        && now.saturating_duration_since(first.at) < span
+    {
+        let x = x_of(first.at);
+        runs.push(vec![(0.0, 0.0), (x, 0.0), (x, y_of(rate))]);
+    }
+    for segment in segments(points) {
+        runs.push(
+            segment
+                .into_iter()
+                .map(|(at, rate)| (x_of(at), y_of(rate)))
+                .collect(),
+        );
+    }
+    runs
+}
+
+/// What the number is, and the one way this platform's counters differ.
+/// The platform sentence is always in both catalogues; which one is
+/// appended depends on where this binary runs.
+pub fn tip(coverage: Option<OwnerCoverage>) -> String {
+    let platform = if cfg!(target_os = "linux") {
+        i18n::tr("traffic.tip_linux")
+    } else {
+        i18n::tr("traffic.tip_macos")
+    };
+    let tip = format!("{} {platform}", i18n::tr("traffic.tip"));
+    if coverage == Some(OwnerCoverage::OwnProcessesOnly) {
+        return format!("{tip} {}", i18n::tr("traffic.tip_partial"));
+    }
+    tip
+}
+
+/// `pid N` for one process, `×N` when the row stands for several — a bare
+/// number in that spot read as a count.
+pub fn pid_label(row: &ProgramRate) -> Option<String> {
+    match row.pids.len() {
+        0 => None,
+        1 => Some(t!("processes.pid_only", pid = row.pids.iter().next()?).to_string()),
+        n => Some(format!("×{n}")),
+    }
+}
+
+/// Where the pids of a `×N` row went: its tooltip. `None` for one.
+pub fn pids_tip(row: &ProgramRate) -> Option<String> {
+    if row.pids.len() < 2 {
+        return None;
+    }
+    let pids: Vec<String> = row.pids.iter().map(u32::to_string).collect();
+    Some(t!("traffic.pids_tip", pids = pids.join(", ")).to_string())
 }
 
 #[derive(Default)]
@@ -1145,5 +1288,80 @@ mod tests {
         let left = book.series(&key("redis"));
         assert_eq!(left.len(), 1, "the evening's point stays");
         assert_eq!(left[0].at, at(t0, 10));
+    }
+
+    fn reading(at: Instant, bytes: Option<u64>) -> CurvePoint {
+        CurvePoint {
+            at,
+            bytes_per_sec: bytes,
+        }
+    }
+
+    #[test]
+    fn the_preview_is_every_row_over_the_floor_in_ranking_order() {
+        let busy = SHOWN_FLOOR + 1;
+        assert_eq!(
+            preview(&[busy, 0, busy, busy, 10, busy]),
+            vec![0, 2, 3, 5],
+            "no cap above the floor; quiet rows wait behind the chip"
+        );
+        assert_eq!(
+            preview(&[SHOWN_FLOOR, busy]),
+            vec![0, 1],
+            "exactly at the floor is not over it, but two rows are under three"
+        );
+    }
+
+    #[test]
+    fn fewer_than_three_over_the_floor_are_filled_by_the_highest_averages() {
+        let busy = SHOWN_FLOOR * 4;
+        assert_eq!(
+            preview(&[200, 9_000, busy, 0, 5_000]),
+            vec![1, 2, 4],
+            "the minute's average picks, the live ranking orders"
+        );
+        assert_eq!(
+            preview(&[100, 100, 100, 100]),
+            vec![0, 1, 2],
+            "a tie goes to the busier row right now"
+        );
+        assert_eq!(preview(&[0]), vec![0]);
+    }
+
+    #[test]
+    fn the_line_follows_the_row_but_never_below_the_floor() {
+        let now = Instant::now();
+        let scale = curve_scale(&[reading(now, Some(11_000))]);
+        assert_eq!(scale, SCALE_FLOOR_BYTES, "11 kB/s does not get to be full");
+
+        let scale = curve_scale(&[reading(now, Some(5 * 1024 * 1024))]);
+        assert_eq!(scale, 5.0 * 1024.0 * 1024.0, "the row's own peak is full");
+
+        assert_eq!(curve_scale(&[]), SCALE_FLOOR_BYTES);
+        assert_eq!(curve_scale(&[reading(now, None)]), SCALE_FLOOR_BYTES);
+    }
+
+    #[test]
+    fn a_line_that_starts_late_rises_from_the_left_edge() {
+        let now = Instant::now() + Duration::from_secs(600);
+        let ago = |secs| now - Duration::from_secs(secs);
+        let peak = 1024 * 1024;
+        let points = [
+            reading(ago(50), Some(peak)),
+            reading(ago(25), Some(peak / 2)),
+            reading(ago(0), Some(0)),
+        ];
+        let runs = trace(&points, Duration::from_secs(100), now);
+        assert_eq!(
+            runs[0],
+            [(0.0, 0.0), (0.5, 0.0), (0.5, 1.0)],
+            "flat from the edge to the first reading, then up to it"
+        );
+        assert_eq!(runs[1], [(0.5, 1.0), (0.75, 0.5), (1.0, 0.0)]);
+        // A line as old as the span starts at the edge already.
+        let runs = trace(&points, Duration::from_secs(50), now);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0][0], (0.0, 1.0));
+        assert!(trace(&points, Duration::ZERO, now).is_empty());
     }
 }

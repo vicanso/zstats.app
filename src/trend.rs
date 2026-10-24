@@ -39,7 +39,7 @@
 //! pid reuse would splice two different programs into one curve — the
 //! same reason the alert cards gate their buttons on `SeenAlert::live`.
 //!
-//! No gpui types, minutes handed in by the caller — testable against
+//! No toolkit types, minutes handed in by the caller — testable against
 //! hand-built sequences, like `watch.rs`.
 
 use crate::fullscan;

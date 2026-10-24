@@ -15,21 +15,20 @@
 //! that displays them ([`tab_reads_registry`]), through zstats' runtime
 //! switch — a rebuild would reset every other channel's rate baseline.
 
-use crate::notify;
-use crate::prefs;
-use crate::procscan;
-use crate::state::{Tab, ZStatsGlobalStore};
-use crate::tray;
-use gpui::{App, Global};
+// The thread, its cadences and its switches are shared, and so is what a
+// tick does to the store (`ZStatsAppState::on_tick`). [`spawn`] hands each
+// tick over a channel; folding it into the store is the host's, on a
+// thread of its own.
+use crate::state::Tab;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
+use zstats::CollectorConfig;
+use zstats::Monitor;
 use zstats::settings::FileConfig;
-use zstats::{CollectorConfig, Monitor};
 
 /// Set by the Alerts tab after it writes `[alerts]` overrides. The
 /// collector thread consumes it on the next loop so windows and
@@ -126,18 +125,12 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(2);
 /// then, and 5s is the line where it does not look stuck.
 const IDLE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How often to sweep for abnormal processes.
-///
-/// Far cheaper than a metrics sample — one `sysctl` on macOS, one `/proc`
-/// walk on Linux, no per-process CPU/memory accounting — and what it looks
-/// for changes on the scale of minutes or days, not seconds.
-const ABNORMAL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
-
 /// Shared "the panel is on screen" flag, plus a way to wake the collector.
 ///
-/// Two things hang off visibility: the sampling cadence, and whether a landing
-/// tick repaints. The window is never destroyed now — it is ordered off screen
-/// — so gpui has no idea it is invisible and would happily keep rendering it.
+/// Two things hang off visibility: the sampling cadence, and whether a
+/// landing tick reaches the panel's bindings (`nsh::root::Live`). The window
+/// is never destroyed — it is ordered off screen — so nothing else would tell
+/// it that nobody is looking.
 #[derive(Clone)]
 pub struct CollectorPace {
     visible: Arc<AtomicBool>,
@@ -148,8 +141,6 @@ pub struct CollectorPace {
     registry_tab: Arc<AtomicBool>,
     wake: mpsc::Sender<()>,
 }
-
-impl Global for CollectorPace {}
 
 impl CollectorPace {
     /// The panel came on screen: sample now, and hold the fast cadence.
@@ -214,8 +205,21 @@ fn registry_channels(on_screen: bool, file: Option<&CollectorConfig>) -> (bool, 
     (on_screen && gpu, on_screen && drives)
 }
 
-/// Spawn the collector and the task that folds its output into the store.
-pub fn start(cx: &mut App) {
+/// What [`spawn`] hands the host that started it.
+pub struct Collector {
+    /// The pace the store and the panel's show and hide paths share.
+    pub pace: CollectorPace,
+    /// Each tick as it lands, for the host to fold into the store
+    /// (`ZStatsAppState::on_tick`) on its own thread.
+    pub ticks: smol::channel::Receiver<zstats::Tick>,
+    /// `config.toml` as read at launch, for the store (`set_settings`);
+    /// `None` when it could not be read.
+    pub settings: Option<FileConfig>,
+}
+
+/// Start the collector thread. `tab` is the session's, restored before the
+/// collector exists, which seeds whether the registry channels are wanted.
+pub fn spawn(tab: Tab) -> Collector {
     let dir = zstats::settings::default_dir();
 
     // Read the config once: it seeds the Config tab and the sampling
@@ -224,28 +228,27 @@ pub fn start(cx: &mut App) {
     // too — running at our own rate would have the two processes disagree
     // about a setting the user wrote down once.
     let mut interval = DEFAULT_INTERVAL;
-    match zstats::settings::load(&dir) {
+    let settings = match zstats::settings::load(&dir) {
         Ok(settings) => {
             interval = settings.daemon.interval.unwrap_or(DEFAULT_INTERVAL);
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, _| state.set_settings(settings));
+            Some(settings)
         }
-        Err(e) => tracing::error!("could not read {}/config.toml: {e}", dir.display()),
-    }
+        Err(e) => {
+            tracing::error!("could not read {}/config.toml: {e}", dir.display());
+            None
+        }
+    };
 
     let visible = Arc::new(AtomicBool::new(false));
-    // Seeded from the store: the session's tab was restored before this
-    // global existed, so `tab_selected` never saw it.
-    let registry_tab = Arc::new(AtomicBool::new(tab_reads_registry(
-        cx.global::<ZStatsGlobalStore>().read(cx).tab(),
-    )));
+    // Seeded from the session's tab: it was restored before this pace
+    // existed, so `tab_selected` never saw it.
+    let registry_tab = Arc::new(AtomicBool::new(tab_reads_registry(tab)));
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
-    cx.set_global(CollectorPace {
+    let pace = CollectorPace {
         visible: visible.clone(),
         registry_tab: registry_tab.clone(),
         wake: wake_tx,
-    });
+    };
 
     let (tx, rx) = smol::channel::unbounded::<zstats::Tick>();
 
@@ -319,135 +322,11 @@ pub fn start(cx: &mut App) {
         }
     });
 
-    spawn_abnormal_scan(cx);
-
-    cx.spawn(async move |cx| {
-        while let Ok(tick) = rx.recv().await {
-            cx.update(|cx| {
-                cx.global::<ZStatsGlobalStore>()
-                    .clone()
-                    .update(cx, |state, cx| {
-                        let now = Instant::now();
-                        // The user's master switch, ahead of the
-                        // per-episode gates: while banners are off
-                        // nothing interrupts, so neither the snooze
-                        // clock nor the auto-quiet window should
-                        // record a delivery that never happened.
-                        let muted = !prefs::notifications();
-                        for event in state.ingest(tick, cx) {
-                            // Quiet subjects still land in the Alerts list
-                            // above — only the banner stays quiet. Three
-                            // gates: the global switch, the snooze the
-                            // user asked for, and the auto-quiet for a
-                            // subject that has already interrupted twice
-                            // this hour.
-                            //
-                            // Each verdict is logged: a banner that
-                            // silently stayed away is indistinguishable
-                            // from a rule that stopped firing (the same
-                            // reason the card wears a pill), and the log
-                            // is where that question gets answered a day
-                            // later.
-                            let snoozed = !muted && state.banner_snoozed(&event);
-                            let damped = !muted && !snoozed && state.banner_damped(&event, now);
-                            tracing::info!(
-                                kind = ?event.kind(),
-                                subject = ?event.subject,
-                                banner = if muted {
-                                    "muted"
-                                } else if snoozed {
-                                    "snoozed"
-                                } else if damped {
-                                    "auto-quieted"
-                                } else {
-                                    "delivered"
-                                },
-                                "alert reported"
-                            );
-                            if muted || snoozed || damped {
-                                continue;
-                            }
-                            notify::post(&event);
-                        }
-                        for notice in state.take_sustained_notices() {
-                            tracing::info!(
-                                pid = notice.pid,
-                                name = %notice.name,
-                                banner = if muted { "muted" } else { "delivered" },
-                                "sustained-load notice"
-                            );
-                            if !muted {
-                                notify::post_sustained(&notice);
-                            }
-                        }
-                        for notice in state.take_disk_growth_notices() {
-                            tracing::info!(
-                                path = %notice.growth.path.display(),
-                                grew = notice.growth.grew,
-                                now = notice.growth.now,
-                                banner = if muted { "muted" } else { "delivered" },
-                                "disk growth notice"
-                            );
-                            if !muted {
-                                notify::post_disk_growth(&notice);
-                            }
-                        }
-                        for creep in state.take_memory_creep_notices() {
-                            tracing::info!(
-                                name = %creep.name,
-                                climb_bytes = creep.climb_bytes,
-                                now_bytes = creep.now_bytes,
-                                banner = if muted { "muted" } else { "delivered" },
-                                "memory creep notice"
-                            );
-                            if !muted {
-                                notify::post_memory_creep(&creep);
-                            }
-                        }
-                        // After ingest, not before: the tray's auto
-                        // mode reads the episode list this tick just
-                        // merged into, and a memory alert should turn
-                        // the face on the sample that reported it.
-                        tray::sync(cx, state);
-                    });
-                // Outside the store's update: it resizes the panel,
-                // which reads the store and updates the window.
-                crate::sync_panel_notice(cx);
-            });
-        }
-    })
-    .detach();
-}
-
-/// Sweep for zombie / stopped processes on its own cadence.
-///
-/// Separate from the metrics collector on purpose: zstats keeps only the top N
-/// processes by CPU then memory, and an abnormal process scores near zero on
-/// both — on this machine they ranked 435th and below, so they can never
-/// appear in the panel's process table.
-fn spawn_abnormal_scan(cx: &mut App) {
-    cx.spawn(async move |cx| {
-        loop {
-            // `scan` walks the whole process table, so keep it off the UI
-            // thread even though it is cheap.
-            let found = cx
-                .background_executor()
-                .spawn(async { procscan::scan() })
-                .await;
-            // `update` returns `()` in this gpui pin; a dropped app simply
-            // stops polling this task. A failed scan is not "no zombies":
-            // skip the replace so observation clocks keep running.
-            if let Some(found) = found {
-                cx.update(|cx| {
-                    cx.global::<ZStatsGlobalStore>()
-                        .clone()
-                        .update(cx, |state, cx| state.set_abnormal(found, cx));
-                });
-            }
-            cx.background_executor().timer(ABNORMAL_SCAN_INTERVAL).await;
-        }
-    })
-    .detach();
+    Collector {
+        pace,
+        ticks: rx,
+        settings,
+    }
 }
 
 #[cfg(test)]

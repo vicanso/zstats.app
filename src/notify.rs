@@ -5,15 +5,15 @@
 //! the panel on Alerts". Threshold edits stay in the Alerts tab.
 //!
 //! macOS delivery is our own thin `UNUserNotificationCenter` layer:
-//! `addNotificationRequest:` is an async post that returns immediately,
-//! and a resident delegate receives clicks on the main run loop, which
-//! gpui is already pumping. Fire-and-forget is the point, not a shortcut.
-//! An earlier transport (notify-rust's `wait_for_action` on one delivery
-//! thread) returned only when the user *dealt with* a banner — one left
-//! sitting in Notification Center parked the thread for as long as it sat
-//! there, every later banner queued behind it, and the 17th was silently
-//! dropped. Attention is not a resource to serialise on: with delivery
-//! decoupled from it there is no queue to fill and nothing to stall.
+//! `addNotificationRequest:` is an async post that returns immediately, and
+//! a resident delegate receives clicks on the main run loop, which the host
+//! already runs. Fire-and-forget is the point, not a shortcut. An earlier
+//! transport (notify-rust's `wait_for_action` on one delivery thread)
+//! returned only when the user *dealt with* a banner — one left sitting in
+//! Notification Center parked the thread for as long as it sat there, every
+//! later banner queued behind it, and the 17th was silently dropped.
+//! Attention is not a resource to serialise on: with delivery decoupled
+//! from it there is no queue to fill and nothing to stall.
 //!
 //! UN requires a real `.app` bundle: outside one (`cargo run`) it
 //! throws, so banners are honestly absent there, said once in the log.
@@ -399,15 +399,16 @@ fn deliver(banner: &Banner) {
     }
 }
 
-/// Listen for banner clicks. Call once from `main`, on the UI thread,
-/// before the first tick.
+/// Listen for banner clicks. Call once at startup, on the UI thread,
+/// before the first tick. A click arrives on the returned channel; what it
+/// opens is the host's business (the Alerts tab).
 ///
 /// No identity claim any more: `UNUserNotificationCenter` attributes
 /// banners to the process's real bundle, so the old
 /// `notify_rust::set_application` swizzle (and the `BUNDLE_ID` constant
 /// it had to keep in step with Cargo.toml) retired with the
 /// `NSUserNotification` path.
-pub fn start(cx: &mut gpui::App) {
+pub fn start() -> smol::channel::Receiver<()> {
     let (tx, rx) = smol::channel::unbounded();
     let _ = CLICK.set(tx);
 
@@ -427,15 +428,7 @@ pub fn start(cx: &mut gpui::App) {
             }
         });
     }
-
-    cx.spawn(async move |cx| {
-        while rx.recv().await.is_ok() {
-            // `update` is `()` in this gpui pin — a dropped app just
-            // stops polling this task.
-            cx.update(crate::show_alerts_window);
-        }
-    })
-    .detach();
+    rx
 }
 
 /// Show one system notification for a freshly fired alert.
@@ -612,7 +605,9 @@ fn episode_banner_id(event: &AlertEvent) -> String {
     }
 }
 
-fn subject_title(subject: &AlertSubject) -> String {
+/// Who an alert is about, as a banner names it — and the notice row
+/// (`notice.rs`), which is the same news.
+pub fn subject_title(subject: &AlertSubject) -> String {
     match subject {
         // The banner is pure presentation — the display name where the
         // executable's own says nothing (zstats 0.5.3).

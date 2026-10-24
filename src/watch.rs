@@ -11,9 +11,10 @@
 //! - **Interface activity** is not in the snapshot at all: the kernel's
 //!   counters are cumulative since boot and cannot say *when* bytes moved.
 //!
-//! They live here rather than in [`crate::state`] because none of them needs
-//! gpui — no `Context`, no `notify`, nothing to render. That is what lets them
-//! be tested against a hand-built sequence of samples instead of a live app.
+//! They live here rather than in [`crate::state`] because none of them
+//! needs the store or the interface — no effects, nothing to render. That
+//! is what lets them be tested against a hand-built sequence of samples
+//! instead of a live app.
 
 use crate::procscan::AbnormalProcess;
 use std::cmp::Reverse;

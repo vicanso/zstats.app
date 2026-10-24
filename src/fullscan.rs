@@ -218,6 +218,33 @@ fn group_config() -> CollectorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process;
+
+    /// Two `sleep`s, children of this test, for as long as it lives. A
+    /// container's whole process table can be the shell, cargo and this
+    /// binary: three, the cap the uncapped listing is told apart from,
+    /// and no tree of more than one process to show that grouping walks
+    /// descendants (`make linux-check` met both).
+    struct Sleepers(Vec<process::Child>);
+
+    impl Sleepers {
+        fn start() -> Sleepers {
+            Sleepers(
+                (0..2)
+                    .filter_map(|_| process::Command::new("sleep").arg("30").spawn().ok())
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for Sleepers {
+        fn drop(&mut self) {
+            for sleeper in &mut self.0 {
+                let _ = sleeper.kill();
+                let _ = sleeper.wait();
+            }
+        }
+    }
 
     /// Both listings are process tables. zstats turns the two `ioreg`
     /// channels on by default, so they are only off because these configs
@@ -262,6 +289,7 @@ mod tests {
 
     #[test]
     fn scans_every_process_tree() {
+        let _sleepers = Sleepers::start();
         let scan = scan_groups().expect("collect");
         // Same reasoning as above: the cap shows up as a truncated table,
         // not as a small one.
@@ -284,11 +312,11 @@ mod tests {
     /// contract — that is why [`scan`] exists.
     #[test]
     fn list_processes_returns_the_uncapped_table() {
+        let _sleepers = Sleepers::start();
         let processes = list_processes().expect("collect");
         // Against a capped run of the same config rather than against a
         // process count: "more than 50" is a claim about the machine, and
-        // this has to hold in a container too. A machine with fewer than
-        // three processes cannot run this test suite.
+        // this has to hold in a container too.
         let capped = LocalCollector::new(CollectorConfig {
             max_processes: 3,
             ..process_config()

@@ -260,8 +260,8 @@ mod native {
             }
         });
         // `None` queue means "post on the thread that raised it" — the
-        // main thread for workspace notifications, which is where gpui
-        // already is.
+        // main thread for workspace notifications, whose run loop the host
+        // already runs.
         let tokens = unsafe {
             (
                 center.addObserverForName_object_queue_usingBlock(

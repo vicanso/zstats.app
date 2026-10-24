@@ -1,6 +1,6 @@
 //! Squarified treemap layout (Bruls, Huizing & van Wijk, 2000) — the
-//! arithmetic behind the disk window's directory map, kept free of gpui
-//! so it can be tested on plain numbers.
+//! arithmetic behind the disk window's directory map, kept free of any
+//! toolkit so it can be tested on plain numbers.
 //!
 //! Squarified rather than slice-and-dice: alternating strips give a
 //! folder with forty subfolders forty hairlines, where a reader compares

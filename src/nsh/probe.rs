@@ -1,0 +1,412 @@
+//! Debug builds only: drives the panel from a command file named by
+//! `ZSTATS_PROBE`, one command per line, appended while the app runs. The
+//! in-process hook the gpui front end's interface checks are made with,
+//! rebuilt on AppKit: events are synthesised as `NSEvent`s and handed to
+//! the panel's `sendEvent:`, so the user's own pointer never moves and no
+//! other app loses focus.
+//!
+//! Coordinates are points from the panel's top-left corner, as a
+//! screenshot of the window reads at 1×.
+//!
+//! ```text
+//! show | show key | hide          on screen (optionally as the key window)
+//! anchor X Y W H                  shown as a click on a status item at that
+//!                                 rect would show it (physical pixels, top left)
+//! click X Y | move X Y            a left click / a pointer move
+//! click-in N X Y                  a left click in window number N (an
+//!                                 alert NSH puts over the panel)
+//! move-in N X Y                   a pointer move in window number N (a
+//!                                 row's hover in the disk-space window)
+//! tray                            a left click on the status item, handed
+//!                                 to the item's own window
+//! banner                          what a click on a banner does
+//! drag W H                        resized to W×H, top edge held, as a
+//!                                 person's drag of an edge ends there
+//! detail 0|1                      Overview's short or long form, then
+//!                                 shown again at that form's size
+//! key SPEC [settings|storage]     a keystroke (`mod+1`, `escape`) posted to
+//!                                 the app's event queue for the key window
+//!                                 or the one named, so shortcuts and menus
+//!                                 see it as typed
+//! open settings|storage           the settings or disk-space window
+//! resize settings|storage W H     that window's content at W×H points, so
+//!                                 a page longer than it can be seen whole
+//! type TEXT                       key events for each character
+//! info                            window number, frame, key and first responder
+//! quit
+//! ```
+
+use crate::nsh::host::{self, Host};
+use crate::nsh::root::AuxWindow;
+use crate::nsh::windows;
+use crate::placement::{self, TrayAnchor};
+use crate::{appkit, prefs};
+use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2_app_kit::{
+    NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow,
+    NSWindowDidEndLiveResizeNotification,
+};
+use objc2_foundation::{NSNotificationCenter, NSPoint, NSProcessInfo, NSString};
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
+
+/// How often the command file is read for new lines.
+const POLL: Duration = Duration::from_millis(200);
+
+/// Starts the reader when `ZSTATS_PROBE` names a file; does nothing
+/// otherwise.
+pub fn start() {
+    let Some(path) = env::var_os("ZSTATS_PROBE").map(PathBuf::from) else {
+        return;
+    };
+    tracing::info!(path = %path.display(), "probe reading commands");
+    let spawned = thread::Builder::new().name("probe".into()).spawn(move || {
+        let mut done = 0;
+        loop {
+            thread::sleep(POLL);
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines().skip(done) {
+                let line = line.to_owned();
+                dispatch2::DispatchQueue::main().exec_async(move || run(&line));
+            }
+            done = text.lines().count();
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("probe thread: {e}");
+    }
+}
+
+fn run(line: &str) {
+    let mut words = line.split_whitespace();
+    let Some(cmd) = words.next() else {
+        return;
+    };
+    let rest: Vec<&str> = words.collect();
+    let num = |i: usize| {
+        rest.get(i)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    tracing::info!("probe: {line}");
+    host::with_host(|h| match cmd {
+        "show" => host::show(h, None, rest.first() == Some(&"key")),
+        // Placement under the icon without a click on the real one, which
+        // would move the user's pointer.
+        "anchor" => host::show(
+            h,
+            Some(TrayAnchor {
+                x: num(0),
+                y: num(1),
+                width: num(2),
+                height: num(3),
+            }),
+            false,
+        ),
+        "hide" => host::hide(h),
+        "click" => {
+            // A click makes the panel key (its root takes the keyboard),
+            // and a key non-activating panel takes the keystrokes meant
+            // for the app in front — the person's, typing while this
+            // runs: a ⌘2 meant for their terminal once switched the
+            // panel's tab. Unless it was key already, it gives the
+            // keyboard back.
+            let was_key = h.panel.isKeyWindow();
+            mouse(h, NSEventType::LeftMouseDown, num(0), num(1));
+            mouse(h, NSEventType::LeftMouseUp, num(0), num(1));
+            if !was_key {
+                h.panel.resignKeyWindow();
+            }
+        }
+        "move-in" => {
+            let mtm = MainThreadMarker::from(&*h.panel);
+            let window =
+                NSApplication::sharedApplication(mtm).windowWithWindowNumber(num(0) as isize);
+            match window {
+                Some(window) => {
+                    window.setAcceptsMouseMovedEvents(true);
+                    let height = window.contentView().map_or(0.0, |v| v.frame().size.height);
+                    let at = NSPoint::new(num(1), height - num(2));
+                    mouse_in(&window, NSEventType::MouseMoved, at);
+                }
+                None => tracing::warn!("probe: no window {}", num(0)),
+            }
+        }
+        "click-in" => {
+            let mtm = MainThreadMarker::from(&*h.panel);
+            let window =
+                NSApplication::sharedApplication(mtm).windowWithWindowNumber(num(0) as isize);
+            match window {
+                Some(window) => {
+                    let height = window.contentView().map_or(0.0, |v| v.frame().size.height);
+                    let at = NSPoint::new(num(1), height - num(2));
+                    mouse_in(&window, NSEventType::LeftMouseDown, at);
+                    mouse_in(&window, NSEventType::LeftMouseUp, at);
+                }
+                None => tracing::warn!("probe: no window {}", num(0)),
+            }
+        }
+        "tray" => click_status_item(MainThreadMarker::from(&*h.panel)),
+        "banner" => host::show_alerts(),
+        "drag" => {
+            appkit::set_size_keeping_top(
+                &h.panel,
+                num(0) as f32,
+                num(1) as f32,
+                placement::TRAY_GAP,
+            );
+            // What AppKit posts when a person lets go of an edge; the
+            // panel's delegate hears it as it would that.
+            // SAFETY: an AppKit constant, posted for the window it names,
+            // as AppKit itself posts it.
+            unsafe {
+                NSNotificationCenter::defaultCenter().postNotificationName_object(
+                    NSWindowDidEndLiveResizeNotification,
+                    Some(&h.panel),
+                );
+            }
+        }
+        "key" => post_key(
+            MainThreadMarker::from(&*h.panel),
+            rest.first().copied().unwrap_or(""),
+            rest.get(1).and_then(|name| aux_named(name)),
+        ),
+        "open" => windows::open(
+            aux_named(rest.first().copied().unwrap_or("")).unwrap_or(AuxWindow::Settings),
+        ),
+        "resize" => {
+            if let Some(aux) = aux_named(rest.first().copied().unwrap_or("")) {
+                windows::resize(aux, num(1), num(2));
+            }
+        }
+        "detail" => {
+            prefs::set_overview_detail(rest.first() == Some(&"1"));
+            host::show(h, None, false);
+        }
+        "move" => {
+            // A real pointer reaches NSH through its tracking areas; a
+            // synthesised move is dispatched by the window, which only
+            // forwards moves when asked to.
+            h.panel.setAcceptsMouseMovedEvents(true);
+            mouse(h, NSEventType::MouseMoved, num(0), num(1));
+        }
+        "type" => {
+            let text = line.split_once(' ').map_or("", |(_, text)| text);
+            for ch in text.chars() {
+                key(h, NSEventType::KeyDown, ch);
+                key(h, NSEventType::KeyUp, ch);
+            }
+        }
+        "info" => info(h),
+        "quit" => {
+            let mtm = MainThreadMarker::from(&*h.panel);
+            NSApplication::sharedApplication(mtm).terminate(None);
+        }
+        other => tracing::warn!("probe: unknown command {other:?}"),
+    });
+}
+
+fn info(h: &Host) {
+    let key_window = NSApplication::sharedApplication(MainThreadMarker::from(&*h.panel))
+        .keyWindow()
+        .map(|w| {
+            (
+                w.title().to_string(),
+                w.frame().size.width,
+                w.frame().size.height,
+            )
+        });
+    tracing::info!("probe info: key window {key_window:?}");
+    let frame = h.panel.frame();
+    let responder = h
+        .panel
+        .firstResponder()
+        .map(|r| r.class().name().to_string_lossy().into_owned());
+    tracing::info!(
+        "probe info: window {} · frame ({:.0}, {:.0}) {:.0}×{:.0} · visible {} · key {} · first responder {:?} · detail {} · dragged {:?}×{:?}/{:?}",
+        h.panel.windowNumber(),
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+        h.panel.isVisible(),
+        h.panel.isKeyWindow(),
+        responder,
+        prefs::overview_detail(),
+        prefs::panel_width(),
+        prefs::panel_height(false),
+        prefs::panel_height(true),
+    );
+}
+
+fn location(h: &Host, x: f64, y: f64) -> NSPoint {
+    let height = h.panel.contentView().map_or(0.0, |v| v.frame().size.height);
+    // The window's base coordinates grow upwards from its bottom edge.
+    NSPoint::new(x, height - y)
+}
+
+fn uptime() -> f64 {
+    NSProcessInfo::processInfo().systemUptime()
+}
+
+fn mouse(h: &Host, kind: NSEventType, x: f64, y: f64) {
+    mouse_in(&h.panel, kind, location(h, x, y));
+}
+
+/// `at` in `window`'s base coordinates.
+fn mouse_in(window: &NSWindow, kind: NSEventType, at: NSPoint) {
+    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind,
+        at,
+        NSEventModifierFlags::empty(),
+        uptime(),
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        1.0,
+    );
+    if let Some(event) = event {
+        window.sendEvent(&event);
+    }
+}
+
+/// A status item is a window of the app's own (`NSStatusBarWindow`), so a
+/// click on it can be handed over like one on the panel. Not every such
+/// window takes clicks: with more than one display, macOS draws a copy of
+/// the item on each other menu bar (a "replicant" image), so the one
+/// clicked is the window whose view under the centre is tray-icon's own
+/// (`TaoTrayTarget`) — the rightmost such, the primary, since Both mode
+/// inserts its second item to the left.
+fn click_status_item(mtm: MainThreadMarker) {
+    let mut items: Vec<(Retained<NSWindow>, NSPoint)> = Vec::new();
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if window.class().name().to_bytes() != b"NSStatusBarWindow" {
+            continue;
+        }
+        let frame = window.frame();
+        let centre = NSPoint::new(frame.size.width / 2.0, frame.size.height / 2.0);
+        let takes_clicks = window
+            .contentView()
+            .and_then(|view| view.hitTest(centre))
+            .is_some_and(|view| view.class().name().to_bytes() == b"TaoTrayTarget");
+        if takes_clicks {
+            items.push((window, centre));
+        }
+    }
+    let Some((item, centre)) = items
+        .into_iter()
+        .max_by(|(a, _), (b, _)| a.frame().origin.x.total_cmp(&b.frame().origin.x))
+    else {
+        tracing::warn!("probe: no status item to click");
+        return;
+    };
+    let frame = item.frame();
+    tracing::info!(
+        "probe: clicking the status item at ({:.0}, {:.0}) {:.0}×{:.0}",
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+    );
+    mouse_in(&item, NSEventType::LeftMouseDown, centre);
+    mouse_in(&item, NSEventType::LeftMouseUp, centre);
+}
+
+fn key(h: &Host, kind: NSEventType, ch: char) {
+    let chars = NSString::from_str(&ch.to_string());
+    let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        kind,
+        NSPoint::new(0.0, 0.0),
+        NSEventModifierFlags::empty(),
+        uptime(),
+        h.panel.windowNumber(),
+        None,
+        &chars,
+        &chars,
+        false,
+        0,
+    );
+    if let Some(event) = event {
+        h.panel.sendEvent(&event);
+    }
+}
+
+fn aux_named(name: &str) -> Option<AuxWindow> {
+    match name {
+        "settings" => Some(AuxWindow::Settings),
+        "storage" => Some(AuxWindow::Storage),
+        _ => None,
+    }
+}
+
+/// A keystroke such as `mod+1` or `escape`, posted to the app's event
+/// queue for `aux`, or else the key window. Not handed to the window as
+/// clicks are: NSH matches its shortcuts in a local event monitor, and
+/// menus their key equivalents in the application's `sendEvent:`, and
+/// both only see events that come through the queue.
+///
+/// A window this opened is often not the key window: macOS 14 grants an
+/// app's request to come forward only in answer to the person's own
+/// input, and the probe's is not that — so a window is named instead.
+fn post_key(mtm: MainThreadMarker, spec: &str, aux: Option<AuxWindow>) {
+    let mut flags = NSEventModifierFlags::empty();
+    let mut key = "";
+    for part in spec.split('+') {
+        match part {
+            "mod" | "cmd" => flags |= NSEventModifierFlags::Command,
+            "shift" => flags |= NSEventModifierFlags::Shift,
+            "ctrl" => flags |= NSEventModifierFlags::Control,
+            "alt" => flags |= NSEventModifierFlags::Option,
+            other => key = other,
+        }
+    }
+    // The US layout's virtual key codes, for the keys the shortcuts use.
+    let (chars, code) = match key {
+        "escape" => ("\u{1b}", 53),
+        "1" => ("1", 18),
+        "2" => ("2", 19),
+        "3" => ("3", 20),
+        "4" => ("4", 21),
+        "5" => ("5", 23),
+        "6" => ("6", 22),
+        "7" => ("7", 26),
+        "p" => ("p", 35),
+        "r" => ("r", 15),
+        "w" => ("w", 13),
+        _ => {
+            tracing::warn!("probe: no key code for {spec:?}");
+            return;
+        }
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let window = match aux {
+        Some(aux) => windows::number(aux),
+        None => app.keyWindow().map(|w| w.windowNumber()),
+    }
+    .unwrap_or(0);
+    let chars = NSString::from_str(chars);
+    for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind,
+            NSPoint::new(0.0, 0.0),
+            flags,
+            uptime(),
+            window,
+            None,
+            &chars,
+            &chars,
+            false,
+            code,
+        );
+        if let Some(event) = event {
+            app.postEvent_atStart(&event, false);
+        }
+    }
+}

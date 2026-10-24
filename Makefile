@@ -22,7 +22,7 @@ fmt:
 	cargo fmt
 
 lint:
-	cargo clippy --all-targets --all-features -- --deny=warnings
+	cargo clippy --all-targets -- --deny=warnings
 
 # Type-check only — far faster than a full build when iterating on code.
 check:
@@ -38,12 +38,10 @@ release:
 
 # Desktop app bundle (.app / .deb / .msi). Requires `cargo install cargo-bundle`.
 #
-# The LSUIElement step is what keeps the Dock icon from flashing on launch.
-# `hide_dock_icon()` only runs ~50ms in — after gpui has built NSApplication,
-# installed its delegate and started the runloop — and the icon is in the Dock
-# for all of it. LSUIElement makes LaunchServices skip creating it in the first
-# place, so all that's left is gpui's own setActivationPolicy(Regular), which
-# our callback undoes microseconds later in the same call stack.
+# The LSUIElement step is what keeps the Dock icon from flashing on launch:
+# the host sets the accessory activation policy itself, but only once it
+# runs, and LaunchServices would have put the icon in the Dock before that.
+# LSUIElement makes it skip creating it in the first place.
 bundle:
 	cargo bundle --release
 	@TARGET=$$(cargo metadata --format-version 1 --no-deps \
@@ -83,15 +81,23 @@ bundle:
 #
 # Three things here were learned the hard way. crates.io times out inside
 # that VM, so dependencies are vendored on the host and the build runs
-# `--offline` against them. `naga` needs more than the default memory or
-# the OOM killer takes it mid-compile. And the work directory lives outside
+# `--offline` against them — vendored on every run, because a vendor tree
+# older than Cargo.lock fails the offline build on the first new crate. The
+# build wants more than the default memory or the OOM killer takes it
+# mid-compile (`naga`, in gpui's day). And the work directory lives outside
 # the repo so a Linux target tree never collides with the macOS one.
 LINUX_WORK ?= $(HOME)/.cache/zstats-linux
 
-linux-check:
+# The image is rebuilt whenever the Containerfile changes: kept only while
+# it was missing, it stayed on bookworm after the file had moved on, and
+# the first build that needed GTK 4 failed for want of it.
+$(LINUX_WORK)/image.stamp: Containerfile
 	@command -v container >/dev/null || { echo "needs Apple's container CLI (or swap in docker/podman)"; exit 1; }
-	@container image list | grep -q '^zstats-linux' || container build -t zstats-linux -f Containerfile .
-	@[ -d "$(LINUX_WORK)/vendor" ] || cargo vendor --locked "$(LINUX_WORK)/vendor" >/dev/null
+	container build -t zstats-linux -f Containerfile .
+	@mkdir -p "$(LINUX_WORK)" && touch "$@"
+
+linux-check: $(LINUX_WORK)/image.stamp
+	@cargo vendor --locked "$(LINUX_WORK)/vendor" >/dev/null
 	@mkdir -p "$(LINUX_WORK)/target" "$(LINUX_WORK)/cargo-home"
 	@printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "/vendor"\n' > "$(LINUX_WORK)/cargo-home/config.toml"
 	container run --rm -m 12g -c 6 \
@@ -101,7 +107,7 @@ linux-check:
 		-v "$(LINUX_WORK)/cargo-home":/cargo-home \
 		-w /src -e CARGO_TARGET_DIR=/target -e CARGO_HOME=/cargo-home \
 		zstats-linux \
-		bash -c "cargo build --all-targets --offline && cargo test --offline"
+		bash -c "cargo clippy --all-targets --offline -- --deny=warnings && cargo test --offline"
 
 # Drop the container work tree (vendored crates and the Linux target dir).
 linux-clean:

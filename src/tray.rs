@@ -3,14 +3,15 @@
 //! Two backends, one shape: an `NSStatusItem` on macOS, a
 //! StatusNotifierItem over D-Bus on Linux (`tray-icon`'s `ksni` feature —
 //! its default `libappindicator` backend is the GTK main loop this module
-//! used to be excluded over, and that one really cannot coexist with
-//! gpui's event loop). What the host hands back differs in three ways,
+//! used to be excluded over, and that one really cannot coexist with the
+//! interface's loop: it was gpui's, it is now NSH's GTK 4, and
+//! libappindicator is GTK 3). What the host hands back differs in three ways,
 //! and all three are load-bearing below:
 //!
 //! - **No icon rect.** `TrayIcon::rect` is hard-coded `None` on SNI and
 //!   click events carry `Rect::default()`, so nothing can hang the panel
-//!   off the item — the compositor anchors it instead (`panel_kind` in
-//!   main.rs). Every anchor on this path is `None`, which is the same
+//!   off the item — the compositor anchors it instead (the layer surface
+//!   in `nsh/linux.rs`). Every anchor on this path is `None`, which is the same
 //!   fallback macOS already takes before AppKit has laid the item out.
 //! - **No right-click event.** SNI maps `secondary_activate` to
 //!   `MouseButton::Middle` and never sends a right click: the context
@@ -21,22 +22,26 @@
 //!   told; SNI paints exactly the pixels it is given. The glyph therefore
 //!   has to choose a colour, and nothing in the protocol says what is
 //!   behind it — see [`ink`].
+//!
+//! Host-agnostic since phase 1d of docs/nsh-migration.md. The tray is
+//! kept on the thread that built it, the main thread (it was a gpui
+//! `Global`); [`sync`] reads the store alone; and what a click or the menu
+//! asks for goes, as a [`TrayAction`], to the handler [`start`] was given
+//! — what showing the panel means is the host's.
 
-use crate::assets::{self, CustomIconName};
+use crate::APP_NAME;
+use crate::assets::CustomIconName;
 use crate::format;
+use crate::glyph;
 use crate::i18n;
-use crate::prefs::{self, TrayPref};
-use crate::state::{TrayAnchor, ZStatsAppState};
 /// Only the ink reads it, and only where there is no template image.
 #[cfg(not(target_os = "macos"))]
-use crate::theme;
-use crate::{APP_NAME, show_main_window, toggle_main_window};
-use gpui::{App, Global};
-use resvg::{tiny_skia, usvg};
+use crate::palette;
+use crate::prefs::{self, TrayPref};
+use crate::state::{TrayAnchor, ZStatsAppState};
 use rust_i18n::t;
-use std::cell::{Cell, RefCell};
-use std::str;
-use std::thread;
+use std::cell::{Cell, OnceCell, RefCell};
+use std::sync::Arc;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -138,7 +143,18 @@ struct TrayHandle {
     ink: Cell<[u8; 3]>,
 }
 
-impl Global for TrayHandle {}
+thread_local! {
+    /// The tray, on the thread that built it — the main thread, where
+    /// macOS makes and changes an `NSStatusItem`. Set once: by [`start`],
+    /// or on Linux by the first build after a tray host appeared.
+    static TRAY: OnceCell<TrayHandle> = const { OnceCell::new() };
+}
+
+/// `f` on the tray; `None` when it was never built, or when called from a
+/// thread other than the one that keeps it.
+fn with_tray<R>(f: impl FnOnce(&TrayHandle) -> R) -> Option<R> {
+    TRAY.with(|tray| tray.get().map(f))
+}
 
 impl TrayHandle {
     /// Grow or shed the second item. A no-op when it already matches.
@@ -311,8 +327,8 @@ impl Figure {
 /// with whatever items it has.
 ///
 /// Must be called on the main thread (macOS creates an `NSStatusItem`):
-/// true for `init_tray` and for `sync`, which only ever runs inside
-/// `cx.update`.
+/// true for [`start`] and for [`sync`], which run on the thread that
+/// keeps the tray.
 fn build_item(label: &'static str, face: TrayFace, faces: &Faces) -> Option<Item> {
     let mut builder = TrayIconBuilder::new()
         .with_menu(Box::new(build_menu()))
@@ -385,15 +401,30 @@ pub fn face_for(
 /// out immediately rather than on the next tick. Before the first
 /// sample there is a face but no figure. A no-op if the tray failed to
 /// build.
-pub fn sync(cx: &App, state: &ZStatsAppState) {
-    let Some(handle) = cx.try_global::<TrayHandle>() else {
-        return;
-    };
-    // Before anything is worn: a theme switch has to reach the bar on
-    // this pass, not on the one after it.
-    handle.ensure_ink();
+///
+/// On the thread that keeps the tray. A host whose store lives on
+/// another thread takes the two halves apart: [`look`] where the store
+/// is, [`wear`] on the tray's thread.
+pub fn sync(state: &ZStatsAppState) {
+    wear(look(state));
+}
+
+/// What the menu bar should wear, read off the store and nothing else —
+/// `Send`, so it can be carried to the tray's thread.
+pub struct Look {
+    /// Both mode: the second item exists and wears [`Self::cpu`].
+    both: bool,
+    face: TrayFace,
+    figure: Option<Figure>,
+    /// The unread-alert spec.
+    hot: bool,
+    /// The second item's figure; read only in Both mode.
+    cpu: Option<Figure>,
+}
+
+/// The first half of [`sync`]: the store's answer, on any thread.
+pub fn look(state: &ZStatsAppState) -> Look {
     let pref = prefs::tray();
-    handle.set_both(pref == TrayPref::Both);
     let figure = |face| {
         state.latest().map(|tick| match face {
             TrayFace::Cpu => Figure::cpu(tick.snapshot.cpu.usage_percent),
@@ -415,18 +446,40 @@ pub fn sync(cx: &App, state: &ZStatsAppState) {
         state.memory_needs_attention(),
         state.disk_needs_attention(),
     );
-    // One spec, on the item that always exists. Both's second item is
-    // the same news twice — two adjacent dots would look like two
-    // alerts.
-    let hot = state.tray_alert_unseen();
-    let faces = handle.faces.borrow();
-    handle.primary.wear(face, figure(face), hot, &faces);
-    if let Some(second) = handle.second.borrow().as_ref() {
-        second.wear(TrayFace::Cpu, figure(TrayFace::Cpu), false, &faces);
+    let both = pref == TrayPref::Both;
+    Look {
+        both,
+        face,
+        figure: figure(face),
+        // One spec, on the item that always exists. Both's second item is
+        // the same news twice — two adjacent dots would look like two
+        // alerts.
+        hot: state.tray_alert_unseen(),
+        cpu: if both { figure(TrayFace::Cpu) } else { None },
     }
 }
 
-enum TrayAction {
+/// The second half of [`sync`]: `look` on the items, on the thread that
+/// keeps the tray.
+pub fn wear(look: Look) {
+    with_tray(|handle| {
+        // Before anything is worn: a theme switch has to reach the bar on
+        // this pass, not on the one after it.
+        handle.ensure_ink();
+        handle.set_both(look.both);
+        let faces = handle.faces.borrow();
+        handle
+            .primary
+            .wear(look.face, look.figure, look.hot, &faces);
+        if let Some(second) = handle.second.borrow().as_ref() {
+            second.wear(TrayFace::Cpu, look.cpu, false, &faces);
+        }
+    });
+}
+
+/// What the tray asks of the host, through the handler [`start`] was
+/// given.
+pub enum TrayAction {
     /// Left-clicking the icon; carries the icon's screen rect to hang the
     /// window off, or `None` where the platform reports none. Toggles.
     Toggle(Option<TrayAnchor>),
@@ -435,22 +488,30 @@ enum TrayAction {
     /// The menu's way into the disk-space window.
     Storage,
     Quit,
+    /// A tray host appeared on the session bus after the first build
+    /// failed: call [`host_appeared`] on the thread that keeps the tray.
+    #[cfg(target_os = "linux")]
+    HostAppeared,
 }
 
-/// A menu bar face, rasterised from the bundled SVG.
+/// The handler [`start`] was given. Called on whichever thread the
+/// platform reports an event on.
+type Deliver = Arc<dyn Fn(TrayAction) + Send + Sync>;
+
+/// A menu bar face, rasterised from the bundled SVG (`glyph.rs`).
 ///
 /// A CPU die and a memory stick rather than a trend arrow: an arrow makes
 /// a claim about the data ("the numbers are going up"), while the subject
 /// itself does not. The face that is showing *is* a claim — but one
 /// zstats or the kernel already made (`face_for`), never a reading of
 /// the numbers here.
-///
-/// `tray-icon` takes raw RGBA only — it has no SVG support and just re-encodes
-/// whatever it is given as a PNG for `NSImage`. macOS then scales that to 18pt
-/// tall (`platform_impl/macos/mod.rs`), so the bitmap is produced at 2x to stay
-/// sharp on Retina.
-fn tray_icon(glyph: CustomIconName) -> Option<Icon> {
-    Icon::from_rgba(rasterise_icon(glyph, ICON_SIZE)?, ICON_SIZE, ICON_SIZE).ok()
+fn tray_icon(face: CustomIconName) -> Option<Icon> {
+    Icon::from_rgba(
+        glyph::rasterise(face, ink())?,
+        glyph::ICON_SIZE,
+        glyph::ICON_SIZE,
+    )
+    .ok()
 }
 
 /// The colour the glyph's pixels carry.
@@ -478,7 +539,7 @@ fn ink() -> [u8; 3] {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        ink_for(theme::is_dark())
+        ink_for(palette::is_dark())
     }
 }
 
@@ -493,94 +554,12 @@ fn ink_for(dark: bool) -> [u8; 3] {
     if dark { [0xe6; 3] } else { [0x1a; 3] }
 }
 
-/// Same die, plus a filled spec in the top-left, in the glyph's own ink
-/// rather than a colour of its own. On macOS that means extra alpha on
-/// the same template, so the spec takes the menu bar's ink along with the
-/// die (white on dark, black on light) — a painted colour there would
-/// have to drop template mode and become a black block. Off macOS it is
-/// [`ink`]'s colour, the same one the strokes carry.
-fn tray_icon_hot(glyph: CustomIconName) -> Option<Icon> {
-    let mut rgba = rasterise_icon(glyph, ICON_SIZE)?;
-    stamp_hot_dot(&mut rgba, ICON_SIZE);
-    Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE).ok()
-}
-
-/// 4 pt at 2×, top-left — away from the percent title on the right.
-const DOT_DIAMETER: u32 = 8;
-const DOT_INSET: u32 = 1;
-
-fn stamp_hot_dot(rgba: &mut [u8], size: u32) {
-    let ink = ink();
-    let radius = DOT_DIAMETER as f32 / 2.0;
-    let cx = DOT_INSET as f32 + radius;
-    let cy = DOT_INSET as f32 + radius;
-    let r2 = radius * radius;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 + 0.5 - cx;
-            let dy = y as f32 + 0.5 - cy;
-            if dx * dx + dy * dy <= r2 {
-                let i = ((y * size + x) * 4) as usize;
-                rgba[i..i + 3].copy_from_slice(&ink);
-                rgba[i + 3] = 255;
-            }
-        }
-    }
-}
-
-/// Rendered at 2x the 18pt macOS uses, so no upscaling happens.
-const ICON_SIZE: u32 = 36;
-
-/// Rasterise the bundled SVG to straight RGBA. Split out from [`tray_icon`]
-/// so the result can be inspected in a test — a silently empty bitmap would
-/// otherwise just look like a missing icon at runtime.
-fn rasterise_icon(glyph: CustomIconName, size: u32) -> Option<Vec<u8>> {
-    rasterise_icon_scaled(glyph, size, GLYPH_SCALE)
-}
-
-/// Share of the canvas the glyph occupies; the rest is transparent margin.
-///
-/// lucide draws to the edges of its 24x24 viewBox, and macOS scales the whole
-/// bitmap to 18pt — so at 1.0 the glyph is a full 18pt tall and outweighs the
-/// ~12pt title beside it. System menu bar icons inset their artwork instead.
-const GLYPH_SCALE: f32 = 0.78;
-
-fn rasterise_icon_scaled(glyph: CustomIconName, size: u32, glyph_scale: f32) -> Option<Vec<u8>> {
-    // From the shared embed rather than `include_str!`, which would compile a
-    // second, uncompressed copy of the same file into the binary.
-    let raw = assets::get(&glyph.path())?;
-    // lucide ships `stroke="currentColor"`, which is a CSS-context keyword
-    // usvg cannot resolve on its own. Which colour does not matter: the
-    // channels are overwritten with `ink` below, and only alpha survives
-    // this function.
-    let svg = str::from_utf8(&raw)
-        .ok()?
-        .replace("currentColor", "#000000");
-
-    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
-    let mut pixmap = tiny_skia::Pixmap::new(size, size)?;
-    let source = tree.size();
-    let longest = source.width().max(source.height());
-    let scale = size as f32 * glyph_scale / longest;
-    // Centre what is left over, so the margin is even on all four sides.
-    let inset = (size as f32 - longest * scale) / 2.0;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_translate(inset, inset).pre_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-
-    let mut rgba = pixmap.take();
-    // Keep only alpha and repaint the colour channels. tiny-skia hands back
-    // premultiplied colour, which `Icon::from_rgba` would read as straight,
-    // so those channels have to be rewritten whatever happens — `ink` is
-    // what decides to what. On macOS the template discards it and works off
-    // alpha alone; off macOS it *is* the glyph.
-    let ink = ink();
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel[..3].copy_from_slice(&ink);
-    }
-    Some(rgba)
+/// Same die, plus the alert spec in the top-left (`glyph::stamp_hot_dot`),
+/// in [`ink`]'s colour like the strokes.
+fn tray_icon_hot(face: CustomIconName) -> Option<Icon> {
+    let mut rgba = glyph::rasterise(face, ink())?;
+    glyph::stamp_hot_dot(&mut rgba, ink());
+    Icon::from_rgba(rgba, glyph::ICON_SIZE, glyph::ICON_SIZE).ok()
 }
 
 /// Where the primary status item sits right now, in the physical pixels
@@ -597,9 +576,8 @@ fn rasterise_icon_scaled(glyph: CustomIconName, size: u32, glyph_scale: f32) -> 
 /// `TrayIcon::rect` is hard-coded `None` there — and equally without a
 /// tray, or when AppKit has not laid the item out yet. Every caller then
 /// falls back to the last position, which is what they all did before.
-pub fn anchor(cx: &App) -> Option<TrayAnchor> {
-    let handle = cx.try_global::<TrayHandle>()?;
-    let rect = handle.primary.icon.rect()?;
+pub fn anchor() -> Option<TrayAnchor> {
+    let rect = with_tray(|handle| handle.primary.icon.rect())??;
     Some(TrayAnchor {
         x: rect.position.x,
         y: rect.position.y,
@@ -611,13 +589,13 @@ pub fn anchor(cx: &App) -> Option<TrayAnchor> {
 /// Swap in a menu rebuilt in the active locale. The menu snapshots its item
 /// titles when built, so a language switch has to hand the tray a fresh one —
 /// the icon, tooltip and event threads stay put. A no-op without a tray.
-pub fn rebuild_menu(cx: &App) {
-    if let Some(handle) = cx.try_global::<TrayHandle>() {
+pub fn rebuild_menu() {
+    with_tray(|handle| {
         handle.primary.icon.set_menu(Some(Box::new(build_menu())));
         if let Some(second) = handle.second.borrow().as_ref() {
             second.icon.set_menu(Some(Box::new(build_menu())));
         }
-    }
+    });
 }
 
 fn build_menu() -> Menu {
@@ -647,8 +625,14 @@ fn build_menu() -> Menu {
     menu
 }
 
-/// Must be called on the main thread (macOS creates an `NSStatusItem`), which
-/// is where `Application::run`'s callback already runs.
+/// Build the tray and hand what it asks for to `deliver`.
+///
+/// Must be called on the main thread (macOS creates an `NSStatusItem`),
+/// and [`sync`], [`anchor`] and [`rebuild_menu`] then run on that same
+/// thread, where the tray is kept. `deliver` is called on whichever
+/// thread the platform reports an event on — the main thread on macOS,
+/// inside the status item's own action; ksni's own on Linux — and takes
+/// the action to wherever the host handles it.
 ///
 /// Without a tray host — no SNI host on the session bus — `build_item`
 /// logs and returns `None`. That is not an error path: the panel still
@@ -656,22 +640,37 @@ fn build_menu() -> Menu {
 /// keybinding (`docs/omarchy-port.md` 阶段 2). On Linux it is also often
 /// not the final answer: a login launch can beat the bar that hosts the
 /// tray, so the tray is built again when a host appears ([`sni`]).
-pub fn init_tray(cx: &mut App) {
-    let built = try_build_tray(cx);
+pub fn start(deliver: impl Fn(TrayAction) + Send + Sync + 'static) {
+    let deliver: Deliver = Arc::new(deliver);
+    route_events(deliver.clone());
+    let built = try_build();
     // Elsewhere a failed build is the answer: an `NSStatusItem` has no
     // host to wait for.
     #[cfg(target_os = "linux")]
     if !built {
-        sni::build_when_a_host_appears(cx);
+        sni::build_when_a_host_appears(deliver);
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = built;
+    let _ = (built, deliver);
 }
 
-/// Build the tray and wire its events; `false` when the primary item could
-/// not be created, having changed nothing — so it can simply be called
-/// again.
-fn try_build_tray(cx: &mut App) -> bool {
+/// [`TrayAction::HostAppeared`]: build the tray now, unless an earlier
+/// appearance already did.
+#[cfg(target_os = "linux")]
+pub fn host_appeared() {
+    if with_tray(|_| ()).is_some() {
+        return;
+    }
+    if try_build() {
+        tracing::info!("tray built after a tray host appeared");
+    } else {
+        tracing::warn!("a tray host is on the bus but the tray still failed");
+    }
+}
+
+/// Build the tray; `false` when the primary item could not be created,
+/// having changed nothing — so it can simply be called again.
+fn try_build() -> bool {
     // Rasterised up front so a later swap is cheap.
     let faces = build_faces();
     // The store is empty here, so the face is the preference's resting
@@ -687,104 +686,81 @@ fn try_build_tray(cx: &mut App) -> bool {
     let second = (pref == TrayPref::Both)
         .then(|| build_item("second", TrayFace::Cpu, &faces))
         .flatten();
-    cx.set_global(TrayHandle {
+    let handle = TrayHandle {
         primary,
         second: RefCell::new(second),
         faces: RefCell::new(faces),
         ink: Cell::new(ink()),
+    };
+    TRAY.with(|tray| {
+        let _ = tray.set(handle);
     });
-
-    // Both receivers only block, so park a dedicated thread on each (zero CPU
-    // while idle) and funnel their events onto the main-thread executor.
-    // Two threads rather than a `select!` keeps crossbeam out of our deps.
-    let (action_tx, action_rx) = smol::channel::unbounded::<TrayAction>();
-
-    let menu_tx = action_tx.clone();
-    thread::spawn(move || {
-        let receiver = MenuEvent::receiver();
-        while let Ok(event) = receiver.recv() {
-            let action = match event.id().0.as_str() {
-                MENU_ID_SHOW => TrayAction::Show,
-                MENU_ID_STORAGE => TrayAction::Storage,
-                MENU_ID_QUIT => TrayAction::Quit,
-                _ => continue,
-            };
-            if menu_tx.send_blocking(action).is_err() {
-                return;
-            }
-        }
-    });
-
-    thread::spawn(move || {
-        let receiver = TrayIconEvent::receiver();
-        while let Ok(event) = receiver.recv() {
-            // macOS emits Click on both mouseDown and mouseUp — keying off Up
-            // means a press-and-hold doesn't fire until the button is
-            // released. SNI's `activate` is a single event that already
-            // arrives as Up, so the same filter passes it through.
-            //
-            // Left only, and on SNI that is the only button there is: the
-            // host opens the context menu itself, and `secondary_activate`
-            // (a *middle* click, not a right one) is not a control this
-            // app offers anywhere else either.
-            let rect = match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    rect,
-                    ..
-                } => rect,
-                _ => continue,
-            };
-            // The icon's screen rect, which is what the window gets anchored
-            // to. SNI reports none (`Rect::default()` — every field zero),
-            // and a fabricated origin would put the panel in the corner of
-            // the screen rather than leave the compositor to place it, so
-            // the honest answer there is no answer.
-            #[cfg(not(target_os = "linux"))]
-            let anchor = Some(TrayAnchor {
-                x: rect.position.x,
-                y: rect.position.y,
-                width: f64::from(rect.size.width),
-                height: f64::from(rect.size.height),
-            });
-            #[cfg(target_os = "linux")]
-            let anchor = {
-                let _ = rect;
-                None
-            };
-            // Every click the host delivers, before anything is done with
-            // it. A tray host is free to turn one activation into two
-            // events, and from the panel's side that is indistinguishable
-            // from an auto-hide: it opens and is gone. Two of these lines
-            // milliseconds apart is the whole diagnosis.
-            tracing::info!("tray click received");
-            if action_tx.send_blocking(TrayAction::Toggle(anchor)).is_err() {
-                return;
-            }
-        }
-    });
-
-    cx.spawn(async move |cx| {
-        // Ends on its own: once the app shuts down this task stops being
-        // polled, and the sender thread exits when the channel drops.
-        while let Ok(action) = action_rx.recv().await {
-            cx.update(|cx| match action {
-                TrayAction::Toggle(anchor) => toggle_main_window(cx, anchor),
-                TrayAction::Show => show_main_window(cx),
-                TrayAction::Storage => {
-                    // A menu click does not make a menu-bar app active,
-                    // and a window opened behind the one in use is not
-                    // an answer to the click.
-                    cx.activate(true);
-                    crate::open_storage_window(cx);
-                }
-                TrayAction::Quit => cx.quit(),
-            });
-        }
-    })
-    .detach();
+    #[cfg(target_os = "linux")]
+    sni::BUILT.store(true, std::sync::atomic::Ordering::Release);
     true
+}
+
+/// tray-icon's two handlers, set once whether or not an item gets built —
+/// without one they never fire — and before the first build: each is a
+/// set-once cell that the first event fixes for good, to the receiver if
+/// nothing is set by then. A handler rather than the crate's receivers,
+/// which only block: the gpui front end used to park a thread on each to
+/// forward its events.
+fn route_events(deliver: Deliver) {
+    let menu = deliver.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let action = match event.id().0.as_str() {
+            MENU_ID_SHOW => TrayAction::Show,
+            MENU_ID_STORAGE => TrayAction::Storage,
+            MENU_ID_QUIT => TrayAction::Quit,
+            _ => return,
+        };
+        menu(action);
+    }));
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        // macOS emits Click on both mouseDown and mouseUp — keying off Up
+        // means a press-and-hold doesn't fire until the button is
+        // released. SNI's `activate` is a single event that already
+        // arrives as Up, so the same filter passes it through.
+        //
+        // Left only, and on SNI that is the only button there is: the
+        // host opens the context menu itself, and `secondary_activate`
+        // (a *middle* click, not a right one) is not a control this
+        // app offers anywhere else either.
+        let rect = match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                rect,
+                ..
+            } => rect,
+            _ => return,
+        };
+        // The icon's screen rect, which is what the window gets anchored
+        // to. SNI reports none (`Rect::default()` — every field zero),
+        // and a fabricated origin would put the panel in the corner of
+        // the screen rather than leave the compositor to place it, so
+        // the honest answer there is no answer.
+        #[cfg(not(target_os = "linux"))]
+        let anchor = Some(TrayAnchor {
+            x: rect.position.x,
+            y: rect.position.y,
+            width: f64::from(rect.size.width),
+            height: f64::from(rect.size.height),
+        });
+        #[cfg(target_os = "linux")]
+        let anchor = {
+            let _ = rect;
+            None
+        };
+        // Every click the host delivers, before anything is done with
+        // it. A tray host is free to turn one activation into two
+        // events, and from the panel's side that is indistinguishable
+        // from an auto-hide: it opens and is gone. Two of these lines
+        // milliseconds apart is the whole diagnosis.
+        tracing::info!("tray click received");
+        deliver(TrayAction::Toggle(anchor));
+    }));
 }
 
 /// Building the tray once a StatusNotifier host is on the session bus.
@@ -810,65 +786,74 @@ fn try_build_tray(cx: &mut App) -> bool {
 /// and a desktop that never grows a tray host just keeps one idle thread.
 #[cfg(target_os = "linux")]
 mod sni {
-    use super::try_build_tray;
-    use gpui::App;
+    use super::{Deliver, TrayAction};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
 
     const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 
-    /// Tries after each appearance of a host: at once, then twice more in
-    /// case the host took its name a moment before it took calls. Past
-    /// that the tray waits for the host's next appearance (a bar restart)
-    /// rather than spinning against one that keeps refusing.
+    /// Asks for a build after each appearance of a host: at once, then
+    /// twice more in case the host took its name a moment before it took
+    /// calls. Past that the tray waits for the host's next appearance (a
+    /// bar restart) rather than spinning against one that keeps refusing.
     const RETRY_AFTER: [Duration; 3] = [
         Duration::ZERO,
         Duration::from_secs(2),
         Duration::from_secs(10),
     ];
 
-    pub(super) fn build_when_a_host_appears(cx: &mut App) {
-        let (tx, rx) = smol::channel::unbounded::<()>();
+    /// Whether the tray is built, for the watcher thread: the tray itself
+    /// is kept on a thread this one cannot see.
+    pub(super) static BUILT: AtomicBool = AtomicBool::new(false);
+
+    fn built() -> bool {
+        BUILT.load(Ordering::Acquire)
+    }
+
+    pub(super) fn build_when_a_host_appears(deliver: Deliver) {
         thread::spawn(move || {
-            if let Err(e) = watch(&tx) {
+            if let Err(e) = watch(&deliver) {
                 tracing::warn!(error = %e, "cannot watch the session bus for a tray host");
             }
         });
         tracing::info!("no tray host yet; the tray is built when one appears");
-        cx.spawn(async move |cx| {
-            while rx.recv().await.is_ok() {
-                for delay in RETRY_AFTER {
-                    if !delay.is_zero() {
-                        cx.background_executor().timer(delay).await;
-                    }
-                    if cx.update(try_build_tray) {
-                        tracing::info!("tray built after a tray host appeared");
-                        // Dropping `rx` ends the watcher thread at the
-                        // next name change it sees.
-                        return;
-                    }
-                }
-                tracing::warn!("a tray host is on the bus but the tray still failed");
-            }
-        })
-        .detach();
     }
 
-    /// One message per appearance of a watcher: now, if one is already
-    /// there, then on every new owner. Subscribes before it asks, or a
-    /// host that took the name between the failed build and this call
-    /// would never be heard of. Blocks for as long as the bus lives.
-    fn watch(tx: &smol::channel::Sender<()>) -> zbus::Result<()> {
+    /// One round of [`RETRY_AFTER`] for one appearance of a host. True
+    /// once the tray is built — each build happens on the thread that
+    /// keeps the tray, so this only asks and then looks.
+    fn ask(deliver: &Deliver) -> bool {
+        for delay in RETRY_AFTER {
+            thread::sleep(delay);
+            if built() {
+                return true;
+            }
+            deliver(TrayAction::HostAppeared);
+        }
+        built()
+    }
+
+    /// A round of asking per appearance of a watcher: now, if one is
+    /// already there, then on every new owner, until the tray is built.
+    /// Subscribes before it asks, or a host that took the name between the
+    /// failed build and this call would never be heard of. Blocks for as
+    /// long as the bus lives or the tray is missing.
+    fn watch(deliver: &Deliver) -> zbus::Result<()> {
         let conn = zbus::blocking::Connection::session()?;
         let dbus = zbus::blocking::fdo::DBusProxy::new(&conn)?;
         let changes = dbus.receive_name_owner_changed_with_args(&[(0, WATCHER)])?;
         let name = zbus::names::BusName::try_from(WATCHER)?;
-        if dbus.name_has_owner(name)? && tx.send_blocking(()).is_err() {
+        if dbus.name_has_owner(name)? && ask(deliver) {
             return Ok(());
         }
         for change in changes {
+            // The last round's last build may have held after it looked.
+            if built() {
+                return Ok(());
+            }
             let args = change.args()?;
-            if args.new_owner.is_some() && tx.send_blocking(()).is_err() {
+            if args.new_owner.is_some() && ask(deliver) {
                 return Ok(());
             }
         }
@@ -880,40 +865,6 @@ mod sni {
 mod tests {
     use super::*;
 
-    /// Both faces, not just the one the item is built with: the memory
-    /// glyph is applied only on a swap, so a broken SVG there would show
-    /// up as "the icon vanished the first time memory got tight".
-    #[test]
-    fn every_face_rasterises_to_a_visible_glyph() {
-        for glyph in [
-            CustomIconName::Cpu,
-            CustomIconName::MemoryStick,
-            CustomIconName::HardDrive,
-        ] {
-            let rgba = rasterise_icon(glyph, ICON_SIZE).expect("icon should rasterise");
-            assert_eq!(rgba.len() as u32, ICON_SIZE * ICON_SIZE * 4);
-
-            let opaque = rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .filter(|px| px[3] > 32)
-                .count();
-            let total = (ICON_SIZE * ICON_SIZE) as usize;
-            let coverage = opaque as f32 / total as f32;
-
-            // A failed parse (lucide's `currentColor`, a bad viewBox, a
-            // scale of zero) yields a fully transparent bitmap that raises
-            // no error and simply shows as a missing icon. A stroke-only
-            // glyph covers a modest share of its box, so bracket it on
-            // both sides.
-            assert!(
-                (0.02..0.50).contains(&coverage),
-                "{glyph:?}: unexpected glyph coverage {coverage:.3} — SVG likely failed to render"
-            );
-        }
-    }
-
     /// The whole job of the ink is contrast with whatever is behind it,
     /// so a dark theme must not produce a dark glyph. A regression here
     /// is invisible in the literal sense: the icon is simply not there,
@@ -923,28 +874,6 @@ mod tests {
     fn the_ink_is_light_on_a_dark_theme_and_dark_on_a_light_one() {
         assert!(ink_for(true).iter().all(|c| *c > 0x80), "dark theme");
         assert!(ink_for(false).iter().all(|c| *c < 0x80), "light theme");
-    }
-
-    #[test]
-    fn an_alert_spec_is_extra_alpha_in_the_glyphs_own_ink() {
-        for glyph in [
-            CustomIconName::Cpu,
-            CustomIconName::MemoryStick,
-            CustomIconName::HardDrive,
-        ] {
-            let mut rgba = rasterise_icon(glyph, ICON_SIZE).expect("glyph");
-            let cx = (DOT_INSET + DOT_DIAMETER / 2) as usize;
-            let i = (cx * ICON_SIZE as usize + cx) * 4;
-            let before = rgba[i + 3];
-            stamp_hot_dot(&mut rgba, ICON_SIZE);
-            assert_eq!(rgba[i + 3], 255, "{glyph:?}: the spec must be opaque");
-            assert!(rgba[i + 3] >= before);
-            assert_eq!(
-                &rgba[i..i + 3],
-                &ink(),
-                "{glyph:?}: the glyph's own ink, never a colour of its own"
-            );
-        }
     }
 
     /// Auto rests on CPU, turns for memory or disk, and memory wins

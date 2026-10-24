@@ -25,8 +25,10 @@
 //! Linux-only on purpose. macOS gets single-instance from LaunchServices
 //! and always has a menu bar item to click, so there is nothing here it
 //! needs and nothing here that could change how it behaves.
-
-use gpui::App;
+//!
+//! What a second launch asked for reaches the host through the handler
+//! [`serve`] is given (`nsh/linux.rs`), and the host decides what toggling
+//! the panel means.
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -237,42 +239,24 @@ fn deliver(mut stream: UnixStream, invocation: Invocation) {
     }
 }
 
-/// Serve the socket for the process lifetime.
-///
-/// One blocking thread on `accept`, funnelled onto the main-thread
-/// executor — the same shape `tray.rs` uses for its two event receivers,
-/// and for the same reason: these are blocking receivers that must not
-/// sit on gpui's loop.
-pub fn serve(listener: UnixListener, cx: &mut App) {
-    let (tx, rx) = smol::channel::unbounded::<Invocation>();
+/// Serve the socket for the process lifetime: one thread blocked on
+/// `accept`, handing each invocation to `deliver` on that thread, which
+/// takes it to wherever the host acts on it.
+pub fn serve(listener: UnixListener, deliver: impl Fn(Invocation) + Send + 'static) {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let Some(invocation) = read_one(stream) else {
                 continue;
             };
-            if tx.send_blocking(invocation).is_err() {
-                return;
-            }
-        }
-    });
-
-    cx.spawn(async move |cx| {
-        // Ends on its own: once the app shuts down this task stops being
-        // polled and the sender thread's channel drops.
-        while let Ok(invocation) = rx.recv().await {
             tracing::info!(
                 ?invocation,
                 this_build = crate::about::commit(),
                 "received from a second launch"
             );
-            cx.update(|cx| match invocation {
-                Invocation::Toggle => crate::toggle_main_window(cx, None),
-                Invocation::Launch => crate::show_main_window(cx),
-            });
+            deliver(invocation);
         }
-    })
-    .detach();
+    });
 }
 
 /// One line, one command. Anything else is ignored rather than answered:

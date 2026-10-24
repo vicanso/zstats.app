@@ -1,6 +1,6 @@
 //! The icon an application shows in the Dock, for a row that names a
 //! program: Overview's top apps, the Apps and Processes tabs, the
-//! Network tab's traffic card, and History (through [`for_record`],
+//! Network tab's traffic card, and History (through [`icon_for_record`],
 //! which checks the recorded pid still runs that program). A
 //! letter in a tile stood there before (`widgets::monogram`), and five
 //! letters in five grey tiles are read one by one, where Chrome's or
@@ -30,15 +30,28 @@
 //! list said less than the letters it replaced.
 //!
 //! Each bundle's icon is drawn once, as a small PNG, and kept for the
-//! session ([`for_pid`]): six Chrome helpers share one drawing. The
+//! session ([`icon_for_pid`]): six Chrome helpers share one drawing. The
 //! monogram's doc said why it did not do this: "the icon itself is a
 //! file read per app per paint" — which a cache by bundle makes once per
 //! app. The bundle a pid runs from is kept under the pid and the
 //! process's name: a pid can be reused, and a recycled pid under another
 //! program misses and asks again.
+//!
+//! The drawing is a PNG, kept as the `data:` URI NSH shows, made once
+//! with it. One cache for the process, behind a lock: NSH asks from each
+//! window's engine thread, and the drawing needs no particular thread —
+//! this module's test draws Finder's icon on a test runner's.
 
-use gpui::Image;
-use std::sync::Arc;
+use crate::assets;
+use std::sync::{Arc, OnceLock};
+
+/// An application's icon, drawn once as a small PNG.
+#[derive(Clone)]
+pub struct Icon {
+    /// The drawing as a `data:` URI, the way NSH takes an image — made
+    /// once, not per row per frame.
+    pub data_uri: Arc<str>,
+}
 
 /// The icon for the process `pid`, called `name` — or for the tree it
 /// roots — or `None` where the row keeps its letter (see the module
@@ -46,18 +59,18 @@ use std::sync::Arc;
 /// Cached for the session, answers included that were `None`; a miss
 /// costs one `proc_pidpath`, and a bundle not met before one AppKit
 /// drawing.
-pub fn for_pid(pid: u32, name: &str) -> Option<Arc<Image>> {
+pub fn icon_for_pid(pid: u32, name: &str) -> Option<Icon> {
     cached(pid, name, false)
 }
 
-/// [`for_pid`] for a process read back from the records — History's
+/// [`icon_for_pid`] for a process read back from the records — History's
 /// rows — whose pid may have exited since, or been handed to another
 /// program. The icon is given only while the pid still runs an
 /// executable of the recorded name (zstats' process name is the
 /// executable's file name, as sysinfo reads it on macOS); otherwise the
 /// row keeps its letter. A stranger's icon on a row would be a claim
 /// about the record that nothing behind it makes.
-pub fn for_record(pid: u32, name: &str) -> Option<Arc<Image>> {
+pub fn icon_for_record(pid: u32, name: &str) -> Option<Icon> {
     cached(pid, name, true)
 }
 
@@ -65,10 +78,9 @@ pub fn for_record(pid: u32, name: &str) -> Option<Arc<Image>> {
 /// not answer for a live row under the same pid and name, or the other
 /// way round.
 #[cfg(target_os = "macos")]
-fn cached(pid: u32, name: &str, recorded: bool) -> Option<Arc<Image>> {
-    use gpui::ImageFormat;
-    use std::cell::RefCell;
+fn cached(pid: u32, name: &str, recorded: bool) -> Option<Icon> {
     use std::collections::HashMap;
+    use std::sync::{Mutex, PoisonError};
 
     /// Processes the cache holds before it starts over. The Processes
     /// tab's full listing scrolls through every pid on the machine, so
@@ -86,14 +98,13 @@ fn cached(pid: u32, name: &str, recorded: bool) -> Option<Arc<Image>> {
         /// records; the bundle it runs from, `None` included.
         bundles: HashMap<(u32, String, bool), Option<String>>,
         /// A bundle's icon, `None` included.
-        icons: HashMap<String, Option<Arc<Image>>>,
+        icons: HashMap<String, Option<Icon>>,
     }
 
-    thread_local! {
-        static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
-    }
-    CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    let cache = cache.get_or_insert_with(Cache::default);
+    {
         let key = (pid, name.to_string(), recorded);
         let bundle = match cache.bundles.get(&key) {
             Some(hit) => hit.clone(),
@@ -109,20 +120,52 @@ fn cached(pid: u32, name: &str, recorded: bool) -> Option<Arc<Image>> {
         if let Some(hit) = cache.icons.get(&bundle) {
             return hit.clone();
         }
-        let icon =
-            native::icon_png(&bundle).map(|png| Arc::new(Image::from_bytes(ImageFormat::Png, png)));
+        let icon = native::icon_png(&bundle).map(|png| Icon {
+            data_uri: Arc::from(format!("data:image/png;base64,{}", base64(&png))),
+        });
         if cache.icons.len() >= BUNDLE_CAP {
             cache.icons.clear();
         }
         cache.icons.insert(bundle, icon.clone());
         icon
+    }
+}
+
+/// This app's own icon — the bundle's artwork, embedded as
+/// `zstats-icon.png` — as a `data:` URI, for the About page; made once.
+pub fn own_data_uri() -> Arc<str> {
+    static URI: OnceLock<Arc<str>> = OnceLock::new();
+    URI.get_or_init(|| {
+        let png = assets::get("zstats-icon.png").unwrap_or_default();
+        Arc::from(format!("data:image/png;base64,{}", base64(&png)))
     })
+    .clone()
+}
+
+/// Standard base64 with padding (RFC 4648 §4), for [`Icon::data_uri`].
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// No bundles to read an icon from off macOS: every row keeps its
 /// letter.
 #[cfg(not(target_os = "macos"))]
-fn cached(_pid: u32, _name: &str, _recorded: bool) -> Option<Arc<Image>> {
+fn cached(_pid: u32, _name: &str, _recorded: bool) -> Option<Icon> {
     None
 }
 
@@ -362,6 +405,27 @@ mod native {
                 );
                 assert_eq!(bundle_of(pid, Some("Safari")), None, "a reused pid");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 4648's own test vectors: every padding case.
+    #[test]
+    fn base64_is_the_standard_one() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(plain.as_bytes()), encoded, "{plain:?}");
         }
     }
 }

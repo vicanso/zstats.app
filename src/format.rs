@@ -481,9 +481,30 @@ pub fn tilde(path: &Path) -> String {
     )
 }
 
+/// Durations the way the config file writes them: the settings window's
+/// cadence rows, and the Alerts tab's armed list quoting the cooldown.
+pub fn humanize(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms >= 60_000 && ms.is_multiple_of(60_000) {
+        format!("{}m", ms / 60_000)
+    } else if ms.is_multiple_of(1_000) {
+        format!("{}s", ms / 1_000)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn humanize_matches_file_form() {
+        assert_eq!(humanize(Duration::ZERO), "0s");
+        assert_eq!(humanize(Duration::from_secs(2)), "2s");
+        assert_eq!(humanize(Duration::from_secs(60)), "1m");
+        assert_eq!(humanize(Duration::from_millis(500)), "500ms");
+    }
 
     #[test]
     fn drive_figures_keep_their_precision_where_it_means_something() {

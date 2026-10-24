@@ -9,7 +9,7 @@ const SUPPORTED: &[&str] = &["en", "zh"];
 
 /// Mirror of "the active locale draws its words in Han characters",
 /// kept by [`init`]. An atomic rather than a `rust_i18n::locale()`
-/// string compare because [`crate::theme::tiny_label`] asks on every
+/// string compare because [`crate::palette::tiny_label`] asks on every
 /// small label of every repaint, at the collector's cadence.
 static CJK: AtomicBool = AtomicBool::new(false);
 
@@ -44,7 +44,7 @@ pub fn init() {
 
 /// Whether the interface is written in Han characters. Answers for the
 /// *locale*, not for any particular string — what it feeds is the
-/// legibility concession in [`crate::theme::tiny_label`].
+/// legibility concession in [`crate::palette::tiny_label`].
 pub fn is_cjk() -> bool {
     CJK.load(Ordering::Relaxed)
 }

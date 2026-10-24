@@ -1,12 +1,13 @@
 //! Application-level state.
 //!
 //! The window is only a rendering layer, and it spends most of its life off
-//! screen: the panel is ordered out rather than destroyed (see `window_ext`),
-//! and gpui discards element state for anything it did not paint this frame.
-//! So everything that has to survive a hide → reveal round trip belongs here
-//! rather than in the root view — window geometry, the selected tab, per-tab
-//! scroll offsets. Collected metrics are the main tenant, and sampling runs
-//! whether or not a window exists at all.
+//! screen: the panel is ordered out rather than destroyed (`nsh/host.rs`),
+//! and what it shows is bound to the store's values. So everything that has
+//! to survive a hide → reveal round trip belongs here rather than in the root
+//! (gpui, which discarded element state for anything it did not paint that
+//! frame, made this a necessity; it is still the rule) — window geometry, the
+//! selected tab, per-tab scroll offsets. Collected metrics are the main
+//! tenant, and sampling runs whether or not a window exists at all.
 //!
 //! Disk analysis lives in [`analysis`], alert episodes in [`alerts`]: both
 //! are store-owned, but changing either used to mean editing this whole file.
@@ -14,10 +15,12 @@
 mod alerts;
 mod analysis;
 mod dupes;
+pub mod effects;
 
 pub use alerts::SeenAlert;
 pub use analysis::{DiskAnalysis, Expansion, GrowthNotice, StorageTab};
 pub use dupes::{DupeProgress, DupeSearch};
+pub use effects::{Effects, Reply};
 
 use alerts::{AlertBook, keep_alert};
 use analysis::Analysis;
@@ -29,36 +32,30 @@ use crate::cachepreset;
 use crate::cleanhints;
 use crate::diskwatch;
 use crate::fullscan::{self, GroupScan, Scan};
+use crate::geom::Rect;
 use crate::history;
 use crate::history::Spender;
 use crate::i18n;
 use crate::metrics;
+use crate::notify;
 use crate::prefs;
 use crate::procscan;
 use crate::series;
 use crate::spaceinfo::{self, SpaceInfo};
 use crate::traffic::{self, ProgramRate};
-use crate::tray;
 use crate::trend::{self, AppTrend, MIB};
 use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedRule, SustainedWatch};
 use crate::webhook;
-use gpui::{
-    App, AppContext, Bounds, Context, Entity, Focusable, Global, ListAlignment, ListState, Pixels,
-    ScrollHandle, Window, px,
-};
-use gpui_kit::component::input::{InputEvent, InputState};
-use std::array;
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::collections::hash_map::{DefaultHasher, Entry};
-use std::hash::{Hash, Hasher};
+use std::collections::hash_map::Entry;
 use std::mem;
-use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zstats::settings::FileConfig;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
@@ -197,19 +194,6 @@ impl Tab {
     /// Stable index, used to key per-tab UI state such as scroll position.
     pub fn index(self) -> usize {
         Tab::ALL.iter().position(|t| *t == self).unwrap_or_default()
-    }
-
-    /// Stable element id — English, not translated.
-    pub fn label(self) -> &'static str {
-        match self {
-            Tab::Overview => "Overview",
-            Tab::Apps => "Apps",
-            Tab::Processes => "Processes",
-            Tab::Hardware => "Hardware",
-            Tab::Net => "Network",
-            Tab::Alerts => "Alerts",
-            Tab::History => "History",
-        }
     }
 
     /// File key in `app.toml`; `None` for Overview, which is the default
@@ -411,15 +395,6 @@ const EJECT_HIDE_MAX: Duration = Duration::from_secs(60);
 /// minute can only return what is already on screen.
 const HISTORY_FRESH: Duration = Duration::from_secs(60);
 
-/// Whether the panel is on screen. Tab-entry work (History read,
-/// `tmutil` probe, topology fetch) keys off this rather than the
-/// selected tab alone: the tab outlives a hide and, since it is
-/// remembered, a restart too.
-fn panel_visible(cx: &App) -> bool {
-    cx.try_global::<metrics::CollectorPace>()
-        .is_some_and(|p| p.is_visible())
-}
-
 /// The one-shot listing of every process, behind the All chip.
 ///
 /// Separate from the collected [`Tick`] on purpose: the panel's list is the
@@ -453,12 +428,10 @@ pub struct FullScanData {
     /// Indices into `processes` that the name filter keeps — the rows the
     /// list actually shows. The whole range while no filter is active.
     pub visible: Vec<usize>,
-    /// Drives the virtualised list: measured row heights plus the scroll
-    /// offset. Lives here because gpui drops element state it did not
-    /// paint and the panel repaints per tick — built per frame, the list
-    /// would snap to the top every couple of seconds. Rebuilt with each
-    /// scan, so a new photograph starts at the top with an empty cache.
-    pub list: ListState,
+    /// Which row set `visible` is: new with each scan and each change of
+    /// the filter, so the page's virtual list starts a new photograph
+    /// at the top with an empty cache, and keeps its scroll otherwise.
+    pub rows: u64,
 }
 
 /// The one-shot listing of every process tree, behind the Apps All chip.
@@ -481,7 +454,8 @@ pub struct FullAppScanData {
     pub window: Duration,
     pub at: Instant,
     pub visible: Vec<usize>,
-    pub list: ListState,
+    /// See [`FullScanData::rows`].
+    pub rows: u64,
 }
 
 /// Full process table, for naming every member of an expanded Apps tree.
@@ -686,9 +660,57 @@ fn member_table_next(table: &MemberTable, now: Instant, interval: Duration) -> M
     }
 }
 
+/// Clicking the tray icon first takes focus away from the panel, which
+/// auto-hides it, and only then delivers the click. A click landing inside
+/// this window of an auto-hide is read as "the user wanted it gone" and does
+/// not reopen — that's what makes the tray icon toggle. The hosts ask
+/// [`ZStatsAppState::took_recent_auto_hide`] with it.
+pub const TOGGLE_GRACE: Duration = Duration::from_millis(300);
+
+/// How long a freshly mapped layer surface is immune to both auto-hide
+/// paths.
+///
+/// A panel that has been on screen for a tenth of a second has not been
+/// looked away from, whatever the compositor just said. It exists
+/// because Wayland offers two dismissal signals and neither is
+/// trustworthy in the frames right after a map: keyboard focus can
+/// arrive and leave again on its own under focus-follows-mouse, and the
+/// pointer's first enter/leave pair can land before the user has moved
+/// at all. macOS needs none of it — an `NSWindow` that
+/// `activate_window` brought up stays active until something takes it.
+///
+/// Deliberately short: a floor under "the panel just opened", not a
+/// window in which it refuses to close. A real click away is produced
+/// by a human hand and arrives later than this at the very earliest.
+#[cfg(target_os = "linux")]
+pub const REVEAL_GRACE: Duration = Duration::from_millis(150);
+
+/// How long the pointer has to stay outside before that counts as a
+/// dismissal.
+///
+/// The panel maps flush under the bar, so a tray click whose cursor sat
+/// a few pixels above the panel's top edge puts the new surface *under*
+/// the pointer. Wayland then sends `wl_pointer.enter` for a panel the
+/// user has not reached, and the next small movement back into the bar
+/// is a `leave` — which used to close it on the spot. Whether that
+/// happened at all depended on where in the bar the click landed, which
+/// is exactly why it looked intermittent rather than broken.
+///
+/// Re-checking on the next frame, which this replaces, is microseconds
+/// and settles nothing. 400ms is longer than the gap between an
+/// accidental enter and the deliberate move that follows it, and short
+/// enough that a real look-away still reads as immediate.
+#[cfg(target_os = "linux")]
+pub const POINTER_LEAVE_GRACE: Duration = Duration::from_millis(400);
+
 pub struct ZStatsAppState {
-    window_bounds: Option<Bounds<Pixels>>,
+    window_bounds: Option<Rect>,
     scale_factor: f32,
+    /// The collector's pace (`metrics::CollectorPace`): whether the panel
+    /// is on screen, and the way to tell the collector which tab is. Set
+    /// once the collector runs (`set_pace`); `None` before that, and in
+    /// tests, where the panel counts as hidden.
+    pace: Option<metrics::CollectorPace>,
     last_auto_hide: Option<Instant>,
     pub(crate) latest: Option<Tick>,
     pub(crate) alert_book: AlertBook,
@@ -728,14 +750,12 @@ pub struct ZStatsAppState {
     /// The failure already logged. A blip while a ranking is on screen
     /// must not warn on every background read.
     traffic_fault: Option<String>,
-    /// The listening card's search input, created on first open (an
-    /// [`InputState`] needs a `Window`) and kept, like the process filter.
-    listen_filter: Option<Entity<InputState>>,
-    /// Whether the search row is on screen. Closing clears the text, for
+    /// Whether the listening card's search row is on screen (the input
+    /// itself is the page's). Closing clears the text, for
     /// the process filter's reason: a hidden query that kept filtering
     /// would read as listeners vanishing.
     listen_filter_open: bool,
-    /// The query, lowercased and trimmed, mirrored out of the entity on
+    /// The query, lowercased and trimmed, mirrored out of the input on
     /// every change so the view can read it as plain state.
     listen_filter_text: String,
     /// Directory analyser + large-file query. Survives hide for the
@@ -751,28 +771,11 @@ pub struct ZStatsAppState {
     space: Option<SpaceInfo>,
     space_at: Option<Instant>,
     space_inflight: bool,
-    /// The popover panel. Hidden rather than destroyed on macOS, so this
-    /// outlives hide → show. Settings and storage already keep theirs;
-    /// `cx.windows().first()` is SlotMap insertion order, not "the
-    /// panel", and would `orderOut` the wrong window once another exists.
-    panel_window: Option<gpui::AnyWindowHandle>,
-    /// The settings window, if one was ever opened. Kept so a second
-    /// click focuses the existing window; a handle whose window the user
-    /// closed fails its update and a fresh window is built instead.
-    settings_window: Option<gpui::AnyWindowHandle>,
-    /// The disk-space window (large files + the analyser), same
-    /// reuse-or-rebuild contract as [`Self::settings_window`].
-    storage_window: Option<gpui::AnyWindowHandle>,
-    /// Bumped by the Interface page's pref setters ([`crate::repaint`]).
-    /// Prefs live in `app.toml`, not this struct, so a collector tick
-    /// must not look like a chip click to the settings window's observer.
-    ui_epoch: u64,
-    /// Which showing of the panel this is — bumped on every hide. It
-    /// keys the footer's keep-awake menu: gpui-kit keeps a dropdown open
-    /// until it is dismissed from inside its window, a hide comes from
-    /// outside, and the panel is hidden rather than destroyed — so a
-    /// menu open when the panel went away was still open, an hour later,
-    /// on the frame it came back.
+    /// Which showing of the panel this is — bumped on every hide. The
+    /// panel's menus close on it (`nsh::root::close_on_hide`): a hide
+    /// comes from outside the menu, and the panel is hidden rather than
+    /// destroyed — so a menu open when the panel went away was still
+    /// open, an hour later, on the frame it came back.
     panel_visit: u32,
     /// Volumes this session has successfully ejected, and when. They
     /// are hidden from the Hardware tab until the snapshot stops
@@ -868,33 +871,19 @@ pub struct ZStatsAppState {
     /// opening All on Processes must not be how you get Chrome's helpers,
     /// and landing this must not flip that tab into its full listing.
     member_table: MemberTable,
-    /// The name-filter input, created on first open — [`InputState`] needs
-    /// a `Window`, which only the toggle click has. Kept once created, so
-    /// reopening the filter does not rebuild cursor/undo state.
-    proc_filter: Option<Entity<InputState>>,
-    /// Whether the filter row is on screen. Closing clears the text — a
+    /// Whether the process name filter's row is on screen (the input is
+    /// the page's). Closing clears the text — a
     /// hidden filter that kept filtering would read as processes vanishing.
     proc_filter_open: bool,
-    /// The query, lowercased, mirrored out of the entity on every change.
+    /// The query, lowercased, mirrored out of the input on every change.
     /// Views read the store without an `App` in hand, and the full-scan
-    /// list must be rebuilt when the row set changes — both want the text
-    /// as plain state, not behind an entity read.
+    /// rows must be recut when it changes — both want the text as plain
+    /// state.
     proc_filter_text: String,
-    /// One scroll offset per tab, indexed by [`Tab::index`].
-    ///
-    /// Has to live here rather than on the element: gpui keys element state by
-    /// id and drops whatever it did not paint, and only one tab's body is ever
-    /// painted. A per-tab id alone therefore resets every tab to the top on
-    /// each switch — holding the handles across frames is what actually
-    /// remembers the position.
-    scroll: [ScrollHandle; Tab::ALL.len()],
-    /// Scroll for the rows region *inside* the Processes top-N card — the
-    /// rows scroll under a pinned header, so they need a handle of their
-    /// own, held here for the same reason as the per-tab ones above.
-    proc_rows_scroll: ScrollHandle,
-    /// Same, for the Applications card.
-    history_rows_scroll: ScrollHandle,
-    app_rows_scroll: ScrollHandle,
+    /// Names each row set a full listing has shown ([`FullScanData::rows`]),
+    /// so the page's virtual list knows when it is looking at a new
+    /// one. Only ever counts up.
+    list_epoch: u64,
     /// One-shot "scroll the Apps list to the selected row on the next
     /// paint", armed by [`Self::reveal_app`]. A `Cell` because the
     /// consumer is the render pass, which holds `&self`; taken once,
@@ -909,6 +898,7 @@ impl Default for ZStatsAppState {
         Self {
             window_bounds: None,
             scale_factor: 1.0,
+            pace: None,
             last_auto_hide: None,
             latest: None,
             alert_book: AlertBook::default(),
@@ -930,7 +920,6 @@ impl Default for ZStatsAppState {
             traffic_baseline: None,
             traffic_curves: traffic::CurveBook::default(),
             traffic_fault: None,
-            listen_filter: None,
             listen_filter_open: false,
             listen_filter_text: String::new(),
             analysis: Analysis::default(),
@@ -938,10 +927,6 @@ impl Default for ZStatsAppState {
             space: None,
             space_at: None,
             space_inflight: false,
-            panel_window: None,
-            settings_window: None,
-            storage_window: None,
-            ui_epoch: 0,
             panel_visit: 0,
             ejected: HashMap::new(),
             proc_sort: ProcSort::default(),
@@ -976,13 +961,9 @@ impl Default for ZStatsAppState {
             full_scan: FullScan::default(),
             full_app_scan: FullAppScan::default(),
             member_table: MemberTable::default(),
-            proc_filter: None,
             proc_filter_open: false,
             proc_filter_text: String::new(),
-            scroll: array::from_fn(|_| ScrollHandle::new()),
-            proc_rows_scroll: ScrollHandle::new(),
-            history_rows_scroll: ScrollHandle::new(),
-            app_rows_scroll: ScrollHandle::new(),
+            list_epoch: 0,
             app_reveal: Cell::new(false),
             proc_reveal: Cell::new(false),
         }
@@ -1025,9 +1006,9 @@ impl ZStatsAppState {
     /// up to a full `disk_io_refresh_interval`, because zstats serves
     /// the whole disk list from cache between refreshes; waking the
     /// collector does not help, since that cadence is wall-clock.
-    pub fn mark_ejected(&mut self, mount: String, cx: &mut Context<Self>) {
+    pub fn mark_ejected(&mut self, mount: String, fx: &mut dyn Effects) {
         self.ejected.insert(mount, Instant::now());
-        cx.notify();
+        fx.changed();
     }
 
     /// Whether a volume card should be withheld this frame.
@@ -1043,10 +1024,124 @@ impl ZStatsAppState {
         });
     }
 
+    /// One tick from the collector, folded in and delivered: the store
+    /// takes it (`ingest`), each alert it reported passes the three banner
+    /// gates and is posted or logged as held back, the watchers' notices
+    /// go out the same way, and the tray and the panel's height follow.
+    /// The host hands every tick here, on a thread of its own, under the
+    /// store's lock.
+    pub fn on_tick(&mut self, tick: Tick, fx: &mut dyn Effects) {
+        let now = Instant::now();
+        // The user's master switch, ahead of the per-episode gates: while
+        // banners are off nothing interrupts, so neither the snooze clock
+        // nor the auto-quiet window should record a delivery that never
+        // happened.
+        let muted = !prefs::notifications();
+        for event in self.ingest(tick, fx) {
+            // Quiet subjects still land in the Alerts list above — only the
+            // banner stays quiet. Three gates: the global switch, the
+            // snooze the user asked for, and the auto-quiet for a subject
+            // that has already interrupted twice this hour.
+            //
+            // Each verdict is logged: a banner that silently stayed away is
+            // indistinguishable from a rule that stopped firing (the same
+            // reason the card wears a pill), and the log is where that
+            // question gets answered a day later.
+            let snoozed = !muted && self.banner_snoozed(&event);
+            let damped = !muted && !snoozed && self.banner_damped(&event, now);
+            tracing::info!(
+                kind = ?event.kind(),
+                subject = ?event.subject,
+                banner = if muted {
+                    "muted"
+                } else if snoozed {
+                    "snoozed"
+                } else if damped {
+                    "auto-quieted"
+                } else {
+                    "delivered"
+                },
+                "alert reported"
+            );
+            if muted || snoozed || damped {
+                continue;
+            }
+            notify::post(&event);
+        }
+        for notice in self.take_sustained_notices() {
+            tracing::info!(
+                pid = notice.pid,
+                name = %notice.name,
+                banner = if muted { "muted" } else { "delivered" },
+                "sustained-load notice"
+            );
+            if !muted {
+                notify::post_sustained(&notice);
+            }
+        }
+        for notice in self.take_disk_growth_notices() {
+            tracing::info!(
+                path = %notice.growth.path.display(),
+                grew = notice.growth.grew,
+                now = notice.growth.now,
+                banner = if muted { "muted" } else { "delivered" },
+                "disk growth notice"
+            );
+            if !muted {
+                notify::post_disk_growth(&notice);
+            }
+        }
+        for creep in self.take_memory_creep_notices() {
+            tracing::info!(
+                name = %creep.name,
+                climb_bytes = creep.climb_bytes,
+                now_bytes = creep.now_bytes,
+                banner = if muted { "muted" } else { "delivered" },
+                "memory creep notice"
+            );
+            if !muted {
+                notify::post_memory_creep(&creep);
+            }
+        }
+        // After ingest, not before: the tray's auto mode reads the episode
+        // list this tick just merged into, and a memory alert should turn
+        // the face on the sample that reported it.
+        fx.sync_tray(self);
+        // Last: it resizes the panel, which reads the store.
+        fx.fit_panel();
+    }
+
+    /// Sweep for zombie and stopped processes on their own cadence, for
+    /// the life of the process.
+    ///
+    /// Separate from the metrics collector on purpose: zstats keeps only
+    /// the top N processes by CPU then memory, and an abnormal process
+    /// scores near zero on both — on this machine they ranked 435th and
+    /// below, so they can never appear in the panel's process table.
+    pub fn start_abnormal_scan(&mut self, fx: &mut dyn Effects) {
+        /// Far cheaper than a metrics sample — one `sysctl` on macOS, one
+        /// `/proc` walk on Linux, no per-process CPU/memory accounting —
+        /// and what it looks for changes on the scale of minutes or days,
+        /// not seconds.
+        const ABNORMAL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+        effects::background(fx, |reply| {
+            loop {
+                // A failed scan is not "no zombies": skip the replace so
+                // observation clocks keep running.
+                if let Some(found) = procscan::scan()
+                    && !reply.apply(move |state, fx| state.set_abnormal(found, fx))
+                {
+                    return;
+                }
+                thread::sleep(ABNORMAL_SCAN_INTERVAL);
+            }
+        });
+    }
+
     /// Fold one collection round into the state. Returns the events that
     /// arrived this tick so the caller can deliver desktop notifications
     /// without walking the accumulated list.
-    pub fn ingest(&mut self, tick: Tick, cx: &mut Context<Self>) -> Vec<AlertEvent> {
+    pub fn ingest(&mut self, tick: Tick, fx: &mut dyn Effects) -> Vec<AlertEvent> {
         let now = Instant::now();
         let wall = SystemTime::now();
         // Who a webhook body says it is from — zstats' own host record,
@@ -1067,7 +1162,7 @@ impl ZStatsAppState {
             // to it: the spec is "you have not opened that tab", not a
             // count of undismissed cards. Hidden, or on another tab,
             // `record_alert` has already lit it.
-            if self.alerts_are_showing(cx) {
+            if self.alerts_are_showing() {
                 self.see_alerts();
             }
             // The file mirrors the list, so it is rewritten where the
@@ -1191,21 +1286,17 @@ impl ZStatsAppState {
         // interesting while someone is looking at the Hardware tab —
         // on screen, not merely selected: the tab survives hide (and a
         // restart), and the probe spawns `tmutil` once a minute.
-        if self.tab == Tab::Hardware && panel_visible(cx) {
-            self.ensure_space_info(cx);
+        if self.tab == Tab::Hardware && self.panel_visible() {
+            self.ensure_space_info(fx);
         }
         // Listeners are a photograph of a visit. Traffic is a ten-minute
         // curve, so it keeps sampling on this tick — every 2s while that
         // tab is on screen, every 10s otherwise — and a late answer is
         // kept even when nobody is looking.
-        self.ensure_traffic(cx);
+        self.ensure_traffic(fx);
         // The daily disk check rides the tick like the reads above, but
         // only ever starts when nobody is looking (`diskwatch::due`).
-        let storage_open = self.storage_window.is_some_and(|handle| {
-            cx.windows()
-                .iter()
-                .any(|w| w.window_id() == handle.window_id())
-        });
+        let storage_open = fx.storage_window_open();
         let (on_battery, cpu_percent, logical_cores) =
             self.latest().map_or((false, None, 1), |tick| {
                 (
@@ -1217,29 +1308,29 @@ impl ZStatsAppState {
         let moment = analysis::DiskCheckMoment {
             on_battery,
             cpu_percent,
-            someone_looking: panel_visible(cx) || storage_open,
+            someone_looking: self.panel_visible() || storage_open,
             logical_cores,
         };
-        self.maybe_check_disk(moment, cx);
-        if self.tab == Tab::Net && panel_visible(cx) {
-            self.ensure_listeners(cx);
+        self.maybe_check_disk(moment, fx);
+        if self.tab == Tab::Net && self.panel_visible() {
+            self.ensure_listeners(fx);
         }
         self.prune_stale_alerts();
         self.forget_ended_watch();
-        self.maybe_auto_check_update(cx);
+        self.maybe_auto_check_update(fx);
         // Views cannot start work. Hide drops the table. A still-open
         // expansion, or a job face the tick cannot name, asks from here
         // so the row title is `cargo` before anyone clicks, and a
         // 15s-old photograph is replaced.
-        self.ensure_apps_topology(cx);
-        cx.notify();
+        self.ensure_apps_topology(fx);
+        fx.changed();
         fresh
     }
 
     /// Refresh the purgeable/snapshot readout when it has gone stale.
     /// Single-flight; the probe spawns `tmutil`, so it stays off the
     /// main thread and well below the collection cadence.
-    fn ensure_space_info(&mut self, cx: &mut Context<Self>) {
+    fn ensure_space_info(&mut self, fx: &mut dyn Effects) {
         /// Purgeable space moves slowly and the probe costs a process
         /// spawn — one refresh a minute is plenty.
         const SPACE_REFRESH: Duration = Duration::from_secs(60);
@@ -1247,26 +1338,22 @@ impl ZStatsAppState {
             return;
         }
         self.space_inflight = true;
-        cx.spawn(async move |this, cx| {
-            let info = cx
-                .background_executor()
-                .spawn(async { spaceinfo::probe() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        effects::background(fx, move |reply| {
+            let info = spaceinfo::probe();
+            reply.apply(move |state, fx| {
                 state.space = Some(info);
                 state.space_at = Some(Instant::now());
                 state.space_inflight = false;
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// Read the listening sockets when the card has nothing, or has held
     /// the same answer for [`LISTENERS_REFRESH`]. Single-flight, and off
     /// the main thread: `zstats::listeners` reads the kernel's socket
     /// tables and a few process entries.
-    fn ensure_listeners(&mut self, cx: &mut Context<Self>) {
+    fn ensure_listeners(&mut self, fx: &mut dyn Effects) {
         if self.listeners_inflight
             || self
                 .listeners_at
@@ -1275,17 +1362,14 @@ impl ZStatsAppState {
             return;
         }
         self.listeners_inflight = true;
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async { zstats::listeners() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        effects::background(fx, move |reply| {
+            let outcome = zstats::listeners();
+            reply.apply(move |state, fx| {
                 state.listeners_inflight = false;
                 // Hidden while the tables were being read: the hide
                 // already dropped the card, and a late answer must not
                 // bring it back for a panel nobody is looking at.
-                if !(state.tab == Tab::Net && panel_visible(cx)) {
+                if !(state.tab == Tab::Net && state.panel_visible()) {
                     return;
                 }
                 let view = match outcome {
@@ -1303,10 +1387,9 @@ impl ZStatsAppState {
                 };
                 state.listeners = Some(view);
                 state.listeners_at = Some(Instant::now());
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// The listening card's last answer; `None` before the first read of
@@ -1322,27 +1405,24 @@ impl ZStatsAppState {
     /// kernel read as [`Self::ensure_listeners`], which still runs only
     /// while the Network tab is on screen. This one does not: the curve
     /// is filled from the resident tick.
-    fn ensure_traffic(&mut self, cx: &mut Context<Self>) {
+    fn ensure_traffic(&mut self, fx: &mut dyn Effects) {
         if !zstats::snapshot::Capabilities::current().process_traffic {
             return;
         }
         let wait = traffic_wait(
             self.traffic.as_ref(),
-            self.tab == Tab::Net && panel_visible(cx),
+            self.tab == Tab::Net && self.panel_visible(),
         );
         if self.traffic_inflight || !traffic_due(self.traffic_at, Instant::now(), wait) {
             return;
         }
         self.traffic_inflight = true;
-        cx.spawn(async move |this, cx| {
-            let (outcome, at) = cx
-                .background_executor()
-                .spawn(async {
-                    let outcome = zstats::process_traffic();
-                    (outcome, Instant::now())
-                })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        effects::background(fx, move |reply| {
+            let (outcome, at) = {
+                let outcome = zstats::process_traffic();
+                (outcome, Instant::now())
+            };
+            reply.apply(move |state, fx| {
                 state.traffic_inflight = false;
                 // Applied even if the panel hid or the tab changed while
                 // the tables were being read. Dropping a late answer
@@ -1351,12 +1431,11 @@ impl ZStatsAppState {
                 // on screen — a hidden window is not being drawn, and
                 // another tab does not show this one.
                 state.apply_traffic(outcome, at);
-                if state.tab == Tab::Net && panel_visible(cx) {
-                    cx.notify();
+                if state.tab == Tab::Net && state.panel_visible() {
+                    fx.changed();
                 }
             });
-        })
-        .detach();
+        });
     }
 
     /// Fold one `process_traffic()` result into the ranking and the curve.
@@ -1463,9 +1542,9 @@ impl ZStatsAppState {
         self.show_all_traffic
     }
 
-    pub fn toggle_all_traffic(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_all_traffic(&mut self, fx: &mut dyn Effects) {
         self.show_all_traffic = !self.show_all_traffic;
-        cx.notify();
+        fx.changed();
     }
 
     /// Make the next tick re-read the listening sockets instead of waiting
@@ -1480,17 +1559,13 @@ impl ZStatsAppState {
         self.show_all_listeners
     }
 
-    pub fn toggle_all_listeners(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_all_listeners(&mut self, fx: &mut dyn Effects) {
         self.show_all_listeners = !self.show_all_listeners;
-        cx.notify();
+        fx.changed();
     }
 
     pub fn listen_filter_open(&self) -> bool {
         self.listen_filter_open
-    }
-
-    pub fn listen_filter_input(&self) -> Option<&Entity<InputState>> {
-        self.listen_filter.as_ref()
     }
 
     /// The lowercased, trimmed search; empty while the search is closed.
@@ -1498,42 +1573,26 @@ impl ZStatsAppState {
         &self.listen_filter_text
     }
 
-    /// Show or hide the listening card's search, creating the input on
-    /// first use — the process filter's shape, without its full-scan
-    /// rebuild: this list is recomputed from the answer on every paint.
-    pub fn toggle_listen_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.listen_filter_open {
-            self.listen_filter_open = false;
-            // `set_value` emits no Change event, so the mirror is cleared
-            // by hand.
-            if let Some(input) = &self.listen_filter {
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-            }
-            self.listen_filter_text.clear();
-        } else {
-            self.listen_filter_open = true;
-            if self.listen_filter.is_none() {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(i18n::tr("listen.filter_placeholder"))
-                        // Esc clears, through the path that emits Change.
-                        .clean_on_escape()
-                });
-                cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.listen_filter_text = input.read(cx).value().trim().to_lowercase();
-                        cx.notify();
-                    }
-                })
-                .detach();
-                self.listen_filter = Some(input);
-            }
-            // Focus so typing can start without a second click.
-            if let Some(input) = &self.listen_filter {
-                input.read(cx).focus_handle(cx).focus(window, cx);
-            }
-        }
-        cx.notify();
+    /// The listening card's search comes on screen, empty.
+    pub fn open_listen_filter(&mut self, fx: &mut dyn Effects) {
+        self.listen_filter_open = true;
+        fx.changed();
+    }
+
+    /// The search goes, and its query with it, for the process filter's
+    /// reason.
+    pub fn close_listen_filter(&mut self, fx: &mut dyn Effects) {
+        self.listen_filter_open = false;
+        self.listen_filter_text.clear();
+        fx.changed();
+    }
+
+    /// What the search says now, from its input: trimmed and lowercased.
+    /// This list is recomputed from the answer on every paint, so there is
+    /// nothing to recut.
+    pub fn set_listen_filter_text(&mut self, text: &str, fx: &mut dyn Effects) {
+        self.listen_filter_text = text.trim().to_lowercase();
+        fx.changed();
     }
 
     pub fn space_info(&self) -> Option<&SpaceInfo> {
@@ -1573,9 +1632,9 @@ impl ZStatsAppState {
     }
 
     /// Replace the abnormal-process list from a fresh scan.
-    pub fn set_abnormal(&mut self, found: Vec<procscan::AbnormalProcess>, cx: &mut Context<Self>) {
+    pub fn set_abnormal(&mut self, found: Vec<procscan::AbnormalProcess>, fx: &mut dyn Effects) {
         self.abnormal.replace(found, Instant::now());
-        cx.notify();
+        fx.changed();
     }
 
     /// Abnormal processes that have stayed that way long enough to matter.
@@ -1739,41 +1798,41 @@ impl ZStatsAppState {
         self.proc_sort
     }
 
-    pub fn set_proc_sort(&mut self, sort: ProcSort, cx: &mut Context<Self>) {
+    pub fn set_proc_sort(&mut self, sort: ProcSort, fx: &mut dyn Effects) {
         self.proc_sort = sort;
-        cx.notify();
+        fx.changed();
     }
 
     pub fn app_sort(&self) -> AppSort {
         self.app_sort
     }
 
-    pub fn set_app_sort(&mut self, sort: AppSort, cx: &mut Context<Self>) {
+    pub fn set_app_sort(&mut self, sort: AppSort, fx: &mut dyn Effects) {
         self.app_sort = sort;
-        cx.notify();
+        fx.changed();
     }
 
-    pub fn toggle_only_abnormal(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_only_abnormal(&mut self, fx: &mut dyn Effects) {
         self.only_abnormal = !self.only_abnormal;
-        cx.notify();
+        fx.changed();
     }
 
     pub fn show_unused_nets(&self) -> bool {
         self.show_unused_nets
     }
 
-    pub fn toggle_unused_nets(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_unused_nets(&mut self, fx: &mut dyn Effects) {
         self.show_unused_nets = !self.show_unused_nets;
-        cx.notify();
+        fx.changed();
     }
 
     pub fn show_all_sensors(&self) -> bool {
         self.show_all_sensors
     }
 
-    pub fn toggle_all_sensors(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_all_sensors(&mut self, fx: &mut dyn Effects) {
         self.show_all_sensors = !self.show_all_sensors;
-        cx.notify();
+        fx.changed();
     }
 
     /// How long we have observed this pid as abnormal. Always a lower bound:
@@ -1793,7 +1852,7 @@ impl ZStatsAppState {
         &mut self,
         key: &str,
         value: &str,
-        cx: &mut Context<Self>,
+        fx: &mut dyn Effects,
     ) -> Result<(), String> {
         let file = persist_setting(&zstats::settings::default_dir(), key, value)?;
         self.settings = Some(file);
@@ -1802,10 +1861,10 @@ impl ZStatsAppState {
         } else {
             metrics::request_reload();
         }
-        if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
+        if let Some(pace) = self.pace.as_ref() {
             pace.wake();
         }
-        cx.notify();
+        fx.changed();
         Ok(())
     }
 
@@ -1817,14 +1876,14 @@ impl ZStatsAppState {
         key: &str,
         name: &str,
         value: &str,
-        cx: &mut Context<Self>,
+        fx: &mut dyn Effects,
     ) -> Result<(), String> {
         let payload = if name.is_empty() {
             value.to_string()
         } else {
             format!("{name}={value}")
         };
-        self.apply_setting(key, &payload, cx)
+        self.apply_setting(key, &payload, fx)
     }
 
     /// Drop one per-subject `[alerts]` override, so that subject falls
@@ -1841,31 +1900,31 @@ impl ZStatsAppState {
         &mut self,
         key: &str,
         name: &str,
-        cx: &mut Context<Self>,
+        fx: &mut dyn Effects,
     ) -> Result<(), String> {
         let file = remove_setting(&zstats::settings::default_dir(), key, name)?;
         self.settings = Some(file);
         // Overrides live in `[alerts]`, the one section that reloads in
         // place — no collector rebuild, so no rate baselines are lost.
         metrics::request_reload();
-        if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
+        if let Some(pace) = self.pace.as_ref() {
             pace.wake();
         }
-        cx.notify();
+        fx.changed();
         Ok(())
     }
 
     /// Replace `config.toml` with zstats builtins. Language and theme live
     /// in `app.toml` and are left alone. Collector fields are baked in at
     /// construction, so this rebuilds the `Monitor`.
-    pub fn reset_settings(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn reset_settings(&mut self, fx: &mut dyn Effects) -> Result<(), String> {
         let file = reset_config(&zstats::settings::default_dir())?;
         self.settings = Some(file);
         metrics::request_rebuild();
-        if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
+        if let Some(pace) = self.pace.as_ref() {
             pace.wake();
         }
-        cx.notify();
+        fx.changed();
         Ok(())
     }
 
@@ -1875,77 +1934,10 @@ impl ZStatsAppState {
         self.tab
     }
 
-    pub fn panel_window(&self) -> Option<gpui::AnyWindowHandle> {
-        self.panel_window
-    }
-
-    pub fn set_panel_window(&mut self, handle: gpui::AnyWindowHandle) {
-        self.panel_window = Some(handle);
-    }
-
-    pub fn settings_window(&self) -> Option<gpui::AnyWindowHandle> {
-        self.settings_window
-    }
-
-    /// Interface-page prefs are not fields here. Bumping this is what
-    /// makes the settings window's observer treat a chip click as news
-    /// without also following every collector tick.
-    pub fn bump_ui(&mut self) {
-        self.ui_epoch = self.ui_epoch.wrapping_add(1);
-    }
-
-    /// See the field: an element id for whatever must not outlive the
-    /// showing it was opened in.
+    /// See the field: what must not outlive the showing it was opened in
+    /// reads it.
     pub fn panel_visit(&self) -> u32 {
         self.panel_visit
-    }
-
-    /// What the settings window actually paints from this store. A
-    /// collector tick changes `latest` and must not match; an update
-    /// download, a template fetch, a config.toml write, or a pref chip
-    /// must. Compared by the window's observer so it can skip `notify`.
-    pub fn settings_paint_token(&self) -> u64 {
-        let mut h = DefaultHasher::new();
-        self.ui_epoch.hash(&mut h);
-        self.settings
-            .as_ref()
-            .map(|s| s as *const FileConfig as usize)
-            .unwrap_or(0)
-            .hash(&mut h);
-        self.update_nudge.hash(&mut h);
-        self.update_ignored.hash(&mut h);
-        self.template_nudge.hash(&mut h);
-        hash_update_status(&self.update_status, &mut h);
-        hash_template_sync(&self.template_sync, &mut h);
-        match &self.hints_sync {
-            None => 0u8.hash(&mut h),
-            Some(HintsSync::Running) => 1u8.hash(&mut h),
-            Some(HintsSync::Done(_)) => 2u8.hash(&mut h),
-        }
-        match &self.caches_sync {
-            None => 0u8.hash(&mut h),
-            Some(CachesSync::Running) => 1u8.hash(&mut h),
-            Some(CachesSync::Done(_)) => 2u8.hash(&mut h),
-        }
-        h.finish()
-    }
-
-    pub fn set_settings_window(&mut self, handle: gpui::AnyWindowHandle) {
-        self.settings_window = Some(handle);
-    }
-
-    pub fn storage_window(&self) -> Option<gpui::AnyWindowHandle> {
-        self.storage_window
-    }
-
-    pub fn set_storage_window(&mut self, handle: gpui::AnyWindowHandle) {
-        self.storage_window = Some(handle);
-    }
-
-    /// This tab's scroll offset, held across frames so switching away and
-    /// back returns to where the list was left.
-    pub fn scroll_handle(&self, tab: Tab) -> &ScrollHandle {
-        &self.scroll[tab.index()]
     }
 
     /// Back to a clean slate for the next open. The name filter and the
@@ -1959,14 +1951,14 @@ impl ZStatsAppState {
     /// takes focus off the panel — which is exactly what calls this. The
     /// same "not remembered" rule now runs on that window's own
     /// lifecycle ([`Self::reset_storage_views`]).
-    pub fn reset_transient_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn reset_transient_views(&mut self, fx: &mut dyn Effects) {
         if self.proc_filter_open {
-            // The close arm clears the input, the lowercased mirror and
-            // the full-scan cuts in one place.
-            self.toggle_proc_filter(window, cx);
+            // Clears the lowercased mirror and the full-scan cuts in one
+            // place.
+            self.close_proc_filter(fx);
         }
         if self.listen_filter_open {
-            self.toggle_listen_filter(window, cx);
+            self.close_listen_filter(fx);
         }
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
@@ -1994,49 +1986,37 @@ impl ZStatsAppState {
         // does not arise, because the read did not stop. Overview's
         // half-hour rings stay for the same reason: the hidden tick is
         // what fills them.
-        cx.notify();
+        fx.changed();
     }
 
-    pub fn proc_rows_scroll(&self) -> &ScrollHandle {
-        &self.proc_rows_scroll
-    }
-
-    pub fn history_rows_scroll(&self) -> &ScrollHandle {
-        &self.history_rows_scroll
-    }
-
-    pub fn app_rows_scroll(&self) -> &ScrollHandle {
-        &self.app_rows_scroll
-    }
-
-    pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+    pub fn set_tab(&mut self, tab: Tab, fx: &mut dyn Effects) {
         if self.tab != tab {
             self.tab = tab;
             prefs::set_last_tab_key(tab.pref_key());
             // Hidden or not: the collector reads this beside visibility,
             // so a banner switching a hidden panel to Alerts must not
             // leave a stale Hardware behind for the next reveal.
-            if let Some(pace) = cx.try_global::<metrics::CollectorPace>() {
+            if let Some(pace) = self.pace.as_ref() {
                 pace.tab_selected(tab);
             }
             // A hidden switch (a banner click about to reveal Alerts)
             // leaves the entry work to `enter_shown_tab`, which the
             // reveal runs — doing it here too would read twice.
-            if panel_visible(cx) {
-                self.enter_tab(cx);
+            if self.panel_visible() {
+                self.enter_tab(fx);
             }
             if tab == Tab::Alerts {
                 self.see_alerts();
-                tray::sync(cx, self);
+                fx.sync_tray(self);
                 // Seeing them takes Overview's notice row away, and the
                 // panel is 46 shorter without it. With the switch, when
                 // the whole body changes anyway, rather than on the
                 // collector's next tick, up to two seconds into reading
                 // the page that was asked for. Deferred: the fit reads
                 // this store.
-                cx.defer(crate::sync_panel_notice);
+                fx.fit_panel();
             }
-            cx.notify();
+            fx.changed();
         }
     }
 
@@ -2053,14 +2033,14 @@ impl ZStatsAppState {
     /// The panel just came on screen (built, or revealed from the tray):
     /// the tab it shows is being visited, so it gets the same entry work
     /// a click on it would.
-    pub fn enter_shown_tab(&mut self, cx: &mut Context<Self>) {
-        self.enter_tab(cx);
+    pub fn enter_shown_tab(&mut self, fx: &mut dyn Effects) {
+        self.enter_tab(fx);
     }
 
-    fn enter_tab(&mut self, cx: &mut Context<Self>) {
+    fn enter_tab(&mut self, fx: &mut dyn Effects) {
         let tab = self.tab;
         if tab == Tab::Hardware {
-            self.ensure_space_info(cx);
+            self.ensure_space_info(fx);
         }
         // Listeners are a visit: the list is a photograph, so a tab
         // entry reads it now rather than a tick later. Traffic keeps
@@ -2068,8 +2048,8 @@ impl ZStatsAppState {
         // left by the 10s cadence is then at most one live interval
         // stale, instead of waiting out the rest of those 10s.
         if tab == Tab::Net {
-            self.ensure_traffic(cx);
-            self.ensure_listeners(cx);
+            self.ensure_traffic(fx);
+            self.ensure_listeners(fx);
         }
         // Opening History is what pays for reading it. Re-read on every
         // visit rather than caching: the file grows a line a minute, and
@@ -2081,7 +2061,7 @@ impl ZStatsAppState {
                 .history_loaded_at
                 .is_some_and(|at| at.elapsed() < HISTORY_FRESH)
         {
-            self.load_history(cx);
+            self.load_history(fx);
         }
         // The past week's files are small and change only at
         // midnight; re-reading them on the way into the tab is
@@ -2093,7 +2073,7 @@ impl ZStatsAppState {
         // process groups for a job face. Kick it here so the first
         // paint after the switch is not waiting on the next tick.
         if matches!(tab, Tab::Apps | Tab::Overview) {
-            self.ensure_apps_topology(cx);
+            self.ensure_apps_topology(fx);
         }
     }
 
@@ -2119,18 +2099,18 @@ impl ZStatsAppState {
 
     /// Wave the offered table away: dot out for exactly this content,
     /// probes keep running, the card's button keeps telling the truth.
-    pub fn ignore_template_offer(&mut self, cx: &mut Context<Self>) {
+    pub fn ignore_template_offer(&mut self, fx: &mut dyn Effects) {
         alerttpl::ignore_offer();
         self.template_nudge = alerttpl::nudge();
-        cx.notify();
+        fx.changed();
     }
 
     /// A silent finding but no check this session: run one, so the
     /// About row carries the release notes the silent check does not
     /// retain. Solicited — the user just opened the update surface.
-    pub fn refresh_update_for_about(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_update_for_about(&mut self, fx: &mut dyn Effects) {
         if self.update_status.is_none() && self.update_nudge.is_some() {
-            self.check_update(cx);
+            self.check_update(fx);
         }
     }
 
@@ -2141,17 +2121,17 @@ impl ZStatsAppState {
 
     /// Take the skip back: the dot returns and the About row goes back
     /// to offering the download.
-    pub fn unignore_update(&mut self, cx: &mut Context<Self>) {
+    pub fn unignore_update(&mut self, fx: &mut dyn Effects) {
         updater::unignore();
         self.update_ignored = None;
         self.update_nudge = updater::nudge();
-        cx.notify();
+        fx.changed();
     }
 
     /// "Skip this version": mute the gear's dot for `version` alone.
     /// Checks keep running, the About page keeps answering truthfully,
     /// and the next release re-arms the dot by itself.
-    pub fn ignore_update(&mut self, version: &str, cx: &mut Context<Self>) {
+    pub fn ignore_update(&mut self, version: &str, fx: &mut dyn Effects) {
         updater::ignore(version);
         self.update_nudge = updater::nudge();
         self.update_ignored = updater::ignored();
@@ -2163,7 +2143,7 @@ impl ZStatsAppState {
         // again still tells the truth: skipping silences the reminder,
         // never the answer.
         self.update_status = None;
-        cx.notify();
+        fx.changed();
     }
 
     /// The silent update check, riding the tick like the space probe.
@@ -2171,7 +2151,7 @@ impl ZStatsAppState {
     /// check file, and the file's own days-scale cadence — so the
     /// steady state is one tiny file read per hour and one network
     /// round-trip per `AUTO_CHECK_EVERY`.
-    fn maybe_auto_check_update(&mut self, cx: &mut Context<Self>) {
+    fn maybe_auto_check_update(&mut self, fx: &mut dyn Effects) {
         const PROBE_EVERY: Duration = Duration::from_secs(3600);
         if self.auto_check_inflight
             || self
@@ -2185,28 +2165,24 @@ impl ZStatsAppState {
             return;
         }
         self.auto_check_inflight = true;
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async {
-                    let outcome = updater::check();
-                    // The template probe rides the same two-day clock —
-                    // one rhythm of unprompted network for the whole
-                    // app, not one per feature. Compare-only: applying
-                    // stays behind the card's button (`alerttpl`).
-                    alerttpl::silent_check();
-                    outcome
-                })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        effects::background(fx, move |reply| {
+            let outcome = {
+                let outcome = updater::check();
+                // The template probe rides the same two-day clock —
+                // one rhythm of unprompted network for the whole
+                // app, not one per feature. Compare-only: applying
+                // stays behind the card's button (`alerttpl`).
+                alerttpl::silent_check();
+                outcome
+            };
+            reply.apply(move |state, fx| {
                 state.auto_check_inflight = false;
                 updater::record_outcome(SystemTime::now(), &outcome);
                 state.update_nudge = updater::nudge();
                 state.template_nudge = alerttpl::nudge();
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// The last webhook test's outcome, for the Interface row.
@@ -2216,71 +2192,59 @@ impl ZStatsAppState {
 
     /// An edited URL is a different endpoint: what the last test said
     /// about the old one no longer describes anything on screen.
-    pub fn forget_webhook_test(&mut self, cx: &mut Context<Self>) {
+    pub fn forget_webhook_test(&mut self, fx: &mut dyn Effects) {
         if self.webhook_test.take().is_some() {
-            self.bump_ui();
-            cx.notify();
+            fx.changed();
         }
     }
 
     /// POST one test notification to the configured URL, off the main
-    /// thread, and keep the answer for the row. One at a time. The
-    /// settings window does not follow ticks, hence the epoch bumps.
-    pub fn test_webhook(&mut self, cx: &mut Context<Self>) {
+    /// thread, and keep the answer for the row. One at a time.
+    pub fn test_webhook(&mut self, fx: &mut dyn Effects) {
         if matches!(self.webhook_test, Some(WebhookTest::Sending)) {
             return;
         }
         self.webhook_test = Some(WebhookTest::Sending);
-        self.bump_ui();
-        cx.notify();
+        fx.changed();
         let message = i18n::tr("config.webhook_test_body");
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { webhook::send_test(&message) })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        effects::background(fx, move |reply| {
+            let outcome = webhook::send_test(&message);
+            reply.apply(move |state, fx| {
                 state.webhook_test = Some(match outcome {
                     Ok(status) => WebhookTest::Delivered(status),
                     Err(error) => WebhookTest::Failed(error),
                 });
-                state.bump_ui();
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// Ask GitHub for the latest release on the background executor.
     /// One at a time, same as the hints fetch.
-    pub fn check_update(&mut self, cx: &mut Context<Self>) {
+    pub fn check_update(&mut self, fx: &mut dyn Effects) {
         if matches!(self.update_status, Some(UpdateStatus::Checking)) {
             return;
         }
         self.update_status = Some(UpdateStatus::Checking);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                // The notes will be read here, so the releases this
-                // build skipped come with the latest's.
-                .spawn(async { updater::check_with_skipped() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        fx.changed();
+        effects::background(fx, move |reply| {
+            // The notes will be read here, so the releases this
+            // build skipped come with the latest's.
+            let outcome = updater::check_with_skipped();
+            reply.apply(move |state, fx| {
                 // A manual check answers the same question: stamp the
                 // silent clock and refresh the gear's dot from it.
                 updater::record_outcome(SystemTime::now(), &outcome);
                 state.update_nudge = updater::nudge();
                 state.update_status = Some(UpdateStatus::Done(outcome));
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// Download `version`'s DMG on the background executor, with a
     /// progress pump back to this state. One at a time.
-    pub fn download_update(&mut self, version: String, cx: &mut Context<Self>) {
+    pub fn download_update(&mut self, version: String, fx: &mut dyn Effects) {
         if matches!(self.update_status, Some(UpdateStatus::Downloading { .. })) {
             return;
         }
@@ -2294,69 +2258,53 @@ impl ZStatsAppState {
             total: 0,
             notes,
         });
-        cx.notify();
+        fx.changed();
 
-        let (tx, rx) = smol::channel::unbounded::<(u64, u64)>();
-        cx.spawn(async move |this, cx| {
-            while let Ok((received, total)) = rx.recv().await {
-                let _ = this.update(cx, |state, cx| {
-                    if let Some(UpdateStatus::Downloading {
-                        received: r,
-                        total: t,
-                        ..
-                    }) = &mut state.update_status
-                    {
-                        *r = received;
-                        *t = total;
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            let tag = version.clone();
-            let downloaded = cx
-                .background_executor()
-                .spawn(async move {
-                    // Throttled to whole-MB steps: every 64 KB chunk
-                    // would repaint the settings window for nothing.
-                    let mut last_mb = u64::MAX;
-                    updater::download(&tag, move |received, total| {
-                        let mb = received / (1024 * 1024);
-                        if mb != last_mb || received == total {
-                            last_mb = mb;
-                            let _ = tx.try_send((received, total));
+        effects::background(fx, move |reply| {
+            // Throttled to whole-MB steps: every 64 KB chunk would repaint
+            // the settings window for nothing.
+            let progress = reply.clone();
+            let mut last_mb = u64::MAX;
+            let downloaded = updater::download(&version, move |received, total| {
+                let mb = received / (1024 * 1024);
+                if mb != last_mb || received == total {
+                    last_mb = mb;
+                    progress.apply(move |state, fx| {
+                        if let Some(UpdateStatus::Downloading {
+                            received: r,
+                            total: t,
+                            ..
+                        }) = &mut state.update_status
+                        {
+                            *r = received;
+                            *t = total;
+                            fx.changed();
                         }
-                    })
-                })
-                .await;
+                    });
+                }
+            });
             let path = match downloaded {
                 Ok(path) => path,
                 Err(error) => {
-                    let _ = this.update(cx, |state, cx| {
+                    reply.apply(move |state, fx| {
                         let notes = state.update_notes_in_flight();
                         state.update_status = Some(UpdateStatus::DownloadFailed {
                             version,
                             error,
                             notes,
                         });
-                        cx.notify();
+                        fx.changed();
                     });
                     return;
                 }
             };
-            let _ = this.update(cx, |state, cx| {
+            reply.apply(|state, fx| {
                 let notes = state.update_notes_in_flight();
                 state.update_status = Some(UpdateStatus::Installing { notes });
-                cx.notify();
+                fx.changed();
             });
-            let delivered = cx
-                .background_executor()
-                .spawn(async move { updater::install(&path) })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+            let delivered = updater::install(&path);
+            reply.apply(move |state, fx| {
                 let notes = state.update_notes_in_flight();
                 state.update_status = Some(match delivered {
                     Ok(updater::Delivery::Replaced) => UpdateStatus::Installed { manual: false },
@@ -2370,10 +2318,9 @@ impl ZStatsAppState {
                         notes,
                     },
                 });
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// The release notes riding the in-flight update status, so a
@@ -2396,44 +2343,36 @@ impl ZStatsAppState {
 
     /// Fetch the published Caches roots on the background executor.
     /// One at a time, same as the clean hints.
-    pub fn update_cachepreset(&mut self, cx: &mut Context<Self>) {
+    pub fn update_cachepreset(&mut self, fx: &mut dyn Effects) {
         if matches!(self.caches_sync, Some(CachesSync::Running)) {
             return;
         }
         self.caches_sync = Some(CachesSync::Running);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async { cachepreset::update_from_remote() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        fx.changed();
+        effects::background(fx, move |reply| {
+            let outcome = cachepreset::update_from_remote();
+            reply.apply(move |state, fx| {
                 state.caches_sync = Some(CachesSync::Done(outcome));
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// Fetch the published rules on the background executor. One at a
     /// time — a second press while one runs is a no-op, not a queue.
-    pub fn update_cleanhints(&mut self, cx: &mut Context<Self>) {
+    pub fn update_cleanhints(&mut self, fx: &mut dyn Effects) {
         if matches!(self.hints_sync, Some(HintsSync::Running)) {
             return;
         }
         self.hints_sync = Some(HintsSync::Running);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async { cleanhints::update_from_remote() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        fx.changed();
+        effects::background(fx, move |reply| {
+            let outcome = cleanhints::update_from_remote();
+            reply.apply(move |state, fx| {
                 state.hints_sync = Some(HintsSync::Done(outcome));
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     pub fn template_sync(&self) -> Option<&TemplateSync> {
@@ -2447,38 +2386,34 @@ impl ZStatsAppState {
     /// The collector reload is [`alerttpl`]'s own doing, next to the
     /// write: whether zstats has to re-read its thresholds is a fact
     /// about the file having changed, not about a view having asked.
-    pub fn update_alert_template(&mut self, cx: &mut Context<Self>) {
+    pub fn update_alert_template(&mut self, fx: &mut dyn Effects) {
         if matches!(self.template_sync, Some(TemplateSync::Running)) {
             return;
         }
         self.template_sync = Some(TemplateSync::Running);
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async { alerttpl::update_from_remote() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        fx.changed();
+        effects::background(fx, move |reply| {
+            let outcome = alerttpl::update_from_remote();
+            reply.apply(move |state, fx| {
                 state.template_sync = Some(TemplateSync::Done(outcome));
                 // Applying (or finding local already current) withdrew
                 // the standing offer; the dot follows the file.
                 state.template_nudge = alerttpl::nudge();
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// Drop the override and go back to the table compiled into zstats.
     /// Local file work only — no executor hop, unlike the fetch above.
-    pub fn use_builtin_alert_template(&mut self, cx: &mut Context<Self>) {
+    pub fn use_builtin_alert_template(&mut self, fx: &mut dyn Effects) {
         self.template_sync = Some(match alerttpl::use_builtin() {
             Ok(true) => TemplateSync::Reverted,
             Ok(false) => TemplateSync::NothingToRevert,
             Err(e) => TemplateSync::RevertFailed(e),
         });
         self.template_nudge = alerttpl::nudge();
-        cx.notify();
+        fx.changed();
     }
 
     pub fn history_sort(&self) -> HistorySort {
@@ -2486,18 +2421,18 @@ impl ZStatsAppState {
     }
 
     /// One button, two orders — cycle like the process sort chip.
-    pub fn set_history_sort(&mut self, sort: HistorySort, cx: &mut Context<Self>) {
+    pub fn set_history_sort(&mut self, sort: HistorySort, fx: &mut dyn Effects) {
         self.history_sort = sort;
-        cx.notify();
+        fx.changed();
     }
 
     pub fn show_all_history(&self) -> bool {
         self.show_all_history
     }
 
-    pub fn toggle_all_history(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_all_history(&mut self, fx: &mut dyn Effects) {
         self.show_all_history = !self.show_all_history;
-        cx.notify();
+        fx.changed();
     }
 
     pub fn history_range(&self) -> HistoryRange {
@@ -2506,42 +2441,39 @@ impl ZStatsAppState {
 
     /// Switch the window and re-read. The rows drop to the loading state
     /// first — stale today-rows under a "30 days" title would be a lie.
-    pub fn set_history_range(&mut self, range: HistoryRange, cx: &mut Context<Self>) {
+    pub fn set_history_range(&mut self, range: HistoryRange, fx: &mut dyn Effects) {
         if self.history_range == range {
             return;
         }
         self.history_range = range;
         self.history = None;
         self.history_loaded_at = None;
-        self.load_history(cx);
+        self.load_history(fx);
     }
 
     /// Re-read the selected window's history files on the background
     /// executor. Guarded by the range it was started for: quickly
     /// flipping ranges must not let a slow wide read land under a
     /// narrower title.
-    pub fn load_history(&mut self, cx: &mut Context<Self>) {
+    pub fn load_history(&mut self, fx: &mut dyn Effects) {
         let range = self.history_range;
-        cx.spawn(async move |this, cx| {
-            let rows = cx
-                .background_executor()
-                .spawn(async move {
-                    history::spenders(&zstats::settings::default_dir(), range.days())
-                        .unwrap_or_else(|e| {
-                            tracing::error!("could not read history: {e}");
-                            Vec::new()
-                        })
-                })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        effects::background(fx, move |reply| {
+            let rows = {
+                history::spenders(&zstats::settings::default_dir(), range.days()).unwrap_or_else(
+                    |e| {
+                        tracing::error!("could not read history: {e}");
+                        Vec::new()
+                    },
+                )
+            };
+            reply.apply(move |state, fx| {
                 if state.history_range == range {
                     state.history = Some(rows);
                     state.history_loaded_at = Some(Instant::now());
-                    cx.notify();
+                    fx.changed();
                 }
             });
-        })
-        .detach();
+        });
     }
 
     /// The whole-table listing, or what is happening to it.
@@ -2551,16 +2483,16 @@ impl ZStatsAppState {
 
     /// Ask for the whole process table, or drop the answer and go back to
     /// the collector's list.
-    pub fn toggle_full_scan(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_full_scan(&mut self, fx: &mut dyn Effects) {
         match self.full_scan {
             // A failed scan retries rather than latching.
-            FullScan::Off | FullScan::Failed => self.start_full_scan(cx),
+            FullScan::Off | FullScan::Failed => self.start_full_scan(fx),
             // Already in flight. A second click must not spawn a second
             // scan — they would land in an order nobody controls.
             FullScan::Running => {}
             FullScan::Ready(_) => {
                 self.full_scan = FullScan::Off;
-                cx.notify();
+                fx.changed();
             }
         }
     }
@@ -2569,28 +2501,25 @@ impl ZStatsAppState {
         &self.full_app_scan
     }
 
-    pub fn toggle_full_app_scan(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_full_app_scan(&mut self, fx: &mut dyn Effects) {
         match self.full_app_scan {
-            FullAppScan::Off | FullAppScan::Failed => self.start_full_app_scan(cx),
+            FullAppScan::Off | FullAppScan::Failed => self.start_full_app_scan(fx),
             FullAppScan::Running => {}
             FullAppScan::Ready(_) => {
                 self.full_app_scan = FullAppScan::Off;
-                cx.notify();
+                fx.changed();
             }
         }
     }
 
     /// Collect every process tree on the background executor. Same reasons
     /// as [`Self::start_full_scan`] not to widen the resident collector.
-    pub fn start_full_app_scan(&mut self, cx: &mut Context<Self>) {
+    pub fn start_full_app_scan(&mut self, fx: &mut dyn Effects) {
         self.full_app_scan = FullAppScan::Running;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let scanned = cx
-                .background_executor()
-                .spawn(async { fullscan::scan_groups() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        fx.changed();
+        effects::background(fx, move |reply| {
+            let scanned = fullscan::scan_groups();
+            reply.apply(move |state, fx| {
                 // Land only into a scan someone is still waiting for — the
                 // panel hiding mid-scan resets to Off, and a result nobody
                 // asked for anymore must not push the tab back into the
@@ -2606,7 +2535,7 @@ impl ZStatsAppState {
                     }) => {
                         let visible = filtered_group_indices(&groups, &state.proc_filter_text);
                         FullAppScan::Ready(FullAppScanData {
-                            list: ListState::new(visible.len(), ListAlignment::Top, px(400.)),
+                            rows: state.next_rows(),
                             visible,
                             groups,
                             total,
@@ -2619,24 +2548,20 @@ impl ZStatsAppState {
                         FullAppScan::Failed
                     }
                 };
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     /// Collect every process on the background executor. Blocking and slow
     /// by design (it sleeps to get a CPU baseline), which is exactly why it
     /// does not run on the collector thread: that one has a cadence to keep.
-    pub fn start_full_scan(&mut self, cx: &mut Context<Self>) {
+    pub fn start_full_scan(&mut self, fx: &mut dyn Effects) {
         self.full_scan = FullScan::Running;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let scanned = cx
-                .background_executor()
-                .spawn(async { fullscan::scan() })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+        fx.changed();
+        effects::background(fx, move |reply| {
+            let scanned = fullscan::scan();
+            reply.apply(move |state, fx| {
                 // Same landing guard as the app scan: a hide mid-scan reset
                 // this to Off, and the result must not undo that.
                 if !matches!(state.full_scan, FullScan::Running) {
@@ -2651,10 +2576,7 @@ impl ZStatsAppState {
                         // A filter typed while the scan ran applies to it too.
                         let visible = filtered_indices(&processes, &state.proc_filter_text);
                         FullScan::Ready(FullScanData {
-                            // Overdraw of roughly one panel: rows near the
-                            // viewport are pre-measured so scrolling does
-                            // not pop as estimates get corrected.
-                            list: ListState::new(visible.len(), ListAlignment::Top, px(400.)),
+                            rows: state.next_rows(),
                             visible,
                             processes,
                             total,
@@ -2667,18 +2589,13 @@ impl ZStatsAppState {
                         FullScan::Failed
                     }
                 };
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     pub fn proc_filter_open(&self) -> bool {
         self.proc_filter_open
-    }
-
-    pub fn proc_filter_input(&self) -> Option<&Entity<InputState>> {
-        self.proc_filter.as_ref()
     }
 
     /// The lowercased filter query; empty while the filter is closed.
@@ -2686,58 +2603,47 @@ impl ZStatsAppState {
         &self.proc_filter_text
     }
 
-    /// Show or hide the name filter, creating the input on first use.
-    pub fn toggle_proc_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.proc_filter_open {
-            self.proc_filter_open = false;
-            // `set_value` deliberately emits no Change event, so the mirror
-            // and the full-scan rows are brought back by hand.
-            if let Some(input) = &self.proc_filter {
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-            }
-            self.proc_filter_text.clear();
-            self.refresh_full_scan_filter();
-        } else {
-            self.proc_filter_open = true;
-            if self.proc_filter.is_none() {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(i18n::tr("processes.filter_placeholder"))
-                        // Esc clears. Goes through `replace_text`, which —
-                        // unlike `set_value` — emits Change, so the mirror
-                        // and the full-scan rows follow without extra wiring.
-                        .clean_on_escape()
-                });
-                cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.proc_filter_text = input.read(cx).value().to_lowercase();
-                        this.refresh_full_scan_filter();
-                        cx.notify();
-                    }
-                })
-                .detach();
-                self.proc_filter = Some(input);
-            }
-            // Focus so typing can start without a second click.
-            if let Some(input) = &self.proc_filter {
-                input.read(cx).focus_handle(cx).focus(window, cx);
-            }
-        }
-        cx.notify();
+    /// The name filter's row comes on screen, empty.
+    pub fn open_proc_filter(&mut self, fx: &mut dyn Effects) {
+        self.proc_filter_open = true;
+        fx.changed();
     }
 
-    /// Recompute which full-scan rows the filter keeps, and rebuild the
-    /// list state to match — `gpui::list` is told its row count up front,
-    /// so a changed row set is a new list, scrolled back to the top.
+    /// The name filter goes, and its query with it: a hidden filter that
+    /// kept filtering would read as processes vanishing.
+    pub fn close_proc_filter(&mut self, fx: &mut dyn Effects) {
+        self.proc_filter_open = false;
+        self.proc_filter_text.clear();
+        self.refresh_full_scan_filter();
+        fx.changed();
+    }
+
+    /// What the name filter says now, from its input.
+    pub fn set_proc_filter_text(&mut self, text: &str, fx: &mut dyn Effects) {
+        self.proc_filter_text = text.to_lowercase();
+        self.refresh_full_scan_filter();
+        fx.changed();
+    }
+
+    /// The next name for a full listing's row set.
+    fn next_rows(&mut self) -> u64 {
+        self.list_epoch += 1;
+        self.list_epoch
+    }
+
+    /// Recompute which full-scan rows the filter keeps. A changed row set
+    /// is a new one ([`FullScanData::rows`]): the list it is shown in
+    /// starts again at the top.
     fn refresh_full_scan_filter(&mut self) {
         let filter = mem::take(&mut self.proc_filter_text);
+        let (process_rows, app_rows) = (self.next_rows(), self.next_rows());
         if let FullScan::Ready(data) = &mut self.full_scan {
             data.visible = filtered_indices(&data.processes, &filter);
-            data.list = ListState::new(data.visible.len(), ListAlignment::Top, px(400.));
+            data.rows = process_rows;
         }
         if let FullAppScan::Ready(data) = &mut self.full_app_scan {
             data.visible = filtered_group_indices(&data.groups, &filter);
-            data.list = ListState::new(data.visible.len(), ListAlignment::Top, px(400.));
+            data.rows = app_rows;
         }
         self.proc_filter_text = filter;
     }
@@ -2747,20 +2653,20 @@ impl ZStatsAppState {
     }
 
     /// Clicking the open row closes it, as in the design.
-    pub fn toggle_pid(&mut self, pid: u32, cx: &mut Context<Self>) {
+    pub fn toggle_pid(&mut self, pid: u32, fx: &mut dyn Effects) {
         self.selected_pid = if self.selected_pid == Some(pid) {
             None
         } else {
             Some(pid)
         };
-        cx.notify();
+        fx.changed();
     }
 
     pub fn selected_app(&self) -> Option<u32> {
         self.selected_app
     }
 
-    pub fn toggle_app(&mut self, root_pid: u32, cx: &mut Context<Self>) {
+    pub fn toggle_app(&mut self, root_pid: u32, fx: &mut dyn Effects) {
         if self.selected_app == Some(root_pid) {
             self.selected_app = None;
             // Keep the photograph: collapsing must not rename a
@@ -2771,27 +2677,27 @@ impl ZStatsAppState {
                 self.member_table = MemberTable::Off;
             }
             let expected = self.group_process_count(root_pid).unwrap_or(1);
-            self.ensure_member_table(root_pid, expected, cx);
+            self.ensure_member_table(root_pid, expected, fx);
         }
-        cx.notify();
+        fx.changed();
     }
 
     /// Jump from a row elsewhere (Overview's top card) to the Apps tab
     /// with this tree selected and its expansion loading — the same
     /// state a click on the Apps row itself produces, minus the toggle:
     /// landing on an already-open tree must not fold it.
-    pub fn reveal_app(&mut self, root_pid: u32, cx: &mut Context<Self>) {
-        self.set_tab(Tab::Apps, cx);
+    pub fn reveal_app(&mut self, root_pid: u32, fx: &mut dyn Effects) {
+        self.set_tab(Tab::Apps, fx);
         if self.selected_app != Some(root_pid) {
             self.selected_app = Some(root_pid);
             if matches!(self.member_table, MemberTable::Failed { .. }) {
                 self.member_table = MemberTable::Off;
             }
             let expected = self.group_process_count(root_pid).unwrap_or(1);
-            self.ensure_member_table(root_pid, expected, cx);
+            self.ensure_member_table(root_pid, expected, fx);
         }
         self.app_reveal.set(true);
-        cx.notify();
+        fx.changed();
     }
 
     /// True exactly once per [`Self::reveal_app`]: the Apps list scrolls
@@ -2805,14 +2711,14 @@ impl ZStatsAppState {
     /// The abnormal-only filter would hide a normal target, so it comes off;
     /// a name filter that already hides the row is left alone (nowhere to
     /// scroll is the honest outcome, same as Apps).
-    pub fn reveal_pid(&mut self, pid: u32, cx: &mut Context<Self>) {
-        self.set_tab(Tab::Processes, cx);
+    pub fn reveal_pid(&mut self, pid: u32, fx: &mut dyn Effects) {
+        self.set_tab(Tab::Processes, fx);
         self.only_abnormal = false;
         if self.selected_pid != Some(pid) {
             self.selected_pid = Some(pid);
         }
         self.proc_reveal.set(true);
-        cx.notify();
+        fx.changed();
     }
 
     /// True exactly once per [`Self::reveal_pid`].
@@ -2825,7 +2731,7 @@ impl ZStatsAppState {
     /// a restart); else a live process still holding that pid-and-name, or
     /// the same name under a new pid; else just open Processes. A pid-only
     /// hit is rejected: macOS recycles low pids.
-    pub fn reveal_history_subject(&mut self, pid: u32, name: &str, cx: &mut Context<Self>) {
+    pub fn reveal_history_subject(&mut self, pid: u32, name: &str, fx: &mut dyn Effects) {
         let groups = self
             .latest
             .as_ref()
@@ -2833,7 +2739,7 @@ impl ZStatsAppState {
         if let Some(groups) = groups
             && let Some(root) = live_group_root(groups, name)
         {
-            self.reveal_app(root, cx);
+            self.reveal_app(root, fx);
             return;
         }
         let processes = self
@@ -2843,10 +2749,10 @@ impl ZStatsAppState {
         if let Some(processes) = processes
             && let Some(live) = live_process_pid(processes, name, pid)
         {
-            self.reveal_pid(live, cx);
+            self.reveal_pid(live, fx);
             return;
         }
-        self.set_tab(Tab::Processes, cx);
+        self.set_tab(Tab::Processes, fx);
     }
 
     /// The uncapped process table, once Apps/Overview needed a job face
@@ -2894,17 +2800,17 @@ impl ZStatsAppState {
     /// older than the process cadence. A 2-process Finder is already
     /// complete; Chrome's helpers and a `login` compile whose `zsh` was
     /// ranked out are why the first fetch exists.
-    fn ensure_apps_topology(&mut self, cx: &mut Context<Self>) {
+    fn ensure_apps_topology(&mut self, fx: &mut dyn Effects) {
         if let Some(pid) = self.selected_app
             && let Some(n) = self.group_process_count(pid)
         {
-            self.ensure_member_table(pid, n, cx);
+            self.ensure_member_table(pid, n, fx);
         }
-        if !panel_visible(cx) || !matches!(self.tab, Tab::Apps | Tab::Overview) {
+        if !self.panel_visible() || !matches!(self.tab, Tab::Apps | Tab::Overview) {
             return;
         }
         if let Some((root, n)) = self.tree_needing_topology() {
-            self.ensure_member_table(root, n, cx);
+            self.ensure_member_table(root, n, fx);
         }
     }
 
@@ -2925,7 +2831,7 @@ impl ZStatsAppState {
         })
     }
 
-    fn ensure_member_table(&mut self, root: u32, expected: u32, cx: &mut Context<Self>) {
+    fn ensure_member_table(&mut self, root: u32, expected: u32, fx: &mut dyn Effects) {
         match member_table_next(
             &self.member_table,
             Instant::now(),
@@ -2933,7 +2839,7 @@ impl ZStatsAppState {
         ) {
             MemberTableNext::Hold => return,
             MemberTableNext::Restart => {
-                self.start_member_table(cx);
+                self.start_member_table(fx);
                 return;
             }
             MemberTableNext::FallThrough => {}
@@ -2949,10 +2855,10 @@ impl ZStatsAppState {
         if fullscan::tree_members(root, processes).len() as u32 >= expected {
             return;
         }
-        self.start_member_table(cx);
+        self.start_member_table(fx);
     }
 
-    fn start_member_table(&mut self, cx: &mut Context<Self>) {
+    fn start_member_table(&mut self, fx: &mut dyn Effects) {
         match &mut self.member_table {
             MemberTable::Running => return,
             MemberTable::Ready {
@@ -2961,22 +2867,19 @@ impl ZStatsAppState {
             MemberTable::Ready { refreshing, .. } => *refreshing = true,
             _ => {
                 self.member_table = MemberTable::Running;
-                cx.notify();
+                fx.changed();
             }
         }
-        cx.spawn(async move |this, cx| {
+        effects::background(fx, move |reply| {
             // The process groups come from the same background pass, so
             // the face and the member rows describe one moment: a job
             // read a tick later could name a pid the table no longer
             // has, or miss the one it just gained.
-            let listed = cx
-                .background_executor()
-                .spawn(async {
-                    let processes = fullscan::list_processes()?;
-                    Ok::<_, zstats::CollectError>((processes, Arc::new(procscan::process_groups())))
-                })
-                .await;
-            let _ = this.update(cx, |state, cx| {
+            let listed = (|| {
+                let processes = fullscan::list_processes()?;
+                Ok::<_, zstats::CollectError>((processes, Arc::new(procscan::process_groups())))
+            })();
+            reply.apply(move |state, fx| {
                 if matches!(state.member_table, MemberTable::Off) {
                     return;
                 }
@@ -3005,40 +2908,39 @@ impl ZStatsAppState {
                         }
                     }
                 };
-                cx.notify();
+                fx.changed();
             });
-        })
-        .detach();
+        });
     }
 
     // ---- window --------------------------------------------------------
 
-    /// Where the main window was last seen. Used when reopening without a
-    /// tray anchor (the menu's "Show Window"), so it doesn't jump to centre.
-    pub fn window_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.window_bounds
+    /// The collector's pace, once it runs.
+    pub fn set_pace(&mut self, pace: metrics::CollectorPace) {
+        self.pace = Some(pace);
     }
 
-    /// Last known display scale factor, mirrored from the main window. Only
-    /// a fallback for placement when AppKit has no screen list (off the
-    /// main thread, or not macOS). On macOS the tray's scale is resolved
-    /// per display — see `placement::resolve_icon`.
-    pub fn scale_factor(&self) -> f32 {
-        self.scale_factor
+    /// Whether the panel is on screen. Tab-entry work (History read,
+    /// `tmutil` probe, topology fetch) keys off this rather than the
+    /// selected tab alone: the tab outlives a hide and, since it is
+    /// remembered, a restart too.
+    pub fn panel_visible(&self) -> bool {
+        self.pace.as_ref().is_some_and(|p| p.is_visible())
+    }
+
+    /// Where the main window was last seen. Used when reopening without a
+    /// tray anchor (the menu's "Show Window"), so it doesn't jump to centre.
+    pub fn window_bounds(&self) -> Option<Rect> {
+        self.window_bounds
     }
 
     /// Called from the root view's `render` on every frame — only notify
     /// when something changed, or observers would wake up continuously.
-    pub fn set_window_metrics(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        scale_factor: f32,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_window_metrics(&mut self, bounds: Rect, scale_factor: f32, fx: &mut dyn Effects) {
         if self.window_bounds != Some(bounds) || self.scale_factor != scale_factor {
             self.window_bounds = Some(bounds);
             self.scale_factor = scale_factor;
-            cx.notify();
+            fx.changed();
         }
     }
 
@@ -3048,7 +2950,7 @@ impl ZStatsAppState {
     }
 
     /// Did an auto-hide happen within `window`? Consumes the mark, so it
-    /// only ever answers `true` once — see `TOGGLE_GRACE` in `main.rs`.
+    /// only ever answers `true` once — see [`TOGGLE_GRACE`].
     pub fn took_recent_auto_hide(&mut self, window: Duration) -> bool {
         self.last_auto_hide
             .take()
@@ -3074,80 +2976,6 @@ fn filtered_group_indices(groups: &[ProcessGroupSnapshot], filter: &str) -> Vec<
         .filter(|(_, g)| filter.is_empty() || g.name.to_lowercase().contains(filter))
         .map(|(i, _)| i)
         .collect()
-}
-
-/// `Global` wrapper around the state entity: `cx.global::<ZStatsGlobalStore>()`
-/// reaches it from anywhere that holds an `App`, including the tray handler
-/// and the collection task, which both run with no window at all.
-#[derive(Clone)]
-pub struct ZStatsGlobalStore(Entity<ZStatsAppState>);
-
-impl ZStatsGlobalStore {
-    pub fn new(state: Entity<ZStatsAppState>) -> Self {
-        Self(state)
-    }
-}
-
-impl Global for ZStatsGlobalStore {}
-
-impl Deref for ZStatsGlobalStore {
-    type Target = Entity<ZStatsAppState>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-fn hash_update_status(status: &Option<UpdateStatus>, h: &mut impl Hasher) {
-    match status {
-        None => 0u8.hash(h),
-        Some(UpdateStatus::Checking) => 1u8.hash(h),
-        Some(UpdateStatus::Done(check)) => {
-            2u8.hash(h);
-            match check {
-                updater::UpdateCheck::UpToDate => 0u8.hash(h),
-                updater::UpdateCheck::Newer { version, .. } => {
-                    1u8.hash(h);
-                    version.hash(h);
-                }
-                updater::UpdateCheck::Failed(e) => {
-                    2u8.hash(h);
-                    e.hash(h);
-                }
-            }
-        }
-        Some(UpdateStatus::Downloading {
-            received, total, ..
-        }) => {
-            3u8.hash(h);
-            received.hash(h);
-            total.hash(h);
-        }
-        Some(UpdateStatus::Installing { .. }) => 4u8.hash(h),
-        Some(UpdateStatus::Installed { manual }) => {
-            5u8.hash(h);
-            manual.hash(h);
-        }
-        Some(UpdateStatus::DownloadFailed { version, error, .. }) => {
-            6u8.hash(h);
-            version.hash(h);
-            error.hash(h);
-        }
-    }
-}
-
-fn hash_template_sync(sync: &Option<TemplateSync>, h: &mut impl Hasher) {
-    match sync {
-        None => 0u8.hash(h),
-        Some(TemplateSync::Running) => 1u8.hash(h),
-        Some(TemplateSync::Done(_)) => 2u8.hash(h),
-        Some(TemplateSync::Reverted) => 3u8.hash(h),
-        Some(TemplateSync::NothingToRevert) => 4u8.hash(h),
-        Some(TemplateSync::RevertFailed(e)) => {
-            5u8.hash(h);
-            e.hash(h);
-        }
-    }
 }
 
 /// Write one `zstats -add` key into `<dir>/config.toml` and return the
@@ -3195,18 +3023,10 @@ fn setting_rebuilds_collector(key: &str) -> bool {
     )
 }
 
-/// Screen rectangle of the tray icon, in **physical** pixels with a top-left
-/// origin — that's what `tray_icon` reports. It multiplied the AppKit
-/// logical frame by *that status item's* `backingScaleFactor`, so converting
-/// back has to pick the matching screen (see `placement::resolve_icon`),
-/// not the window's last-known [`ZStatsAppState::scale_factor`].
-#[derive(Clone, Copy, Debug)]
-pub struct TrayAnchor {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
+/// The tray icon's rect, defined with the geometry that reads it
+/// (`placement.rs`) and re-exported where `tray.rs` has always imported it
+/// from.
+pub use crate::placement::TrayAnchor;
 
 #[cfg(test)]
 mod tests {
@@ -3376,54 +3196,6 @@ mod tests {
         let state = ZStatsAppState::new();
         // No config loaded yet: zstats' own default of 30%, thirded.
         assert!((state.sustained_bar() - 10.0).abs() < f64::EPSILON);
-    }
-
-    /// The settings window observes this token instead of every store
-    /// notify. A collector tick (tab, selection, filters) must not
-    /// match; a pref chip, a download byte, or a config.toml write must.
-    #[test]
-    fn settings_paint_token_ignores_collector_ticks() {
-        let mut state = ZStatsAppState::new();
-        let a = state.settings_paint_token();
-        state.tab = Tab::Alerts;
-        state.selected_pid = Some(1);
-        state.only_abnormal = true;
-        assert_eq!(
-            state.settings_paint_token(),
-            a,
-            "panel selection is not settings"
-        );
-        state.bump_ui();
-        assert_ne!(
-            state.settings_paint_token(),
-            a,
-            "a pref chip must repaint settings"
-        );
-        let b = state.settings_paint_token();
-        state.update_status = Some(UpdateStatus::Downloading {
-            received: 10,
-            total: 100,
-            notes: String::new(),
-        });
-        assert_ne!(
-            state.settings_paint_token(),
-            b,
-            "download progress must move the About bar"
-        );
-        let c = state.settings_paint_token();
-        state.update_status = Some(UpdateStatus::Downloading {
-            received: 50,
-            total: 100,
-            notes: String::new(),
-        });
-        assert_ne!(state.settings_paint_token(), c);
-        let d = state.settings_paint_token();
-        state.settings = Some(FileConfig::default());
-        assert_ne!(
-            state.settings_paint_token(),
-            d,
-            "a config.toml write must repaint Config"
-        );
     }
 
     /// The menus list `ALL`, so an ordering missing from it cannot be

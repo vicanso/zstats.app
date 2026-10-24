@@ -1,14 +1,8 @@
 //! Bundled static files: fonts, locales, and app icons.
 //!
 //! rust-embed's `compression` feature zstd-compresses each file into the
-//! binary; [`get`] inflates on first read. Also implements [`AssetSource`]
-//! so gpui can load `icons/power.svg` the same way it loads `IconName` SVGs
-//! from gpui-kit.
+//! binary; [`get`] inflates on first read.
 
-use anyhow::anyhow;
-use gpui::{AssetSource, Result, SharedString};
-use gpui_kit::assets::Assets as ComponentAssets;
-use gpui_kit::component::Icon;
 use rust_embed::RustEmbed;
 use std::borrow::Cow;
 
@@ -16,14 +10,12 @@ use std::borrow::Cow;
 ///
 /// rust-embed walks the directory and keeps every regular file it finds — it
 /// does **not** skip dotfiles, so the Finder's `.DS_Store` droppings (22 KB
-/// across three directories here) would be compressed into the binary and
-/// listed by [`AssetSource::list`], which is what gpui enumerates icons with.
+/// across three directories here) would be compressed into the binary.
 /// Naming the extensions instead of excluding known junk means nothing new
 /// can be embedded by accident.
 ///
-/// The `include` attributes need rust-embed's `include-exclude` feature. It
-/// is declared in `Cargo.toml` rather than left to feature unification with
-/// gpui-kit-assets, which happens to enable it today.
+/// The `include` attributes need rust-embed's `include-exclude` feature,
+/// declared in `Cargo.toml`.
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[include = "icons/*.svg"]
@@ -39,39 +31,17 @@ pub fn get(path: &str) -> Option<Cow<'static, [u8]>> {
     Assets::get(path).map(|f| f.data)
 }
 
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path.is_empty() {
-            return Ok(None);
-        }
-        if let Some(file) = ComponentAssets::get(path) {
-            return Ok(Some(file.data));
-        }
-        // An unknown path is an error rather than `Ok(None)`: gpui renders a
-        // missing SVG as empty space either way, but only the error reaches
-        // the log and says which path it was.
-        Self::get(path)
-            .map(|f| Some(f.data))
-            .ok_or_else(|| anyhow!(r#"could not find asset at path "{path}""#))
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut files: Vec<SharedString> = ComponentAssets::iter()
-            .filter_map(|p| p.starts_with(path).then(|| p.into()))
-            .collect();
-        files.extend(Self::iter().filter_map(|p| p.starts_with(path).then(|| p.into())));
-        Ok(files)
-    }
-}
-
-/// The SVGs this app ships itself, because gpui-kit's `IconName` has no
-/// equivalent for them.
+/// The SVGs the interface draws — lucide's, bundled because NSH has no
+/// icon set of its own (`nsh::widgets::icon` hands each one over as a
+/// `data:` URI and tints it); the tray rasterises its faces from the same
+/// files. Where a variant's note names a gpui-kit `IconName`, that is the
+/// glyph the gpui front end drew in its place until 2026-10-25.
 ///
 /// Named rather than written out as paths at the call site: the filename then
 /// exists once, so renaming or dropping an SVG fails to compile here instead
-/// of silently leaving a hole in the tab strip. `Icon::path()` resolves
-/// through [`AssetSource`] at paint time and cannot be checked any earlier.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// of silently leaving a hole in the tab strip; a test checks every name is
+/// embedded.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CustomIconName {
     AppWindow,
     Cpu,
@@ -88,14 +58,13 @@ pub enum CustomIconName {
     Shield,
     /// Footer pin: keeps the panel from auto-hiding on focus loss.
     Pin,
-    /// Footer keep-awake indicator; lucide `coffee`. gpui-kit has `Sun`
-    /// and `Moon`, but both read as the theme picker's glyphs — this
-    /// one has to say "the Mac is being held awake" and nothing else.
+    /// Footer keep-awake indicator; lucide `coffee`. A sun or a moon
+    /// (gpui-kit's `Sun` / `Moon`) would read as the theme picker's glyphs —
+    /// this one has to say "the Mac is being held awake" and nothing else.
     Coffee,
     /// Move-to-Trash on the disk-space window's rows; lucide `trash-2`.
-    /// gpui-kit's `IconName::Trash` names the same glyph but is not in its
-    /// default embedded set, and its `Delete` is a backspace key — which
-    /// read as "clear this field" on a control that moves files.
+    /// Not a backspace key (gpui-kit's `Delete`, which read as "clear this
+    /// field" on a control that moves files).
     Trash,
     /// The footer's form toggle while the panel is short: lucide
     /// `chevrons-up-down`, two chevrons pulling apart — open it out.
@@ -103,10 +72,47 @@ pub enum CustomIconName {
     /// The same toggle while the panel is long: lucide
     /// `chevrons-down-up`, the two chevrons closing.
     Collapse,
+    /// The disclosure and menu chevrons (`nsh/widgets.rs`): lucide's,
+    /// gpui-kit's `IconName::ChevronDown` and `ChevronRight`.
+    ChevronDown,
+    ChevronRight,
+    /// The panel's tab strip and footer (`nsh/chrome.rs`), lucide's:
+    /// Overview, the Network and Alerts tabs, Settings (gpui-kit's
+    /// `IconName::LayoutDashboard`, `Network`, `Bell`, `Settings2`);
+    /// Processes and Hardware reuse [`Self::Cpu`] and [`Self::HardDrive`].
+    LayoutDashboard,
+    Network,
+    Bell,
+    Settings,
+    /// The quiet ⓘ beside a card's title (`nsh::widgets::info_icon`);
+    /// gpui-kit's `IconName::Info`.
+    Info,
+    /// The lists' name filter (`nsh/apps.rs`): lucide `search`, the
+    /// header's control, and `x`, the field's clear — gpui-kit's
+    /// `IconName::Search` and its cleanable input.
+    Search,
+    Close,
+    /// The volume card's eject badge (`nsh/hardware.rs`): lucide
+    /// `circle-x`, gpui-kit's `IconName::CircleX`.
+    CircleX,
+    /// The settings window's Interface page in its nav: lucide
+    /// `palette`, gpui-kit's `IconName::Palette`.
+    Palette,
+    /// The About page's link out to the project (`nsh/settings.rs`):
+    /// lucide `external-link`, gpui-kit's `IconName::ExternalLink`.
+    ExternalLink,
+    /// The disk-space window's reveal and folder-picking buttons:
+    /// lucide `folder` and `folder-open`, gpui-kit's `IconName::Folder`
+    /// and `FolderOpen`.
+    Folder,
+    FolderOpen,
+    /// The bulk-trash sheet's ticks: lucide `check`, gpui-kit's
+    /// `IconName::Check` inside its `Checkbox`.
+    Check,
 }
 
 impl CustomIconName {
-    pub fn path(self) -> SharedString {
+    pub fn path(self) -> &'static str {
         match self {
             CustomIconName::AppWindow => "icons/app-window.svg",
             CustomIconName::Cpu => "icons/cpu.svg",
@@ -122,14 +128,22 @@ impl CustomIconName {
             CustomIconName::Trash => "icons/trash.svg",
             CustomIconName::Expand => "icons/chevrons-up-down.svg",
             CustomIconName::Collapse => "icons/chevrons-down-up.svg",
+            CustomIconName::ChevronDown => "icons/chevron-down.svg",
+            CustomIconName::ChevronRight => "icons/chevron-right.svg",
+            CustomIconName::LayoutDashboard => "icons/layout-dashboard.svg",
+            CustomIconName::Network => "icons/network.svg",
+            CustomIconName::Bell => "icons/bell.svg",
+            CustomIconName::Settings => "icons/settings-2.svg",
+            CustomIconName::Info => "icons/info.svg",
+            CustomIconName::Search => "icons/search.svg",
+            CustomIconName::Close => "icons/x.svg",
+            CustomIconName::CircleX => "icons/circle-x.svg",
+            CustomIconName::Palette => "icons/palette.svg",
+            CustomIconName::ExternalLink => "icons/external-link.svg",
+            CustomIconName::Folder => "icons/folder.svg",
+            CustomIconName::FolderOpen => "icons/folder-open.svg",
+            CustomIconName::Check => "icons/check.svg",
         }
-        .into()
-    }
-}
-
-impl From<CustomIconName> for Icon {
-    fn from(val: CustomIconName) -> Self {
-        Icon::empty().path(val.path())
     }
 }
 
@@ -161,14 +175,29 @@ mod tests {
             CustomIconName::Trash,
             CustomIconName::Expand,
             CustomIconName::Collapse,
+            CustomIconName::ChevronDown,
+            CustomIconName::ChevronRight,
+            CustomIconName::LayoutDashboard,
+            CustomIconName::Network,
+            CustomIconName::Bell,
+            CustomIconName::Settings,
+            CustomIconName::Info,
+            CustomIconName::Search,
+            CustomIconName::Close,
+            CustomIconName::CircleX,
+            CustomIconName::Palette,
+            CustomIconName::ExternalLink,
+            CustomIconName::Folder,
+            CustomIconName::FolderOpen,
+            CustomIconName::Check,
         ] {
             let path = icon.path();
-            assert!(get(&path).is_some(), "{path} is not embedded");
+            assert!(get(path).is_some(), "{path} is not embedded");
         }
     }
 
     /// The allowlist has to keep covering the other two asset kinds, which
-    /// are read through [`get`] rather than through [`AssetSource`].
+    /// are read through [`get`] too.
     #[test]
     fn fonts_and_locales_are_embedded() {
         assert!(get("fonts/JetBrainsMono-Regular.ttf").is_some());
