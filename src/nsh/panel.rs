@@ -15,8 +15,9 @@ use crate::nsh::root::{self, AuxWindow, CARD_PAD, GUTTER, HostAction, Live};
 use crate::nsh::widgets::{self, Choice};
 use crate::nsh::{store, theme};
 use crate::state::{Tab, ZStatsAppState};
-use crate::{APP_NAME, format, i18n, palette, prefs};
+use crate::{APP_NAME, appicon, format, i18n, palette, prefs};
 use nsh_core::ui::prelude::*;
+use std::cmp::Reverse;
 
 /// The processor's figure, for the headline.
 fn cpu_value(state: &ZStatsAppState) -> String {
@@ -35,6 +36,31 @@ fn cpu_fraction(state: &ZStatsAppState) -> f32 {
 /// How long the collector has been sampling, as a pill.
 fn span(state: &ZStatsAppState) -> String {
     format!("{} alerts", state.alerts().len())
+}
+
+/// Five processes by the memory they hold, with their marks: the first
+/// three that run from an app with an icon, then two that do not — one
+/// of each kind of mark, whatever is running.
+fn busiest(state: &ZStatsAppState) -> Vec<(u32, String, String, String)> {
+    let Some(processes) = state
+        .latest()
+        .and_then(|tick| tick.snapshot.processes.as_deref())
+    else {
+        return Vec::new();
+    };
+    let mut by_memory: Vec<_> = processes.iter().collect();
+    by_memory.sort_by_key(|p| Reverse(p.memory_bytes));
+    let (apps, others): (Vec<_>, Vec<_>) = by_memory
+        .into_iter()
+        .partition(|p| appicon::icon_for_pid(p.pid, &p.name).is_some());
+    apps.into_iter()
+        .take(3)
+        .chain(others.into_iter().take(2))
+        .map(|p| {
+            let title = p.display_name.clone().unwrap_or_else(|| p.name.clone());
+            (p.pid, p.name.clone(), title, format::gb(p.memory_bytes))
+        })
+        .collect()
 }
 
 fn total(state: &ZStatsAppState) -> String {
@@ -196,6 +222,38 @@ pub fn Panel() -> impl IntoElement {
                         )),
                 ),
         )
+        .child(
+            widgets::list_shell()
+                .py(px(6.))
+                .child(dynamic(move || {
+                    live.track();
+                    store::read(busiest)
+                        .into_iter()
+                        .map(|(pid, name, title, memory)| {
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(CARD_PAD))
+                                .py(px(4.))
+                                .child(widgets::app_mark(pid, &name, &title))
+                                .child(
+                                    text(title)
+                                        .flex_1()
+                                        .number_of_lines(1u32)
+                                        .text_size(px(12.))
+                                        .text_color(theme::color(palette::text)),
+                                )
+                                .child(
+                                    text(memory)
+                                        .tabular_nums()
+                                        .text_size(px(12.))
+                                        .text_color(theme::color(palette::text_muted)),
+                                )
+                        })
+                        .collect::<Vec<_>>()
+                })),
+        )
         .child(view().flex_1())
         .child(
             view()
@@ -206,6 +264,15 @@ pub fn Panel() -> impl IntoElement {
                 }))
                 .child(root::quiet_button(i18n::tr("disk.storage_title"), || {
                     root::ask(HostAction::Open(AuxWindow::Storage));
+                }))
+                .child(root::quiet_button("Confirm…".to_owned(), move || {
+                    widgets::confirm(
+                        "Clear the sample?".to_owned(),
+                        "The sample's chips go back to Short. Nothing on the machine changes."
+                            .to_owned(),
+                        "Clear".to_owned(),
+                        move || form.set(false),
+                    );
                 }))
                 .child(view().flex_1())
                 .child(root::quiet_button(i18n::tr("common.quit"), || {

@@ -86,6 +86,12 @@ impl Live {
         }
     }
 
+    /// Subscribes the closure it is read in to the store's changes, for
+    /// one that reads the store itself (a list made again as it moves).
+    pub fn track(self) {
+        self.0.get();
+    }
+
     /// [`Live::read`] for a text.
     pub fn text(self, f: fn(&ZStatsAppState) -> String) -> impl Fn() -> String + Clone + 'static {
         self.read(f)

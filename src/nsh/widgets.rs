@@ -17,12 +17,13 @@
 //! - **The mono face is registered with each root** (`root::make`), from
 //!   the same bundled files `font::register` gives gpui.
 
+use crate::appicon::{self, Icon};
 use crate::assets::{self, CustomIconName};
 use crate::color::Rgba;
 use crate::nsh::root::CARD_PAD;
 use crate::nsh::theme;
-use crate::palette;
-use nsh_base::{menu, menu_item};
+use crate::{i18n, palette};
+use nsh_base::{alert_dialog, menu, menu_item};
 use nsh_core::ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -80,6 +81,51 @@ pub fn icon(name: CustomIconName, size: f32, ink: impl Fn() -> Rgba) -> AnyEleme
         .w(px(size))
         .h(px(size))
         .tint_color(theme::color(ink))
+        .into_element()
+}
+
+/// The edge of a row's mark, icon or tile (`widgets::MARK_SIZE`).
+const MARK_SIZE: f32 = 22.;
+
+/// A row's mark: the icon of the application the process runs from
+/// (`appicon`), or the name's first letter in a tile where there is none
+/// — a shell, a command-line tool, a daemon (`widgets::app_mark`).
+pub fn app_mark(pid: u32, name: &str, title: &str) -> AnyElement {
+    mark(appicon::icon_for_pid(pid, name), title)
+}
+
+fn mark(icon: Option<Icon>, title: &str) -> AnyElement {
+    match icon {
+        Some(icon) => image(SharedString::from(icon.data_uri))
+            .flex_none()
+            .w(px(MARK_SIZE))
+            .h(px(MARK_SIZE))
+            .into_element(),
+        None => monogram(title),
+    }
+}
+
+/// The letter a row falls back to, in a small tile where an icon would be.
+fn monogram(name: &str) -> AnyElement {
+    let letter: String = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default();
+    view()
+        .flex_none()
+        .w(px(MARK_SIZE))
+        .h(px(MARK_SIZE))
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .bg(theme::color(palette::track))
+        .child(
+            text(letter)
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::color(palette::text_muted)),
+        )
         .into_element()
 }
 
@@ -389,4 +435,28 @@ pub fn menu_trigger(label: impl IntoReactive<SharedString>, choices: Vec<Choice>
         );
     }
     popup.into_element()
+}
+
+/// Ask before something that cannot be taken back, then run `on_ok` only
+/// on a yes (`confirm::ask`): the action named on its button in the
+/// destructive style, Cancel beside it, Escape as Cancel. The platform's
+/// own alert rather than gpui's in-window sheet — NSH has the native one,
+/// and a quit or a move to the Trash asked in the system's words reads as
+/// the system's question. Called from a handler, which owns the task the
+/// answer is awaited in.
+pub fn confirm(title: String, body: String, ok: String, on_ok: impl FnOnce() + 'static) {
+    let answer = alert_dialog()
+        .title(title)
+        .description(body)
+        .cancel(i18n::tr("common.cancel"))
+        .destructive(ok.clone())
+        .close_on_escape(true)
+        .show();
+    spawn(async move {
+        if let Ok(Some(chosen)) = answer.await
+            && chosen.as_str() == ok
+        {
+            on_ok();
+        }
+    });
 }

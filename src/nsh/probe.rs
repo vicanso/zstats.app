@@ -13,6 +13,8 @@
 //! anchor X Y W H                  shown as a click on a status item at that
 //!                                 rect would show it (physical pixels, top left)
 //! click X Y | move X Y            a left click / a pointer move
+//! click-in N X Y                  a left click in window number N (an
+//!                                 alert NSH puts over the panel)
 //! tray                            a left click on the status item, handed
 //!                                 to the item's own window
 //! banner                          what a click on a banner does
@@ -116,6 +118,20 @@ fn run(line: &str) {
             mouse(h, NSEventType::LeftMouseUp, num(0), num(1));
             if !was_key {
                 h.panel.resignKeyWindow();
+            }
+        }
+        "click-in" => {
+            let mtm = MainThreadMarker::from(&*h.panel);
+            let window =
+                NSApplication::sharedApplication(mtm).windowWithWindowNumber(num(0) as isize);
+            match window {
+                Some(window) => {
+                    let height = window.contentView().map_or(0.0, |v| v.frame().size.height);
+                    let at = NSPoint::new(num(1), height - num(2));
+                    mouse_in(&window, NSEventType::LeftMouseDown, at);
+                    mouse_in(&window, NSEventType::LeftMouseUp, at);
+                }
+                None => tracing::warn!("probe: no window {}", num(0)),
             }
         }
         "tray" => click_status_item(MainThreadMarker::from(&*h.panel)),

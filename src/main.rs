@@ -37,6 +37,7 @@ mod about;
 mod active;
 mod alertlog;
 mod alerttpl;
+mod appicon;
 #[cfg(target_os = "macos")]
 mod appkit;
 mod assetinfo;
@@ -87,8 +88,6 @@ mod webhook;
 // The gpui front end. Phase 1 of docs/nsh-migration.md moves what is not
 // about drawing — the store, the tray's face, the colours, the placement
 // geometry — out of these and into the shared half.
-#[cfg(feature = "gpui")]
-mod appicon;
 #[cfg(feature = "gpui")]
 mod confirm;
 #[cfg(all(feature = "gpui", target_os = "macos"))]
