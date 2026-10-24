@@ -1,13 +1,17 @@
 //! Bundled static files: fonts, locales, and app icons.
 //!
 //! rust-embed's `compression` feature zstd-compresses each file into the
-//! binary; [`get`] inflates on first read. Also implements [`AssetSource`]
-//! so gpui can load `icons/power.svg` the same way it loads `IconName` SVGs
-//! from gpui-kit.
+//! binary; [`get`] inflates on first read. With the gpui front end it also
+//! implements gpui's `AssetSource`, so gpui can load `icons/power.svg` the
+//! same way it loads `IconName` SVGs from gpui-kit.
 
+#[cfg(feature = "gpui")]
 use anyhow::anyhow;
+#[cfg(feature = "gpui")]
 use gpui::{AssetSource, Result, SharedString};
+#[cfg(feature = "gpui")]
 use gpui_kit::assets::Assets as ComponentAssets;
+#[cfg(feature = "gpui")]
 use gpui_kit::component::Icon;
 use rust_embed::RustEmbed;
 use std::borrow::Cow;
@@ -17,7 +21,8 @@ use std::borrow::Cow;
 /// rust-embed walks the directory and keeps every regular file it finds — it
 /// does **not** skip dotfiles, so the Finder's `.DS_Store` droppings (22 KB
 /// across three directories here) would be compressed into the binary and
-/// listed by [`AssetSource::list`], which is what gpui enumerates icons with.
+/// listed by gpui's `AssetSource::list`, which is what gpui enumerates icons
+/// with.
 /// Naming the extensions instead of excluding known junk means nothing new
 /// can be embedded by accident.
 ///
@@ -39,6 +44,7 @@ pub fn get(path: &str) -> Option<Cow<'static, [u8]>> {
     Assets::get(path).map(|f| f.data)
 }
 
+#[cfg(feature = "gpui")]
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path.is_empty() {
@@ -69,8 +75,9 @@ impl AssetSource for Assets {
 ///
 /// Named rather than written out as paths at the call site: the filename then
 /// exists once, so renaming or dropping an SVG fails to compile here instead
-/// of silently leaving a hole in the tab strip. `Icon::path()` resolves
-/// through [`AssetSource`] at paint time and cannot be checked any earlier.
+/// of silently leaving a hole in the tab strip. gpui's `Icon::path()`
+/// resolves through `AssetSource` at paint time and cannot be checked any
+/// earlier.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CustomIconName {
     AppWindow,
@@ -106,7 +113,7 @@ pub enum CustomIconName {
 }
 
 impl CustomIconName {
-    pub fn path(self) -> SharedString {
+    pub fn path(self) -> &'static str {
         match self {
             CustomIconName::AppWindow => "icons/app-window.svg",
             CustomIconName::Cpu => "icons/cpu.svg",
@@ -123,10 +130,10 @@ impl CustomIconName {
             CustomIconName::Expand => "icons/chevrons-up-down.svg",
             CustomIconName::Collapse => "icons/chevrons-down-up.svg",
         }
-        .into()
     }
 }
 
+#[cfg(feature = "gpui")]
 impl From<CustomIconName> for Icon {
     fn from(val: CustomIconName) -> Self {
         Icon::empty().path(val.path())
@@ -163,12 +170,12 @@ mod tests {
             CustomIconName::Collapse,
         ] {
             let path = icon.path();
-            assert!(get(&path).is_some(), "{path} is not embedded");
+            assert!(get(path).is_some(), "{path} is not embedded");
         }
     }
 
     /// The allowlist has to keep covering the other two asset kinds, which
-    /// are read through [`get`] rather than through [`AssetSource`].
+    /// are read through [`get`] rather than through gpui's `AssetSource`.
     #[test]
     fn fonts_and_locales_are_embedded() {
         assert!(get("fonts/JetBrainsMono-Regular.ttf").is_some());

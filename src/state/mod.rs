@@ -763,7 +763,7 @@ pub struct ZStatsAppState {
     /// The disk-space window (large files + the analyser), same
     /// reuse-or-rebuild contract as [`Self::settings_window`].
     storage_window: Option<gpui::AnyWindowHandle>,
-    /// Bumped by the Interface page's pref setters ([`crate::repaint`]).
+    /// Bumped by the Interface page's pref setters ([`crate::gpui_app::repaint`]).
     /// Prefs live in `app.toml`, not this struct, so a collector tick
     /// must not look like a chip click to the settings window's observer.
     ui_epoch: u64,

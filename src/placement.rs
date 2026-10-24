@@ -122,7 +122,7 @@ pub fn window_size(detail: bool, notice: bool, dragged: Dragged) -> (f32, f32) {
 /// Whether a panel this tall shows Overview's long form: once it is as
 /// tall as that page was measured for, the page fits without scrolling,
 /// and under that height the short form is what fits. Asked while a
-/// person drags the panel's edge (`crate::follow_dragged_height`) —
+/// person drags the panel's edge (`crate::gpui_app::follow_dragged_height`) —
 /// never of a height the panel gave itself, or the notice row's 46
 /// could carry a short panel over the line and the long form, which has
 /// no such row, would take them back.

@@ -92,3 +92,10 @@ jobs:
         run: cargo build --all-targets
       - name: test
         run: cargo test --workspace
+      # The NSH front end (docs/nsh-migration.md). Its Linux host arrives
+      # in phase 2; until then this proves the shared modules build and
+      # pass without gpui on Linux too.
+      - name: build (nsh)
+        run: cargo build --all-targets --no-default-features --features nsh
+      - name: test (nsh)
+        run: cargo test --workspace --no-default-features --features nsh

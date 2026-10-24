@@ -8,7 +8,9 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 
 | 文件 | 职责 |
 |---|---|
-| `main.rs` | 启动、窗口生命周期、显隐与定位的调度 |
+| `main.rs` | 模块声明、按 feature 选择前端（gpui / NSH，见 `nsh-migration.md`） |
+| `gpui_app.rs` | gpui 前端：启动、窗口生命周期、显隐与定位的调度 |
+| `nsh/` | NSH 前端（迁移中，见 `nsh-migration.md`） |
 | `placement.rs` | 窗口尺寸与「挂在托盘图标下方」的纯几何（可单测） |
 | `window_ext.rs` | 通过 AppKit 直接显示 / 隐藏 / 移动 `NSWindow` |
 | `dock.rs` | 两条独立路径的 Dock 图标抑制 |
@@ -53,7 +55,7 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 
 设置窗口的 Interface 页可以把语言（跟随系统 / English / 中文）和主题（跟随系统 / 浅色 / 深色）固定下来，写在 `~/.zstats/app.toml`（`prefs.rs`）。不写进共享的 config.toml 是因为 `zstats::settings::save` 只回写它认识的 `[collector]` / `[daemon]` / `[alerts]` 三段——任何额外的键都活不过下一次 `apply_add` 落盘（无论是本应用改阈值还是 CLI 的 `-add`），会被无声丢掉。缺键即跟随系统，所以文件不存在就是默认行为。
 
-强制主题除了换 gpui 主题，还会 pin `NSApp.appearance`（`main.rs` 的 `apply_ns_appearance`）：vibrancy 材质跟的是窗口的 AppKit appearance 而不是我们的 token，不 pin 的话「系统浅色 + 强制深色」会变成深色文字压在浅色 Popover 毛玻璃上——正是背景不透明度注释里说的那种灰雾。切语言则要重建托盘菜单和应用菜单（两者在构建时就快照了翻译文案），面板本身每 tick 整体重绘，重设 locale 即可。
+强制主题除了换 gpui 主题，还会 pin `NSApp.appearance`（`gpui_app.rs` 的 `apply_ns_appearance`）：vibrancy 材质跟的是窗口的 AppKit appearance 而不是我们的 token，不 pin 的话「系统浅色 + 强制深色」会变成深色文字压在浅色 Popover 毛玻璃上——正是背景不透明度注释里说的那种灰雾。切语言则要重建托盘菜单和应用菜单（两者在构建时就快照了翻译文案），面板本身每 tick 整体重绘，重设 locale 即可。
 
 ## 界面
 

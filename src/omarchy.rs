@@ -19,7 +19,7 @@
 //! theme mixed with defaults would be a palette nobody designed.
 //!
 //! Read on demand, never watched: the panel re-reads it each time it
-//! opens (`crate::refresh_omarchy_palette`), and on Wayland the panel is
+//! opens (`crate::gpui_app::refresh_omarchy_palette`), and on Wayland the panel is
 //! rebuilt on every open anyway. A theme switch shows up the next time
 //! the panel does, which is the only time anyone is looking.
 

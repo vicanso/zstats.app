@@ -22,6 +22,16 @@ category = "public.app-category.utilities"
 osx_minimum_system_version = "12.0"
 short_description = "A menu bar metrics panel written in Rust and GPUI."
 
+# Two front ends while the interface moves from gpui to NSH
+# (docs/nsh-migration.md). They add up rather than exclude each other:
+# with both on (`--all-features`, as `make lint` builds) `ZSTATS_UI=nsh`
+# picks NSH at launch and gpui stays the default. Releases build `gpui`
+# alone until the switch.
+[features]
+default = ["gpui"]
+gpui = ["dep:gpui", "dep:gpui_platform", "dep:gpui_macros", "dep:gpui-kit"]
+nsh = ["dep:nsh-core", "dep:nsh-base", "dep:nsh-platform-macos", "dep:dispatch2"]
+
 [dependencies]
 
 # GPUI comes from crates.io as the `gpui-pre-*` family: zed publishes `gpui`
@@ -30,18 +40,23 @@ short_description = "A menu bar metrics panel written in Rust and GPUI."
 # crate names the source uses (`gpui::`, `gpui_platform::`) and must stay on
 # the exact family gpui-kit's own manifest pins, or two GPUIs end up in the
 # tree — `cargo tree -i gpui-pre` must show one.
-gpui = { package = "gpui-pre", version = "0.3.9" }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.9", features = [
+gpui = { package = "gpui-pre", version = "0.3.9", optional = true }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.9", optional = true, features = [
     "font-kit",
     "x11",
     "wayland",
     "runtime_shaders",
 ] }
-gpui_macros = { package = "gpui-pre-macros", version = "0.3.9" }
+gpui_macros = { package = "gpui-pre-macros", version = "0.3.9", optional = true }
 # gpui-kit bundles gpui-base + gpui-component (`gpui_kit::component::*`) and
 # the component icon assets (`gpui_kit::assets::Assets`). No `tree-sitter`:
 # that feature is LanguageConfig / the highlighter, which nothing here uses.
-gpui-kit = "0.7.3"
+gpui-kit = { version = "0.7.3", optional = true }
+# The NSH front end (`src/nsh/`). No `js` on the platform crate: the panel
+# is a Rust root, and QuickJS stays out of the binary. The Linux backend
+# joins in phase 2 (docs/nsh-migration.md).
+nsh-core = { version = "0.2.0", optional = true }
+nsh-base = { version = "0.2.0", optional = true }
 # tinyvec 1.13.0 (crates.io, 2026-09-03) does not compile on rustc 1.98:
 # `use alloc::vec::{self, Vec}` shadows the `vec!` macro (Lokathor/tinyvec#225).
 # 1.13.1 restored `vec!`; keep a floor so `cargo update` cannot pick 1.13.0.
@@ -207,6 +222,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSDictionary",
     "NSValue",
+    # The NSH front end: its panel delegate's notifications, and the
+    # uptime its debug probe stamps synthesised events with.
+    "NSNotification",
+    "NSObject",
+    "NSProcessInfo",
 ] }
 raw-window-handle = "0.6"
 # Banner delivery. NSUserNotification — the deprecated API a bare binary
@@ -258,6 +278,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     # The quit button on memory alert cards: terminate.rs sends the
     # ⌘Q-equivalent request through NSRunningApplication.
     "NSRunningApplication",
+    # NSRunningApplication's pid accessors take and return `pid_t`, which
+    # only exist with this feature. gpui's tree turned it on for us until
+    # a build without gpui showed nothing here asked for it.
+    "libc",
     "NSScreen",
     "NSVisualEffectView",
     "NSWindow",
@@ -265,6 +289,30 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     # that says when that changes — public API, no entitlement.
     "NSWorkspace",
     "objc2-core-foundation",
+    # The NSH front end's own panel (src/nsh/): a non-activating NSPanel
+    # whose content view is NSH's AppView, the material under it, and the
+    # synthesised events its debug probe drives it with.
+    "objc2-quartz-core",
+    "NSButton",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSPanel",
+    "NSResponder",
+    "NSView",
+] }
+# The NSH front end's macOS backend (AppKit views, CoreText text), and the
+# main queue its engine threads hand AppKit work to. Same versions NSH
+# itself is built on, so the tree keeps one objc2 of each.
+nsh-platform-macos = { version = "0.2.0", optional = true, default-features = false }
+dispatch2 = { version = "0.3.1", optional = true }
+# A canvas's content layer, whose asynchronous drawing the NSH front end
+# turns off (src/nsh/host.rs, `draw_canvases_in_place`).
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CALayer",
 ] }
 
 # XDG banners. macOS delivery is UNUserNotificationCenter in notify.rs;

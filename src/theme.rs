@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 /// gpui-kit theme file for the golden pair. Loaded into `ThemeRegistry`
 /// when the preference is Golden; the names `Golden Light` / `Golden Dark`
-/// are what [`crate::apply_appearance`] looks up.
+/// are what [`crate::gpui_app::apply_appearance`] looks up.
 pub const GOLDEN_JSON: &str = include_str!("../themes/golden.json");
 
 #[derive(Clone, Copy, PartialEq, Eq)]

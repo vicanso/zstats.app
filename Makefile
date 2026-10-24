@@ -1,7 +1,7 @@
 # Release version — Cargo.toml is the single source of truth.
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 
-.PHONY: dev debug run fmt lint test check release bundle bloat udeps clean linux-check linux-clean \
+.PHONY: dev debug run nsh fmt lint test check release bundle bloat udeps clean linux-check linux-clean \
 	version version-patch version-minor version-major tag changelog
 
 # --- develop ---------------------------------------------------------------
@@ -16,13 +16,21 @@ debug:
 
 run: dev
 
+# The NSH front end alone (docs/nsh-migration.md). Debug builds open the
+# panel at launch, as `make dev` does for the gpui one.
+nsh:
+	cargo run --no-default-features --features nsh
+
 # --- quality ---------------------------------------------------------------
 
 fmt:
 	cargo fmt
 
+# Both front ends at once, then the NSH one alone: only the second shows
+# that the shared modules still build without gpui.
 lint:
 	cargo clippy --all-targets --all-features -- --deny=warnings
+	cargo clippy --all-targets --no-default-features --features nsh -- --deny=warnings
 
 # Type-check only — far faster than a full build when iterating on code.
 check:
@@ -30,6 +38,7 @@ check:
 
 test:
 	cargo test --workspace
+	cargo test --workspace --no-default-features --features nsh
 
 # --- release ---------------------------------------------------------------
 

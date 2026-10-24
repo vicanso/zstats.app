@@ -15,21 +15,35 @@
 //! that displays them ([`tab_reads_registry`]), through zstats' runtime
 //! switch — a rebuild would reset every other channel's rate baseline.
 
+// The thread, its cadences and its switches are shared; how a tick reaches
+// the screen is still the gpui front end's (phase 1d of
+// docs/nsh-migration.md moves that behind a channel either can read).
+#[cfg(feature = "gpui")]
 use crate::notify;
+#[cfg(feature = "gpui")]
 use crate::prefs;
+#[cfg(feature = "gpui")]
 use crate::procscan;
+#[cfg(feature = "gpui")]
 use crate::state::{Tab, ZStatsGlobalStore};
+#[cfg(feature = "gpui")]
 use crate::tray;
+#[cfg(feature = "gpui")]
 use gpui::{App, Global};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+#[cfg(feature = "gpui")]
 use std::sync::mpsc::RecvTimeoutError;
+#[cfg(feature = "gpui")]
 use std::thread;
 use std::time::Duration;
+#[cfg(feature = "gpui")]
 use std::time::Instant;
+use zstats::CollectorConfig;
+#[cfg(feature = "gpui")]
+use zstats::Monitor;
 use zstats::settings::FileConfig;
-use zstats::{CollectorConfig, Monitor};
 
 /// Set by the Alerts tab after it writes `[alerts]` overrides. The
 /// collector thread consumes it on the next loop so windows and
@@ -149,6 +163,7 @@ pub struct CollectorPace {
     wake: mpsc::Sender<()>,
 }
 
+#[cfg(feature = "gpui")]
 impl Global for CollectorPace {}
 
 impl CollectorPace {
@@ -185,6 +200,7 @@ impl CollectorPace {
     /// The selected tab changed. Switching *to* a tab that shows GPUs or
     /// drives while the panel is up wakes the collector, so the GPU gauge
     /// is there on the first paint rather than a visible tick later.
+    #[cfg(feature = "gpui")]
     pub fn tab_selected(&self, tab: Tab) {
         let reads = tab_reads_registry(tab);
         let was = self.registry_tab.swap(reads, Ordering::Relaxed);
@@ -197,6 +213,7 @@ impl CollectorPace {
 /// The tabs that display GPU or drive figures — the one place that
 /// decides when `ioreg` runs, so adding those figures to another tab is
 /// a change here and nowhere else.
+#[cfg(feature = "gpui")]
 pub(crate) fn tab_reads_registry(tab: Tab) -> bool {
     tab == Tab::Hardware
 }
@@ -215,6 +232,7 @@ fn registry_channels(on_screen: bool, file: Option<&CollectorConfig>) -> (bool, 
 }
 
 /// Spawn the collector and the task that folds its output into the store.
+#[cfg(feature = "gpui")]
 pub fn start(cx: &mut App) {
     let dir = zstats::settings::default_dir();
 
@@ -425,6 +443,7 @@ pub fn start(cx: &mut App) {
 /// processes by CPU then memory, and an abnormal process scores near zero on
 /// both — on this machine they ranked 435th and below, so they can never
 /// appear in the panel's process table.
+#[cfg(feature = "gpui")]
 fn spawn_abnormal_scan(cx: &mut App) {
     cx.spawn(async move |cx| {
         loop {
@@ -500,6 +519,7 @@ mod tests {
         assert!(c.collect_gpu && c.collect_drives);
     }
 
+    #[cfg(feature = "gpui")]
     #[test]
     fn only_hardware_reads_the_registry() {
         for tab in Tab::ALL {
@@ -507,6 +527,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gpui")]
     #[test]
     fn selecting_a_registry_tab_wakes_the_collector_only_when_it_matters() {
         let (wake, woken) = mpsc::channel();

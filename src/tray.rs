@@ -22,8 +22,9 @@
 //!   has to choose a colour, and nothing in the protocol says what is
 //!   behind it — see [`ink`].
 
-use crate::assets::{self, CustomIconName};
+use crate::assets::CustomIconName;
 use crate::format;
+use crate::glyph;
 use crate::i18n;
 use crate::prefs::{self, TrayPref};
 use crate::state::{TrayAnchor, ZStatsAppState};
@@ -32,10 +33,8 @@ use crate::state::{TrayAnchor, ZStatsAppState};
 use crate::theme;
 use crate::{APP_NAME, show_main_window, toggle_main_window};
 use gpui::{App, Global};
-use resvg::{tiny_skia, usvg};
 use rust_i18n::t;
 use std::cell::{Cell, RefCell};
-use std::str;
 use std::thread;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -437,20 +436,20 @@ enum TrayAction {
     Quit,
 }
 
-/// A menu bar face, rasterised from the bundled SVG.
+/// A menu bar face, rasterised from the bundled SVG (`glyph.rs`).
 ///
 /// A CPU die and a memory stick rather than a trend arrow: an arrow makes
 /// a claim about the data ("the numbers are going up"), while the subject
 /// itself does not. The face that is showing *is* a claim — but one
 /// zstats or the kernel already made (`face_for`), never a reading of
 /// the numbers here.
-///
-/// `tray-icon` takes raw RGBA only — it has no SVG support and just re-encodes
-/// whatever it is given as a PNG for `NSImage`. macOS then scales that to 18pt
-/// tall (`platform_impl/macos/mod.rs`), so the bitmap is produced at 2x to stay
-/// sharp on Retina.
-fn tray_icon(glyph: CustomIconName) -> Option<Icon> {
-    Icon::from_rgba(rasterise_icon(glyph, ICON_SIZE)?, ICON_SIZE, ICON_SIZE).ok()
+fn tray_icon(face: CustomIconName) -> Option<Icon> {
+    Icon::from_rgba(
+        glyph::rasterise(face, ink())?,
+        glyph::ICON_SIZE,
+        glyph::ICON_SIZE,
+    )
+    .ok()
 }
 
 /// The colour the glyph's pixels carry.
@@ -493,94 +492,12 @@ fn ink_for(dark: bool) -> [u8; 3] {
     if dark { [0xe6; 3] } else { [0x1a; 3] }
 }
 
-/// Same die, plus a filled spec in the top-left, in the glyph's own ink
-/// rather than a colour of its own. On macOS that means extra alpha on
-/// the same template, so the spec takes the menu bar's ink along with the
-/// die (white on dark, black on light) — a painted colour there would
-/// have to drop template mode and become a black block. Off macOS it is
-/// [`ink`]'s colour, the same one the strokes carry.
-fn tray_icon_hot(glyph: CustomIconName) -> Option<Icon> {
-    let mut rgba = rasterise_icon(glyph, ICON_SIZE)?;
-    stamp_hot_dot(&mut rgba, ICON_SIZE);
-    Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE).ok()
-}
-
-/// 4 pt at 2×, top-left — away from the percent title on the right.
-const DOT_DIAMETER: u32 = 8;
-const DOT_INSET: u32 = 1;
-
-fn stamp_hot_dot(rgba: &mut [u8], size: u32) {
-    let ink = ink();
-    let radius = DOT_DIAMETER as f32 / 2.0;
-    let cx = DOT_INSET as f32 + radius;
-    let cy = DOT_INSET as f32 + radius;
-    let r2 = radius * radius;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 + 0.5 - cx;
-            let dy = y as f32 + 0.5 - cy;
-            if dx * dx + dy * dy <= r2 {
-                let i = ((y * size + x) * 4) as usize;
-                rgba[i..i + 3].copy_from_slice(&ink);
-                rgba[i + 3] = 255;
-            }
-        }
-    }
-}
-
-/// Rendered at 2x the 18pt macOS uses, so no upscaling happens.
-const ICON_SIZE: u32 = 36;
-
-/// Rasterise the bundled SVG to straight RGBA. Split out from [`tray_icon`]
-/// so the result can be inspected in a test — a silently empty bitmap would
-/// otherwise just look like a missing icon at runtime.
-fn rasterise_icon(glyph: CustomIconName, size: u32) -> Option<Vec<u8>> {
-    rasterise_icon_scaled(glyph, size, GLYPH_SCALE)
-}
-
-/// Share of the canvas the glyph occupies; the rest is transparent margin.
-///
-/// lucide draws to the edges of its 24x24 viewBox, and macOS scales the whole
-/// bitmap to 18pt — so at 1.0 the glyph is a full 18pt tall and outweighs the
-/// ~12pt title beside it. System menu bar icons inset their artwork instead.
-const GLYPH_SCALE: f32 = 0.78;
-
-fn rasterise_icon_scaled(glyph: CustomIconName, size: u32, glyph_scale: f32) -> Option<Vec<u8>> {
-    // From the shared embed rather than `include_str!`, which would compile a
-    // second, uncompressed copy of the same file into the binary.
-    let raw = assets::get(&glyph.path())?;
-    // lucide ships `stroke="currentColor"`, which is a CSS-context keyword
-    // usvg cannot resolve on its own. Which colour does not matter: the
-    // channels are overwritten with `ink` below, and only alpha survives
-    // this function.
-    let svg = str::from_utf8(&raw)
-        .ok()?
-        .replace("currentColor", "#000000");
-
-    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
-    let mut pixmap = tiny_skia::Pixmap::new(size, size)?;
-    let source = tree.size();
-    let longest = source.width().max(source.height());
-    let scale = size as f32 * glyph_scale / longest;
-    // Centre what is left over, so the margin is even on all four sides.
-    let inset = (size as f32 - longest * scale) / 2.0;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_translate(inset, inset).pre_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-
-    let mut rgba = pixmap.take();
-    // Keep only alpha and repaint the colour channels. tiny-skia hands back
-    // premultiplied colour, which `Icon::from_rgba` would read as straight,
-    // so those channels have to be rewritten whatever happens — `ink` is
-    // what decides to what. On macOS the template discards it and works off
-    // alpha alone; off macOS it *is* the glyph.
-    let ink = ink();
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel[..3].copy_from_slice(&ink);
-    }
-    Some(rgba)
+/// Same die, plus the alert spec in the top-left (`glyph::stamp_hot_dot`),
+/// in [`ink`]'s colour like the strokes.
+fn tray_icon_hot(face: CustomIconName) -> Option<Icon> {
+    let mut rgba = glyph::rasterise(face, ink())?;
+    glyph::stamp_hot_dot(&mut rgba, ink());
+    Icon::from_rgba(rgba, glyph::ICON_SIZE, glyph::ICON_SIZE).ok()
 }
 
 /// Where the primary status item sits right now, in the physical pixels
@@ -880,40 +797,6 @@ mod sni {
 mod tests {
     use super::*;
 
-    /// Both faces, not just the one the item is built with: the memory
-    /// glyph is applied only on a swap, so a broken SVG there would show
-    /// up as "the icon vanished the first time memory got tight".
-    #[test]
-    fn every_face_rasterises_to_a_visible_glyph() {
-        for glyph in [
-            CustomIconName::Cpu,
-            CustomIconName::MemoryStick,
-            CustomIconName::HardDrive,
-        ] {
-            let rgba = rasterise_icon(glyph, ICON_SIZE).expect("icon should rasterise");
-            assert_eq!(rgba.len() as u32, ICON_SIZE * ICON_SIZE * 4);
-
-            let opaque = rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .filter(|px| px[3] > 32)
-                .count();
-            let total = (ICON_SIZE * ICON_SIZE) as usize;
-            let coverage = opaque as f32 / total as f32;
-
-            // A failed parse (lucide's `currentColor`, a bad viewBox, a
-            // scale of zero) yields a fully transparent bitmap that raises
-            // no error and simply shows as a missing icon. A stroke-only
-            // glyph covers a modest share of its box, so bracket it on
-            // both sides.
-            assert!(
-                (0.02..0.50).contains(&coverage),
-                "{glyph:?}: unexpected glyph coverage {coverage:.3} — SVG likely failed to render"
-            );
-        }
-    }
-
     /// The whole job of the ink is contrast with whatever is behind it,
     /// so a dark theme must not produce a dark glyph. A regression here
     /// is invisible in the literal sense: the icon is simply not there,
@@ -923,28 +806,6 @@ mod tests {
     fn the_ink_is_light_on_a_dark_theme_and_dark_on_a_light_one() {
         assert!(ink_for(true).iter().all(|c| *c > 0x80), "dark theme");
         assert!(ink_for(false).iter().all(|c| *c < 0x80), "light theme");
-    }
-
-    #[test]
-    fn an_alert_spec_is_extra_alpha_in_the_glyphs_own_ink() {
-        for glyph in [
-            CustomIconName::Cpu,
-            CustomIconName::MemoryStick,
-            CustomIconName::HardDrive,
-        ] {
-            let mut rgba = rasterise_icon(glyph, ICON_SIZE).expect("glyph");
-            let cx = (DOT_INSET + DOT_DIAMETER / 2) as usize;
-            let i = (cx * ICON_SIZE as usize + cx) * 4;
-            let before = rgba[i + 3];
-            stamp_hot_dot(&mut rgba, ICON_SIZE);
-            assert_eq!(rgba[i + 3], 255, "{glyph:?}: the spec must be opaque");
-            assert!(rgba[i + 3] >= before);
-            assert_eq!(
-                &rgba[i..i + 3],
-                &ink(),
-                "{glyph:?}: the glyph's own ink, never a colour of its own"
-            );
-        }
     }
 
     /// Auto rests on CPU, turns for memory or disk, and memory wins
