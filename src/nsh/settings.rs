@@ -276,16 +276,14 @@ fn interface_card(live: Live) -> AnyElement {
                 root::ask(HostAction::Restyle);
             },
         ))
-        .child(pref_row(
-            live,
+        .child(stacked_row(
             i18n::tr("config.theme"),
-            Some(theme_tip),
-            themes,
-            prefs::theme_in_force,
-            |pref: ThemePref| {
+            theme_tip,
+            chips(live, themes, prefs::theme_in_force, |pref: ThemePref| {
                 prefs::set_theme(pref);
                 root::ask(HostAction::Restyle);
-            },
+            }),
+            false,
         ))
         .child(pref_row(
             live,
@@ -395,7 +393,28 @@ fn pref_row<T: Copy + PartialEq + 'static>(
     current: fn() -> T,
     choose: impl Fn(T) + Copy + 'static,
 ) -> AnyElement {
-    let chips: Vec<AnyElement> = choices
+    row(
+        label,
+        tip,
+        view()
+            .flex_row()
+            .flex_none()
+            .gap(px(4.))
+            .children(chips(live, choices, current, choose))
+            .into_element(),
+        false,
+    )
+    .into_element()
+}
+
+/// One option chip per choice, the one in force lit.
+fn chips<T: Copy + PartialEq + 'static>(
+    live: Live,
+    choices: Choices<T>,
+    current: fn() -> T,
+    choose: impl Fn(T) + Copy + 'static,
+) -> Vec<AnyElement> {
+    choices
         .into_iter()
         .map(|(words, value)| {
             widgets::option_chip(
@@ -407,19 +426,42 @@ fn pref_row<T: Copy + PartialEq + 'static>(
                 move || choose(value),
             )
         })
-        .collect();
-    row(
-        label,
-        tip,
-        view()
-            .flex_row()
-            .flex_none()
-            .gap(px(4.))
-            .children(chips)
-            .into_element(),
-        false,
-    )
-    .into_element()
+        .collect()
+}
+
+/// The label and its ⓘ, then the chips under them — for a choice too
+/// wide to stand beside its name. Beside it, the theme's five chips in
+/// English left no room for the label, whose ⓘ sat on the first chip;
+/// the chips wrap rather than run past the card's padding, should a
+/// language's words outgrow even a line of their own.
+fn stacked_row(label: String, tip: String, chips: Vec<AnyElement>, last: bool) -> AnyElement {
+    view()
+        .px(px(ROW_PAD_X))
+        .py(px(8.))
+        .border_b(px(if last { 0. } else { 1. }))
+        .border_color(theme::color(palette::border_subtle))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    text(label)
+                        .text_size(px(11.))
+                        .line_height(widgets::line(11.))
+                        .text_color(theme::color(palette::ink)),
+                )
+                .child(widgets::info_icon(widgets::wrap_tooltip(tip))),
+        )
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .mt(px(6.))
+                .gap(px(4.))
+                .children(chips),
+        )
+        .into_element()
 }
 
 /// "Label · switch" (`config::notifications_row` and its siblings).
@@ -571,8 +613,8 @@ fn panel_size_row(live: Live) -> AnyElement {
     .into_element()
 }
 
-/// The panel's opacity: the label, then its chips under it — the card's
-/// last row.
+/// The panel's opacity: the label, then its seven chips under it — the
+/// card's last row.
 fn opacity_row(live: Live) -> AnyElement {
     let chips: Vec<AnyElement> = settingspage::opacity_choices()
         .into_iter()
@@ -591,26 +633,12 @@ fn opacity_row(live: Live) -> AnyElement {
             )
         })
         .collect();
-    view()
-        .px(px(ROW_PAD_X))
-        .py(px(8.))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
-                .child(
-                    text(i18n::tr("config.opacity"))
-                        .text_size(px(11.))
-                        .line_height(widgets::line(11.))
-                        .text_color(theme::color(palette::ink)),
-                )
-                .child(widgets::info_icon(widgets::wrap_tooltip(i18n::tr(
-                    "config.opacity_tip",
-                )))),
-        )
-        .child(view().flex_row().mt(px(6.)).gap(px(4.)).children(chips))
-        .into_element()
+    stacked_row(
+        i18n::tr("config.opacity"),
+        i18n::tr("config.opacity_tip"),
+        chips,
+        true,
+    )
 }
 
 /// A card's title and the ⓘ that carries its standing note

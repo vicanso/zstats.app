@@ -307,7 +307,7 @@ Overview 内存卡上的 swap 行，越线才变红。这条线**不能**用 `sw
 - **scale factor**：tray-icon 报物理像素，换算要 scale（gpui 的 `PlatformDisplay` 当年不暴露它，NSH 也不替我们管这件事）。macOS 宿主遍历 `NSScreen`（`nsh/host.rs` 的 `Screens`），每块屏带自己的 `backingScaleFactor`（`screens()[0]` 仍是含菜单栏、也是 AppKit 全局原点的那块，但图标可能在别的屏上——「Displays have separate Spaces」时每块屏都有菜单栏）。选哪块屏的 scale 见下面「多显示器不同 DPI」；面板每次调整尺寸时记进 `ZStatsAppState` 的值（`set_window_metrics`）只在拿不到 `NSScreen` 列表时作退路。
 
 **面板之外还有两个普通窗口**：设置与磁盘空间（目录分析 + 重复文件），各是一个 `NSWindow`、各有自己的 `AppView` 和引擎线程（`nsh/windows.rs`；Linux 上是 GTK 窗口）。设置开在 `SETTINGS_WINDOW_SIZE`
-（507×620）；磁盘空间 2026-10-03 起打开即铺满屏幕可用区域（`NSWindow::zoom`，菜单栏和 Dock 留着），
+（527×620——原是 507，2026-10-25 加宽 20：界面页不透明度那一行七个 chip，英文下比卡片内宽多 13，最后一个顶到卡片边上）；磁盘空间 2026-10-03 起打开即铺满屏幕可用区域（`NSWindow::zoom`，菜单栏和 Dock 留着），
 因为分析页成了一张目录地图，地图按面积读，720×480 只够一张明信片；缩放按钮回到 `STORAGE_WINDOW_SIZE`。
 那个尺寸的由来：原先也是 507×620，2026-10-02 改成横向的 720×480——它缺的是宽度：507 里路径只分到尺寸、标签和两个按钮剩下的那点。先试过
 720×840，在 14 寸屏上几乎顶天立地，一个查完就关的窗口不该开成文档那么高；480 在标签栏和

@@ -228,8 +228,11 @@ pub const PANEL_MARGIN_TOP: f32 = 10.;
 /// paths needed the width ([`STORAGE_WINDOW_SIZE`]); the two are now
 /// different shapes, which reads as a decision, where two nearly-equal
 /// sizes read as an accident. Still resizable — this is where it opens,
-/// not where it must stay.
-pub const SETTINGS_WINDOW_SIZE: (f32, f32) = (507., 620.);
+/// not where it must stay. It was 507 wide until 2026-10-25: the Interface
+/// card's opacity row is seven chips on a line, and in English they came
+/// to 330 against the 317 the card had inside its padding — the last chip
+/// stood on the card's edge. 527 leaves them 7 to spare.
+pub const SETTINGS_WINDOW_SIZE: (f32, f32) = (527., 620.);
 /// The disk-space window's size before it zooms to fill the screen, and
 /// the size the zoom button returns it to. It opens zoomed because the
 /// analysis tab is a directory map beside its lists, and a map is read
