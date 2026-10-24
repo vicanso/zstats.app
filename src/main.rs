@@ -57,6 +57,7 @@ mod fullscan;
 mod geom;
 mod glyph;
 mod history;
+mod hot;
 mod i18n;
 mod i18n_loader;
 #[cfg(target_os = "linux")]

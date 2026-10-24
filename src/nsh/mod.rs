@@ -9,16 +9,18 @@
 //! have in common in `root.rs`, all reading the shared store
 //! (`store.rs`).
 
+mod chart;
 mod chrome;
+mod gallery;
 #[cfg(target_os = "macos")]
 mod host;
 #[cfg(target_os = "linux")]
 mod linux;
+mod overview;
 mod panel;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe;
 mod root;
-mod sample;
 mod settings;
 mod storage;
 mod store;

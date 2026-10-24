@@ -10,7 +10,7 @@ use crate::prefs;
 use crate::state::ZStatsAppState;
 
 /// What the notice row says, most pressing first.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
     /// The menu bar is on memory ([`ZStatsAppState::memory_needs_attention`]).
     Memory,

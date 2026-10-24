@@ -1,9 +1,9 @@
 //! The panel's root on NSH: the tab strip, the page of the tab on screen
 //! in a scroll view, and the footer (`chrome.rs`) — `views::root` on the
 //! gpui front end. The pages arrive one by one in phase 4 of
-//! docs/nsh-migration.md; a tab whose page has not is a card that says so,
-//! and Overview's place holds the building blocks on live figures
-//! (`sample.rs`) until its own page does.
+//! docs/nsh-migration.md; a tab whose page has not is a card that says so.
+//! A debug build run with `ZSTATS_GALLERY` set shows the building blocks
+//! on live figures (`gallery.rs`) in Overview's place.
 //!
 //! The page is made again only when the tab changes (a memo of it), and
 //! keeps its own bindings across ticks; the gpui front end repaints the
@@ -15,11 +15,12 @@
 //! compositor's on a Hyprland desktop).
 
 use crate::nsh::root::{self, CARD_GAP, GUTTER, HostAction, Live};
-use crate::nsh::{chrome, sample, store, theme, widgets};
+use crate::nsh::{chrome, gallery, overview, store, theme, widgets};
 use crate::palette;
 use crate::prefs;
 use crate::state::{Tab, ZStatsAppState};
 use nsh_core::ui::prelude::*;
+use std::env;
 
 #[component]
 pub fn Panel() -> impl IntoElement {
@@ -55,9 +56,16 @@ pub fn Panel() -> impl IntoElement {
 /// The page of `tab`.
 fn page(tab: Tab, live: Live) -> AnyElement {
     match tab {
-        Tab::Overview => sample::page(live),
+        Tab::Overview if gallery_asked() => gallery::page(live),
+        Tab::Overview => overview::page(live),
         other => not_yet(other),
     }
+}
+
+/// The building blocks instead of Overview: a debug build run with
+/// `ZSTATS_GALLERY` set.
+fn gallery_asked() -> bool {
+    cfg!(debug_assertions) && env::var_os("ZSTATS_GALLERY").is_some()
 }
 
 /// A tab whose page has not reached this front end yet. Not translated —

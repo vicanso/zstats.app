@@ -125,6 +125,9 @@ pub enum CustomIconName {
     Network,
     Bell,
     Settings,
+    /// The quiet ⓘ beside a card's title (`nsh::widgets::info_icon`);
+    /// gpui's `IconName::Info`.
+    Info,
 }
 
 impl CustomIconName {
@@ -150,6 +153,7 @@ impl CustomIconName {
             CustomIconName::Network => "icons/network.svg",
             CustomIconName::Bell => "icons/bell.svg",
             CustomIconName::Settings => "icons/settings-2.svg",
+            CustomIconName::Info => "icons/info.svg",
         }
     }
 }
@@ -195,6 +199,7 @@ mod tests {
             CustomIconName::Network,
             CustomIconName::Bell,
             CustomIconName::Settings,
+            CustomIconName::Info,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

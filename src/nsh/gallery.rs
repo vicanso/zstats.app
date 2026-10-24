@@ -1,7 +1,8 @@
-//! The building blocks on live figures (`widgets.rs`), where Overview's
-//! page will be: what this development build shows until phase 4b of
-//! docs/nsh-migration.md brings the page itself. Not translated — a
-//! development build's page, gone with it.
+//! The building blocks on live figures (`widgets.rs`): a debug build shows
+//! it in Overview's place while `ZSTATS_GALLERY` is set, to look at a
+//! block before the page that uses it is ported. Not translated — a
+//! development build's page; it goes when the last page arrives
+//! (docs/nsh-migration.md, phase 4).
 
 use crate::nsh::root::{self, AuxWindow, CARD_GAP, CARD_PAD, HostAction, Live};
 use crate::nsh::widgets::{self, Choice};

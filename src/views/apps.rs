@@ -18,6 +18,7 @@ use crate::font;
 use crate::format;
 use crate::fullscan;
 use crate::gpui_ui;
+use crate::hot;
 use crate::i18n;
 use crate::state::{AppSort, FullAppScan, FullAppScanData, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
@@ -35,10 +36,6 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::process;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
-
-/// Same one-core colour line as [`super::processes`] — a tree and a
-/// process that both read 110% must agree about "hot". Display only.
-const HOT_PERCENT: f32 = 100.0;
 
 /// Header + caveat line. Same budget as the process full-scan card so
 /// the list fills the panel instead of leaving a strip of empty card.
@@ -368,7 +365,10 @@ fn app_row(
     sort: AppSort,
     bar_full: f32,
 ) -> AnyElement {
-    let hot = g.cpu_usage_percent > HOT_PERCENT && !processes::own_check_cpu(g.root_pid, state);
+    // The burst half of `hot::is_hot`, as Overview's trees: a tree has no
+    // sustained flag of its own.
+    let hot = hot::is_hot(f64::from(g.cpu_usage_percent), false)
+        && !hot::own_check_cpu(g.root_pid, state);
     let expanded = state.selected_app() == Some(g.root_pid);
     let root_pid = g.root_pid;
     let face = face_of(g, state);

@@ -323,9 +323,10 @@ fn clear_surface_ground(host: &Host) {
 /// however little the canvas drew — the panel's footprint swung between
 /// 26 and 126 MB — and in place it drew for less CPU, not more
 /// (`~/github/nsh-panel-spike/FINDINGS.md`, finding 1). This walks the
-/// panel's layers and turns it off. No page draws a canvas yet; Overview's
-/// charts will (phase 4), and need it asked again whenever a new one
-/// mounts.
+/// panel's layers and turns it off: on show, and after every tick (the
+/// store's `fit_panel`), so a chart that mounts later — a tab switched to,
+/// a page's first sample — draws in place by the next one. A walk of the
+/// panel's few dozen layers.
 fn draw_canvases_in_place(host: &Host) {
     fn walk(layer: &CALayer) {
         if layer.drawsAsynchronously() {
@@ -404,6 +405,7 @@ fn fit_form() {
 /// the height the panel has (`placement::notice_step`), so a panel dragged
 /// taller keeps what was added — the gpui front end's `sync_panel_notice`.
 fn fit_panel() {
+    with_host(draw_canvases_in_place);
     let notice = store::read(notice::row_shown);
     if NOTICE_FITTED.swap(notice, Ordering::Relaxed) == notice {
         return;

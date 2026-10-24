@@ -131,6 +131,69 @@ fn monogram(name: &str) -> AnyElement {
         .into_element()
 }
 
+/// A quiet ⓘ beside a card's title, carrying an explanation on hover
+/// (`widgets::info_icon`).
+pub fn info_icon(tip: TooltipElement) -> AnyElement {
+    view()
+        .flex_none()
+        .tooltip(tip)
+        .child(icon(CustomIconName::Info, 11., palette::text_dim))
+        .into_element()
+}
+
+/// A link in the page's own voice: a word and a chevron, in `ink`, with
+/// the chip's fill under the pointer (`overview::quiet_link`).
+pub fn quiet_link(
+    label: impl IntoReactive<SharedString>,
+    tip: TooltipElement,
+    ink: impl Fn() -> Rgba + Copy + 'static,
+    go: impl Fn() + 'static,
+) -> AnyElement {
+    view()
+        .flex_none()
+        .tooltip(tip)
+        .child(
+            nsh_base::button()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .rounded(px(7.))
+                .px(px(8.))
+                .py(px(4.))
+                .hover(|s| s.bg(theme::color(palette::chip)))
+                .on_press(go)
+                .child(
+                    text(label)
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || theme::color(ink)),
+                )
+                .child(icon(CustomIconName::ChevronRight, 12., ink)),
+        )
+        .into_element()
+}
+
+/// A card that says why there is nothing to show (`widgets::empty_card`).
+pub fn empty_card(title: String, body: String) -> AnyElement {
+    card()
+        .pt(px(16.))
+        .pb(px(16.))
+        .child(
+            text(title)
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::color(palette::text)),
+        )
+        .child(
+            text(body)
+                .mt(px(6.))
+                .text_size(px(11.))
+                .text_color(theme::color(palette::text_muted)),
+        )
+        .into_element()
+}
+
 /// The mark that says a row opens: a chevron at the head of its second
 /// line, turned down while `open`, dim (`widgets::expand_mark`).
 pub fn expand_mark(open: impl Fn() -> bool + 'static) -> AnyElement {
