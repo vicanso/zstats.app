@@ -23,17 +23,16 @@ use crate::alerttpl;
 // macOS.
 #[cfg(target_os = "macos")]
 use crate::assets;
-use crate::autostart::{self, Status};
+use crate::autostart;
 use crate::cachepreset;
 use crate::cleanhints;
 use crate::confirm;
-use crate::finder;
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::omarchy;
-use crate::opener;
-use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
+use crate::prefs;
+pub use crate::settingspage::SettingsSection;
+use crate::settingspage::{self, Autostart};
 use crate::state::{
     CachesSync, HintsSync, TemplateSync, UpdateStatus, WebhookTest, ZStatsAppState,
     ZStatsGlobalStore,
@@ -67,84 +66,18 @@ use zstats::CollectorConfig;
 use zstats::alerts::ActiveThresholds;
 use zstats::settings::PressureAlert;
 
-/// Left-nav sections of the settings window.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum SettingsSection {
-    /// Language and theme — `app.toml`, not shared with the CLI.
-    #[default]
-    Interface,
-    /// When zstats alerts: the thresholds and the per-program rules.
-    /// Half of what was the Config page until 2026-10-12 — the half
-    /// someone opens Settings *for* ("stop telling me about Chrome"),
-    /// which sat under collector cadences and above three "Update from
-    /// GitHub" cards.
-    Alerts,
-    /// The other half, plus the four Interface rows that asked a
-    /// question nobody arrives with: the sustained-load pair, the
-    /// webhook and the proxy. Still everything `config.toml` holds that
-    /// is not a threshold.
-    Advanced,
-    /// Full Disk Access: live status plus a deep link into System
-    /// Settings. Status only — granting stays a user act there. macOS
-    /// only, and the variant itself is gated rather than merely left
-    /// out of [`Self::ALL`]: a page nothing can navigate to should not
-    /// exist as a value either. See `ALL` for why there is no Linux
-    /// counterpart.
-    #[cfg(target_os = "macos")]
-    Permissions,
-    About,
-}
-
-impl SettingsSection {
-    /// The pages, in nav order.
-    ///
-    /// Permissions is macOS only. Full Disk Access is a TCC concept: one
-    /// switch that pre-empts every per-app data prompt the disk analysis
-    /// could trigger. A Linux session has no such switch to offer — a
-    /// directory the user cannot read is simply unreadable, and the
-    /// analysis already counts those as skipped — so a page whose only
-    /// control opens `x-apple.systempreferences:` would be a page about
-    /// another operating system.
-    #[cfg(target_os = "macos")]
-    pub const ALL: [SettingsSection; 5] = [
-        SettingsSection::Interface,
-        SettingsSection::Alerts,
-        SettingsSection::Advanced,
-        SettingsSection::Permissions,
-        SettingsSection::About,
-    ];
-    #[cfg(not(target_os = "macos"))]
-    pub const ALL: [SettingsSection; 4] = [
-        SettingsSection::Interface,
-        SettingsSection::Alerts,
-        SettingsSection::Advanced,
-        SettingsSection::About,
-    ];
-
-    pub fn label_key(self) -> &'static str {
-        match self {
-            SettingsSection::Interface => "config.nav_interface",
-            SettingsSection::Alerts => "config.nav_alerts",
-            SettingsSection::Advanced => "config.nav_advanced",
-            #[cfg(target_os = "macos")]
-            SettingsSection::Permissions => "config.nav_permissions",
-            SettingsSection::About => "config.nav_about",
-        }
-    }
-
-    /// The nav row's icon. Settings2 on Advanced is where config.toml's
-    /// own knobs are; the footer gear that opens this window is the same
-    /// glyph. Alerts wears the panel's Alerts tab's bell.
-    pub fn icon(self) -> Icon {
-        match self {
-            SettingsSection::Interface => Icon::new(IconName::Palette),
-            SettingsSection::Alerts => Icon::new(IconName::Bell),
-            SettingsSection::Advanced => Icon::new(IconName::Settings2),
-            // gpui-kit ships no shield; ours rides CustomIconName.
-            #[cfg(target_os = "macos")]
-            SettingsSection::Permissions => assets::CustomIconName::Shield.into(),
-            SettingsSection::About => Icon::new(IconName::Info),
-        }
+/// The nav row's icon. Settings2 on Advanced is where config.toml's own
+/// knobs are; the footer gear that opens this window is the same glyph.
+/// Alerts wears the panel's Alerts tab's bell.
+pub fn section_icon(section: SettingsSection) -> Icon {
+    match section {
+        SettingsSection::Interface => Icon::new(IconName::Palette),
+        SettingsSection::Alerts => Icon::new(IconName::Bell),
+        SettingsSection::Advanced => Icon::new(IconName::Settings2),
+        // gpui-kit ships no shield; ours rides CustomIconName.
+        #[cfg(target_os = "macos")]
+        SettingsSection::Permissions => assets::CustomIconName::Shield.into(),
+        SettingsSection::About => Icon::new(IconName::Info),
     }
 }
 
@@ -910,21 +843,10 @@ fn file_note(id: &'static str, name: &'static str) -> AnyElement {
         .text_size(px(10.))
         .text_color(theme::text_dim())
         .hover(|d| d.bg(theme::surface_raised()).text_color(theme::text()))
-        .tooltip(widgets::wrap_tooltip(i18n::tr(
-            if cfg!(target_os = "macos") {
-                "config.file_reveal_tip"
-            } else {
-                "config.file_reveal_tip_linux"
-            },
-        )))
+        .tooltip(widgets::wrap_tooltip(settingspage::file_reveal_tip()))
         .on_click(move |_, _window, cx| {
             cx.stop_propagation();
-            let path = zstats::settings::default_dir().join(name);
-            if path.is_file() {
-                finder::reveal(&path);
-            } else if let Err(e) = opener::open([path.parent().unwrap_or(&path).as_os_str()]) {
-                tracing::warn!("open config dir: {e}");
-            }
+            settingspage::reveal_file(name);
         })
         .child(name)
         .into_any_element()
@@ -944,54 +866,26 @@ fn interface_card() -> AnyElement {
         .child(pref_row(
             "pref-language",
             i18n::tr("config.language"),
-            vec![
-                (i18n::tr("config.follow_system"), LanguagePref::System),
-                // Each language in its own name, so it stays findable from
-                // inside the other locale. Deliberately not translated.
-                ("English".into(), LanguagePref::English),
-                ("中文".into(), LanguagePref::Chinese),
-            ],
+            settingspage::language_choices(),
             prefs::language(),
             crate::set_language_pref,
             None,
         ))
         .child({
-            let mut themes = vec![
-                (i18n::tr("config.follow_system"), ThemePref::System),
-                (i18n::tr("config.theme_light"), ThemePref::Light),
-                (i18n::tr("config.theme_dark"), ThemePref::Dark),
-                (i18n::tr("config.theme_golden"), ThemePref::Golden),
-            ];
-            // Only where there is an Omarchy palette to follow, plus every
-            // development build so it can be tried from a Mac (where it
-            // paints Tokyo Night, Omarchy's default).
-            let omarchy = omarchy::selectable();
-            if omarchy {
-                // The desktop's own name for itself, in both locales.
-                themes.push(("Omarchy".into(), ThemePref::Omarchy));
-            }
+            let (themes, tip) = settingspage::theme_choices();
             pref_row(
                 "pref-theme",
                 i18n::tr("config.theme"),
                 themes,
                 prefs::theme_in_force(),
                 crate::set_theme_pref,
-                Some(i18n::tr(if omarchy {
-                    "config.theme_tip_omarchy"
-                } else {
-                    "config.theme_tip"
-                })),
+                Some(tip),
             )
         })
         .child(pref_row(
             "pref-tray",
             i18n::tr("config.tray"),
-            vec![
-                (i18n::tr("config.tray_auto"), TrayPref::Auto),
-                ("CPU".into(), TrayPref::Cpu),
-                (i18n::tr("config.tray_memory"), TrayPref::Memory),
-                (i18n::tr("config.tray_both"), TrayPref::Both),
-            ],
+            settingspage::tray_choices(),
             prefs::tray(),
             crate::set_tray_pref,
             Some(i18n::tr("config.tray_tip")),
@@ -1082,12 +976,7 @@ fn advanced_card(state: &ZStatsAppState, fields: &Fields) -> AnyElement {
         .child(pref_row(
             "pref-sustained-after",
             i18n::tr("config.sustained_after"),
-            vec![
-                ("1h".into(), 60u16),
-                ("2h".into(), 120),
-                ("4h".into(), 240),
-                ("8h".into(), 480),
-            ],
+            settingspage::sustained_after_choices(),
             (prefs::sustained_after().as_secs() / 60) as u16,
             crate::set_sustained_after_pref,
             Some(i18n::tr("config.sustained_after_tip")),
@@ -1095,22 +984,12 @@ fn advanced_card(state: &ZStatsAppState, fields: &Fields) -> AnyElement {
         .child(pref_row(
             "pref-sustained-divisor",
             i18n::tr("config.sustained_divisor"),
-            vec![
-                ("÷2".into(), 2u8),
-                ("÷3".into(), 3),
-                ("÷4".into(), 4),
-                ("÷6".into(), 6),
-            ],
+            settingspage::sustained_divisor_choices(),
             prefs::sustained_divisor(),
             crate::set_sustained_divisor_pref,
-            Some(
-                t!(
-                    "config.sustained_divisor_tip",
-                    divisor = prefs::sustained_divisor(),
-                    bar = format!("{:.0}%", state.sustained_bar_percent())
-                )
-                .to_string(),
-            ),
+            Some(settingspage::sustained_divisor_tip(
+                state.sustained_bar_percent(),
+            )),
         ))
         .child(webhook_row(state, fields.webhook, fields.webhook_valid))
         .child(proxy_row(fields.proxy, fields.proxy_valid))
@@ -1401,15 +1280,7 @@ fn autostart_row() -> AnyElement {
                 )
                 .child(widgets::info_icon(
                     "pref-autostart-info",
-                    // Two mechanisms, two descriptions: the switch does
-                    // the same job on both, but "Login Items" and
-                    // "~/.config/autostart" are not the same place to
-                    // go and revoke it.
-                    i18n::tr(if cfg!(target_os = "macos") {
-                        "config.autostart_tip"
-                    } else {
-                        "config.autostart_tip_linux"
-                    }),
+                    settingspage::autostart_tip(),
                 )),
         )
         .child(autostart_control())
@@ -1417,16 +1288,16 @@ fn autostart_row() -> AnyElement {
 }
 
 fn autostart_control() -> AnyElement {
-    match autostart::status() {
-        Status::Enabled | Status::NotRegistered => Switch::new("pref-autostart")
+    match settingspage::autostart() {
+        Autostart::Switch(on) => Switch::new("pref-autostart")
             .small()
-            .checked(autostart::is_enabled())
+            .checked(on)
             .on_click(|checked, _window, cx| crate::set_autostart_pref(*checked, cx))
             .into_any_element(),
         // The sentence is the control: it opens Login Items, the only
         // place approval can actually happen. Same chip chrome as the
         // FDA "Open Settings" button — hover fill, not a fake switch.
-        Status::RequiresApproval => div()
+        Autostart::Approve(words) => div()
             .id("pref-autostart-approve")
             .flex_none()
             .rounded_full()
@@ -1439,20 +1310,13 @@ fn autostart_control() -> AnyElement {
             .text_color(theme::text())
             .hover(|d| d.bg(theme::surface_raised()))
             .on_click(|_, _window, _cx| autostart::open_login_items())
-            .child(i18n::tr("config.autostart_needs_approval"))
+            .child(words)
             .into_any_element(),
-        // `NotFound` is "the mechanism is absent" on both platforms, but
-        // the absence has a different name: no installed .app for
-        // launchd, or no session component reading the directory.
-        Status::NotFound => div()
+        Autostart::Absent(words) => div()
             .flex_none()
             .text_size(px(11.))
             .text_color(theme::text_dim())
-            .child(i18n::tr(if cfg!(target_os = "macos") {
-                "config.autostart_not_found"
-            } else {
-                "config.autostart_no_reader"
-            }))
+            .child(words)
             .into_any_element(),
     }
 }
@@ -1461,15 +1325,7 @@ fn autostart_control() -> AnyElement {
 /// whatever `prefs::load` froze at launch.
 fn opacity_row() -> AnyElement {
     let current = prefs::opacity();
-    let chips: [(String, Option<f32>); 7] = [
-        (i18n::tr("config.opacity_default"), None),
-        ("50%".into(), Some(0.50)),
-        ("60%".into(), Some(0.60)),
-        ("70%".into(), Some(0.70)),
-        ("80%".into(), Some(0.80)),
-        ("90%".into(), Some(0.90)),
-        ("100%".into(), Some(1.00)),
-    ];
+    let chips = settingspage::opacity_choices();
     v_flex()
         .px(px(13.))
         .py(px(8.))
@@ -1493,11 +1349,7 @@ fn opacity_row() -> AnyElement {
                 .mt(px(6.))
                 .gap(px(4.))
                 .children(chips.into_iter().enumerate().map(|(i, (text, value))| {
-                    let on = match (current, value) {
-                        (None, None) => true,
-                        (Some(a), Some(b)) => (a - b).abs() < 0.001,
-                        _ => false,
-                    };
+                    let on = settingspage::opacity_on(current, value);
                     div()
                         .id(("pref-opacity", i))
                         .flex_none()

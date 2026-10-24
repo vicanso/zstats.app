@@ -29,9 +29,7 @@ use gpui::{
     Subscription, TitlebarOptions, Window, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
-use gpui_kit::component::{
-    ActiveTheme, Icon, Root, Sizable, Size, Theme, ThemeMode, ThemeRegistry,
-};
+use gpui_kit::component::{ActiveTheme, Root, Sizable, Size, Theme, ThemeMode, ThemeRegistry};
 
 /// Wayland `app_id` / X11 WM_CLASS — task switchers group windows by it and
 /// resolve the icon from the installed `.desktop` entry.
@@ -1184,7 +1182,7 @@ fn settings_nav(
                                 .items_center()
                                 .gap(px(6.))
                                 .child(
-                                    Icon::new(item.icon())
+                                    views::config::section_icon(item)
                                         .with_size(Size::Size(px(13.)))
                                         .text_color(gpui::Hsla::from(if on {
                                             theme::ink()

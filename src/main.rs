@@ -84,6 +84,7 @@ mod procscan;
 mod proxy;
 mod rows;
 mod series;
+mod settingspage;
 mod spaceinfo;
 mod squarify;
 mod state;
