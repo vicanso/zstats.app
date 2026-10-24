@@ -83,6 +83,8 @@ mod dock;
 mod font;
 #[cfg(feature = "gpui")]
 mod gpui_app;
+#[cfg(feature = "gpui")]
+mod gpui_ui;
 #[cfg(all(feature = "gpui", target_os = "linux"))]
 mod ipc;
 #[cfg(feature = "gpui")]

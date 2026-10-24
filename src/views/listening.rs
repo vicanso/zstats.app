@@ -38,6 +38,7 @@ use super::widgets;
 use crate::confirm;
 use crate::font;
 use crate::format;
+use crate::gpui_ui;
 use crate::i18n;
 use crate::state::{ListenerView, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
@@ -160,11 +161,7 @@ fn search_chip(state: &ZStatsAppState) -> AnyElement {
                     theme::text_muted()
                 })),
         )
-        .on_click(|_, window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.toggle_listen_filter(window, cx));
-        })
+        .on_click(|_, window, cx| gpui_ui::toggle_listen_filter(window, cx))
         .into_any_element()
 }
 
@@ -173,12 +170,12 @@ fn search_row(state: &ZStatsAppState) -> Option<AnyElement> {
     if !state.listen_filter_open() {
         return None;
     }
-    let input = state.listen_filter_input()?;
+    let input = gpui_ui::listen_filter_input()?;
     Some(
         div()
             .px(px(widgets::CARD_PAD))
             .pb(px(6.))
-            .child(Input::new(input).xsmall().cleanable(true))
+            .child(Input::new(&input).xsmall().cleanable(true))
             .into_any_element(),
     )
 }

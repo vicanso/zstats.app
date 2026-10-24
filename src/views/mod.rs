@@ -43,6 +43,7 @@ use crate::assets::CustomIconName;
 use crate::awake;
 use crate::font;
 use crate::format;
+use crate::gpui_ui;
 use crate::i18n;
 use crate::prefs;
 use crate::state::{Tab, ZStatsAppState, ZStatsGlobalStore};
@@ -99,11 +100,7 @@ const CARD_GAP: f32 = 10.;
 /// has reported a window size.
 pub(super) fn body_height(state: &ZStatsAppState) -> Option<f32> {
     state.window_bounds().map(|bounds| {
-        f32::from(bounds.size.height)
-            - TAB_STRIP_HEIGHT
-            - FOOTER_HEIGHT
-            - BODY_BOTTOM_PAD
-            - CONTENT_TOP_PAD
+        bounds.size.height - TAB_STRIP_HEIGHT - FOOTER_HEIGHT - BODY_BOTTOM_PAD - CONTENT_TOP_PAD
     })
 }
 
@@ -319,7 +316,7 @@ fn content(state: &ZStatsAppState) -> AnyElement {
         // though — gpui drops element state it did not paint, and only the
         // active tab is ever painted — so the handle comes from the store.
         .id(("panel-body", tab.index()))
-        .track_scroll(state.scroll_handle(tab))
+        .track_scroll(&gpui_ui::scroll_handle(tab))
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()

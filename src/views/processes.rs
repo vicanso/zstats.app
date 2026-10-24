@@ -12,6 +12,7 @@ use crate::confirm;
 use crate::diskwatch::Hold;
 use crate::font;
 use crate::format;
+use crate::gpui_ui;
 use crate::i18n;
 use crate::procscan;
 use crate::procscan::ProcState;
@@ -437,7 +438,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         && let Some(sel) = state.selected_pid()
         && let Some(ix) = rows.iter().position(|(p, _)| p.pid == sel)
     {
-        state.proc_rows_scroll().scroll_to_item(abnormal.len() + ix);
+        gpui_ui::proc_rows_scroll().scroll_to_item(abnormal.len() + ix);
     }
 
     let title = if only_abnormal {
@@ -481,7 +482,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             // `h`, so a short list keeps a short card.
             v_flex()
                 .id("proc-rows")
-                .track_scroll(state.proc_rows_scroll())
+                .track_scroll(&gpui_ui::proc_rows_scroll())
                 .overflow_y_scroll()
                 .max_h(px(fit.viewport))
                 .children(abnormal_rows(
@@ -753,7 +754,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
         && let Some(sel) = state.selected_pid()
         && let Some(ix) = visible.iter().position(|&i| processes[i].pid == sel)
     {
-        data.list.scroll_to_reveal_item(ix);
+        gpui_ui::process_list(data).scroll_to_reveal_item(ix);
     }
 
     widgets::list_shell()
@@ -785,7 +786,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullScanData) -> AnyElement {
             )
         })
         .child(
-            list(data.list.clone(), move |i, _window, cx| {
+            list(gpui_ui::process_list(data), move |i, _window, cx| {
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let p = &processes[visible[i]];
                 // Resolved with a linear find because the closure owns only
@@ -853,11 +854,7 @@ pub(super) fn filter_chip(state: &ZStatsAppState) -> AnyElement {
                     theme::text_muted()
                 })),
         )
-        .on_click(|_, window, cx| {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, cx| state.toggle_proc_filter(window, cx));
-        })
+        .on_click(|_, window, cx| gpui_ui::toggle_proc_filter(window, cx))
         .into_any_element()
 }
 
@@ -867,12 +864,12 @@ pub(super) fn filter_row(state: &ZStatsAppState) -> Option<AnyElement> {
     if !state.proc_filter_open() {
         return None;
     }
-    let input = state.proc_filter_input()?;
+    let input = gpui_ui::proc_filter_input()?;
     Some(
         div()
             .px(px(widgets::CARD_PAD))
             .pb(px(6.))
-            .child(Input::new(input).xsmall().cleanable(true))
+            .child(Input::new(&input).xsmall().cleanable(true))
             .into_any_element(),
     )
 }

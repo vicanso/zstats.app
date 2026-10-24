@@ -10,6 +10,7 @@ use super::widgets;
 use crate::assets::CustomIconName;
 use crate::font;
 use crate::format;
+use crate::gpui_ui;
 use crate::history::{self, HistoryShape};
 use crate::i18n;
 use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore};
@@ -130,7 +131,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                 // control you stop using.
                 v_flex()
                     .id("history-rows")
-                    .track_scroll(state.history_rows_scroll())
+                    .track_scroll(&gpui_ui::history_rows_scroll())
                     .overflow_y_scroll()
                     .max_h(px(fit.viewport))
                     .children(shown.into_iter().enumerate().map(|(i, s)| {

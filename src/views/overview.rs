@@ -776,7 +776,7 @@ fn apps_rows(state: &ZStatsAppState, detail: bool, base: usize) -> usize {
     };
     let notice = !detail && has_notice(state);
     let (_, own) = placement::window_size(detail, notice, placement::Dragged::default());
-    let spare = f32::from(bounds.size.height) - own;
+    let spare = bounds.size.height - own;
     if spare < APP_ROW {
         return base;
     }

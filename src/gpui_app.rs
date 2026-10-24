@@ -11,8 +11,8 @@ use crate::ipc;
 use crate::placement::{MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 use crate::{
-    active, autostart, awake, font, i18n, logger, metrics, notify, omarchy, placement, prefs,
-    proxy, state, theme, tray, updater, views, watch, webhook,
+    active, autostart, awake, font, gpui_ui, i18n, logger, metrics, notify, omarchy, placement,
+    prefs, proxy, state, theme, tray, updater, views, watch, webhook,
 };
 #[cfg(target_os = "macos")]
 use crate::{dock, window_ext};
@@ -276,10 +276,8 @@ impl ZStatsApp {
             );
             cx.global::<ZStatsGlobalStore>()
                 .clone()
-                .update(cx, |state, cx| {
-                    state.mark_auto_hidden();
-                    state.reset_transient_views(window, cx);
-                });
+                .update(cx, |state, _| state.mark_auto_hidden());
+            gpui_ui::reset_transient_views(window, cx);
             // Order it off screen rather than destroy it — rebuilding the
             // window on every toggle is what leaked ~1 MB a cycle.
             // AppKit after the App cell is released: this callback *is*
@@ -407,10 +405,8 @@ impl ZStatsApp {
                 );
                 cx.global::<ZStatsGlobalStore>()
                     .clone()
-                    .update(cx, |state, cx| {
-                        state.mark_auto_hidden();
-                        state.reset_transient_views(window, cx);
-                    });
+                    .update(cx, |state, _| state.mark_auto_hidden());
+                gpui_ui::reset_transient_views(window, cx);
                 cx.global::<metrics::CollectorPace>().hidden();
                 window.remove_window();
             });
@@ -434,7 +430,7 @@ impl Render for ZStatsApp {
         let scale_factor = window.scale_factor();
         let store = cx.global::<ZStatsGlobalStore>().clone();
         store.update(cx, |state, cx| {
-            state.set_window_metrics(bounds, scale_factor, cx)
+            state.set_window_metrics(bounds.into(), scale_factor, cx)
         });
         // Before the page is built, so the frame that crosses the line
         // is already the other form.
@@ -752,7 +748,7 @@ fn apply_min_height(cx: &mut App) {
     #[cfg(target_os = "macos")]
     {
         let height = placement::min_height(NOTICE_FITTED.load(Ordering::Relaxed));
-        if let Some(handle) = cx.global::<ZStatsGlobalStore>().read(cx).panel_window() {
+        if let Some(handle) = gpui_ui::panel_window() {
             let _ = handle.update(cx, |_, window, _| {
                 window_ext::set_min_height(window, height)
             });
@@ -828,7 +824,7 @@ pub fn sync_panel_notice(cx: &mut App) {
         return;
     }
     apply_min_height(cx);
-    let Some(handle) = cx.global::<ZStatsGlobalStore>().read(cx).panel_window() else {
+    let Some(handle) = gpui_ui::panel_window() else {
         return;
     };
     let Ok(bounds) = handle.update(cx, |_, window, _| window.bounds()) else {
@@ -841,7 +837,7 @@ pub fn sync_panel_notice(cx: &mut App) {
 
 /// Resize the panel with its top edge held.
 fn set_panel_size(width: f32, height: f32, cx: &mut App) {
-    let Some(handle) = cx.global::<ZStatsGlobalStore>().read(cx).panel_window() else {
+    let Some(handle) = gpui_ui::panel_window() else {
         return;
     };
     #[cfg(target_os = "macos")]
@@ -1558,7 +1554,7 @@ pub fn open_settings_window(cx: &mut App) {
     if !prefs::pinned() {
         cx.defer(|cx| close_panel_from_outside(cx));
     }
-    let existing = cx.global::<ZStatsGlobalStore>().read(cx).settings_window();
+    let existing = gpui_ui::settings_window();
     if let Some(handle) = existing
         && handle
             .update(cx, |_, window, _| window.activate_window())
@@ -1586,9 +1582,7 @@ pub fn open_settings_window(cx: &mut App) {
         },
     );
     if let Ok(handle) = opened {
-        cx.global::<ZStatsGlobalStore>()
-            .clone()
-            .update(cx, |state, _| state.set_settings_window(handle.into()));
+        gpui_ui::set_settings_window(handle.into());
     }
 }
 
@@ -1609,7 +1603,7 @@ pub fn open_storage_window(cx: &mut App) {
     if !prefs::pinned() {
         cx.defer(|cx| close_panel_from_outside(cx));
     }
-    let existing = cx.global::<ZStatsGlobalStore>().read(cx).storage_window();
+    let existing = gpui_ui::storage_window();
     if let Some(handle) = existing
         && handle
             .update(cx, |_, window, _| window.activate_window())
@@ -1644,9 +1638,7 @@ pub fn open_storage_window(cx: &mut App) {
         },
     );
     if let Ok(handle) = opened {
-        cx.global::<ZStatsGlobalStore>()
-            .clone()
-            .update(cx, |state, _| state.set_storage_window(handle.into()));
+        gpui_ui::set_storage_window(handle.into());
     }
 }
 
@@ -1703,7 +1695,11 @@ fn panel_kind() -> gpui::WindowKind {
 pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     // Before the window exists, so its first frame is the current theme.
     refresh_omarchy_palette(cx);
-    let saved = cx.global::<ZStatsGlobalStore>().read(cx).window_bounds();
+    let saved = cx
+        .global::<ZStatsGlobalStore>()
+        .read(cx)
+        .window_bounds()
+        .map(Bounds::from);
     let default_size = {
         let notice = overview_has_notice(cx);
         NOTICE_FITTED.store(notice, Ordering::Relaxed);
@@ -1757,9 +1753,7 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
     };
     match opened {
         Ok(handle) => {
-            cx.global::<ZStatsGlobalStore>()
-                .clone()
-                .update(cx, |state, _| state.set_panel_window(handle.into()));
+            gpui_ui::set_panel_window(handle.into());
             mark_panel_shown(cx);
         }
         Err(e) => tracing::error!("failed to open main window: {e}"),
@@ -1773,10 +1767,8 @@ pub fn open_main_window(cx: &mut App, anchor: Option<TrayAnchor>) {
 fn retire_panel_state(window: &mut Window, cx: &mut App) {
     cx.global::<ZStatsGlobalStore>()
         .clone()
-        .update(cx, |state, cx| {
-            state.mark_auto_hidden();
-            state.reset_transient_views(window, cx);
-        });
+        .update(cx, |state, _| state.mark_auto_hidden());
+    gpui_ui::reset_transient_views(window, cx);
     cx.global::<metrics::CollectorPace>().hidden();
 }
 
@@ -1931,7 +1923,7 @@ fn build_panel(window: &mut Window, cx: &mut App, layer_shell: bool) -> gpui::En
 /// Settings and storage already keep a handle; looking up
 /// `cx.windows().first()` is gpui's SlotMap order, not "the panel".
 fn live_panel_handle(cx: &mut App) -> Option<gpui::AnyWindowHandle> {
-    let handle = cx.global::<ZStatsGlobalStore>().read(cx).panel_window()?;
+    let handle = gpui_ui::panel_window()?;
     handle.update(cx, |_, _, _| ()).ok()?;
     Some(handle)
 }
@@ -1998,9 +1990,7 @@ pub fn hide_main_window(cx: &mut App) {
     if let Some(handle) = live_panel_handle(cx) {
         let ns = handle
             .update(cx, |_, window, cx| {
-                cx.global::<ZStatsGlobalStore>()
-                    .clone()
-                    .update(cx, |state, cx| state.reset_transient_views(window, cx));
+                gpui_ui::reset_transient_views(window, cx);
                 window_ext::retain(window)
             })
             .ok()

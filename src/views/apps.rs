@@ -17,6 +17,7 @@ use crate::confirm;
 use crate::font;
 use crate::format;
 use crate::fullscan;
+use crate::gpui_ui;
 use crate::i18n;
 use crate::state::{AppSort, FullAppScan, FullAppScanData, ZStatsAppState, ZStatsGlobalStore};
 use crate::terminate;
@@ -108,7 +109,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             .selected_app()
             .and_then(|sel| rows.iter().position(|g| g.root_pid == sel))
     {
-        state.app_rows_scroll().scroll_to_item(ix);
+        gpui_ui::app_rows_scroll().scroll_to_item(ix);
     }
 
     let fit = processes::fit_rows(
@@ -156,7 +157,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             // height budget is shared because the chrome is identical.
             v_flex()
                 .id("app-rows")
-                .track_scroll(state.app_rows_scroll())
+                .track_scroll(&gpui_ui::app_rows_scroll())
                 .overflow_y_scroll()
                 .max_h(px(fit.viewport))
                 .children({
@@ -233,7 +234,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
         && let Some(sel) = state.selected_app()
         && let Some(ix) = visible.iter().position(|&i| groups[i].root_pid == sel)
     {
-        data.list.scroll_to_reveal_item(ix);
+        gpui_ui::app_list(data).scroll_to_reveal_item(ix);
     }
 
     widgets::list_shell()
@@ -265,7 +266,7 @@ fn full_scan_card(state: &ZStatsAppState, data: &FullAppScanData) -> AnyElement 
             )
         })
         .child(
-            list(data.list.clone(), move |i, _window, cx| {
+            list(gpui_ui::app_list(data), move |i, _window, cx| {
                 let state = cx.global::<ZStatsGlobalStore>().read(cx);
                 let g = &groups[visible[i]];
                 let ambiguous = repeated.contains(face_of(g, state).text().as_str());

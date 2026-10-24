@@ -29,6 +29,8 @@ use crate::cachepreset;
 use crate::cleanhints;
 use crate::diskwatch;
 use crate::fullscan::{self, GroupScan, Scan};
+use crate::geom::Rect;
+use crate::gpui_ui;
 use crate::history;
 use crate::history::Spender;
 use crate::i18n;
@@ -44,12 +46,7 @@ use crate::updater;
 pub use crate::watch::SustainedNotice;
 use crate::watch::{AbnormalWatch, NetActivity, SustainedRule, SustainedWatch};
 use crate::webhook;
-use gpui::{
-    App, AppContext, Bounds, Context, Entity, Focusable, Global, ListAlignment, ListState, Pixels,
-    ScrollHandle, Window, px,
-};
-use gpui_kit::component::input::{InputEvent, InputState};
-use std::array;
+use gpui::{App, Context, Entity, Global};
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -453,12 +450,10 @@ pub struct FullScanData {
     /// Indices into `processes` that the name filter keeps — the rows the
     /// list actually shows. The whole range while no filter is active.
     pub visible: Vec<usize>,
-    /// Drives the virtualised list: measured row heights plus the scroll
-    /// offset. Lives here because gpui drops element state it did not
-    /// paint and the panel repaints per tick — built per frame, the list
-    /// would snap to the top every couple of seconds. Rebuilt with each
-    /// scan, so a new photograph starts at the top with an empty cache.
-    pub list: ListState,
+    /// Which row set `visible` is: new with each scan and each change of
+    /// the filter, so a front end's virtual list starts a new photograph
+    /// at the top with an empty cache, and keeps its scroll otherwise.
+    pub rows: u64,
 }
 
 /// The one-shot listing of every process tree, behind the Apps All chip.
@@ -481,7 +476,8 @@ pub struct FullAppScanData {
     pub window: Duration,
     pub at: Instant,
     pub visible: Vec<usize>,
-    pub list: ListState,
+    /// See [`FullScanData::rows`].
+    pub rows: u64,
 }
 
 /// Full process table, for naming every member of an expanded Apps tree.
@@ -687,7 +683,7 @@ fn member_table_next(table: &MemberTable, now: Instant, interval: Duration) -> M
 }
 
 pub struct ZStatsAppState {
-    window_bounds: Option<Bounds<Pixels>>,
+    window_bounds: Option<Rect>,
     scale_factor: f32,
     last_auto_hide: Option<Instant>,
     pub(crate) latest: Option<Tick>,
@@ -728,14 +724,12 @@ pub struct ZStatsAppState {
     /// The failure already logged. A blip while a ranking is on screen
     /// must not warn on every background read.
     traffic_fault: Option<String>,
-    /// The listening card's search input, created on first open (an
-    /// [`InputState`] needs a `Window`) and kept, like the process filter.
-    listen_filter: Option<Entity<InputState>>,
-    /// Whether the search row is on screen. Closing clears the text, for
+    /// Whether the listening card's search row is on screen (the input
+    /// itself is the front end's, `gpui_ui.rs`). Closing clears the text, for
     /// the process filter's reason: a hidden query that kept filtering
     /// would read as listeners vanishing.
     listen_filter_open: bool,
-    /// The query, lowercased and trimmed, mirrored out of the entity on
+    /// The query, lowercased and trimmed, mirrored out of the input on
     /// every change so the view can read it as plain state.
     listen_filter_text: String,
     /// Directory analyser + large-file query. Survives hide for the
@@ -751,18 +745,6 @@ pub struct ZStatsAppState {
     space: Option<SpaceInfo>,
     space_at: Option<Instant>,
     space_inflight: bool,
-    /// The popover panel. Hidden rather than destroyed on macOS, so this
-    /// outlives hide → show. Settings and storage already keep theirs;
-    /// `cx.windows().first()` is SlotMap insertion order, not "the
-    /// panel", and would `orderOut` the wrong window once another exists.
-    panel_window: Option<gpui::AnyWindowHandle>,
-    /// The settings window, if one was ever opened. Kept so a second
-    /// click focuses the existing window; a handle whose window the user
-    /// closed fails its update and a fresh window is built instead.
-    settings_window: Option<gpui::AnyWindowHandle>,
-    /// The disk-space window (large files + the analyser), same
-    /// reuse-or-rebuild contract as [`Self::settings_window`].
-    storage_window: Option<gpui::AnyWindowHandle>,
     /// Bumped by the Interface page's pref setters ([`crate::gpui_app::repaint`]).
     /// Prefs live in `app.toml`, not this struct, so a collector tick
     /// must not look like a chip click to the settings window's observer.
@@ -868,33 +850,19 @@ pub struct ZStatsAppState {
     /// opening All on Processes must not be how you get Chrome's helpers,
     /// and landing this must not flip that tab into its full listing.
     member_table: MemberTable,
-    /// The name-filter input, created on first open — [`InputState`] needs
-    /// a `Window`, which only the toggle click has. Kept once created, so
-    /// reopening the filter does not rebuild cursor/undo state.
-    proc_filter: Option<Entity<InputState>>,
-    /// Whether the filter row is on screen. Closing clears the text — a
+    /// Whether the process name filter's row is on screen (the input is
+    /// the front end's, `gpui_ui.rs`). Closing clears the text — a
     /// hidden filter that kept filtering would read as processes vanishing.
     proc_filter_open: bool,
-    /// The query, lowercased, mirrored out of the entity on every change.
+    /// The query, lowercased, mirrored out of the input on every change.
     /// Views read the store without an `App` in hand, and the full-scan
-    /// list must be rebuilt when the row set changes — both want the text
-    /// as plain state, not behind an entity read.
+    /// rows must be recut when it changes — both want the text as plain
+    /// state.
     proc_filter_text: String,
-    /// One scroll offset per tab, indexed by [`Tab::index`].
-    ///
-    /// Has to live here rather than on the element: gpui keys element state by
-    /// id and drops whatever it did not paint, and only one tab's body is ever
-    /// painted. A per-tab id alone therefore resets every tab to the top on
-    /// each switch — holding the handles across frames is what actually
-    /// remembers the position.
-    scroll: [ScrollHandle; Tab::ALL.len()],
-    /// Scroll for the rows region *inside* the Processes top-N card — the
-    /// rows scroll under a pinned header, so they need a handle of their
-    /// own, held here for the same reason as the per-tab ones above.
-    proc_rows_scroll: ScrollHandle,
-    /// Same, for the Applications card.
-    history_rows_scroll: ScrollHandle,
-    app_rows_scroll: ScrollHandle,
+    /// Names each row set a full listing has shown ([`FullScanData::rows`]),
+    /// so a front end's virtual list knows when it is looking at a new
+    /// one. Only ever counts up.
+    list_epoch: u64,
     /// One-shot "scroll the Apps list to the selected row on the next
     /// paint", armed by [`Self::reveal_app`]. A `Cell` because the
     /// consumer is the render pass, which holds `&self`; taken once,
@@ -930,7 +898,6 @@ impl Default for ZStatsAppState {
             traffic_baseline: None,
             traffic_curves: traffic::CurveBook::default(),
             traffic_fault: None,
-            listen_filter: None,
             listen_filter_open: false,
             listen_filter_text: String::new(),
             analysis: Analysis::default(),
@@ -938,9 +905,6 @@ impl Default for ZStatsAppState {
             space: None,
             space_at: None,
             space_inflight: false,
-            panel_window: None,
-            settings_window: None,
-            storage_window: None,
             ui_epoch: 0,
             panel_visit: 0,
             ejected: HashMap::new(),
@@ -976,13 +940,9 @@ impl Default for ZStatsAppState {
             full_scan: FullScan::default(),
             full_app_scan: FullAppScan::default(),
             member_table: MemberTable::default(),
-            proc_filter: None,
             proc_filter_open: false,
             proc_filter_text: String::new(),
-            scroll: array::from_fn(|_| ScrollHandle::new()),
-            proc_rows_scroll: ScrollHandle::new(),
-            history_rows_scroll: ScrollHandle::new(),
-            app_rows_scroll: ScrollHandle::new(),
+            list_epoch: 0,
             app_reveal: Cell::new(false),
             proc_reveal: Cell::new(false),
         }
@@ -1201,11 +1161,7 @@ impl ZStatsAppState {
         self.ensure_traffic(cx);
         // The daily disk check rides the tick like the reads above, but
         // only ever starts when nobody is looking (`diskwatch::due`).
-        let storage_open = self.storage_window.is_some_and(|handle| {
-            cx.windows()
-                .iter()
-                .any(|w| w.window_id() == handle.window_id())
-        });
+        let storage_open = gpui_ui::storage_window_open(cx);
         let (on_battery, cpu_percent, logical_cores) =
             self.latest().map_or((false, None, 1), |tick| {
                 (
@@ -1489,50 +1445,30 @@ impl ZStatsAppState {
         self.listen_filter_open
     }
 
-    pub fn listen_filter_input(&self) -> Option<&Entity<InputState>> {
-        self.listen_filter.as_ref()
-    }
-
     /// The lowercased, trimmed search; empty while the search is closed.
     pub fn listen_filter_text(&self) -> &str {
         &self.listen_filter_text
     }
 
-    /// Show or hide the listening card's search, creating the input on
-    /// first use — the process filter's shape, without its full-scan
-    /// rebuild: this list is recomputed from the answer on every paint.
-    pub fn toggle_listen_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.listen_filter_open {
-            self.listen_filter_open = false;
-            // `set_value` emits no Change event, so the mirror is cleared
-            // by hand.
-            if let Some(input) = &self.listen_filter {
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-            }
-            self.listen_filter_text.clear();
-        } else {
-            self.listen_filter_open = true;
-            if self.listen_filter.is_none() {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(i18n::tr("listen.filter_placeholder"))
-                        // Esc clears, through the path that emits Change.
-                        .clean_on_escape()
-                });
-                cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.listen_filter_text = input.read(cx).value().trim().to_lowercase();
-                        cx.notify();
-                    }
-                })
-                .detach();
-                self.listen_filter = Some(input);
-            }
-            // Focus so typing can start without a second click.
-            if let Some(input) = &self.listen_filter {
-                input.read(cx).focus_handle(cx).focus(window, cx);
-            }
-        }
+    /// The listening card's search comes on screen, empty.
+    pub fn open_listen_filter(&mut self, cx: &mut Context<Self>) {
+        self.listen_filter_open = true;
+        cx.notify();
+    }
+
+    /// The search goes, and its query with it, for the process filter's
+    /// reason.
+    pub fn close_listen_filter(&mut self, cx: &mut Context<Self>) {
+        self.listen_filter_open = false;
+        self.listen_filter_text.clear();
+        cx.notify();
+    }
+
+    /// What the search says now, from its input: trimmed and lowercased.
+    /// This list is recomputed from the answer on every paint, so there is
+    /// nothing to recut.
+    pub fn set_listen_filter_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.listen_filter_text = text.trim().to_lowercase();
         cx.notify();
     }
 
@@ -1875,18 +1811,6 @@ impl ZStatsAppState {
         self.tab
     }
 
-    pub fn panel_window(&self) -> Option<gpui::AnyWindowHandle> {
-        self.panel_window
-    }
-
-    pub fn set_panel_window(&mut self, handle: gpui::AnyWindowHandle) {
-        self.panel_window = Some(handle);
-    }
-
-    pub fn settings_window(&self) -> Option<gpui::AnyWindowHandle> {
-        self.settings_window
-    }
-
     /// Interface-page prefs are not fields here. Bumping this is what
     /// makes the settings window's observer treat a chip click as news
     /// without also following every collector tick.
@@ -1930,24 +1854,6 @@ impl ZStatsAppState {
         h.finish()
     }
 
-    pub fn set_settings_window(&mut self, handle: gpui::AnyWindowHandle) {
-        self.settings_window = Some(handle);
-    }
-
-    pub fn storage_window(&self) -> Option<gpui::AnyWindowHandle> {
-        self.storage_window
-    }
-
-    pub fn set_storage_window(&mut self, handle: gpui::AnyWindowHandle) {
-        self.storage_window = Some(handle);
-    }
-
-    /// This tab's scroll offset, held across frames so switching away and
-    /// back returns to where the list was left.
-    pub fn scroll_handle(&self, tab: Tab) -> &ScrollHandle {
-        &self.scroll[tab.index()]
-    }
-
     /// Back to a clean slate for the next open. The name filter and the
     /// one-shot full listings are "looking at something right now" state:
     /// a panel reopened hours later with yesterday's query looks broken,
@@ -1959,14 +1865,17 @@ impl ZStatsAppState {
     /// takes focus off the panel — which is exactly what calls this. The
     /// same "not remembered" rule now runs on that window's own
     /// lifecycle ([`Self::reset_storage_views`]).
-    pub fn reset_transient_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// The searches' inputs are the front end's; it empties them before
+    /// this runs (`gpui_ui::reset_transient_views`).
+    pub fn reset_transient_views(&mut self, cx: &mut Context<Self>) {
         if self.proc_filter_open {
-            // The close arm clears the input, the lowercased mirror and
-            // the full-scan cuts in one place.
-            self.toggle_proc_filter(window, cx);
+            // Clears the lowercased mirror and the full-scan cuts in one
+            // place.
+            self.close_proc_filter(cx);
         }
         if self.listen_filter_open {
-            self.toggle_listen_filter(window, cx);
+            self.close_listen_filter(cx);
         }
         self.full_scan = FullScan::Off;
         self.full_app_scan = FullAppScan::Off;
@@ -1995,18 +1904,6 @@ impl ZStatsAppState {
         // half-hour rings stay for the same reason: the hidden tick is
         // what fills them.
         cx.notify();
-    }
-
-    pub fn proc_rows_scroll(&self) -> &ScrollHandle {
-        &self.proc_rows_scroll
-    }
-
-    pub fn history_rows_scroll(&self) -> &ScrollHandle {
-        &self.history_rows_scroll
-    }
-
-    pub fn app_rows_scroll(&self) -> &ScrollHandle {
-        &self.app_rows_scroll
     }
 
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -2606,7 +2503,7 @@ impl ZStatsAppState {
                     }) => {
                         let visible = filtered_group_indices(&groups, &state.proc_filter_text);
                         FullAppScan::Ready(FullAppScanData {
-                            list: ListState::new(visible.len(), ListAlignment::Top, px(400.)),
+                            rows: state.next_rows(),
                             visible,
                             groups,
                             total,
@@ -2651,10 +2548,7 @@ impl ZStatsAppState {
                         // A filter typed while the scan ran applies to it too.
                         let visible = filtered_indices(&processes, &state.proc_filter_text);
                         FullScan::Ready(FullScanData {
-                            // Overdraw of roughly one panel: rows near the
-                            // viewport are pre-measured so scrolling does
-                            // not pop as estimates get corrected.
-                            list: ListState::new(visible.len(), ListAlignment::Top, px(400.)),
+                            rows: state.next_rows(),
                             visible,
                             processes,
                             total,
@@ -2677,67 +2571,52 @@ impl ZStatsAppState {
         self.proc_filter_open
     }
 
-    pub fn proc_filter_input(&self) -> Option<&Entity<InputState>> {
-        self.proc_filter.as_ref()
-    }
-
     /// The lowercased filter query; empty while the filter is closed.
     pub fn proc_filter_text(&self) -> &str {
         &self.proc_filter_text
     }
 
-    /// Show or hide the name filter, creating the input on first use.
-    pub fn toggle_proc_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.proc_filter_open {
-            self.proc_filter_open = false;
-            // `set_value` deliberately emits no Change event, so the mirror
-            // and the full-scan rows are brought back by hand.
-            if let Some(input) = &self.proc_filter {
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-            }
-            self.proc_filter_text.clear();
-            self.refresh_full_scan_filter();
-        } else {
-            self.proc_filter_open = true;
-            if self.proc_filter.is_none() {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(i18n::tr("processes.filter_placeholder"))
-                        // Esc clears. Goes through `replace_text`, which —
-                        // unlike `set_value` — emits Change, so the mirror
-                        // and the full-scan rows follow without extra wiring.
-                        .clean_on_escape()
-                });
-                cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.proc_filter_text = input.read(cx).value().to_lowercase();
-                        this.refresh_full_scan_filter();
-                        cx.notify();
-                    }
-                })
-                .detach();
-                self.proc_filter = Some(input);
-            }
-            // Focus so typing can start without a second click.
-            if let Some(input) = &self.proc_filter {
-                input.read(cx).focus_handle(cx).focus(window, cx);
-            }
-        }
+    /// The name filter's row comes on screen, empty.
+    pub fn open_proc_filter(&mut self, cx: &mut Context<Self>) {
+        self.proc_filter_open = true;
         cx.notify();
     }
 
-    /// Recompute which full-scan rows the filter keeps, and rebuild the
-    /// list state to match — `gpui::list` is told its row count up front,
-    /// so a changed row set is a new list, scrolled back to the top.
+    /// The name filter goes, and its query with it: a hidden filter that
+    /// kept filtering would read as processes vanishing.
+    pub fn close_proc_filter(&mut self, cx: &mut Context<Self>) {
+        self.proc_filter_open = false;
+        self.proc_filter_text.clear();
+        self.refresh_full_scan_filter();
+        cx.notify();
+    }
+
+    /// What the name filter says now, from its input.
+    pub fn set_proc_filter_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.proc_filter_text = text.to_lowercase();
+        self.refresh_full_scan_filter();
+        cx.notify();
+    }
+
+    /// The next name for a full listing's row set.
+    fn next_rows(&mut self) -> u64 {
+        self.list_epoch += 1;
+        self.list_epoch
+    }
+
+    /// Recompute which full-scan rows the filter keeps. A changed row set
+    /// is a new one ([`FullScanData::rows`]): the list it is shown in
+    /// starts again at the top.
     fn refresh_full_scan_filter(&mut self) {
         let filter = mem::take(&mut self.proc_filter_text);
+        let (process_rows, app_rows) = (self.next_rows(), self.next_rows());
         if let FullScan::Ready(data) = &mut self.full_scan {
             data.visible = filtered_indices(&data.processes, &filter);
-            data.list = ListState::new(data.visible.len(), ListAlignment::Top, px(400.));
+            data.rows = process_rows;
         }
         if let FullAppScan::Ready(data) = &mut self.full_app_scan {
             data.visible = filtered_group_indices(&data.groups, &filter);
-            data.list = ListState::new(data.visible.len(), ListAlignment::Top, px(400.));
+            data.rows = app_rows;
         }
         self.proc_filter_text = filter;
     }
@@ -3015,7 +2894,7 @@ impl ZStatsAppState {
 
     /// Where the main window was last seen. Used when reopening without a
     /// tray anchor (the menu's "Show Window"), so it doesn't jump to centre.
-    pub fn window_bounds(&self) -> Option<Bounds<Pixels>> {
+    pub fn window_bounds(&self) -> Option<Rect> {
         self.window_bounds
     }
 
@@ -3029,12 +2908,7 @@ impl ZStatsAppState {
 
     /// Called from the root view's `render` on every frame — only notify
     /// when something changed, or observers would wake up continuously.
-    pub fn set_window_metrics(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        scale_factor: f32,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_window_metrics(&mut self, bounds: Rect, scale_factor: f32, cx: &mut Context<Self>) {
         if self.window_bounds != Some(bounds) || self.scale_factor != scale_factor {
             self.window_bounds = Some(bounds);
             self.scale_factor = scale_factor;
