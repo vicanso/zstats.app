@@ -36,7 +36,7 @@ use crate::active;
 use crate::assets::CustomIconName;
 use crate::cleanhints::{self, CleanHint};
 use crate::confirm;
-use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult, ScanScope};
+use crate::diskscan::{self, DiffBaseline, DirHit, FileHit, HitKind, ScanResult};
 use crate::diskwatch;
 use crate::dupes::{DupeFile, DupeGroup, DupeScope};
 use crate::finder;
@@ -46,9 +46,9 @@ use crate::i18n;
 use crate::opener;
 use crate::prefs;
 use crate::state::{
-    DiskAnalysis, DupeProgress, DupeSearch, Expansion, StorageTab, ZStatsAppState,
-    ZStatsGlobalStore,
+    DiskAnalysis, DupeSearch, Expansion, StorageTab, ZStatsAppState, ZStatsGlobalStore,
 };
+use crate::storagepage::{self, DUPE_FILES_SHOWN, HEAD_PT, META_PT, Preset, ROW_PT};
 use crate::theme;
 use gpui::Entity;
 use gpui::prelude::FluentBuilder;
@@ -65,7 +65,7 @@ use std::cell::Cell;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 mod dirmap;
 
@@ -231,14 +231,10 @@ pub fn tab_strip(state: &ZStatsAppState) -> AnyElement {
 
 // ---- the window's shared pieces ----------------------------------------
 
-/// The window's type scale: three sizes. The panel's kit, carried over
-/// whole, had seven inside three points (9 to 12) — legible at 320px and
-/// fussy at 507, where every step read as a near-miss rather than a
-/// level. Meta is captions, counts and units; rows are what is ranked;
-/// headings are the few lines that say what a block is.
-const META_PT: f32 = 10.;
-const ROW_PT: f32 = 12.;
-const HEAD_PT: f32 = 13.;
+// The window's type scale is three sizes (`storagepage::META_PT`,
+// `ROW_PT`, `HEAD_PT`). The panel's kit, carried over whole, had seven
+// inside three points (9 to 12) — legible at 320px and fussy at 507,
+// where every step read as a near-miss rather than a level.
 
 /// One trailing button's slot. Every row reserves its two, filled or
 /// not, so sizes share one right edge — rows with a trash control and
@@ -465,7 +461,7 @@ fn empty_state(lead: String, cost: String, tip: String, button: AnyElement) -> A
 /// open as a drawer from it.
 fn analysis_card(state: &ZStatsAppState, frame: &Frame) -> AnyElement {
     let running = matches!(state.disk_analysis(), DiskAnalysis::Running { .. });
-    let mismatch = analysis_mismatch(state);
+    let mismatch = storagepage::mismatch_note(state);
     // The drawer stays with the toolbar that opens it: inside the scroll
     // it would open above a table read halfway down, out of sight.
     let mut head: Vec<AnyElement> = analysis_header(state).into_iter().collect();
@@ -477,19 +473,11 @@ fn analysis_card(state: &ZStatsAppState, frame: &Frame) -> AnyElement {
     notes.extend(
         fda_hint(state).map(|hint| div().px(px(13.)).pb(px(8.)).child(hint).into_any_element()),
     );
-    notes.extend(mismatch.as_ref().map(|(shown, ago, selected)| {
+    notes.extend(mismatch.clone().map(|line| {
         div()
             .px(px(13.))
             .pb(px(8.))
-            .child(widgets::note(
-                t!(
-                    "disk.ana_showing",
-                    shown = shown,
-                    ago = ago,
-                    selected = selected
-                )
-                .to_string(),
-            ))
+            .child(widgets::note(line))
             .into_any_element()
     }));
     let body = match state.disk_analysis() {
@@ -618,87 +606,29 @@ fn analysis_result(state: &ZStatsAppState, frame: &Frame, shown: Shown) -> AnyEl
         .into_any_element()
 }
 
-/// The scope a person would call it: "Home", "Caches", "Whole disk", or
-/// the folder's `~` path. Every caption leads with it — a home result
-/// used to omit its root ("~ goes without saying"), so nothing on screen
-/// said which scope a table answered once another chip was lit.
-fn scope_word(roots: &[PathBuf], base: &Path) -> String {
-    let home = diskscan::default_root();
-    if home.as_ref().is_some_and(|home| roots == [home.clone()]) {
-        return i18n::tr("disk.ana_preset_home");
-    }
-    if ScanScope::cache_set().is_some_and(|caches| caches.roots == roots) {
-        return i18n::tr("disk.ana_preset_caches");
-    }
-    if ScanScope::whole_disk().roots == roots {
-        return i18n::tr("disk.ana_preset_disk");
-    }
-    let home_s = env::var("HOME").unwrap_or_default();
-    scope_display(roots, base, &home_s)
-}
-
-/// The scope the next walk covers: the picked one, or home.
-fn selected_scope(state: &ZStatsAppState) -> Option<ScanScope> {
-    state
-        .disk_analysis_scope()
-        .or_else(|| diskscan::default_root().map(ScanScope::single))
-}
-
-/// `(shown, age, selected)` when the result on screen answers a scope
-/// other than the selected one. Picking a chip selects, Analyze walks —
-/// that keeps a minutes-long walk from starting on a stray click — but
-/// it also let a lit "Caches" sit over a table that was still Home's.
-fn analysis_mismatch(state: &ZStatsAppState) -> Option<(String, String, String)> {
-    let DiskAnalysis::Ready(result) = state.disk_analysis() else {
-        return None;
-    };
-    let selected = selected_scope(state)?;
-    (selected.roots != result.roots).then(|| {
-        (
-            scope_word(&result.roots, &result.root),
-            format::ago(result.scanned_at.elapsed().unwrap_or_default()),
-            scope_word(&selected.roots, &selected.base),
-        )
-    })
-}
-
 /// Before the first walk: what it finds, what it costs, and the one
 /// button — named for the scope it will walk.
 fn analysis_empty(state: &ZStatsAppState) -> AnyElement {
-    let word = selected_scope(state)
-        .map(|s| scope_word(&s.roots, &s.base))
-        .unwrap_or_else(|| i18n::tr("disk.ana_preset_home"));
     empty_state(
         i18n::tr("disk.ana_empty_lead"),
         i18n::tr("disk.ana_empty_cost"),
         i18n::tr("disk.ana_hint"),
-        primary_button(
-            "ana-start",
-            t!("disk.ana_scan_scope", scope = word).to_string(),
-            |cx| {
-                cx.global::<ZStatsGlobalStore>()
-                    .clone()
-                    .update(cx, |state, cx| state.start_disk_analysis(cx));
-            },
-        ),
+        primary_button("ana-start", storagepage::start_label(state), |cx| {
+            cx.global::<ZStatsGlobalStore>()
+                .clone()
+                .update(cx, |state, cx| state.start_disk_analysis(cx));
+        }),
     )
 }
 
 /// The caption and the run control. Nothing before the first walk —
 /// the empty state carries that button.
 fn analysis_header(state: &ZStatsAppState) -> Option<AnyElement> {
-    let (scope, rest) = analysis_caption(state)?;
+    let (scope, rest) = storagepage::caption(state)?;
     let ready = matches!(state.disk_analysis(), DiskAnalysis::Ready(_));
-    let progress = match state.disk_analysis() {
-        DiskAnalysis::Running {
-            dirs_done,
-            expected_dirs: Some(expected),
-            ..
-        } if *expected > 0 => Some(*dirs_done as f32 / *expected as f32),
-        _ => None,
-    };
+    let progress = storagepage::progress(state);
     let skips = match state.disk_analysis() {
-        DiskAnalysis::Ready(result) => analysis_skips(result),
+        DiskAnalysis::Ready(result) => storagepage::skips(result),
         _ => None,
     };
     let controls = h_flex()
@@ -731,7 +661,9 @@ fn analysis_header(state: &ZStatsAppState) -> Option<AnyElement> {
                 .items_center()
                 .gap(px(3.))
                 .text_color(theme::text_dim())
-                .tooltip(widgets::wrap_tooltip_lines(lines))
+                .tooltip(widgets::wrap_tooltip_lines(
+                    lines.into_iter().map(SharedString::from).collect(),
+                ))
                 .child(format!("· {label}"))
                 .child(
                     Icon::new(IconName::Info)
@@ -839,28 +771,13 @@ fn dismiss_failed_button() -> AnyElement {
 /// The label names the scope it will walk whenever that is not the
 /// result on screen.
 fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
-    let running = matches!(state.disk_analysis(), DiskAnalysis::Running { .. });
-    // Older than [`STALE_AFTER`]: the chip asks, with a brighter outline
-    // and a sentence on hover. Neutral on purpose — an old result is not
-    // a crossed line, so no accent.
-    let stale = match state.disk_analysis() {
-        DiskAnalysis::Ready(result) => {
-            result.scanned_at.elapsed().unwrap_or_default() > STALE_AFTER
-        }
-        _ => false,
-    };
-    let label = if running {
-        i18n::tr("disk.ana_cancel")
-    } else if let Some((_, _, selected)) = analysis_mismatch(state) {
-        t!("disk.ana_scan_scope", scope = selected).to_string()
-    } else if matches!(state.disk_analysis(), DiskAnalysis::Ready(_)) {
-        i18n::tr("disk.ana_rescan")
-    } else {
-        let word = selected_scope(state)
-            .map(|s| scope_word(&s.roots, &s.base))
-            .unwrap_or_default();
-        t!("disk.ana_scan_scope", scope = word).to_string()
-    };
+    // Older than `storagepage::STALE_AFTER` (a day — when "the numbers
+    // are from earlier" stops going without saying, mostly reached
+    // through the cache surviving a restart): the chip asks, with a
+    // brighter outline and a sentence on hover. Neutral on purpose — an
+    // old result is not a crossed line, so no accent.
+    let stale = storagepage::stale(state);
+    let label = storagepage::run_label(state);
     div()
         .id("diskscan-chip")
         .flex_none()
@@ -874,11 +791,7 @@ fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
         .bg(if stale { theme::chip() } else { theme::inset() })
         .px(px(9.))
         .py(px(2.))
-        .tooltip(widgets::wrap_tooltip(if stale {
-            i18n::tr("disk.ana_stale")
-        } else {
-            i18n::tr("disk.ana_hint")
-        }))
+        .tooltip(widgets::wrap_tooltip(storagepage::run_tip(stale)))
         .text_size(px(META_PT + 1.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme::text())
@@ -886,13 +799,7 @@ fn analysis_chip(state: &ZStatsAppState) -> AnyElement {
         .on_click(move |_, _window, cx| {
             cx.global::<ZStatsGlobalStore>()
                 .clone()
-                .update(cx, |state, cx| {
-                    if matches!(state.disk_analysis(), DiskAnalysis::Running { .. }) {
-                        state.cancel_disk_analysis(cx);
-                    } else {
-                        state.start_disk_analysis(cx);
-                    }
-                });
+                .update(cx, |state, cx| storagepage::run_or_cancel(state, cx));
         })
         .child(label)
         .into_any_element()
@@ -951,7 +858,6 @@ fn toolbar_chip(id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<gpui
 /// Opens the exclusions drawer. Says how many there are, because a walk
 /// that leaves folders out must not let that be forgotten.
 fn exclude_toggle(state: &ZStatsAppState, running: bool) -> AnyElement {
-    let n = prefs::analysis_exclude_raw().len();
     let open = state.analysis_exclude_open();
     toolbar_chip("ana-exclude-toggle", open)
         .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_note")))
@@ -962,11 +868,7 @@ fn exclude_toggle(state: &ZStatsAppState, running: bool) -> AnyElement {
                     .update(cx, |state, cx| state.toggle_analysis_exclude(cx));
             })
         })
-        .child(if n == 0 {
-            i18n::tr("disk.ana_exclude_add")
-        } else {
-            t!("disk.ana_excluded_n", n = n).to_string()
-        })
+        .child(storagepage::exclude_label())
         .into_any_element()
 }
 
@@ -979,24 +881,7 @@ fn exclude_toggle(state: &ZStatsAppState, running: bool) -> AnyElement {
 /// only it says — when the check last ran and what it is waiting for.
 fn daily_chip(state: &ZStatsAppState, running: bool) -> AnyElement {
     let on = prefs::disk_watch();
-    let status = if !on {
-        i18n::tr("disk.watch_off")
-    } else if state.disk_check_running() {
-        i18n::tr("disk.watch_running")
-    } else {
-        match state.disk_check_last() {
-            Some(at) => {
-                let since = at.elapsed().unwrap_or_default();
-                let last = t!("disk.watch_last", ago = format::ago(since)).to_string();
-                if since > diskwatch::CHECK_EVERY {
-                    format!("{last} · {}", i18n::tr(overdue_reason(state)))
-                } else {
-                    last
-                }
-            }
-            None => i18n::tr("disk.watch_first"),
-        }
-    };
+    let status = storagepage::watch_status(state);
     toolbar_chip("ana-watch", false)
         .tooltip(widgets::wrap_tooltip_lines(vec![
             status.into(),
@@ -1028,8 +913,7 @@ fn daily_chip(state: &ZStatsAppState, running: bool) -> AnyElement {
 /// the reason to exclude `~/github` occurs to you while looking at
 /// `~/github` at the top of the table.
 fn analysis_exclude_drawer(exclude: &Entity<InputState>) -> AnyElement {
-    let home = env::var("HOME").unwrap_or_default();
-    let entries = prefs::analysis_exclude_raw();
+    let entries = storagepage::exclude_entries();
     div()
         .px(px(13.))
         .pb(px(8.))
@@ -1041,15 +925,11 @@ fn analysis_exclude_drawer(exclude: &Entity<InputState>) -> AnyElement {
                 .p(px(6.))
                 .rounded(px(7.))
                 .bg(theme::inset())
-                .children(entries.iter().enumerate().map(|(i, raw)| {
-                    let expanded = match raw.strip_prefix("~/") {
-                        Some(rest) if !home.is_empty() => Path::new(&home).join(rest),
-                        _ => PathBuf::from(raw),
-                    };
+                .children(entries.iter().enumerate().map(|(i, (raw, present))| {
                     // A path that does not resolve today is dimmed, not
                     // dropped: a directory can come back, and quietly
                     // discarding what someone typed is the worse failure.
-                    let present = expanded.is_dir();
+                    let present = *present;
                     let drop_me = raw.clone();
                     h_flex()
                         .id(("ana-exclude-chip", i))
@@ -1082,11 +962,7 @@ fn analysis_exclude_drawer(exclude: &Entity<InputState>) -> AnyElement {
                                         .text_color(Hsla::from(theme::text_dim())),
                                 )
                                 .on_click(move |_, _window, cx| {
-                                    let kept: Vec<String> = prefs::analysis_exclude_raw()
-                                        .into_iter()
-                                        .filter(|p| *p != drop_me)
-                                        .collect();
-                                    prefs::set_analysis_exclude(&kept);
+                                    storagepage::drop_exclude(&drop_me);
                                     cx.global::<ZStatsGlobalStore>()
                                         .clone()
                                         .update(cx, |_, cx| cx.notify());
@@ -1116,9 +992,9 @@ fn analysis_exclude_drawer(exclude: &Entity<InputState>) -> AnyElement {
                             });
                             cx.spawn(async move |cx| {
                                 if let Ok(Ok(Some(paths))) = rx.await {
-                                    let mut list = prefs::analysis_exclude_raw();
-                                    list.extend(paths.iter().map(|p| p.display().to_string()));
-                                    prefs::set_analysis_exclude(&list);
+                                    storagepage::add_exclude(
+                                        paths.iter().map(|p| p.display().to_string()),
+                                    );
                                     cx.update(|cx| {
                                         cx.global::<ZStatsGlobalStore>()
                                             .clone()
@@ -1133,25 +1009,6 @@ fn analysis_exclude_drawer(exclude: &Entity<InputState>) -> AnyElement {
         .into_any_element()
 }
 
-/// Why a check that is due has not run, in the order the gates fall
-/// (`diskwatch::due`). "Last 1d ago" beside a check that is on read as
-/// a broken schedule, when it was only waiting — and one of the things
-/// it waits for is this very window closing, so that is what it says
-/// once nothing else is in the way. Reads the same fields the gate
-/// does, for display only.
-fn overdue_reason(state: &ZStatsAppState) -> &'static str {
-    let tick = state.latest();
-    let on_battery = diskwatch::on_battery(tick.and_then(|t| t.snapshot.battery.as_ref()));
-    let busy = tick.is_some_and(|t| t.snapshot.cpu.usage_percent > diskwatch::BUSY_CPU);
-    if on_battery {
-        "disk.watch_wait_power"
-    } else if busy {
-        "disk.watch_wait_quiet"
-    } else {
-        "disk.watch_wait_closed"
-    }
-}
-
 /// What grew in the home tree since about a week ago (`diskwatch`), as
 /// the first table of a home result — the question "what is big" has a
 /// sibling, "what is getting big", and only this table answers it.
@@ -1162,7 +1019,6 @@ fn growth_section(report: &diskwatch::Report) -> Option<AnyElement> {
     if report.rows.is_empty() {
         return None;
     }
-    let days = (report.over.as_secs_f64() / 86_400.0).round().max(1.0) as u64;
     let max = report.rows.iter().map(|g| g.grew).max().unwrap_or(1).max(1);
     let home = env::var("HOME").unwrap_or_default();
     Some(
@@ -1174,7 +1030,7 @@ fn growth_section(report: &diskwatch::Report) -> Option<AnyElement> {
                     .id("ana-growth-title")
                     .tooltip(widgets::wrap_tooltip(i18n::tr("disk.growth_tip")))
                     .child(section_heading(
-                        t!("disk.growth_title", days = days).to_string(),
+                        storagepage::growth_title(report),
                         None,
                         None,
                     )),
@@ -1214,7 +1070,7 @@ fn growth_section(report: &diskwatch::Report) -> Option<AnyElement> {
                                         .icon(IconName::Folder)
                                         .ghost()
                                         .xsmall()
-                                        .tooltip(reveal_tip())
+                                        .tooltip(storagepage::reveal_tip())
                                         .on_click(move |_, _, _| finder::reveal(&reveal))
                                         .into_any_element(),
                                 ),
@@ -1276,108 +1132,31 @@ fn analysis_pick_chip(running: bool) -> AnyElement {
 /// back was the ✕, which also deletes the cached result and the Δ
 /// baseline — a heavy price for changing your mind about scope.
 fn analysis_preset_chips(state: &ZStatsAppState, running: bool) -> Vec<AnyElement> {
-    let selected = state.disk_analysis_scope();
-    let is_sel = |scope: Option<ScanScope>| -> bool {
-        match (selected.as_ref(), scope.as_ref()) {
-            (Some(a), Some(b)) => a.roots == b.roots,
-            _ => false,
-        }
-    };
-    let home = diskscan::default_root();
-    let home_scope = home.clone().map(ScanScope::single);
-    let library_scope = home.clone().map(|h| ScanScope::single(h.join("Library")));
-    let caches_scope = ScanScope::cache_set();
-    let disk_scope = Some(ScanScope::whole_disk());
-    // No pick yet is the default home walk: its chip is the lit one.
-    let home_on = selected.is_none() || is_sel(home_scope.clone());
-    let chip = |id: &'static str,
-                label: String,
-                tip: String,
-                on: bool,
-                go: fn(&mut ZStatsAppState, &mut gpui::Context<ZStatsAppState>)|
-     -> AnyElement {
-        toolbar_chip(id, on)
-            .tooltip(widgets::wrap_tooltip(tip))
-            .when(!running, |d| {
-                d.on_click(move |_, _window, cx| {
-                    cx.global::<ZStatsGlobalStore>().clone().update(cx, go);
+    let mut chips: Vec<AnyElement> = Preset::ALL
+        .into_iter()
+        .map(|preset| {
+            toolbar_chip(("ana-preset", preset as usize), preset.on(state))
+                .tooltip(widgets::wrap_tooltip(preset.tip()))
+                .when(!running, |d| {
+                    d.on_click(move |_, _window, cx| {
+                        cx.global::<ZStatsGlobalStore>()
+                            .clone()
+                            .update(cx, |state, cx| preset.select(state, cx));
+                    })
                 })
-            })
-            .child(label)
-            .into_any_element()
-    };
-    let mut chips = vec![
-        chip(
-            "ana-preset-home",
-            // A word, not the path: `~` alone is a one-character chip
-            // that means nothing outside a terminal. The exact path rides
-            // the tooltip, where `~/Library` beside it keeps its own —
-            // that one is a specific subfolder, and naming it "Library"
-            // would collide with /Library and /System/Library.
-            i18n::tr("disk.ana_preset_home"),
-            i18n::tr("disk.ana_preset_home_tip"),
-            home_on,
-            |state, cx| {
-                if let Some(home) = diskscan::default_root() {
-                    state.set_disk_analysis_at(home, cx);
-                }
-            },
-        ),
-        chip(
-            "ana-preset-library",
-            "~/Library".into(),
-            i18n::tr("disk.ana_preset_library_tip"),
-            is_sel(library_scope),
-            |state, cx| {
-                if let Some(home) = diskscan::default_root() {
-                    state.set_disk_analysis_at(home.join("Library"), cx);
-                }
-            },
-        ),
-        chip(
-            "ana-preset-caches",
-            i18n::tr("disk.ana_preset_caches"),
-            i18n::tr("disk.ana_preset_caches_tip"),
-            is_sel(caches_scope),
-            |state, cx| state.set_disk_analysis_caches(cx),
-        ),
-        // Last among presets, and deliberately so: it is the slowest
-        // by a wide margin and the only one that needs Full Disk
-        // Access to be complete.
-        chip(
-            "ana-preset-disk",
-            i18n::tr("disk.ana_preset_disk"),
-            format!(
-                "{} {}",
-                i18n::tr("disk.ana_preset_disk_tip"),
-                i18n::tr("disk.ana_scope_tip")
-            ),
-            is_sel(disk_scope),
-            |state, cx| state.set_disk_analysis_whole_disk(cx),
-        ),
-    ];
+                .child(preset.label())
+                .into_any_element()
+        })
+        .collect();
     // A picked folder is not a preset — without a chip here the
     // selection would only live in the next walk, and the row would look
     // like nothing was chosen.
-    if let Some(scope) = selected.as_ref() {
-        let preset = [
-            home.clone().map(ScanScope::single),
-            home.map(|h| ScanScope::single(h.join("Library"))),
-            ScanScope::cache_set(),
-            Some(ScanScope::whole_disk()),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|p| p.roots == scope.roots);
-        if !preset {
-            let home_s = env::var("HOME").unwrap_or_default();
-            let label = scope_display(&scope.roots, &scope.base, &home_s);
-            chips.push(
-                toolbar_chip("ana-preset-custom", true)
-                    .child(div().max_w(px(140.)).min_w_0().truncate().child(label))
-                    .into_any_element(),
-            );
-        }
+    if let Some(label) = storagepage::custom_scope(state) {
+        chips.push(
+            toolbar_chip("ana-preset-custom", true)
+                .child(div().max_w(px(140.)).min_w_0().truncate().child(label))
+                .into_any_element(),
+        );
     }
     chips
 }
@@ -1390,21 +1169,14 @@ fn analysis_preset_chips(state: &ZStatsAppState, running: bool) -> Vec<AnyElemen
 /// deliberate zero-touch and no permission would change them.
 #[cfg(target_os = "macos")]
 fn fda_hint(state: &ZStatsAppState) -> Option<AnyElement> {
-    let DiskAnalysis::Ready(result) = state.disk_analysis() else {
-        return None;
-    };
-    if result.skipped_denied == 0 {
-        return None;
-    }
+    let note = storagepage::fda_note(state)?;
     Some(
         h_flex()
             .items_center()
             .justify_between()
             .gap(px(8.))
             .mt(px(4.))
-            .child(div().flex_1().min_w_0().child(widgets::note(
-                t!("disk.ana_fda_note", n = result.skipped_denied).to_string(),
-            )))
+            .child(div().flex_1().min_w_0().child(widgets::note(note)))
             .child(
                 Button::new("ana-fda")
                     .ghost()
@@ -1425,137 +1197,6 @@ fn fda_hint(_state: &ZStatsAppState) -> Option<AnyElement> {
     None
 }
 
-/// "Reveal in Finder" on macOS; the file manager has no one name on
-/// Linux, and the sentence should not promise Finder.
-fn reveal_tip() -> String {
-    i18n::tr(if cfg!(target_os = "macos") {
-        "disk.big_reveal"
-    } else {
-        "disk.big_reveal_linux"
-    })
-}
-
-/// Results older than this get a "consider re-analyzing" nudge on the
-/// Re-analyze chip. Display only, like every threshold in views/ —
-/// nothing refreshes itself: a minutes-long walk must never
-/// self-trigger, so a nudge is where staleness honesty ends. A day is
-/// when "the numbers are from earlier" stops going without saying —
-/// mostly reached through the persisted cache surviving a restart.
-const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// The header's caption as `(scope, the rest)`: the scope in the
-/// heading weight — always said, a home result included — then age,
-/// cost and size of the walk, and what the ± compares against. While a
-/// walk runs, the rest is its progress, against last time's count when
-/// there was a last time. `None` before the first walk.
-fn analysis_caption(state: &ZStatsAppState) -> Option<(String, String)> {
-    match state.disk_analysis() {
-        DiskAnalysis::Off => None,
-        DiskAnalysis::Failed(e) => Some((
-            i18n::tr("disk.ana_failed_title"),
-            t!("disk.ana_failed", e = e.clone()).to_string(),
-        )),
-        DiskAnalysis::Running {
-            dirs_done,
-            scope,
-            expected_dirs,
-            ..
-        } => {
-            let done = format::thousands(*dirs_done);
-            let rest = match expected_dirs {
-                Some(last) => t!(
-                    "disk.ana_running_of",
-                    dirs = done,
-                    last = format::thousands(*last)
-                )
-                .to_string(),
-                None => t!("disk.ana_running", dirs = done).to_string(),
-            };
-            Some((scope_word(&scope.roots, &scope.base), rest))
-        }
-        DiskAnalysis::Ready(result) => {
-            let mut parts = vec![
-                format::ago(result.scanned_at.elapsed().unwrap_or_default()),
-                t!("disk.ana_took", t = format::took(result.took)).to_string(),
-                t!(
-                    "disk.ana_dirs_seen",
-                    n = format::thousands(result.dirs_seen)
-                )
-                .to_string(),
-            ];
-            // Names what the per-row ± compares against. Its absence when
-            // no row moved is itself the answer: nothing big changed.
-            if let Some(diff) = state.analysis_diff_for(result) {
-                parts.push(
-                    t!(
-                        "disk.ana_diff_base",
-                        ago = format::ago(diff.scanned_at().elapsed().unwrap_or_default())
-                    )
-                    .to_string(),
-                );
-            }
-            Some((scope_word(&result.roots, &result.root), parts.join(" · ")))
-        }
-    }
-}
-
-/// Everything a finished walk left out, as one figure and its breakdown:
-/// `("70 skipped", [each non-zero count])`. The figure counts places the
-/// walk did not measure (protected, unreadable, cloud placeholders,
-/// excluded); hard links counted once are not a skip and only join the
-/// breakdown — alone, they are the figure. `None` when there is nothing
-/// to say.
-fn analysis_skips(result: &ScanResult) -> Option<(String, Vec<SharedString>)> {
-    let skipped = [
-        ("disk.ana_skip_protected", result.skipped_protected),
-        ("disk.ana_skip_denied", result.skipped_denied),
-        ("disk.ana_skip_dataless", result.skipped_dataless),
-        // Said for the same reason as the others: a walk that left out
-        // somebody's whole code tree must not let the totals below it
-        // read as the whole scope.
-        ("disk.ana_skip_excluded", result.skipped_excluded),
-    ];
-    let mut lines: Vec<SharedString> = skipped
-        .iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(key, n)| t!(*key, n = format::thousands(*n)).to_string().into())
-        .collect();
-    // Why the totals can read lower than Finder adding up the folders.
-    let links = (result.shared_links > 0).then(|| {
-        t!(
-            "disk.ana_shared_links",
-            n = format::thousands(result.shared_links)
-        )
-        .to_string()
-    });
-    let total: usize = skipped.iter().map(|(_, n)| *n).sum();
-    if total == 0 {
-        return links.map(|text| (text.clone(), vec![text.into()]));
-    }
-    lines.extend(links.map(SharedString::from));
-    Some((
-        t!("disk.ana_skipped_total", n = format::thousands(total)).to_string(),
-        lines,
-    ))
-}
-
-/// One string naming a scope: the single root, or a multi-root scope's
-/// roots listed in full — passing the base alone would read as a walk of
-/// the whole home tree. Every path tilde'd; a plain "~" is the default
-/// home walk, which callers omit (the only scope that goes without
-/// saying).
-fn scope_display(roots: &[PathBuf], base: &Path, home: &str) -> String {
-    if roots.len() > 1 {
-        roots
-            .iter()
-            .map(|r| format::tilde_path(&r.display().to_string(), home))
-            .collect::<Vec<_>>()
-            .join(" + ")
-    } else {
-        format::tilde_path(&base.display().to_string(), home)
-    }
-}
-
 fn analysis_lists(
     state: &ZStatsAppState,
     result: &ScanResult,
@@ -1567,13 +1208,7 @@ fn analysis_lists(
     let running = active::running_bundle_ids();
     // One tooltip for every ± in these tables: which run the figure is
     // measured against, and why silence is not a claim of "new".
-    let delta_tip = diff.map(|d| {
-        t!(
-            "disk.delta_tip",
-            ago = format::ago(d.scanned_at().elapsed().unwrap_or_default())
-        )
-        .to_string()
-    });
+    let delta_tip = diff.map(storagepage::delta_tip);
     let dir_rows = |hits: &[DirHit], id: &'static str, deletable: bool| -> Vec<AnyElement> {
         let max = hits.iter().map(|h| h.bytes).max().unwrap_or(1).max(1);
         let ctx = TreeCtx {
@@ -1643,26 +1278,18 @@ fn analysis_lists(
 
     // The suggestion set, minus caches too small to name a size: a
     // "0 MB" row with a trash control frees nothing a reader could see.
-    // The first few are listed; the heading carries the count and the
-    // total, and the bulk button acts on the whole set — honest, because
-    // unlike the capped tables the full list is retained.
-    const MIB: u64 = 1024 * 1024;
-    let sugs: Vec<DirHit> = result
-        .suggestions
-        .iter()
-        .filter(|d| d.bytes >= MIB)
-        .cloned()
-        .collect();
-    let sug_total: u64 = sugs.iter().map(|d| d.bytes).sum();
+    // The first few are listed (`storagepage::SUG_ROWS` — enough to see
+    // the shape of it, the largest usually dwarf the rest, without
+    // pushing the other lists below the fold); the heading carries the
+    // count and the total, and the bulk button acts on the whole set —
+    // honest, because unlike the capped tables the full list is retained.
     let show_all_sugs = state.analysis_show_all_sugs();
-    let sug_shown = if show_all_sugs {
-        sugs.len()
-    } else {
-        sugs.len().min(SUG_ROWS)
-    };
-    // Growth is measured on the home tree only (`diskwatch`); a result
-    // for any other scope says nothing about it.
-    let home_result = diskscan::default_root().is_some_and(|home| result.roots == [home]);
+    let storagepage::Suggestions {
+        rows: sugs,
+        total: sug_total,
+        shown: sug_shown,
+    } = storagepage::suggestions(result, show_all_sugs);
+    let home_result = storagepage::home_result(result);
     div()
         .children(
             state
@@ -1688,13 +1315,12 @@ fn analysis_lists(
                 ),
             ),
             dir_rows(&sugs[..sug_shown], "ana-sug", actions),
-            (sugs.len() > SUG_ROWS).then(|| {
+            (sugs.len() > storagepage::SUG_ROWS).then(|| {
                 more_pill("ana-sug-more")
-                    .child(if show_all_sugs {
-                        i18n::tr("disk.ana_less")
-                    } else {
-                        t!("disk.ana_more", count = sugs.len() - SUG_ROWS).to_string()
-                    })
+                    .child(storagepage::more_label(
+                        show_all_sugs,
+                        sugs.len() - storagepage::SUG_ROWS,
+                    ))
                     .on_click(|_, _window, cx| {
                         cx.global::<ZStatsGlobalStore>()
                             .clone()
@@ -1727,32 +1353,14 @@ fn analysis_lists(
         .into_any_element()
 }
 
-/// Suggestions listed before "show more". Enough to see the shape of
-/// it — the largest usually dwarf the rest — without pushing the rest
-/// of the lists below the fold.
-const SUG_ROWS: usize = 5;
-
 /// "Trash all" for the suggestion set — acts on the FULL set (TAG trees
 /// plus hint-trashable caches), not just the rendered head. The confirm
 /// lists every row with its size and a tick, so what moves is what the
 /// reader saw, and a row can be kept back; a cache whose app is running
 /// starts unticked, because moving it frees nothing until the app quits.
 fn suggest_clear_button(hits: &[DirHit], running: &[String]) -> AnyElement {
-    let home = env::var("HOME").unwrap_or_default();
     let paths: Vec<PathBuf> = hits.iter().map(|h| h.path.clone()).collect();
-    let items: Vec<(String, u64, Option<String>)> = hits
-        .iter()
-        .map(|hit| {
-            let caution = cleanhints::lookup(&hit.path)
-                .filter(|hint| hint.running_in(running))
-                .map(|hint| t!("disk.pick_running", owner = &hint.owner).to_string());
-            (
-                format::tilde_path(&hit.path.display().to_string(), &home),
-                hit.bytes,
-                caution,
-            )
-        })
-        .collect();
+    let items = storagepage::pick_items(hits, running);
     Button::new("ana-sug-clear")
         .icon(CustomIconName::Trash)
         .ghost()
@@ -1771,9 +1379,7 @@ fn suggest_clear_button(hits: &[DirHit], running: &[String]) -> AnyElement {
                         caution: caution.clone(),
                     })
                     .collect(),
-                ok: |n, bytes| {
-                    t!("disk.sug_pick_ok", n = n, bytes = format::memory(bytes)).to_string()
-                },
+                ok: storagepage::pick_ok,
             };
             confirm::ask_pick(window, cx, sheet, move |chosen, cx| {
                 let picked: Vec<PathBuf> = chosen.iter().map(|&i| paths[i].clone()).collect();
@@ -1791,9 +1397,7 @@ fn suggest_clear_button(hits: &[DirHit], running: &[String]) -> AnyElement {
 /// move. The button only opens the Trash — emptying it is the reader's
 /// own act, the one step that cannot be undone.
 fn trashed_note(bytes: u64) -> Option<AnyElement> {
-    if bytes == 0 {
-        return None;
-    }
+    let line = storagepage::trashed_note(bytes)?;
     Some(
         widgets::card()
             .child(
@@ -1810,9 +1414,7 @@ fn trashed_note(bytes: u64) -> Option<AnyElement> {
                             .text_size(px(11.))
                             .line_height(relative(1.35))
                             .text_color(theme::text_muted())
-                            .child(
-                                t!("disk.trashed_note", bytes = format::memory(bytes)).to_string(),
-                            ),
+                            .child(line),
                     )
                     .child(
                         Button::new("disk-open-trash")
@@ -1824,13 +1426,6 @@ fn trashed_note(bytes: u64) -> Option<AnyElement> {
             .into_any_element(),
     )
 }
-
-/// How many children an opened row lists before it stops and says how
-/// many it is holding back. Eight keeps one open row from pushing the
-/// tables under it off screen, and the summary line is what keeps the
-/// cut visible instead of silent — the same bargain the dirs table's
-/// "show more" makes.
-const EXPAND_ROWS: usize = 8;
 
 /// One indent step, in px. Enough to read as a level at 11px type
 /// without spending the width the paths need.
@@ -1909,19 +1504,18 @@ fn dir_row_tree(
         // (Application Support at 38 of Library's 67 GB filled the bar).
         Some(Expansion::Ready(rows)) if !rows.is_empty() => {
             let max = hit.bytes.max(1);
-            for child in rows.iter().take(expand_shown(rows)) {
+            // Eight at most (`storagepage::EXPAND_ROWS`) keeps one open
+            // row from pushing the tables under it off screen; the summary
+            // line keeps the cut visible instead of silent — the same
+            // bargain the dirs table's "show more" makes.
+            for child in rows.iter().take(storagepage::expand_shown(rows)) {
                 out.extend(dir_row_tree(ctx, child, &hit.path, max, depth + 1));
             }
-            if let Some((hidden, bytes)) = expand_hidden(rows) {
+            if let Some((hidden, bytes)) = storagepage::expand_hidden(rows) {
                 out.push(expand_note(
                     &key,
                     depth + 1,
-                    t!(
-                        "disk.ana_rest",
-                        count = hidden,
-                        bytes = format::memory(bytes)
-                    )
-                    .to_string(),
+                    storagepage::expand_rest(hidden, bytes),
                 ));
             }
         }
@@ -1943,32 +1537,6 @@ fn dir_row_tree(
         None => {}
     }
     out
-}
-
-/// Under a megabyte a row reads `0 MB` — `format::memory` has nothing
-/// finer to say at that scale. A line that reads zero spends a row
-/// saying nothing, so those go to the summary instead, which was
-/// already there and can carry them as a total.
-const EXPAND_FLOOR: u64 = 1024 * 1024;
-
-/// How many children an open row lists: the ranked ones, down to where
-/// they stop being distinguishable, and never more than [`EXPAND_ROWS`].
-/// The list is sorted, so this is a prefix.
-fn expand_shown(rows: &[DirHit]) -> usize {
-    rows.iter()
-        .take(EXPAND_ROWS)
-        .take_while(|r| r.bytes >= EXPAND_FLOOR)
-        .count()
-}
-
-/// What an open row is not listing: how many children it held back and
-/// how much they add up to, or `None` when everything is shown. Counts
-/// what the tables retained, exactly like the dirs table's own "show
-/// more" — neither claims to have seen every directory on disk.
-fn expand_hidden(rows: &[DirHit]) -> Option<(usize, u64)> {
-    let shown = expand_shown(rows);
-    let hidden = rows.len().checked_sub(shown).filter(|n| *n > 0)?;
-    Some((hidden, rows.iter().skip(shown).map(|r| r.bytes).sum()))
 }
 
 /// The dim line an open row shows in place of children — scanning, empty,
@@ -2010,7 +1578,7 @@ fn asset_pill(key: &SharedString, note: &diskscan::AssetNote) -> AnyElement {
         .text_size(px(9.))
         .bg(theme::inset())
         .text_color(theme::tiny_label(theme::text_muted()))
-        .tooltip(widgets::wrap_tooltip(asset_clause(note)))
+        .tooltip(widgets::wrap_tooltip(storagepage::asset_clause(note)))
         .child(i18n::tr("disk.asset_pill"))
         .into_any_element()
 }
@@ -2028,29 +1596,7 @@ fn basis_pill(
     kind: Option<HitKind>,
     hint: Option<&CleanHint>,
 ) -> Option<AnyElement> {
-    let (label, tip) = if kind == Some(HitKind::Tag) {
-        (i18n::tr("disk.kind_tag"), i18n::tr("disk.kind_tag_tip"))
-    } else {
-        let hint = hint?;
-        let base = if hint.trashable {
-            t!("disk.basis_rebuild_tip", owner = &hint.owner).to_string()
-        } else {
-            t!("disk.basis_manual_tip", owner = &hint.owner).to_string()
-        };
-        let tip = match &hint.command {
-            Some(cmd) => format!(
-                "{base} {}",
-                t!("disk.basis_cmd", owner = &hint.owner, cmd = cmd)
-            ),
-            None => base,
-        };
-        let label = if hint.trashable {
-            i18n::tr("disk.kind_tag")
-        } else {
-            i18n::tr("disk.basis_manual")
-        };
-        (label, tip)
-    };
+    let (label, tip) = storagepage::basis(kind, hint)?;
     Some(row_pill(
         SharedString::from(format!("{key}-kind")),
         label,
@@ -2066,7 +1612,7 @@ fn running_pill(key: &SharedString, owner: &str) -> AnyElement {
     row_pill(
         SharedString::from(format!("{key}-running")),
         i18n::tr("disk.running"),
-        t!("disk.running_tip", owner = owner).to_string(),
+        storagepage::running_tip(owner),
         theme::text(),
     )
 }
@@ -2160,47 +1706,6 @@ struct FileRow {
 /// delta prints.
 const DELTA_W: f32 = 56.;
 
-/// Below this a row shows no delta: the tables rank hundreds of MB and
-/// up, so a ±few-MB drift on every row would be noise dressed as
-/// signal. 2% of `TABLE_EXTEND_MIN`, the smallest figure the extended
-/// table admits.
-const DIFF_FLOOR: u64 = 10 * 1024 * 1024;
-
-/// `+1.2 GB` / `-340.0 MB` against the previous run, or `None` when
-/// there is nothing honest to say (no baseline row, or under the floor).
-fn delta_label(bytes: u64, prev_bytes: Option<u64>) -> Option<String> {
-    let prev = prev_bytes?;
-    let (sign, diff) = if bytes >= prev {
-        ("+", bytes - prev)
-    } else {
-        ("-", prev - bytes)
-    };
-    (diff >= DIFF_FLOOR).then(|| format!("{sign}{}", format::memory(diff)))
-}
-
-/// The system's own words about a MobileAsset row, as one sentence.
-///
-/// Every clause is a field that was actually present in the asset's
-/// `Info.plist`; absent fields say nothing, because the alternative is
-/// the app guessing about system files. The closing line is the part
-/// the reader most needs and the only part not read off disk: this
-/// content belongs to `mobileassetd`, and the way to reclaim it is the
-/// system's own storage management, not a delete button here.
-fn asset_clause(note: &diskscan::AssetNote) -> String {
-    let mut out = t!("disk.asset_kind", kind = &note.kind).to_string();
-    if let Some(locale) = &note.locale {
-        out.push_str(&format!(" · {}", t!("disk.asset_locale", lang = locale)));
-    }
-    if note.required_by_os == Some(true) {
-        out.push_str(&format!(" · {}", i18n::tr("disk.asset_required")));
-    }
-    if note.never_collected == Some(true) {
-        out.push_str(&format!(" · {}", i18n::tr("disk.asset_never_collected")));
-    }
-    out.push_str(&format!(" — {}", i18n::tr("disk.asset_reclaim")));
-    out
-}
-
 fn analysis_row(row: AnalysisRow) -> AnyElement {
     let AnalysisRow {
         key,
@@ -2220,47 +1725,18 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
         suggested,
         file,
     } = row;
-    let label = path
-        .strip_prefix(root)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| path.display().to_string());
-    let mut full = format::tilde_path(
-        &path.display().to_string(),
-        &env::var("HOME").unwrap_or_default(),
-    );
-    // A heuristic fold explains itself here rather than with a pill.
-    if kind == Some(HitKind::Heuristic) {
-        full.push_str(" — ");
-        full.push_str(&i18n::tr("disk.kind_guess_tip"));
-    }
-    // In the suggestions the pill is gone (`AnalysisRow::suggested`), so
-    // a TAG tree's declaration rides the name like a hint's owner does.
-    if suggested && kind == Some(HitKind::Tag) {
-        full.push_str(" — ");
-        full.push_str(&i18n::tr("disk.kind_tag_tip"));
-    }
+    let label = storagepage::row_label(path, root);
     // Annotation, not action: a matching clean-hint rides the tooltip —
-    // owner tool plus its own cleanup command, never run by us.
+    // owner tool plus its own cleanup command, never run by us — and so
+    // does what the *system* declares about a MobileAsset row, quoted
+    // rather than interpreted (`mobileassetd` owns that content).
     let hint = cleanhints::lookup(path);
     let app_running = hint.as_ref().is_some_and(|hint| hint.running_in(running));
-    if let Some(hint) = &hint {
-        full.push_str(" — ");
-        full.push_str(&match &hint.command {
-            Some(cmd) => t!("disk.hint_cmd", owner = &hint.owner, cmd = cmd).to_string(),
-            None => t!("disk.hint_owner", owner = &hint.owner).to_string(),
-        });
-    }
-    // The same posture one step further: what the *system* declares
-    // about a MobileAsset row, quoted rather than interpreted. No
-    // delete button follows from it — `mobileassetd` owns this content.
-    if let Some(note) = asset {
-        full.push_str(" — ");
-        full.push_str(&asset_clause(note));
-    }
+    let full = storagepage::row_tip(path, kind, suggested, hint.as_ref(), asset);
     // The Trash is the one directory whose space comes back without
     // judging anything in it: its row's reveal opens the Trash itself —
     // never empties it, that step stays the reader's.
-    let is_trash = env::var_os("HOME").is_some_and(|home| path == Path::new(&home).join(".Trash"));
+    let is_trash = storagepage::is_trash_dir(path);
     let reveal_path = path.to_path_buf();
     let trash_path = path.to_path_buf();
     let open_path = path.to_path_buf();
@@ -2359,7 +1835,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                             .text_size(px(META_PT))
                             .text_color(theme::text_muted())
                             .tooltip(widgets::wrap_tooltip(tip))
-                            .children(delta_label(bytes, prev_bytes)),
+                            .children(storagepage::delta_label(bytes, prev_bytes)),
                     )
                 })
                 .child(size_text(bytes))
@@ -2372,11 +1848,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                             .icon(IconName::Folder)
                             .ghost()
                             .xsmall()
-                            .tooltip(if is_trash {
-                                i18n::tr("disk.open_trash")
-                            } else {
-                                reveal_tip()
-                            })
+                            .tooltip(storagepage::reveal_row_tip(path))
                             .on_click(move |_, _window, cx| {
                                 // The row itself opens; the button must not.
                                 cx.stop_propagation();
@@ -2395,17 +1867,16 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                             .xsmall()
                             .tooltip(i18n::tr("disk.big_trash"))
                             .on_click({
-                                let bytes_str = format::memory(bytes);
                                 // A running owner is the one thing the
                                 // sheet must add: the move frees nothing
                                 // until that app lets go.
-                                let caution = hint
-                                    .as_ref()
-                                    .filter(|_| app_running)
-                                    .map(|hint| {
-                                        t!("disk.trash_running", owner = &hint.owner).to_string()
-                                    })
-                                    .unwrap_or_default();
+                                let body = storagepage::dir_trash_body(
+                                    &confirm_label,
+                                    bytes,
+                                    hint.as_ref()
+                                        .filter(|_| app_running)
+                                        .map(|hint| hint.owner.as_str()),
+                                );
                                 move |_, window, cx| {
                                     cx.stop_propagation();
                                     let path = trash_path.clone();
@@ -2417,8 +1888,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                                             window,
                                             cx,
                                             i18n::tr("disk.big_trash_title"),
-                                            t!("disk.big_trash_body", name = confirm_label.clone())
-                                                .to_string(),
+                                            storagepage::file_trash_body(&confirm_label),
                                             i18n::tr("disk.big_trash_ok"),
                                             move |cx| {
                                                 let path = path.clone();
@@ -2436,15 +1906,7 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
                                         window,
                                         cx,
                                         i18n::tr("disk.big_trash_title"),
-                                        format!(
-                                            "{}{}",
-                                            t!(
-                                                "disk.ana_trash_body",
-                                                name = confirm_label.clone(),
-                                                bytes = bytes_str.clone()
-                                            ),
-                                            caution
-                                        ),
+                                        body.clone(),
                                         i18n::tr("disk.big_trash_ok"),
                                         move |cx| {
                                             let paths = vec![path.clone()];
@@ -2466,12 +1928,6 @@ fn analysis_row(row: AnalysisRow) -> AnyElement {
 }
 
 // ---- duplicates ---------------------------------------------------------
-
-/// Copies listed under one group before the rest become a count. A
-/// picked folder has no size floor, and the same small file can sit in a
-/// hundred places; ten rows say "this is everywhere" as well as a
-/// hundred would.
-const DUPE_FILES_SHOWN: usize = 10;
 
 /// A card header for a tab that has run: the scope it answered in the
 /// heading weight, the caption beside it, the method behind an ⓘ, and
@@ -2554,13 +2010,9 @@ fn dupes_card(state: &ZStatsAppState, scroll: &ScrollHandle) -> AnyElement {
 }
 
 fn dupes_header(state: &ZStatsAppState) -> AnyElement {
-    let (scope, rest) = dupes_caption(state);
+    let (scope, rest) = storagepage::dupes_caption(state);
     let running = matches!(state.dupe_search(), DupeSearch::Running { .. });
-    let label = match state.dupe_search() {
-        DupeSearch::Running { .. } => i18n::tr("disk.ana_cancel"),
-        DupeSearch::Ready(_) => i18n::tr("disk.dup_again"),
-        DupeSearch::Off | DupeSearch::Failed(_) => i18n::tr("disk.dup_find"),
-    };
+    let label = storagepage::dupes_run_label(state);
     tab_header(
         scope,
         rest,
@@ -2575,13 +2027,7 @@ fn dupes_header(state: &ZStatsAppState) -> AnyElement {
                 run_chip("dupes-chip", label, true).on_click(|_, _window, cx| {
                     cx.global::<ZStatsGlobalStore>()
                         .clone()
-                        .update(cx, |state, cx| {
-                            if matches!(state.dupe_search(), DupeSearch::Running { .. }) {
-                                state.clear_dupes(cx);
-                            } else {
-                                state.start_dupes(cx);
-                            }
-                        });
+                        .update(cx, |state, cx| storagepage::dupes_run_or_cancel(state, cx));
                 }),
             )
             // A view action, like the analyser's ✕: drops the list,
@@ -2684,55 +2130,6 @@ fn dupes_scope_row(state: &ZStatsAppState) -> Option<AnyElement> {
     )
 }
 
-/// `(scope, the rest)`: progress while running; afterwards the age, what
-/// was compared and every honesty counter that is not zero.
-fn dupes_caption(state: &ZStatsAppState) -> (String, String) {
-    let word = |scope: &DupeScope| match scope {
-        DupeScope::Home => i18n::tr("disk.ana_preset_home"),
-        DupeScope::Folder(path) => format::tilde(path),
-    };
-    match state.dupe_search() {
-        DupeSearch::Off => (word(state.dupe_scope()), String::new()),
-        DupeSearch::Failed(e) => (
-            i18n::tr("disk.dup_failed_title"),
-            t!("disk.dup_failed", e = e.clone()).to_string(),
-        ),
-        DupeSearch::Running {
-            scope, progress, ..
-        } => {
-            let what = match progress {
-                DupeProgress::Walking { files } => {
-                    t!("disk.dup_walking", n = format::thousands(*files)).to_string()
-                }
-                // "At most": the total assumes every same-size file is read
-                // whole, and the 64 KB pass rules most of them out first.
-                DupeProgress::Hashing { read, total } => t!(
-                    "disk.dup_hashing",
-                    read = format::memory(*read),
-                    total = format::memory(*total)
-                )
-                .to_string(),
-            };
-            (word(scope), what)
-        }
-        DupeSearch::Ready(result) => {
-            let mut parts: Vec<String> = vec![
-                format::ago(result.scanned_at.elapsed().unwrap_or_default()),
-                t!("disk.ana_took", t = format::took(result.took)).to_string(),
-            ];
-            let n = format::thousands(result.files_seen);
-            parts.push(match result.scope {
-                DupeScope::Home => t!("disk.dup_files_home", n = n).to_string(),
-                DupeScope::Folder(_) => t!("disk.dup_files", n = n).to_string(),
-            });
-            if result.unreadable > 0 {
-                parts.push(t!("disk.dup_unreadable", n = result.unreadable).to_string());
-            }
-            (word(&result.scope), parts.join(" · "))
-        }
-    }
-}
-
 /// "Frees 203 MB" — this tab's bold figure is what moving the extra
 /// copies gives back, not a size, so it says so; a group of clones says
 /// it frees nothing instead of a bold "0 MB".
@@ -2775,16 +2172,11 @@ fn dupes_body(state: &ZStatsAppState) -> AnyElement {
     let home = env::var("HOME").unwrap_or_default();
     let shown = state.dupes_shown().min(result.groups.len());
     let hidden = result.groups.len() - shown;
+    let (title, meta) = storagepage::dupes_heading(result.groups.len(), result.extra_copies());
     div()
         .child(section_heading(
-            match result.groups.len() {
-                1 => i18n::tr("disk.dup_groups_one"),
-                n => t!("disk.dup_groups", n = n).to_string(),
-            },
-            Some(match result.extra_copies() {
-                1 => i18n::tr("disk.dup_copies_one"),
-                n => t!("disk.dup_copies", n = n).to_string(),
-            }),
+            title,
+            Some(meta),
             Some(frees_label(result.reclaimable())),
         ))
         .when(state.dupes_stale(), |d| {
@@ -2823,22 +2215,8 @@ fn dupe_group(group: &DupeGroup, home: &str, last: bool) -> AnyElement {
     // The shortest name among the copies: "Installer.dmg" rather than
     // "Installer (1).dmg", "trip.mov" rather than "trip copy.mov" — the
     // copy's name is usually the original's plus what made it a copy.
-    let name = group
-        .files
-        .iter()
-        .filter_map(|f| f.path.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .min_by_key(|n| n.chars().count())
-        .unwrap_or_default();
-    let frees_tip = if group.reclaimable == 0 {
-        i18n::tr("disk.dup_frees_none_tip")
-    } else {
-        t!(
-            "disk.dup_frees_tip",
-            bytes = format::memory(group.reclaimable)
-        )
-        .to_string()
-    };
+    let name = storagepage::group_name(group);
+    let frees_tip = storagepage::frees_tip(group);
     let hidden = group.files.len().saturating_sub(DUPE_FILES_SHOWN);
     let others = group.files.len() - 1;
     let oldest = group.oldest().map(Path::to_path_buf);
@@ -2866,14 +2244,7 @@ fn dupe_group(group: &DupeGroup, home: &str, last: bool) -> AnyElement {
                         .flex_none()
                         .text_size(px(META_PT))
                         .text_color(theme::text_dim())
-                        .child(
-                            t!(
-                                "disk.dup_group_meta",
-                                n = group.files.len(),
-                                size = format::memory(group.len)
-                            )
-                            .to_string(),
-                        ),
+                        .child(storagepage::group_meta(group)),
                 )
                 .child(
                     div()
@@ -2970,7 +2341,7 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize, oldest: bool) -> An
                     .icon(IconName::Folder)
                     .ghost()
                     .xsmall()
-                    .tooltip(reveal_tip())
+                    .tooltip(storagepage::reveal_tip())
                     .on_click({
                         let path = file.path.clone();
                         move |_, _window, _cx| finder::reveal(&path)
@@ -2985,16 +2356,7 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize, oldest: bool) -> An
                     .tooltip(i18n::tr("disk.dup_trash"))
                     .on_click(move |_, window, cx| {
                         let path = path.clone();
-                        let mut body = t!(
-                            "disk.dup_trash_body",
-                            path = confirm_path.clone(),
-                            n = others
-                        )
-                        .to_string();
-                        if !frees {
-                            body.push(' ');
-                            body.push_str(&i18n::tr("disk.dup_trash_nothing"));
-                        }
+                        let body = storagepage::dupe_trash_body(&confirm_path, others, frees);
                         confirm::ask(
                             window,
                             cx,
@@ -3013,100 +2375,4 @@ fn dupe_file_row(file: &DupeFile, home: &str, others: usize, oldest: bool) -> An
             ),
         ))
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::slice;
-
-    /// An opened row may only stay silent about its children when there
-    /// are none left to mention — the summary line is what keeps the cut
-    /// at [`EXPAND_ROWS`] visible.
-    #[test]
-    fn an_opened_row_accounts_for_the_children_it_does_not_list() {
-        let hit = |bytes| DirHit {
-            path: PathBuf::from(format!("/r/{bytes}")),
-            bytes,
-            kind: HitKind::Plain,
-            asset: None,
-        };
-        let big = |n: u64| hit(n * EXPAND_FLOOR);
-        let rows: Vec<DirHit> = (1..=EXPAND_ROWS as u64 + 3).rev().map(big).collect();
-        let (hidden, bytes) = expand_hidden(&rows).expect("three past the cut");
-        assert_eq!(hidden, 3);
-        // The three past the cut, and only those.
-        assert_eq!(bytes, (1 + 2 + 3) * EXPAND_FLOOR);
-        // Exactly the cut, and under it, say nothing.
-        assert_eq!(expand_hidden(&rows[..EXPAND_ROWS]), None);
-        assert_eq!(expand_hidden(&[]), None);
-
-        // A child too small to render as anything but "0 MB" is summed
-        // into the line below instead of spending a row on a zero.
-        let mixed = vec![big(4), big(2), hit(900_000), hit(400_000)];
-        assert_eq!(expand_shown(&mixed), 2, "the two that can be read");
-        let (hidden, bytes) = expand_hidden(&mixed).expect("two below the floor");
-        assert_eq!(hidden, 2);
-        assert_eq!(bytes, 1_300_000);
-    }
-
-    /// Every clause is a field the plist actually carried; the closing
-    /// line is always there, because "do not delete this by hand" is
-    /// the part a reader most needs and the one thing not read off
-    /// disk.
-    #[test]
-    fn the_asset_clause_quotes_only_what_was_declared() {
-        let bare = diskscan::AssetNote {
-            kind: "Font8".into(),
-            required_by_os: None,
-            never_collected: None,
-            locale: None,
-        };
-        let text = asset_clause(&bare);
-        assert!(text.contains("Font8"));
-        assert!(!text.contains("language"), "{text}");
-        let full = diskscan::AssetNote {
-            kind: "VoiceServices".into(),
-            required_by_os: Some(true),
-            never_collected: Some(true),
-            locale: Some("zh_Hans".into()),
-        };
-        let text = asset_clause(&full);
-        assert!(text.contains("zh_Hans"), "{text}");
-        // A declared `false` is not a claim either way — only `true`
-        // earns a clause.
-        let denied = diskscan::AssetNote {
-            kind: "X".into(),
-            required_by_os: Some(false),
-            never_collected: Some(false),
-            locale: None,
-        };
-        let text = asset_clause(&denied);
-        assert!(!text.contains("required"), "{text}");
-    }
-
-    #[test]
-    fn a_scope_is_named_the_way_its_chip_is() {
-        let home = diskscan::default_root().expect("HOME is set under cargo test");
-        assert_eq!(scope_word(slice::from_ref(&home), &home), "Home");
-        assert_eq!(
-            scope_word(&ScanScope::whole_disk().roots, &diskscan::whole_disk_root()),
-            "Whole disk"
-        );
-        let library = home.join("Library");
-        assert_eq!(scope_word(slice::from_ref(&library), &library), "~/Library");
-    }
-
-    #[test]
-    fn delta_speaks_only_when_it_clears_the_floor() {
-        let gib = 1024 * 1024 * 1024;
-        // Growth and shrinkage, signed.
-        assert_eq!(delta_label(3 * gib, Some(2 * gib)), Some("+1.0 GB".into()));
-        assert_eq!(delta_label(2 * gib, Some(3 * gib)), Some("-1.0 GB".into()));
-        // No baseline row → silence, not "new".
-        assert_eq!(delta_label(3 * gib, None), None);
-        // Under the floor either way → unchanged for table purposes.
-        assert_eq!(delta_label(gib + DIFF_FLOOR - 1, Some(gib)), None);
-        assert_eq!(delta_label(gib, Some(gib)), None);
-    }
 }

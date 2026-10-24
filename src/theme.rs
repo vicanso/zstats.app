@@ -48,7 +48,6 @@ tokens!(
     gauge,
     track,
     card_line,
-    map_rest,
 );
 
 /// `palette::tiny_label`.
@@ -103,11 +102,6 @@ pub fn choice_ink(on: bool) -> Rgba {
 #[inline]
 pub fn choice_hover(on: bool) -> Rgba {
     palette::choice_hover(on).into()
-}
-
-/// `palette::map_hues`.
-pub fn map_hues() -> Vec<Rgba> {
-    palette::map_hues().into_iter().map(Into::into).collect()
 }
 
 /// `palette::fill_for`.
