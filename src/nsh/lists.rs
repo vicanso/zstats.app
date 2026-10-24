@@ -1,9 +1,9 @@
-//! What the NSH Apps and Processes pages share — on the gpui front end,
-//! what `views/processes.rs` exports for `views/apps.rs`: the measures of
-//! a list under a pinned header, the name filter (one filter, both
-//! lists; the listening card has one of the same shape), the All chip's shape, the disk check's badge, and an open
-//! row's pieces — its figures, its alert bars, the chips that edit them,
-//! and the outlined button that asks a program to quit.
+//! What the Apps and Processes pages share — on the gpui front end, what
+//! `views/processes.rs` exported for `views/apps.rs`: the measures of a list
+//! under a pinned header, the name filter (one filter, both lists; the
+//! listening card has one of the same shape), the All chip's shape, the disk
+//! check's badge, and an open row's pieces — its figures, its alert bars, the
+//! chips that edit them, and the outlined button that asks a program to quit.
 
 use crate::alertbars::{self, BarDisplay, Resolved};
 use crate::assets::CustomIconName;
@@ -137,8 +137,8 @@ pub fn filter_chip(live: Live, filter: Filter) -> AnyElement {
 }
 
 /// A search's field while it is open, focused as it appears; the clear
-/// empties it, as Escape does on the gpui front end, and leaves the caret
-/// in it as gpui-kit's clear button does.
+/// empties it, as Escape did on the gpui front end, and leaves the caret
+/// in it as gpui-kit's clear button did.
 pub fn filter_row(live: Live, filter: Filter) -> AnyElement {
     let on = live.memo(filter.open);
     let query = computed(move || {

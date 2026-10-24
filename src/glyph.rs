@@ -1,11 +1,10 @@
 //! The menu bar's glyphs as bitmaps: the bundled SVGs rasterised to the
 //! straight RGBA `tray-icon` takes, and the alert spec stamped onto them.
 //!
-//! Shared by both front ends (docs/nsh-migration.md): which glyph the bar
-//! wears is a decision about the data (`tray::face_for`), how it is drawn
-//! is this, and neither needs to know which toolkit draws the panel. The
-//! ink comes in from the caller, because only the caller knows the theme
-//! (`tray::ink`).
+//! Which glyph the bar wears is a decision about the data
+//! (`tray::face_for`), how it is drawn is this, and neither needs to know
+//! which toolkit draws the panel. The ink comes in from the caller, because
+//! only the caller knows the theme (`tray::ink`).
 //!
 //! `tray-icon` takes raw RGBA only — it has no SVG support and just
 //! re-encodes whatever it is given as a PNG for `NSImage`. macOS then scales

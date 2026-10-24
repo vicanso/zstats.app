@@ -3,11 +3,11 @@
 //! draws, where those points sit on the axis, how tall the axis is, and
 //! the monotone cubic the processor and network lines are stroked with.
 //!
-//! None of it ever needed gpui; it lived in `views/overview.rs` because
-//! that is where it was drawn. It moved here so both front ends draw the
-//! same chart from the same arithmetic (docs/nsh-migration.md, phase 1a):
-//! the painting itself — paths, washes, guides — stays with each front
-//! end, along with the inks it is painted in.
+//! None of it ever needed a toolkit; it lived in the gpui front end's
+//! `views/overview.rs` because that is where it was drawn, and moved here
+//! so the NSH charts could draw the same chart from the same arithmetic
+//! (docs/nsh-migration.md, phase 1a). The painting itself — paths, washes,
+//! guides — is `nsh/chart.rs`'s, along with the inks it is painted in.
 
 use crate::format;
 use crate::series::{self, Point};

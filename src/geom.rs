@@ -1,7 +1,7 @@
 //! Rectangles in logical points, top-left origin with y growing down — the
-//! space `placement.rs` does its arithmetic in (gpui's, which it was moved
-//! off in phase 1b of docs/nsh-migration.md); the AppKit host converts at
-//! its edge.
+//! space `placement.rs` does its arithmetic in (gpui's, whose types it
+//! used until phase 1b of docs/nsh-migration.md); the AppKit host converts
+//! at its edge.
 
 /// A point.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

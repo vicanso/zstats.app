@@ -1,11 +1,11 @@
-//! The Alerts tab's rules, on either front end: where the watchers' cards
-//! sit among the live episodes, how a past day folds into rows, what each
-//! card says — its subject, its sentence, the one thing to do, the rules
-//! armed — where a card's jump goes and whom its Quit asks, and what the
-//! threshold editor lights. Every figure is the event's own or zstats'
-//! resolution of the file; this words and orders, it decides nothing (the
-//! rule engine does). Shared since the NSH Alerts page (phase 4h of
-//! docs/nsh-migration.md); `views/alerts.rs` reads it too, and says why each
+//! The Alerts tab's rules: where the watchers' cards sit among the live
+//! episodes, how a past day folds into rows, what each card says — its
+//! subject, its sentence, the one thing to do, the rules armed — where a
+//! card's jump goes and whom its Quit asks, and what the threshold editor
+//! lights. Every figure is the event's own or zstats' resolution of the
+//! file; this words and orders, it decides nothing (the rule engine does).
+//! Moved out of the gpui page for the NSH one (phase 4h of
+//! docs/nsh-migration.md); the gpui page, `views/alerts.rs`, says why each
 //! card looks the way it does.
 
 use crate::alertbars::{BarSource, InForce, Resolved};

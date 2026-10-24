@@ -17,8 +17,8 @@
 
 // The thread, its cadences and its switches are shared, and so is what a
 // tick does to the store (`ZStatsAppState::on_tick`). [`spawn`] hands each
-// tick over a channel; reading it on the thread that keeps the store is
-// the front end's ([`start`] for gpui).
+// tick over a channel; folding it into the store is the host's, on a
+// thread of its own.
 use crate::state::Tab;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,9 +127,10 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Shared "the panel is on screen" flag, plus a way to wake the collector.
 ///
-/// Two things hang off visibility: the sampling cadence, and whether a landing
-/// tick repaints. The window is never destroyed now — it is ordered off screen
-/// — so gpui has no idea it is invisible and would happily keep rendering it.
+/// Two things hang off visibility: the sampling cadence, and whether a
+/// landing tick reaches the panel's bindings (`nsh::root::Live`). The window
+/// is never destroyed — it is ordered off screen — so nothing else would tell
+/// it that nobody is looking.
 #[derive(Clone)]
 pub struct CollectorPace {
     visible: Arc<AtomicBool>,
@@ -204,11 +205,11 @@ fn registry_channels(on_screen: bool, file: Option<&CollectorConfig>) -> (bool, 
     (on_screen && gpu, on_screen && drives)
 }
 
-/// What [`spawn`] hands the front end that started it.
+/// What [`spawn`] hands the host that started it.
 pub struct Collector {
     /// The pace the store and the panel's show and hide paths share.
     pub pace: CollectorPace,
-    /// Each tick as it lands, for the front end to fold into the store
+    /// Each tick as it lands, for the host to fold into the store
     /// (`ZStatsAppState::on_tick`) on its own thread.
     pub ticks: smol::channel::Receiver<zstats::Tick>,
     /// `config.toml` as read at launch, for the store (`set_settings`);
@@ -218,7 +219,6 @@ pub struct Collector {
 
 /// Start the collector thread. `tab` is the session's, restored before the
 /// collector exists, which seeds whether the registry channels are wanted.
-/// Shared by both front ends; [`start`] is gpui's way of wiring it up.
 pub fn spawn(tab: Tab) -> Collector {
     let dir = zstats::settings::default_dir();
 

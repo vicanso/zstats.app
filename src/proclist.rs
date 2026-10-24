@@ -1,10 +1,10 @@
-//! The Processes page's own rules, on either front end: the collector's
-//! top list ranked by the 60s rolling average and reordered by the
-//! page's sort, what a row's meter measures, and the words an expansion
-//! uses for a process's command, parent, IO and user. The list is not the
-//! whole table — zstats materialises `max-processes` (default 50) by CPU
-//! then memory (`views/processes.rs`). Shared since the NSH Processes
-//! page (phase 4e of docs/nsh-migration.md).
+//! The Processes page's own rules: the collector's top list ranked by the
+//! 60s rolling average and reordered by the page's sort, what a row's meter
+//! measures, and the words an expansion uses for a process's command,
+//! parent, IO and user. The list is not the whole table — zstats
+//! materialises `max-processes` (default 50) by CPU then memory (the gpui
+//! page, `views/processes.rs`, says why). Moved out of it for the NSH
+//! Processes page (phase 4e of docs/nsh-migration.md).
 
 use crate::alertbars::{BarDisplay, Resolved, mem_bar_text, pct_bar_text};
 use crate::format;

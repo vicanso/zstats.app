@@ -162,7 +162,7 @@ pub fn page(live: Live) -> AnyElement {
                         .on_press(move || open.update(|o| *o = !*o))
                         .child(widgets::expand_mark(move || open.get()))
                         .child(
-                            text("NSH front end — phase 3 of docs/nsh-migration.md")
+                            text("Building blocks — nsh/widgets.rs")
                                 .text_size(px(12.))
                                 .text_color(theme::color(palette::text)),
                         ),

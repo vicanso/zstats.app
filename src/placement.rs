@@ -2,16 +2,14 @@
 //!
 //! Split from `main.rs` because it is self-contained and the only part of the
 //! window story that can be tested — everything else there needs a running
-//! gpui app, while this is arithmetic on rectangles. Mixed-DPI scale
+//! host, while this is arithmetic on rectangles. Mixed-DPI scale
 //! picking (`resolve_icon`) lives here for the same reason: it is a
 //! function of the tray's physical rect and a list of (frame, scale),
 //! not of AppKit.
 //!
-//! Shared by both front ends (docs/nsh-migration.md, phase 1b): the
-//! arithmetic is on `geom.rs`'s rectangles, and [`below_tray`] takes the
-//! screens and the fallbacks as arguments. Asking AppKit or gpui for those
-//! is each front end's own business — the gpui one's is
-//! [`bounds_below_tray`], gated at the end of this file.
+//! The arithmetic is on `geom.rs`'s rectangles, and [`below_tray`] takes
+//! the screens and the fallbacks as arguments: asking AppKit for those is
+//! the host's business (`nsh/host.rs`'s `Screens`).
 
 use crate::geom::{Point, Rect, Size, point, size};
 use std::env;
@@ -138,7 +136,7 @@ pub fn window_size(detail: bool, notice: bool, dragged: Dragged) -> (f32, f32) {
 /// Whether a panel this tall shows Overview's long form: once it is as
 /// tall as that page was measured for, the page fits without scrolling,
 /// and under that height the short form is what fits. Asked while a
-/// person drags the panel's edge (`crate::gpui_app::follow_dragged_height`) —
+/// person drags the panel's edge (the panel delegate's `windowDidResize:`) —
 /// never of a height the panel gave itself, or the notice row's 46
 /// could carry a short panel over the line and the long form, which has
 /// no such row, would take them back.
@@ -206,8 +204,8 @@ pub const PANEL_MARGIN_RIGHT: f32 = 10.;
 ///
 /// This was 0 for a while, and the reason is worth keeping because it
 /// was a measurement taken through a bug. gpui-component's client-side
-/// frame was inflating the surface by 20px a side (`build_panel` says
-/// how that ended, twice), so the
+/// frame was inflating the gpui front end's surface by 20px a side (a
+/// vendored gpui patch ended it, docs/omarchy-port.md), so the
 /// first pixel of content sat 20px below the bar and the panel looked
 /// over-gapped; 0 was the value that made *that* look right. With the
 /// inflation gone, 0 is what it says — flush against the bar, and too
@@ -215,12 +213,12 @@ pub const PANEL_MARGIN_RIGHT: f32 = 10.;
 /// against a build with a layout bug in it encodes the bug.
 ///
 /// Measured from what the bar left free, **not** from the top of the
-/// screen: an exclusive zone of 0 — which is what `exclusive_zone: None`
-/// means — asks the compositor to move the surface clear of every bar
+/// screen: an exclusive zone of 0 — gtk4-layer-shell's default, which the
+/// panel keeps — asks the compositor to move the surface clear of every bar
 /// that reserves space, and it has already done that before this margin
 /// applies. A bar that reserves more than it paints therefore still
 /// leaves a visible gap here, and closing *that* one means opting out of
-/// the reservation entirely (`exclusive_zone: Some(px(-1.))`) and
+/// the reservation entirely (an exclusive zone of -1) and
 /// subtracting the bar's height by hand — a number no protocol reports,
 /// so it would have to be configured rather than measured.
 #[cfg(target_os = "linux")]
@@ -269,7 +267,8 @@ fn anchored_origin(icon: Rect, window_size: Size, screen: Rect) -> Point {
     origin
 }
 
-/// One display in gpui space, plus the backing scale tray-icon used for it.
+/// One display in `geom.rs`'s space, plus the backing scale tray-icon used
+/// for it.
 ///
 /// `frame` is the full screen (menu bar included) so a status item sitting
 /// in the menu bar still `contains`s; `visible` is what the panel clamps to.

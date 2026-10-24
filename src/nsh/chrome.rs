@@ -1,7 +1,7 @@
-//! The panel's frame on NSH: the tab strip above the page and the footer
-//! under it — `views::tab_strip` and `views::footer` on the gpui front end,
-//! whose comments say why each piece is where it is and looks as it does;
-//! the sizes, inks and words are theirs.
+//! The panel's frame: the tab strip above the page and the footer under
+//! it — a port of `views::tab_strip` and `views::footer` on the gpui front
+//! end, whose comments say why each piece is where it is and looks as it
+//! does; the sizes, inks and words are theirs.
 //!
 //! NSH makes a component once and binds what changes, so nothing here is
 //! rebuilt on a tick: a selected tab, a lit pin, the cup's time left are

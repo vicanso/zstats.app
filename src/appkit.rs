@@ -1,7 +1,6 @@
-//! AppKit window calls both front ends make on the panel. The gpui front
-//! end reaches its `NSWindow` past gpui (`window_ext.rs`); the NSH one
-//! builds its `NSPanel` itself. Either way what is asked of the window is
-//! the same, and is here.
+//! AppKit window calls the host makes on the panel, which it builds itself
+//! (`nsh/host.rs`). They were shared with the gpui front end, which
+//! reached its `NSWindow` past gpui (`window_ext.rs`), and stayed here.
 
 use crate::{omarchy, placement, prefs};
 use objc2_app_kit::{
@@ -24,8 +23,8 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 /// the body scrolls. [`placement::resized`] is that rule and says what
 /// it is for.
 ///
-/// Fires `windowDidResize` synchronously — the gpui front end hops it
-/// off its App borrow (`window_ext::show_retained_at` says why).
+/// Fires `windowDidResize` synchronously, so it is called on the main
+/// queue, never from inside an engine's handler.
 pub fn set_size_keeping_top(ns: &NSWindow, width: f32, height: f32, gap: f32) {
     let frame = ns.frame();
     let top = frame.origin.y + frame.size.height;

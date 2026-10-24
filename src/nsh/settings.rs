@@ -1,4 +1,4 @@
-//! The settings window on NSH: the gpui front end's `SettingsWindow`
+//! The settings window: a port of the gpui front end's `SettingsWindow`
 //! (`gpui_app.rs`) and `views/config.rs`, whose comments say why every
 //! page and row is the way it is — this file carries the same choices and
 //! does not repeat their reasons. The window's rules are shared
@@ -59,7 +59,7 @@ fn set_section(section: SettingsSection) {
     SECTION.store(at, Ordering::Relaxed);
 }
 
-/// A new settings window opens on the first page, as the gpui one does;
+/// A new settings window opens on the first page, as the gpui one did;
 /// only a restyle keeps the page.
 pub fn opening() {
     SECTION.store(0, Ordering::Relaxed);

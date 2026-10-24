@@ -136,7 +136,7 @@ impl TrayPref {
 
 // Held in statics rather than app state: the theme resolves before the
 // first frame and the locale pins before the first `t!`, both ahead of the
-// state entity existing. Same pattern as `theme::DARK`.
+// state entity existing. Same pattern as `palette.rs`'s scheme.
 static LANGUAGE: AtomicU8 = AtomicU8::new(0);
 static THEME: AtomicU8 = AtomicU8::new(0);
 /// Read on every tick by the tray, so an atomic like its neighbours

@@ -2,15 +2,15 @@
 //!
 //! `zstats::process_traffic()` (zstats ≥ 0.7.0) returns each process's
 //! cumulative received and transmitted bytes and keeps nothing between
-//! calls. A rate is the difference of two calls over the wall clock
-//! between them — the crate's contract, not a figure the snapshot
-//! already carries, so this diff is not a second source of a number
-//! zstats computed. The store owns the baseline and a ten-minute curve
-//! ([`CurveBook`]); this module does the arithmetic, and holds the
-//! card's rules both front ends read — which rows show before "show
-//! more", the line's scale and shape, the card's words (shared since the
-//! NSH Network page, phase 4g of docs/nsh-migration.md; `views/traffic.rs`
-//! says why the card looks the way it does).
+//! calls. A rate is the difference of two calls over the wall clock between
+//! them — the crate's contract, not a figure the snapshot already carries,
+//! so this diff is not a second source of a number zstats computed. The
+//! store owns the baseline and a ten-minute curve ([`CurveBook`]); this
+//! module does the arithmetic, and holds the card's rules — which rows show
+//! before "show more", the line's scale and shape, the card's words (moved
+//! out of the gpui card for the NSH Network page, phase 4g of
+//! docs/nsh-migration.md; the gpui card, `views/traffic.rs`, says why it
+//! looks the way it does).
 //!
 //! Three rules, or the number lies (zstats `docs/listeners.md` §3.6):
 //!

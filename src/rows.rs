@@ -1,9 +1,9 @@
-//! A ranked list's rows, on either front end: how the region under a
+//! A ranked list's rows: how the region under a
 //! list's pinned header is divided among whole rows, so a card ends on the
 //! gap above the footer as Overview's does and the region ends on a row
-//! ([`fit_rows`]), and what a full CPU meter means. The heights are each
-//! front end's own — measured from its type — and only the arithmetic is
-//! shared. Moved out of the gpui Processes page for the NSH Apps page
+//! ([`fit_rows`]), and what a full CPU meter means. The heights are the
+//! pages' own — measured from their type — and only the arithmetic is
+//! here. Moved out of the gpui Processes page for the NSH Apps page
 //! (phase 4d of docs/nsh-migration.md).
 
 /// Floor for the per-row CPU bar. The original scale was 800% (eight
@@ -29,16 +29,16 @@ const ROW_STRETCH: f32 = 12.;
 /// the last whole row is never a pixel short of the clip — where the row
 /// after it would show its hairline as a line across the card's bottom
 /// edge. What is cut is half a point of the last row's padding. It is
-/// also what makes the standard regions come out even: they end in a
-/// half (gpui's list header is 39.5), and the rows are whole points.
+/// also what made the standard regions come out even on gpui: they ended
+/// in a half (its list header was 39.5), and the rows are whole points.
 pub const ROW_SEAM: f32 = 0.5;
 
 /// A rows region divided among whole rows ([`fit_rows`]).
 ///
 /// The rows are whole points tall, the first few a point taller than the
-/// rest, because gpui rounds each row's height to the pixel by itself (and
-/// NSH a text's to the point): an equal fractional share came out three
-/// pixels short over nine History rows, and the tenth row's hairline
+/// rest, because NSH rounds a text's height up to the point by itself (as
+/// gpui rounded each row's to the pixel): an equal fractional share came out
+/// three pixels short over nine History rows, and the tenth row's hairline
 /// stood in the gap.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowFit {
@@ -120,7 +120,7 @@ pub fn fit_rows(budget: f32, natural: f32, pad: f32) -> RowFit {
 pub mod tests {
     use super::*;
 
-    /// gpui's collapsed process row and its padding (`processes.rs`): the
+    /// gpui's collapsed process row and its padding (`views/processes.rs`): the
     /// row these limits were tuned on.
     const COLLAPSED_ROW: f32 = 7. + 7. + 19.5 + 2. + 16. + 4. + 3. + 1.;
     const ROW_PAD: f32 = 7.;

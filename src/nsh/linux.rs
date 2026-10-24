@@ -1,11 +1,11 @@
-//! The NSH front end's GTK side on Linux: the panel, the two ordinary
+//! The interface's GTK side on Linux: the panel, the two ordinary
 //! windows, and the ways in (the tray, the socket a keybinding talks to,
 //! a banner's click), all on GTK's main loop. NSH's `AppView` is one GTK
 //! widget per window, running its root on an engine thread of its own;
 //! each commit is one hop back to this loop.
 //!
 //! What it does, and why, is the gpui front end's Linux path
-//! (`gpui_app.rs`, docs/omarchy-port.md), from the same shared parts: the
+//! (`gpui_app.rs`, docs/omarchy-port.md), from the shared parts: the
 //! panel is a wlr-layer-shell surface the compositor anchors top-right
 //! (`panel_kind` there, with the margins and namespace in `placement.rs`),
 //! or a plain window when the compositor has no layer shell; it dismisses
@@ -46,7 +46,8 @@ use std::time::Instant;
 use std::{fs, process, thread};
 
 /// The application id: Wayland's app id, and the name a `.desktop` file
-/// and a compositor rule match on — the gpui front end's `LINUX_APP_ID`.
+/// and a compositor rule match on — the gpui front end's `LINUX_APP_ID`, so
+/// a rule written for it still matches.
 const APP_ID: &str = "com.github.vicanso.zstats";
 
 /// The collector's pace, for the show and hide paths.
@@ -96,8 +97,8 @@ fn with_panel<R>(f: impl FnOnce(&PanelHost) -> R) -> Option<R> {
 }
 
 pub fn run() {
-    // Arguments before anything is initialised, as in the gpui front end:
-    // `--help`, `--version` and a refused flag end the process here.
+    // Arguments before anything is initialised: `--help`, `--version` and a
+    // refused flag end the process here.
     let invocation = match ipc::Invocation::from_args() {
         Ok(invocation) => invocation,
         Err(message) => {
@@ -183,7 +184,7 @@ pub fn run() {
     // The first press of the keybinding has nothing to toggle: the process
     // it would have talked to is this one, starting, and a key that
     // silently starts a background app reads as a key that did nothing.
-    // Debug builds open the panel too, as the gpui front end's do.
+    // Debug builds open the panel too, as on macOS.
     if cfg!(debug_assertions) || invocation.opens_the_panel() {
         show();
     }
@@ -469,9 +470,9 @@ fn hide() {
     }
 }
 
-/// The tray's click and `zstats --toggle`. No toggle grace here, as in the
-/// gpui front end's Linux path: a click on the bar is not a focus change
-/// the panel sees first.
+/// The tray's click and `zstats --toggle`. No toggle grace here (there was
+/// none on the gpui front end's Linux path either): a click on the bar is
+/// not a focus change the panel sees first.
 fn toggle() {
     if with_panel(|panel| panel.window.is_visible()) == Some(true) {
         hide();

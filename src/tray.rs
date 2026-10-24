@@ -3,14 +3,15 @@
 //! Two backends, one shape: an `NSStatusItem` on macOS, a
 //! StatusNotifierItem over D-Bus on Linux (`tray-icon`'s `ksni` feature —
 //! its default `libappindicator` backend is the GTK main loop this module
-//! used to be excluded over, and that one really cannot coexist with
-//! gpui's event loop). What the host hands back differs in three ways,
+//! used to be excluded over, and that one really cannot coexist with the
+//! interface's loop: it was gpui's, it is now NSH's GTK 4, and
+//! libappindicator is GTK 3). What the host hands back differs in three ways,
 //! and all three are load-bearing below:
 //!
 //! - **No icon rect.** `TrayIcon::rect` is hard-coded `None` on SNI and
 //!   click events carry `Rect::default()`, so nothing can hang the panel
-//!   off the item — the compositor anchors it instead (`panel_kind` in
-//!   gpui_app.rs). Every anchor on this path is `None`, which is the same
+//!   off the item — the compositor anchors it instead (the layer surface
+//!   in `nsh/linux.rs`). Every anchor on this path is `None`, which is the same
 //!   fallback macOS already takes before AppKit has laid the item out.
 //! - **No right-click event.** SNI maps `secondary_activate` to
 //!   `MouseButton::Middle` and never sends a right click: the context
@@ -22,11 +23,11 @@
 //!   has to choose a colour, and nothing in the protocol says what is
 //!   behind it — see [`ink`].
 //!
-//! Both front ends share it since phase 1d of docs/nsh-migration.md. The
-//! tray is kept on the thread that built it, the main thread, rather than
-//! in a gpui `Global`; [`sync`] reads the store alone; and what a click or
-//! the menu asks for goes, as a [`TrayAction`], to the handler [`start`]
-//! was given — what showing the panel means is the front end's.
+//! Host-agnostic since phase 1d of docs/nsh-migration.md. The tray is
+//! kept on the thread that built it, the main thread (it was a gpui
+//! `Global`); [`sync`] reads the store alone; and what a click or the menu
+//! asks for goes, as a [`TrayAction`], to the handler [`start`] was given
+//! — what showing the panel means is the host's.
 
 use crate::APP_NAME;
 use crate::assets::CustomIconName;
@@ -401,7 +402,7 @@ pub fn face_for(
 /// sample there is a face but no figure. A no-op if the tray failed to
 /// build.
 ///
-/// On the thread that keeps the tray. A front end whose store lives on
+/// On the thread that keeps the tray. A host whose store lives on
 /// another thread takes the two halves apart: [`look`] where the store
 /// is, [`wear`] on the tray's thread.
 pub fn sync(state: &ZStatsAppState) {
@@ -476,7 +477,7 @@ pub fn wear(look: Look) {
     });
 }
 
-/// What the tray asks of the front end, through the handler [`start`] was
+/// What the tray asks of the host, through the handler [`start`] was
 /// given.
 pub enum TrayAction {
     /// Left-clicking the icon; carries the icon's screen rect to hang the
@@ -631,7 +632,7 @@ fn build_menu() -> Menu {
 /// thread, where the tray is kept. `deliver` is called on whichever
 /// thread the platform reports an event on — the main thread on macOS,
 /// inside the status item's own action; ksni's own on Linux — and takes
-/// the action to wherever the front end handles it.
+/// the action to wherever the host handles it.
 ///
 /// Without a tray host — no SNI host on the session bus — `build_item`
 /// logs and returns `None`. That is not an error path: the panel still
@@ -704,7 +705,7 @@ fn try_build() -> bool {
 /// set-once cell that the first event fixes for good, to the receiver if
 /// nothing is set by then. A handler rather than the crate's receivers,
 /// which only block: the gpui front end used to park a thread on each to
-/// forward its events, and the NSH one has no need to.
+/// forward its events.
 fn route_events(deliver: Deliver) {
     let menu = deliver.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {

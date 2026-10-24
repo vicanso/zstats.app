@@ -26,9 +26,8 @@
 //! and always has a menu bar item to click, so there is nothing here it
 //! needs and nothing here that could change how it behaves.
 //!
-//! Shared by both front ends since phase 2d of docs/nsh-migration.md:
-//! what a second launch asked for reaches the front end through the
-//! handler [`serve`] is given, and the front end decides what toggling
+//! What a second launch asked for reaches the host through the handler
+//! [`serve`] is given (`nsh/linux.rs`), and the host decides what toggling
 //! the panel means.
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -242,7 +241,7 @@ fn deliver(mut stream: UnixStream, invocation: Invocation) {
 
 /// Serve the socket for the process lifetime: one thread blocked on
 /// `accept`, handing each invocation to `deliver` on that thread, which
-/// takes it to wherever the front end acts on it.
+/// takes it to wherever the host acts on it.
 pub fn serve(listener: UnixListener, deliver: impl Fn(Invocation) + Send + 'static) {
     thread::spawn(move || {
         for stream in listener.incoming() {

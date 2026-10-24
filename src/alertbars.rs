@@ -1,10 +1,9 @@
-//! One program's alert bars as zstats resolved them, and how the panel
-//! says them: the figure an expansion's bar row prints, which layer
-//! decided it, and the preset chips that edit it. Read back from zstats'
-//! own `ActiveThresholds` — nothing here evaluates a condition or matches
-//! a name itself. Shared since the NSH Apps page (phase 4d of
-//! docs/nsh-migration.md); the gpui Alerts, Processes and Apps pages read
-//! it too.
+//! One program's alert bars as zstats resolved them, and how the panel says
+//! them: the figure an expansion's bar row prints, which layer decided it,
+//! and the preset chips that edit it. Read back from zstats' own
+//! `ActiveThresholds` — nothing here evaluates a condition or matches a
+//! name itself. Moved out of the gpui pages for the NSH Apps page (phase 4d
+//! of docs/nsh-migration.md).
 
 use crate::alerttpl;
 use crate::format;

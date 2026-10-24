@@ -1,10 +1,9 @@
-//! The interface card's rules, on either front end: which interfaces get
-//! a row, in what order and against what scale, and the words for their
-//! errors, their packets and the idle ones. Every figure is zstats' own
-//! (`NetworkSnapshot`); this picks and words, it derives nothing. Shared
-//! since the NSH Network page (phase 4g of docs/nsh-migration.md);
-//! `views/net.rs` reads it too, and says why the card looks the way it
-//! does.
+//! The interface card's rules: which interfaces get a row, in what order
+//! and against what scale, and the words for their errors, their packets
+//! and the idle ones. Every figure is zstats' own (`NetworkSnapshot`); this
+//! picks and words, it derives nothing. Moved out of the gpui card for the
+//! NSH Network page (phase 4g of docs/nsh-migration.md); the gpui card,
+//! `views/net.rs`, says why it looks the way it does.
 
 use crate::i18n;
 use crate::state::ZStatsAppState;

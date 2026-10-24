@@ -1,14 +1,14 @@
-//! The disk-space window on NSH: `views/storage.rs` and its
-//! `StorageWindow` (`gpui_app.rs`), whose comments say why the window and
-//! each part of it is the way it is — this file carries the same choices
+//! The disk-space window: a port of the gpui front end's `views/storage.rs`
+//! and its `StorageWindow` (`gpui_app.rs`), whose comments say why the window
+//! and each part of it is the way it is — this file carries the same choices
 //! and does not repeat their reasons. The window's rules are shared
-//! (`storagepage.rs`, the directory map's layout in `dirmap.rs`); the
-//! state is the store's, so a walk or a search outlives the window. The
-//! tabs arrived in phase 4k of docs/nsh-migration.md: the frame and
-//! Duplicates first, then the analysis's lists, then the directory map —
-//! its tiles views placed in points, not a canvas: a new canvas layer
-//! draws once asynchronously before the host can stop it (the plan's
-//! problem 1), and the map is made again on every click.
+//! (`storagepage.rs`, the directory map's layout in `dirmap.rs`); the state
+//! is the store's, so a walk or a search outlives the window. The tabs
+//! arrived in phase 4k of docs/nsh-migration.md: the frame and Duplicates
+//! first, then the analysis's lists, then the directory map — its tiles views
+//! placed in points, not a canvas: a new canvas layer draws once
+//! asynchronously before the host can stop it (the plan's problem 1), and the
+//! map is made again on every click.
 //!
 //! The tab strip stays put, and so does each card's head: only the
 //! result scrolls, inside the card's border. A folder is picked in the

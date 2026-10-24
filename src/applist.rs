@@ -1,8 +1,8 @@
-//! The Apps page's own rules, on either front end: which trees the list
-//! shows and in what order, what a row's figures and meter say, and when
-//! a row spends width on its pid. Whole process trees, summed by zstats
-//! over the full table and capped at `max-processes` groups ranked by
-//! CPU (`views/apps.rs` says why). Shared since the NSH Apps page (phase
+//! The Apps page's own rules: which trees the list shows and in what order,
+//! what a row's figures and meter say, and when a row spends width on its
+//! pid. Whole process trees, summed by zstats over the full table and
+//! capped at `max-processes` groups ranked by CPU (the gpui page,
+//! `views/apps.rs`, says why). Moved out of it for the NSH Apps page (phase
 //! 4d of docs/nsh-migration.md).
 
 use crate::alertbars::{self, BarDisplay, Resolved};

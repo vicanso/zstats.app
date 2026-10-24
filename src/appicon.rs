@@ -1,6 +1,6 @@
 //! The icon an application shows in the Dock, for a row that names a
 //! program: Overview's top apps, the Apps and Processes tabs, the
-//! Network tab's traffic card, and History (through [`for_record`],
+//! Network tab's traffic card, and History (through [`icon_for_record`],
 //! which checks the recorded pid still runs that program). A
 //! letter in a tile stood there before (`widgets::monogram`), and five
 //! letters in five grey tiles are read one by one, where Chrome's or
@@ -30,7 +30,7 @@
 //! list said less than the letters it replaced.
 //!
 //! Each bundle's icon is drawn once, as a small PNG, and kept for the
-//! session ([`for_pid`]): six Chrome helpers share one drawing. The
+//! session ([`icon_for_pid`]): six Chrome helpers share one drawing. The
 //! monogram's doc said why it did not do this: "the icon itself is a
 //! file read per app per paint" — which a cache by bundle makes once per
 //! app. The bundle a pid runs from is kept under the pid and the

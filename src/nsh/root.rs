@@ -7,15 +7,15 @@
 //! process goes to the host as a [`HostAction`], which `host.rs` carries
 //! to the main queue.
 //!
-//! **How a root follows the store** is the shape the pages will take. The
+//! **How a root follows the store** is the shape every page takes. The
 //! store is not a signal; a task on the engine thread waits on
 //! `store::subscribe` and, while its window is on screen, bumps one
 //! revision signal that every closure reading the store also reads
 //! ([`Live`]). A change re-runs those closures and NSH redraws what came
 //! out different — the gpui front end's "repaint the window on every
-//! tick", narrowed to what moved. A hidden panel lays nothing out, as the
-//! gpui one does not repaint (`CollectorPace::is_visible`); showing it
-//! sends one more change (`host::mark_shown`).
+//! tick", narrowed to what moved. A hidden panel lays nothing out
+//! (`CollectorPace::is_visible`); showing it sends one more change
+//! (`host::mark_shown`).
 
 use crate::nsh::{store, theme, widgets};
 use crate::palette;
@@ -76,9 +76,8 @@ pub fn connect(host: impl Fn(HostAction) + Send + Sync + 'static) {
     let _ = HOST.set(Box::new(host));
 }
 
-/// Quit (`mod+q`) and, in an ordinary window, close (`mod+w`) — the
-/// gpui front end's `Quit` and `CloseWindow` bindings. On macOS the host's
-/// own menu carries both, so a root binds them only elsewhere, where a
+/// Quit (`mod+q`) and, in an ordinary window, close (`mod+w`). On macOS the
+/// host's own menu carries both, so a root binds them only elsewhere, where a
 /// window has no menu bar.
 pub fn bind_window_keys(window: Option<AuxWindow>) {
     if cfg!(target_os = "macos") {
@@ -192,7 +191,9 @@ impl Live {
     }
 }
 
-/// `views::GUTTER`, `widgets::CARD_PAD` and `views::CARD_GAP`.
+/// The spacing scale's three (`.claude/skills/ui-polish`): the panel's
+/// side margin, a card's padding (and a list row's side margin), the gap
+/// between cards.
 pub const GUTTER: f32 = 12.;
 pub const CARD_PAD: f32 = 12.;
 pub const CARD_GAP: f32 = 10.;
@@ -212,7 +213,7 @@ where
 }
 
 /// A text button in the second ink with the chip's fill under the
-/// pointer — the placeholders' one kind of control.
+/// pointer — the gallery's controls.
 pub fn quiet_button(label: String, on_press: impl Fn() + 'static) -> impl IntoElement {
     button()
         .h(px(24.))

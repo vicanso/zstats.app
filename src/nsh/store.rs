@@ -1,7 +1,7 @@
-//! The store on the NSH front end: one [`ZStatsAppState`] behind a lock,
+//! The store: one [`ZStatsAppState`] behind a lock,
 //! taken by every thread that has business with it.
 //!
-//! gpui keeps the store on its main thread and runs everything there. NSH
+//! gpui kept the store on its main thread and ran everything there. NSH
 //! has more threads than that: each `AppView` runs its interface on an
 //! engine thread of its own, the collector's ticks land on a thread, and
 //! a store job ([`Effects::background`]) reports from another. So the
@@ -72,8 +72,8 @@ fn enter() -> Inside {
         "the NSH store was taken again from inside itself (a deadlock with a std mutex)"
     );
     let store = STORE.get().expect("the NSH store is installed at startup");
-    // A store method that panicked left the state as far as it got; the
-    // gpui front end would carry on from there too, so this does.
+    // A store method that panicked left the state as far as it got; carry
+    // on from there rather than fail every read after it.
     let guard = store.lock().unwrap_or_else(PoisonError::into_inner);
     INSIDE.with(|inside| inside.set(true));
     Inside(guard)

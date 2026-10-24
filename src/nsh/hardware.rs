@@ -1,4 +1,4 @@
-//! Hardware on NSH: the gpui front end's `views/disk.rs`, `drives.rs`,
+//! Hardware: a port of the gpui front end's `views/disk.rs`, `drives.rs`,
 //! `gpu.rs` and `sensors.rs`, whose comments say why every card, figure
 //! and control is the way it is — this file carries the same choices and
 //! does not repeat their reasons. The tab's rules are shared
@@ -27,7 +27,7 @@ pub fn page(live: Live) -> AnyElement {
     let sampled = live.memo(|state: &ZStatsAppState| state.latest().is_some());
     dynamic(move || {
         if !sampled.get() {
-            // The volumes' and the sensors' words, as the gpui page has
+            // The volumes' and the sensors' words, as the gpui page had
             // them: the drives and the GPU say nothing until a sample.
             return view()
                 .gap(px(CARD_GAP))

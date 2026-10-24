@@ -1,16 +1,17 @@
-//! The panel's root on NSH: the tab strip, the page of the tab on screen
-//! in a scroll view, and the footer (`chrome.rs`) — `views::root` on the
-//! gpui front end; the pages arrived one by one in phase 4 of
-//! docs/nsh-migration.md. A debug build run with `ZSTATS_GALLERY` set shows the building blocks
-//! on live figures (`gallery.rs`) in Overview's place.
+//! The panel's root: the tab strip, the page of the tab on screen in a
+//! scroll view, and the footer (`chrome.rs`) — `views::root` on the gpui
+//! front end; the pages arrived one by one in phase 4 of
+//! docs/nsh-migration.md. A debug build run with `ZSTATS_GALLERY` set
+//! shows the building blocks on live figures (`gallery.rs`) in Overview's
+//! place.
 //!
 //! The page is made again only when the tab changes (a memo of it), and
-//! keeps its own bindings across ticks; the gpui front end repaints the
-//! whole panel per tick.
+//! keeps its own bindings across ticks, where the gpui front end repainted
+//! the whole panel per tick.
 //!
 //! Its keys are the gpui panel's: `mod+1` … `mod+7` pick a tab and
-//! `mod+p` pins the panel — `mod` is ⌘ on macOS and Ctrl elsewhere, the
-//! gpui front end's `secondary-` for the same reason (Super is the
+//! `mod+p` pins the panel — `mod` is ⌘ on macOS and Ctrl elsewhere, as
+//! gpui's `secondary-` was, for the same reason (Super is the
 //! compositor's on a Hyprland desktop).
 
 use crate::nsh::root::{self, CARD_GAP, GUTTER, HostAction, Live};

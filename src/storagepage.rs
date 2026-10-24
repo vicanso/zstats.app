@@ -1,9 +1,9 @@
-//! The disk-space window's rules, on either front end: what each tab's
-//! header says, which scope a chip stands for, what a row's pills and
-//! tooltip say, what its trash confirm says, how much of a list shows
-//! before "show more". Shared since the NSH disk-space window (phase 4k of
-//! docs/nsh-migration.md); `views/storage.rs` reads it too, and says why
-//! each part of the window is the way it is.
+//! The disk-space window's rules: what each tab's header says, which scope
+//! a chip stands for, what a row's pills and tooltip say, what its trash
+//! confirm says, how much of a list shows before "show more". Moved out of
+//! the gpui window for the NSH one (phase 4k of docs/nsh-migration.md); the
+//! gpui window, `views/storage.rs`, says why each part of it is the way it
+//! is.
 
 use crate::cleanhints::{self, CleanHint};
 use crate::diskscan::{self, DiffBaseline, DirHit, HitKind, ScanResult, ScanScope};

@@ -1,9 +1,9 @@
 //! Memory's verdicts as the panel words them: the kernel's pressure level
 //! as the long Overview's badge says it, and whether the compressor is
 //! moving segments. Words over zstats' own fields — nothing here reads a
-//! figure zstats does not report or draws a line of its own. Shared since
-//! the NSH Overview's long form (phase 4c of docs/nsh-migration.md); the
-//! gpui Overview and Alerts read it too.
+//! figure zstats does not report or draws a line of its own. Moved out of
+//! the gpui pages for the NSH Overview's long form (phase 4c of
+//! docs/nsh-migration.md); Overview and Alerts read it.
 
 use crate::format;
 use crate::i18n;

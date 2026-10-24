@@ -1,4 +1,4 @@
-//! History on NSH: the gpui front end's `views/history.rs`, whose comments
+//! History: a port of the gpui front end's `views/history.rs`, whose comments
 //! say why every row, figure and control is the way it is — this file
 //! carries the same choices and does not repeat their reasons. The page's
 //! rules are shared (`historylist.rs`), the reading is `history.rs`'s.

@@ -1,8 +1,9 @@
-//! The gpui front end's widgets (`views/widgets.rs`, `views::MenuTrigger`,
-//! the option chips) on NSH, for the pages phase 4 brings over: the same
-//! sizes, inks and rules — `.claude/skills/ui-polish`, and the comments
-//! on the gpui originals, which say why each is the way it is and are not
-//! repeated here. What differs is how NSH draws, not what is drawn:
+//! The building blocks every page is made of: the gpui front end's widgets
+//! (`views/widgets.rs`, `views::MenuTrigger`, the option chips), ported
+//! with their sizes, inks and rules — `.claude/skills/ui-polish`, and the
+//! comments on the gpui originals, which say why each is the way it is
+//! and are not repeated here. What differs is how NSH draws, not what is
+//! drawn:
 //!
 //! - **Colours carry both halves** (`theme::color`), so a widget made once
 //!   follows the appearance; a colour that depends on a value the widget
@@ -12,10 +13,10 @@
 //!   switch changes paint, never geometry.
 //! - **Icons are SVGs drawn as images and tinted** — the bundled ones
 //!   (`assets::CustomIconName`), as `data:` URIs NSH renders at the
-//!   view's size. gpui-kit's lucide set is not here; a page brings the
-//!   glyphs it uses into `assets/icons`.
+//!   view's size. NSH has no icon set; a page brings the glyphs it uses
+//!   into `assets/icons`.
 //! - **The mono face is registered with each root** (`root::make`), from
-//!   the same bundled files `font::register` gives gpui.
+//!   the bundled files ([`fonts`]).
 
 use crate::appicon::{self, Icon};
 use crate::assets::{self, CustomIconName};
@@ -29,7 +30,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
 
-/// The bundled mono face (`font::MONO`): rates and code-like identifiers.
+/// The bundled mono face: rates and code-like identifiers (gpui's
+/// `font.rs` had the rule, which design.md keeps).
 pub const MONO: &str = "JetBrains Mono";
 
 /// The bundled faces' files, for a root to register (`Root::font`).
@@ -234,12 +236,12 @@ fn shell() -> View {
         .outline_color(theme::color(palette::card_line))
 }
 
-/// gpui's line height for a text that sets none — the font's size times
+/// The line height gpui gave a text that set none — the font's size times
 /// φ — to the nearest whole point. NSH's own default is tighter, so an
 /// element ported from one whose gpui twin sets no line height takes
 /// this, or its rows come out shorter than the page they port: the long
 /// Overview stood 46 short without it. Whole points because NSH rounds a
-/// text's measured height up to one (`measure_text`), where gpui keeps
+/// text's measured height up to one (`measure_text`), where gpui kept
 /// the fraction: φ times 10 became 17 against gpui's 16.2, and over a
 /// page of such rows the long Overview ran 5 past its height and
 /// scrolled. In points rather than `relative(..)`, which NSH 0.2.0 drops
@@ -430,7 +432,7 @@ pub fn name(words: impl Fn() -> String + Clone + 'static, size: f32, weight: Fon
 }
 
 /// A body line in the mono face, unless the locale's words are CJK, which
-/// the bundled mono face cannot draw (`font::mono_unless_cjk`).
+/// the bundled mono face cannot draw.
 pub fn mono_unless_cjk(words: Text) -> Text {
     if i18n::is_cjk() {
         words
@@ -997,7 +999,8 @@ fn menu_of(open: Signal<bool>, trigger: View, choices: Vec<Choice>) -> AnyElemen
 /// Ask before something that cannot be taken back, then run `on_ok` only
 /// on a yes (`confirm::ask`): the action named on its button in the
 /// destructive style, Cancel beside it, Escape as Cancel. The platform's
-/// own alert rather than gpui's in-window sheet — NSH has the native one,
+/// own alert (an `NSAlert` sheet) rather than the small panel the gpui
+/// front end drew for itself — NSH has the native one,
 /// and a quit or a move to the Trash asked in the system's words reads as
 /// the system's question. Called from a handler, which owns the task the
 /// answer is awaited in.

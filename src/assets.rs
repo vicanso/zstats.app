@@ -58,14 +58,13 @@ pub enum CustomIconName {
     Shield,
     /// Footer pin: keeps the panel from auto-hiding on focus loss.
     Pin,
-    /// Footer keep-awake indicator; lucide `coffee`. gpui-kit has `Sun`
-    /// and `Moon`, but both read as the theme picker's glyphs — this
-    /// one has to say "the Mac is being held awake" and nothing else.
+    /// Footer keep-awake indicator; lucide `coffee`. A sun or a moon
+    /// (gpui-kit's `Sun` / `Moon`) would read as the theme picker's glyphs —
+    /// this one has to say "the Mac is being held awake" and nothing else.
     Coffee,
     /// Move-to-Trash on the disk-space window's rows; lucide `trash-2`.
-    /// gpui-kit's `IconName::Trash` names the same glyph but is not in its
-    /// default embedded set, and its `Delete` is a backspace key — which
-    /// read as "clear this field" on a control that moves files.
+    /// Not a backspace key (gpui-kit's `Delete`, which read as "clear this
+    /// field" on a control that moves files).
     Trash,
     /// The footer's form toggle while the panel is short: lucide
     /// `chevrons-up-down`, two chevrons pulling apart — open it out.
@@ -73,44 +72,41 @@ pub enum CustomIconName {
     /// The same toggle while the panel is long: lucide
     /// `chevrons-down-up`, the two chevrons closing.
     Collapse,
-    /// The NSH front end's disclosure and menu chevrons (`nsh/widgets.rs`),
-    /// lucide's, which the gpui front end takes from gpui-kit's own set
-    /// (`IconName::ChevronDown`, `ChevronRight`). NSH has no icon set; it
-    /// draws the glyphs this file names.
+    /// The disclosure and menu chevrons (`nsh/widgets.rs`): lucide's,
+    /// gpui-kit's `IconName::ChevronDown` and `ChevronRight`.
     ChevronDown,
     ChevronRight,
-    /// The NSH panel's tab strip and footer (`nsh/chrome.rs`), lucide's:
-    /// Overview, the Network and Alerts tabs, Settings. gpui takes these
-    /// from gpui-kit (`IconName::LayoutDashboard`, `Network`, `Bell`,
-    /// `Settings2`); Processes and Hardware reuse [`Self::Cpu`] and
-    /// [`Self::HardDrive`], the same lucide glyphs.
+    /// The panel's tab strip and footer (`nsh/chrome.rs`), lucide's:
+    /// Overview, the Network and Alerts tabs, Settings (gpui-kit's
+    /// `IconName::LayoutDashboard`, `Network`, `Bell`, `Settings2`);
+    /// Processes and Hardware reuse [`Self::Cpu`] and [`Self::HardDrive`].
     LayoutDashboard,
     Network,
     Bell,
     Settings,
     /// The quiet ⓘ beside a card's title (`nsh::widgets::info_icon`);
-    /// gpui's `IconName::Info`.
+    /// gpui-kit's `IconName::Info`.
     Info,
-    /// The NSH lists' name filter (`nsh/apps.rs`): lucide `search`, the
-    /// header's control, and `x`, the field's clear — gpui's
-    /// `IconName::Search` and gpui-kit's cleanable input.
+    /// The lists' name filter (`nsh/apps.rs`): lucide `search`, the
+    /// header's control, and `x`, the field's clear — gpui-kit's
+    /// `IconName::Search` and its cleanable input.
     Search,
     Close,
-    /// The NSH volume card's eject badge (`nsh/hardware.rs`): lucide
-    /// `circle-x`, gpui's `IconName::CircleX`.
+    /// The volume card's eject badge (`nsh/hardware.rs`): lucide
+    /// `circle-x`, gpui-kit's `IconName::CircleX`.
     CircleX,
-    /// The NSH settings window's Interface page in its nav: lucide
+    /// The settings window's Interface page in its nav: lucide
     /// `palette`, gpui-kit's `IconName::Palette`.
     Palette,
     /// The About page's link out to the project (`nsh/settings.rs`):
     /// lucide `external-link`, gpui-kit's `IconName::ExternalLink`.
     ExternalLink,
-    /// The NSH disk-space window's reveal and folder-picking buttons:
+    /// The disk-space window's reveal and folder-picking buttons:
     /// lucide `folder` and `folder-open`, gpui-kit's `IconName::Folder`
     /// and `FolderOpen`.
     Folder,
     FolderOpen,
-    /// The NSH bulk-trash sheet's ticks: lucide `check`, gpui-kit's
+    /// The bulk-trash sheet's ticks: lucide `check`, gpui-kit's
     /// `IconName::Check` inside its `Checkbox`.
     Check,
 }
@@ -201,7 +197,7 @@ mod tests {
     }
 
     /// The allowlist has to keep covering the other two asset kinds, which
-    /// are read through [`get`] rather than through gpui's `AssetSource`.
+    /// are read through [`get`] too.
     #[test]
     fn fonts_and_locales_are_embedded() {
         assert!(get("fonts/JetBrainsMono-Regular.ttf").is_some());

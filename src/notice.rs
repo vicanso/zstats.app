@@ -1,9 +1,8 @@
 //! Overview's notice row as a decision: whether the short form has
 //! something to announce, and what. The row itself is drawn by the page
-//! (`views/overview.rs` on the gpui front end), but its coming and going
-//! resizes the panel, which is the host's business on either front end —
-//! so the answer is shared, and the page and the window ask the same
-//! function.
+//! (`nsh/overview.rs`), but its coming and going resizes the panel, which
+//! is the host's business — so the answer is here, and the page and the
+//! window ask the same function.
 
 use crate::notify;
 use crate::prefs;

@@ -1,4 +1,4 @@
-//! Processes on NSH: the gpui front end's `views/processes.rs`, whose
+//! Processes: a port of the gpui front end's `views/processes.rs`, whose
 //! comments say why every row, figure and control is the way it is — this
 //! file carries the same choices and does not repeat their reasons. The
 //! page's rules are shared (`proclist.rs`); what it has in common with

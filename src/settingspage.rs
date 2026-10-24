@@ -1,8 +1,8 @@
-//! The settings window's rules, on either front end: its pages and their
-//! order, and what each picker on them offers — the options, the one in
-//! force, and the words that go with them. Shared since the NSH settings
-//! window (phase 4j of docs/nsh-migration.md); `views/config.rs` reads it
-//! too, and says why each row is the way it is.
+//! The settings window's rules: its pages and their order, and what each
+//! picker on them offers — the options, the one in force, and the words
+//! that go with them. Moved out of the gpui window for the NSH one (phase
+//! 4j of docs/nsh-migration.md); the gpui window, `views/config.rs`, says
+//! why each row is the way it is.
 
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
 use crate::state::{

@@ -1,4 +1,4 @@
-//! Network on NSH: the gpui front end's `views/traffic.rs`,
+//! Network: a port of the gpui front end's `views/traffic.rs`,
 //! `listening.rs` and `net.rs`, whose comments say why every card, figure
 //! and control is the way it is — this file carries the same choices and
 //! does not repeat their reasons. The cards' rules are shared

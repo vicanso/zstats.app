@@ -210,7 +210,7 @@ pub fn resize(aux: AuxWindow, width: f64, height: f64) {
 }
 
 /// The system's folder panel, for `pick`: one folder, or several for the
-/// exclusions. Modal, as gpui's `prompt_for_paths`: the disk-space window
+/// exclusions. Modal, as gpui's `prompt_for_paths` was: the disk-space window
 /// is what asked, and stays put behind it. On the main thread.
 pub fn pick_folder(pick: FolderPick) {
     let Some(mtm) = MainThreadMarker::new() else {

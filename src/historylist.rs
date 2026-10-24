@@ -1,12 +1,11 @@
-//! The History tab's rules, on either front end: how the period's
-//! spenders are ordered under each lens and how many are named, what a
-//! row is titled and when it says its pid, the words and figures on its
-//! two lines, and Today's band — which part of the day it covers, how
-//! dark a cell is, the clock under it and what hovering it spells out.
-//! Every figure is zstats' record, read by `history.rs`; this orders and
-//! words. Shared since the NSH History page (phase 4i of
-//! docs/nsh-migration.md); `views/history.rs` reads it too, and says why
-//! the page looks the way it does.
+//! The History tab's rules: how the period's spenders are ordered under
+//! each lens and how many are named, what a row is titled and when it says
+//! its pid, the words and figures on its two lines, and Today's band —
+//! which part of the day it covers, how dark a cell is, the clock under it
+//! and what hovering it spells out. Every figure is zstats' record, read by
+//! `history.rs`; this orders and words. Moved out of the gpui page for the
+//! NSH one (phase 4i of docs/nsh-migration.md); the gpui page,
+//! `views/history.rs`, says why it looks the way it does.
 
 use crate::format;
 use crate::history::{self, Band, HistoryShape, Spender, Stretch};
@@ -26,7 +25,7 @@ pub struct Ranked<'a> {
     pub hidden: usize,
     /// The biggest amount under the lens: a share meter's full track
     pub top: u64,
-    /// How many shown rows carry each name ([`says_pid`])
+    /// How many shown rows carry each name ([`Self::says_pid`])
     names: HashMap<&'a str, usize>,
 }
 
@@ -205,7 +204,7 @@ pub fn band_cells(cells: &Band, lived: usize) -> Vec<Option<f32>> {
 /// than continuous so adjacent cells read as "same-ish" or "different"
 /// instead of a smear; the breakpoints are a quarter of a core, one
 /// core, three cores — the same one-core unit every CPU figure in the
-/// app speaks. Display only, like every threshold in `views/`.
+/// app speaks. Display only, like every threshold the pages keep.
 fn band_alpha(peak: f32) -> f32 {
     match peak {
         p if p < 25.0 => 0.30,

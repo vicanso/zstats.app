@@ -1,11 +1,10 @@
-//! The Hardware tab's rules, on either front end: what each card calls a
-//! volume, a drive, a GPU, a sensor and the battery, which of them it
-//! shows and in what order, and the one act it takes — ejecting a
-//! removable volume. The colour lines are `hot.rs`'s. Every figure is
-//! zstats' own; this formats and picks, it derives nothing. Shared since
-//! the NSH Hardware page (phase 4f of docs/nsh-migration.md); the gpui
-//! cards (`views/disk.rs`, `drives.rs`, `gpu.rs`, `sensors.rs`) read it
-//! too, and say why each card looks the way it does.
+//! The Hardware tab's rules: what each card calls a volume, a drive, a GPU,
+//! a sensor and the battery, which of them it shows and in what order, and
+//! the one act it takes — ejecting a removable volume. The colour lines are
+//! `hot.rs`'s. Every figure is zstats' own; this formats and picks, it
+//! derives nothing. Moved out of the gpui cards for the NSH Hardware page
+//! (phase 4f of docs/nsh-migration.md); those cards (`views/disk.rs`,
+//! `drives.rs`, `gpu.rs`, `sensors.rs`) say why each looks the way it does.
 
 use crate::state::ZStatsAppState;
 use crate::{format, hot, i18n};
@@ -78,7 +77,7 @@ pub fn safe_to_eject(mount: &str) -> bool {
 /// Unmount and eject a removable volume, blocking: run it off the main
 /// thread. `true` only when the tool reported success — a failed eject
 /// must not shorten the wait for a sample that would show the volume
-/// still mounted. On success the front end marks the volume ejected and
+/// still mounted. On success the page marks the volume ejected and
 /// wakes the collector (`ZStatsAppState::mark_ejected` says why).
 pub fn eject(mount: &str) -> bool {
     if !safe_to_eject(mount) {

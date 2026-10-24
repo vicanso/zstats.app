@@ -1,4 +1,4 @@
-//! Overview on NSH: the gpui front end's `views/overview.rs`, whose comments
+//! Overview: a port of the gpui front end's `views/overview.rs`, whose comments
 //! say why every row, figure and colour is the way it is — this file
 //! carries the same choices and does not repeat their reasons.
 //!

@@ -5,15 +5,15 @@
 //! the panel on Alerts". Threshold edits stay in the Alerts tab.
 //!
 //! macOS delivery is our own thin `UNUserNotificationCenter` layer:
-//! `addNotificationRequest:` is an async post that returns immediately,
-//! and a resident delegate receives clicks on the main run loop, which
-//! gpui is already pumping. Fire-and-forget is the point, not a shortcut.
-//! An earlier transport (notify-rust's `wait_for_action` on one delivery
-//! thread) returned only when the user *dealt with* a banner — one left
-//! sitting in Notification Center parked the thread for as long as it sat
-//! there, every later banner queued behind it, and the 17th was silently
-//! dropped. Attention is not a resource to serialise on: with delivery
-//! decoupled from it there is no queue to fill and nothing to stall.
+//! `addNotificationRequest:` is an async post that returns immediately, and
+//! a resident delegate receives clicks on the main run loop, which the host
+//! already runs. Fire-and-forget is the point, not a shortcut. An earlier
+//! transport (notify-rust's `wait_for_action` on one delivery thread)
+//! returned only when the user *dealt with* a banner — one left sitting in
+//! Notification Center parked the thread for as long as it sat there, every
+//! later banner queued behind it, and the 17th was silently dropped.
+//! Attention is not a resource to serialise on: with delivery decoupled
+//! from it there is no queue to fill and nothing to stall.
 //!
 //! UN requires a real `.app` bundle: outside one (`cargo run`) it
 //! throws, so banners are honestly absent there, said once in the log.
@@ -401,7 +401,7 @@ fn deliver(banner: &Banner) {
 
 /// Listen for banner clicks. Call once at startup, on the UI thread,
 /// before the first tick. A click arrives on the returned channel; what it
-/// opens is the front end's business (the Alerts tab, in both).
+/// opens is the host's business (the Alerts tab).
 ///
 /// No identity claim any more: `UNUserNotificationCenter` attributes
 /// banners to the process's real bundle, so the old

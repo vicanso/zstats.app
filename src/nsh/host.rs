@@ -1,41 +1,40 @@
-//! The NSH front end's AppKit side: the application, the status item and
+//! The interface's AppKit side: the application, the status item and
 //! the panel window, all on the main thread. NSH's `AppView` is one
 //! `NSView` inside the panel, running the Rust root in `panel.rs` on an
 //! engine thread of its own.
 //!
-//! Each gpui workaround in the gpui front end has its counterpart here,
+//! Each workaround the gpui front end needed has its counterpart here,
 //! and most of them are simply absent (`~/github/nsh-panel-spike`'s
 //! FINDINGS.md measured this shape): the activation policy is set once
-//! rather than swizzled (`dock.rs`), the window is created with the style
-//! mask it needs rather than patched after its first frame
-//! (`window_ext.rs`), and show and hide are plain AppKit calls with no App
-//! borrow to step around (`after_app_borrow`).
+//! rather than swizzled (`dock.rs` did), the window is created with the
+//! style mask it needs rather than patched after its first frame
+//! (`window_ext.rs` did), and show and hide are plain AppKit calls with no
+//! App borrow to step around (gpui's `after_app_borrow`).
 //!
-//! The status item is `tray.rs`'s, shared with the gpui front end: the
-//! same faces, menu and click handling, with what it asks for handed to
+//! The status item is `tray.rs`'s, which draws nothing of the panel's:
+//! the faces, the menu and the clicks, with what it asks for handed to
 //! [`on_tray`] here.
 //!
 //! The store is the shared one (`store.rs`): the collector's ticks are
 //! folded in on a thread of their own, a banner's click asks for the
 //! Alerts tab, and showing and hiding the panel do the bookkeeping the
-//! gpui front end's `mark_panel_shown` and auto-hide do — the collector's
+//! gpui front end's `mark_panel_shown` and auto-hide did — the collector's
 //! pace, the tab's entry work, the transient views, the toggle's grace.
 //!
-//! How big the panel is follows the gpui front end's rules, from the same
+//! How big the panel is follows the rules the gpui front end had, from
 //! shared answers: Overview's form and its notice row
 //! (`placement::window_size`, `notice::row_shown`), what a person dragged
 //! it to (`prefs::panel_width` / `panel_height`, kept when a drag ends),
 //! the form switching as a drag crosses the long form's height, and the
 //! least height the short form needs. The window is resizable from its
-//! creation rather than patched after its first frame
-//! (`window_ext::let_size_be_dragged`), and the drag's start, middle and
+//! creation rather than patched after its first frame (as gpui's was,
+//! `window_ext::let_size_be_dragged`), and the drag's start, middle and
 //! end are the delegate's own notifications.
 //!
-//! Where the panel goes is `placement.rs`'s, shared with the gpui front
-//! end: the same sizes, and the same hang under the icon with its
-//! multi-display, mixed-DPI scale picking. This side only lists AppKit's
-//! screens in the space that module works in, and turns its answer back
-//! into AppKit's bottom-left one.
+//! Where the panel goes is `placement.rs`'s: the sizes, and the hang under
+//! the icon with its multi-display, mixed-DPI scale picking. This side only
+//! lists AppKit's screens in the space that module works in, and turns its
+//! answer back into AppKit's bottom-left one.
 
 use crate::appkit;
 use crate::color;
@@ -93,7 +92,7 @@ static PACE: OnceLock<CollectorPace> = OnceLock::new();
 
 /// Whether the panel's height includes the short Overview's notice row,
 /// as of the last time it was sized: what [`fit_panel`] compares the page
-/// against. Window bookkeeping, as in the gpui front end.
+/// against. Window bookkeeping, as the gpui front end kept it.
 static NOTICE_FITTED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -167,9 +166,8 @@ impl PanelDelegate {
     }
 }
 
-/// The footer pin keeps a focused-away panel up, as in the gpui front end,
-/// and so do debug builds, so the panel can be inspected while the
-/// debugger or a terminal has focus.
+/// The footer pin keeps a focused-away panel up, and so do debug builds, so
+/// the panel can be inspected while the debugger or a terminal has focus.
 fn auto_hides() -> bool {
     !cfg!(debug_assertions) && !prefs::pinned()
 }
@@ -178,10 +176,10 @@ pub fn run() {
     // The guard flushes the rolling file's worker; dropping it at the end
     // of `run` is what makes the last lines land.
     let _log_guard = logger::init();
-    let mtm = MainThreadMarker::new().expect("the NSH front end starts on the main thread");
+    let mtm = MainThreadMarker::new().expect("the interface starts on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     // No Dock icon, no ⌘Tab entry. One call: nothing here resets it, which
-    // is what `dock.rs` swizzles `setActivationPolicy:` against for gpui.
+    // is what gpui's `dock.rs` swizzled `setActivationPolicy:` against.
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     prefs::load();
     i18n::init();
@@ -248,7 +246,7 @@ pub fn run() {
             on_main(Box::new(show_alerts));
         }
     });
-    // Before the collector, as in the gpui front end: the login-time
+    // Before the collector: the login-time
     // status goes in the log, and the first slow-burn banner can already
     // say whether its subject is in use.
     autostart::refresh();
@@ -257,13 +255,12 @@ pub fn run() {
     // Child processes that block for seconds, off the main thread.
     spawn_named("installer-sweep", updater::sweep_installer_mounts);
     // The Large files tab's last listing, which nothing reads since the
-    // tab went (2026-10-16) — the gpui front end's cleanup, kept here
-    // because this is the front end that stays.
+    // tab went (2026-10-16).
     let _ = fs::remove_file(zstats::settings::default_dir().join("bigfiles.toml"));
 
     // Release builds start with no window, in the menu bar until the icon
-    // is clicked; debug builds open the panel at once, as the gpui front
-    // end's do — without activating, so launching steals no focus.
+    // is clicked; debug builds open the panel at once — without
+    // activating, so launching steals no focus.
     #[cfg(debug_assertions)]
     {
         show(&host, None, false);
@@ -435,7 +432,7 @@ fn apply_min_height(host: &Host) {
 }
 
 /// The footer's form toggle: the panel takes the height of Overview's
-/// form, top edge held (`set_overview_detail_pref` on the gpui front end).
+/// form, top edge held.
 fn fit_form() {
     let (width, height) = panel_size();
     with_host(|host| {
@@ -448,7 +445,7 @@ fn fit_form() {
 /// row came or went, so the panel steps by its height, top edge held.
 /// Nothing on all but the few ticks where the answer changed. A step from
 /// the height the panel has (`placement::notice_step`), so a panel dragged
-/// taller keeps what was added — the gpui front end's `sync_panel_notice`.
+/// taller keeps what was added.
 fn fit_panel() {
     with_host(draw_canvases_in_place);
     let notice = store::read(notice::row_shown);
@@ -555,7 +552,7 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
     // keystrokes meant for the app in front (the prototype's finding 3).
     panel.setBecomesKeyOnlyIfNeeded(true);
     panel.setLevel(POPUP_LEVEL);
-    // `window_ext::join_all_spaces`: the panel opens on the Space the menu
+    // The panel opens on the Space the menu
     // bar was clicked in, full-screen ones included.
     panel.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -571,14 +568,13 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
             ..AppOptions::default()
         },
     );
-    // The glass: the stock popover material behind the root, whose
-    // luminosity clamp keeps the ground dark over a white wallpaper — the
-    // gpui front end's middle layer (`use_popover_material`; CLAUDE.md on
-    // vibrancy). The root paints the scheme's ground over it at the
-    // panel's opacity (`palette::panel_ground`): all of it on Golden Dark,
-    // a wash on the classic pair. gpui needed its own blur view under this
-    // one and a material pinned against AppKit's repaints; a window that
-    // is ours needs only the material.
+    // The glass: the stock popover material behind the root, whose luminosity
+    // clamp keeps the ground dark over a white wallpaper (CLAUDE.md on the
+    // glass; the gpui front end's middle layer). The root paints the scheme's
+    // ground over it at the panel's opacity (`palette::panel_ground`): all of
+    // it on Golden Dark, a wash on the classic pair. gpui needed its own blur
+    // view under this one and a material pinned against AppKit's repaints; a
+    // window that is ours needs only the material.
     panel.setOpaque(false);
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
     let glass = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame);
@@ -691,7 +687,7 @@ pub fn show_alerts() {
 
 /// What the status item asks for. tray-icon reports both of its events
 /// from AppKit's own action, on the main thread, so they reach the host
-/// directly — the gpui front end queues them for a task to pick up.
+/// directly.
 fn on_tray(action: TrayAction) {
     match action {
         TrayAction::Toggle(anchor) => toggle(anchor),
@@ -709,11 +705,10 @@ fn quit() {
 }
 
 /// The app's menu. A menu-bar app never shows a menu bar, but its key
-/// equivalents still answer: ⌘Q, ⌘W for the two ordinary windows (the
-/// gpui front end binds it in their key contexts), and the Edit menu,
+/// equivalents still answer: ⌘Q, ⌘W for the two ordinary windows, and the
+/// Edit menu,
 /// without which ⌘C / ⌘V / ⌘Z never reach a text field. The titles are
-/// never seen, so only Quit's is translated, as the gpui front end's one
-/// menu item is.
+/// never seen, so only Quit's is translated.
 fn install_menu(mtm: MainThreadMarker) {
     let bar = NSMenu::new(mtm);
     let item = |menu: &NSMenu, title: &str, action: objc2::runtime::Sel, key: &str| {
@@ -753,7 +748,7 @@ fn install_menu(mtm: MainThreadMarker) {
 
 /// AppKit's screens in `placement.rs`'s space: top-left origin, y growing
 /// down from the primary screen's top edge (AppKit's grows up from its
-/// bottom). The same conversion `window_ext::screens` makes for gpui.
+/// bottom).
 struct Screens {
     geoms: Vec<ScreenGeom>,
     primary_height: f64,

@@ -1,7 +1,7 @@
-//! Overview's charts on an NSH canvas: the gpui front end's `sparkline`,
-//! `paint_guides`, `paint_gaps`, `paint_curve` and `paint_bars`
-//! (`views/overview.rs`), over the same shared arithmetic (`chart.rs`) —
-//! whose comments say why each mark is drawn as it is.
+//! Overview's charts on an NSH canvas: a port of the gpui front end's
+//! `sparkline`, `paint_guides`, `paint_gaps`, `paint_curve` and
+//! `paint_bars` (`views/overview.rs`), over the shared arithmetic
+//! (`chart.rs`) — whose comments say why each mark is drawn as it is.
 //!
 //! A canvas paints in plain colours, so the palette is read in the half
 //! NSH resolved (`palette::in_mode` over NSH's `dark()`), and the canvas

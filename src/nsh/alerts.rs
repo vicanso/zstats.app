@@ -1,4 +1,4 @@
-//! Alerts on NSH: the gpui front end's `views/alerts.rs`, whose comments say
+//! Alerts: a port of the gpui front end's `views/alerts.rs`, whose comments say
 //! why every card, line and control is the way it is — this file carries
 //! the same choices and does not repeat their reasons. The tab's rules are
 //! shared (`alertlist.rs`), its thresholds' resolution too (`alertbars.rs`).
@@ -322,7 +322,8 @@ fn block(b: Block) -> AnyElement {
     }
 }
 
-/// A text at `size` in `ink`, at gpui's line height for it.
+/// A text at `size` in `ink`, at the line height gpui gave it
+/// (`widgets::line`).
 fn words(words: impl IntoReactive<SharedString>, size: f32, ink: fn() -> Rgba) -> Text {
     text(words)
         .text_size(px(size))

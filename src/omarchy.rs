@@ -7,10 +7,11 @@
 //! `~/.config/omarchy/current`. The locations, the key fallbacks and
 //! the fallback to Tokyo Night all follow huacnlee/gpui-omarchy's
 //! loader, so a theme reads the same here as in an app built on that
-//! library. It is read here rather than through that crate: gpui-omarchy
-//! is a whole component library pinned to `gpui-kit =0.7.0`, and both it
-//! and gpui-component own gpui-base's global colours — two owners of
-//! one global would repaint each other. The panel needs one file.
+//! library. It was read here rather than through that crate while the
+//! interface was gpui: gpui-omarchy is a whole component library pinned
+//! to `gpui-kit =0.7.0`, and both it and gpui-component own gpui-base's
+//! global colours — two owners of one global would repaint each other.
+//! The panel needs one file.
 //!
 //! Both palette formats parse: the semantic one Omarchy 4 ships
 //! (`accent`, `red`, `lighter_background`, …) and the ANSI one before
@@ -19,9 +20,9 @@
 //! theme mixed with defaults would be a palette nobody designed.
 //!
 //! Read on demand, never watched: the panel re-reads it each time it
-//! opens (`crate::gpui_app::refresh_omarchy_palette`), and on Wayland the panel is
-//! rebuilt on every open anyway. A theme switch shows up the next time
-//! the panel does, which is the only time anyone is looking.
+//! opens (`nsh::theme::omarchy_moved`) and every root is made again only
+//! if it changed. A theme switch shows up the next time the panel does,
+//! which is the only time anyone is looking.
 
 use crate::color::{Rgba, rgb};
 use std::env;

@@ -1,11 +1,10 @@
-//! The listening card's rules, on either front end: a row per process
-//! name, how far each endpoint reaches and how it is written, what a
-//! search keeps, which rows the preview shows, and the one process a
-//! row's Quit may act on. The list is `zstats::listeners()`, read by the
-//! store (`state::ensure_listeners`); this groups and words it and
-//! derives no figure. Shared since the NSH Network page (phase 4g of
-//! docs/nsh-migration.md); `views/listening.rs` reads it too, and says why
-//! the card looks the way it does.
+//! The listening card's rules: a row per process name, how far each
+//! endpoint reaches and how it is written, what a search keeps, which rows
+//! the preview shows, and the one process a row's Quit may act on. The list
+//! is `zstats::listeners()`, read by the store (`state::ensure_listeners`);
+//! this groups and words it and derives no figure. Moved out of the gpui
+//! card for the NSH Network page (phase 4g of docs/nsh-migration.md); the
+//! gpui card, `views/listening.rs`, says why it looks the way it does.
 
 use crate::terminate;
 use crate::{format, i18n};

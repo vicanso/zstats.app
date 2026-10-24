@@ -1,12 +1,13 @@
 //! Application-level state.
 //!
 //! The window is only a rendering layer, and it spends most of its life off
-//! screen: the panel is ordered out rather than destroyed (see `window_ext`),
-//! and gpui discards element state for anything it did not paint this frame.
-//! So everything that has to survive a hide → reveal round trip belongs here
-//! rather than in the root view — window geometry, the selected tab, per-tab
-//! scroll offsets. Collected metrics are the main tenant, and sampling runs
-//! whether or not a window exists at all.
+//! screen: the panel is ordered out rather than destroyed (`nsh/host.rs`),
+//! and what it shows is bound to the store's values. So everything that has
+//! to survive a hide → reveal round trip belongs here rather than in the root
+//! (gpui, which discarded element state for anything it did not paint that
+//! frame, made this a necessity; it is still the rule) — window geometry, the
+//! selected tab, per-tab scroll offsets. Collected metrics are the main
+//! tenant, and sampling runs whether or not a window exists at all.
 //!
 //! Disk analysis lives in [`analysis`], alert episodes in [`alerts`]: both
 //! are store-owned, but changing either used to mean editing this whole file.
@@ -428,7 +429,7 @@ pub struct FullScanData {
     /// list actually shows. The whole range while no filter is active.
     pub visible: Vec<usize>,
     /// Which row set `visible` is: new with each scan and each change of
-    /// the filter, so a front end's virtual list starts a new photograph
+    /// the filter, so the page's virtual list starts a new photograph
     /// at the top with an empty cache, and keeps its scroll otherwise.
     pub rows: u64,
 }
@@ -662,8 +663,8 @@ fn member_table_next(table: &MemberTable, now: Instant, interval: Duration) -> M
 /// Clicking the tray icon first takes focus away from the panel, which
 /// auto-hides it, and only then delivers the click. A click landing inside
 /// this window of an auto-hide is read as "the user wanted it gone" and does
-/// not reopen — that's what makes the tray icon toggle. Both front ends
-/// ask [`ZStatsAppState::took_recent_auto_hide`] with it.
+/// not reopen — that's what makes the tray icon toggle. The hosts ask
+/// [`ZStatsAppState::took_recent_auto_hide`] with it.
 pub const TOGGLE_GRACE: Duration = Duration::from_millis(300);
 
 /// How long a freshly mapped layer surface is immune to both auto-hide
@@ -750,7 +751,7 @@ pub struct ZStatsAppState {
     /// must not warn on every background read.
     traffic_fault: Option<String>,
     /// Whether the listening card's search row is on screen (the input
-    /// itself is the front end's, `gpui_ui.rs`). Closing clears the text, for
+    /// itself is the page's). Closing clears the text, for
     /// the process filter's reason: a hidden query that kept filtering
     /// would read as listeners vanishing.
     listen_filter_open: bool,
@@ -770,16 +771,11 @@ pub struct ZStatsAppState {
     space: Option<SpaceInfo>,
     space_at: Option<Instant>,
     space_inflight: bool,
-    /// Bumped by the Interface page's pref setters ([`crate::gpui_app::repaint`]).
-    /// Prefs live in `app.toml`, not this struct, so a collector tick
-    /// must not look like a chip click to the settings window's observer.
-    ui_epoch: u64,
-    /// Which showing of the panel this is — bumped on every hide. It
-    /// keys the footer's keep-awake menu: gpui-kit keeps a dropdown open
-    /// until it is dismissed from inside its window, a hide comes from
-    /// outside, and the panel is hidden rather than destroyed — so a
-    /// menu open when the panel went away was still open, an hour later,
-    /// on the frame it came back.
+    /// Which showing of the panel this is — bumped on every hide. The
+    /// panel's menus close on it (`nsh::root::close_on_hide`): a hide
+    /// comes from outside the menu, and the panel is hidden rather than
+    /// destroyed — so a menu open when the panel went away was still
+    /// open, an hour later, on the frame it came back.
     panel_visit: u32,
     /// Volumes this session has successfully ejected, and when. They
     /// are hidden from the Hardware tab until the snapshot stops
@@ -876,7 +872,7 @@ pub struct ZStatsAppState {
     /// and landing this must not flip that tab into its full listing.
     member_table: MemberTable,
     /// Whether the process name filter's row is on screen (the input is
-    /// the front end's, `gpui_ui.rs`). Closing clears the text — a
+    /// the page's). Closing clears the text — a
     /// hidden filter that kept filtering would read as processes vanishing.
     proc_filter_open: bool,
     /// The query, lowercased, mirrored out of the input on every change.
@@ -885,7 +881,7 @@ pub struct ZStatsAppState {
     /// state.
     proc_filter_text: String,
     /// Names each row set a full listing has shown ([`FullScanData::rows`]),
-    /// so a front end's virtual list knows when it is looking at a new
+    /// so the page's virtual list knows when it is looking at a new
     /// one. Only ever counts up.
     list_epoch: u64,
     /// One-shot "scroll the Apps list to the selected row on the next
@@ -931,7 +927,6 @@ impl Default for ZStatsAppState {
             space: None,
             space_at: None,
             space_inflight: false,
-            ui_epoch: 0,
             panel_visit: 0,
             ejected: HashMap::new(),
             proc_sort: ProcSort::default(),
@@ -1033,8 +1028,8 @@ impl ZStatsAppState {
     /// takes it (`ingest`), each alert it reported passes the three banner
     /// gates and is posted or logged as held back, the watchers' notices
     /// go out the same way, and the tray and the panel's height follow.
-    /// Both front ends hand every tick here, on whatever thread they keep
-    /// the store.
+    /// The host hands every tick here, on a thread of its own, under the
+    /// store's lock.
     pub fn on_tick(&mut self, tick: Tick, fx: &mut dyn Effects) {
         let now = Instant::now();
         // The user's master switch, ahead of the per-episode gates: while
@@ -1939,15 +1934,8 @@ impl ZStatsAppState {
         self.tab
     }
 
-    /// Interface-page prefs are not fields here. Bumping this is what
-    /// makes the settings window's observer treat a chip click as news
-    /// without also following every collector tick.
-    pub fn bump_ui(&mut self) {
-        self.ui_epoch = self.ui_epoch.wrapping_add(1);
-    }
-
-    /// See the field: an element id for whatever must not outlive the
-    /// showing it was opened in.
+    /// See the field: what must not outlive the showing it was opened in
+    /// reads it.
     pub fn panel_visit(&self) -> u32 {
         self.panel_visit
     }
@@ -1963,9 +1951,6 @@ impl ZStatsAppState {
     /// takes focus off the panel — which is exactly what calls this. The
     /// same "not remembered" rule now runs on that window's own
     /// lifecycle ([`Self::reset_storage_views`]).
-    ///
-    /// The searches' inputs are the front end's; it empties them before
-    /// this runs (`gpui_ui::reset_transient_views`).
     pub fn reset_transient_views(&mut self, fx: &mut dyn Effects) {
         if self.proc_filter_open {
             // Clears the lowercased mirror and the full-scan cuts in one
@@ -2209,20 +2194,17 @@ impl ZStatsAppState {
     /// about the old one no longer describes anything on screen.
     pub fn forget_webhook_test(&mut self, fx: &mut dyn Effects) {
         if self.webhook_test.take().is_some() {
-            self.bump_ui();
             fx.changed();
         }
     }
 
     /// POST one test notification to the configured URL, off the main
-    /// thread, and keep the answer for the row. One at a time. The
-    /// settings window does not follow ticks, hence the epoch bumps.
+    /// thread, and keep the answer for the row. One at a time.
     pub fn test_webhook(&mut self, fx: &mut dyn Effects) {
         if matches!(self.webhook_test, Some(WebhookTest::Sending)) {
             return;
         }
         self.webhook_test = Some(WebhookTest::Sending);
-        self.bump_ui();
         fx.changed();
         let message = i18n::tr("config.webhook_test_body");
         effects::background(fx, move |reply| {
@@ -2232,7 +2214,6 @@ impl ZStatsAppState {
                     Ok(status) => WebhookTest::Delivered(status),
                     Err(error) => WebhookTest::Failed(error),
                 });
-                state.bump_ui();
                 fx.changed();
             });
         });
@@ -3043,9 +3024,8 @@ fn setting_rebuilds_collector(key: &str) -> bool {
 }
 
 /// The tray icon's rect, defined with the geometry that reads it
-/// (`placement.rs`, shared by both front ends since phase 1b of
-/// docs/nsh-migration.md) and re-exported where the gpui front end has
-/// always imported it from.
+/// (`placement.rs`) and re-exported where `tray.rs` has always imported it
+/// from.
 pub use crate::placement::TrayAnchor;
 
 #[cfg(test)]

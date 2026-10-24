@@ -1,15 +1,14 @@
-//! The disk-space window's directory map, laid out for either front end:
-//! the level on screen and what it holds, the path back up as crumbs that
-//! fold their middle when too long, and the tiles — a squarified treemap
-//! ([`crate::squarify`]) of the level, the level under each tile drawn
-//! inside it when the tile is large enough. Shared since the NSH
-//! disk-space window (phase 4k of docs/nsh-migration.md);
-//! `views/storage/dirmap.rs` draws it with gpui and says why the map is
-//! the way it is.
+//! The disk-space window's directory map: the level on screen and what it
+//! holds, the path back up as crumbs that fold their middle when too long,
+//! and the tiles — a squarified treemap ([`crate::squarify`]) of the level,
+//! the level under each tile drawn inside it when the tile is large enough.
+//! Moved out of the gpui window for the NSH one (phase 4k of
+//! docs/nsh-migration.md); `views/storage/dirmap.rs`, which drew it with
+//! gpui, says why the map is the way it is.
 //!
 //! A tile's paint is a hue's index and a lightness step rather than a
 //! colour: the hues are the scheme's (`palette::map_hues`), read in
-//! whichever half the front end is painting.
+//! whichever half NSH is painting.
 
 use crate::color::Rgba;
 use crate::diskscan::ScanResult;

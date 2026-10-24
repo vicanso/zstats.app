@@ -1,12 +1,12 @@
-//! Whether a process or a tree wears a row's only colour: a burst over
-//! one core, or a long low hold the sustained watcher saw (`watch.rs`) —
-//! and never this app's own CPU while the daily disk check explains it.
-//! Beside it the other lines a figure turns colour at: a core's, swap's,
-//! a full volume's, a busy GPU's and a sensor near its own ceiling. Display only, like every threshold the views keep: nothing
-//! here fires an alert. Shared by both front ends since the NSH Overview
-//! (phases 4b and 4c of docs/nsh-migration.md); the gpui Processes, Apps
-//! and Overview pages read it too, so a pid is red in all of them or in
-//! none.
+//! Whether a process or a tree wears a row's only colour: a burst over one
+//! core, or a long low hold the sustained watcher saw (`watch.rs`) — and
+//! never this app's own CPU while the daily disk check explains it. Beside
+//! it the other lines a figure turns colour at: a core's, swap's, a full
+//! volume's, a busy GPU's and a sensor near its own ceiling. Display only,
+//! like every threshold the pages keep: nothing here fires an alert. Every
+//! page reads it, so a pid is red in all of them or in none (moved out of
+//! the gpui pages for the NSH Overview, phases 4b and 4c of
+//! docs/nsh-migration.md).
 
 use crate::state::ZStatsAppState;
 use std::process;

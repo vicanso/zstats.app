@@ -1,23 +1,21 @@
-//! What a store method asks of whichever front end holds the store.
+//! What a store method asks of the host that holds the store.
 //!
 //! The store's methods took gpui's `Context<Self>` until phase 1c of
 //! docs/nsh-migration.md, and used it for four things: saying the store
 //! changed, running work off the main thread and folding its answer back
 //! in, keeping the tray in step, and fitting the panel to Overview. Those
-//! are this trait. The gpui front end implements it for
-//! `Context<ZStatsAppState>`, so its call sites still pass `cx`; the NSH
-//! one implements it around the store it shares between threads.
+//! are this trait, which `nsh/store.rs` implements around the store it
+//! shares between threads.
 //!
-//! A background job never touches the store itself. It runs on a thread
-//! of its own and sends its changes back as closures ([`Reply::apply`]),
-//! which the front end runs where it keeps the store — gpui's main thread,
-//! or under the NSH store's lock — in the order they were sent. A job that
+//! A background job never touches the store itself. It runs on a thread of
+//! its own and sends its changes back as closures ([`Reply::apply`]), which
+//! are run under the store's lock, in the order they were sent. A job that
 //! reports as it goes (a disk walk, a download) sends one per report.
 
 use super::ZStatsAppState;
 use std::sync::Arc;
 
-/// One change to the store, made where the front end keeps it.
+/// One change to the store, made under its lock.
 pub type Apply = Box<dyn FnOnce(&mut ZStatsAppState, &mut dyn Effects) + Send>;
 
 /// How a background job hands its changes back. Cheap to clone, and
@@ -66,10 +64,10 @@ pub fn background(fx: &mut dyn Effects, job: impl FnOnce(Reply) + Send + 'static
     fx.background(Box::new(job));
 }
 
-// The NSH front end runs a window's interface on a thread of its own
-// (one per `AppView`) and shares the store between them behind a lock,
-// which needs the store to be `Send`. A gpui handle (an `Rc` inside) put
-// back into it would undo that, so it fails here, at compile time.
+// NSH runs a window's interface on a thread of its own (one per
+// `AppView`) and the store is shared between them behind a lock, which
+// needs the store to be `Send`. A handle with an `Rc` inside put into it
+// would undo that, so it fails here, at compile time.
 const _: fn() = || {
     fn send<T: Send>() {}
     send::<ZStatsAppState>();

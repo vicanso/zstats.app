@@ -1,8 +1,7 @@
-//! The theme on the NSH front end: the same preference and the same
-//! tokens as the gpui one (`prefs::theme_in_force`, `palette.rs`), handed
-//! to NSH the way it paints.
+//! The theme: the preference and the tokens (`prefs::theme_in_force`,
+//! `palette.rs`), handed to NSH the way it paints.
 //!
-//! The gpui front end repaints every token when the appearance turns
+//! The gpui front end repainted every token when the appearance turned
 //! (`apply_appearance`, then `Theme::change`). NSH does not need asking:
 //! a colour given to it carries a light and a dark value
 //! (`AdaptiveColor`), and its engine picks one as the appearance turns,
@@ -21,7 +20,7 @@ use crate::{omarchy, palette};
 use nsh_core::ui::prelude::*;
 
 /// The Omarchy theme follows the desktop's palette, read again as the
-/// panel opens (gpui's `refresh_omarchy_palette`) rather than watched:
+/// panel opens rather than watched:
 /// whether the palette on disk is no longer the one painted, so the host
 /// loads its roots again — a desktop theme switch shows the next time
 /// anyone looks, with no file watcher idling in the tray.
