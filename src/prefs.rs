@@ -14,6 +14,7 @@
 //! correct default, and keeps the file empty for anyone who never touches
 //! the setting.
 
+use crate::omarchy;
 use crate::watch;
 use std::fs;
 use std::io;
@@ -44,7 +45,7 @@ pub enum ThemePref {
     /// The Omarchy desktop's current palette (`omarchy.rs`), light or
     /// dark as that theme is. Offered only on Omarchy and in development
     /// builds (`omarchy::selectable`); stored anywhere, it reads as
-    /// `System` where it is not offered (`crate::theme_in_force`).
+    /// `System` where it is not offered ([`theme_in_force`]).
     Omarchy,
 }
 
@@ -274,6 +275,18 @@ pub fn language() -> LanguagePref {
 
 pub fn theme() -> ThemePref {
     decode_theme(THEME.load(Ordering::Relaxed))
+}
+
+/// The theme preference as it applies on this machine. Omarchy is
+/// offered only where `omarchy::selectable` says so; an `app.toml` that
+/// names it anywhere else — copied from an Omarchy box, or written by a
+/// development build — reads as System rather than as a palette nobody
+/// can pick or unpick from the Interface page.
+pub fn theme_in_force() -> ThemePref {
+    match theme() {
+        ThemePref::Omarchy if !omarchy::selectable() => ThemePref::System,
+        pref => pref,
+    }
 }
 
 pub fn tray() -> TrayPref {
@@ -1148,7 +1161,7 @@ mod tests {
         fs::write(file_path(&dir), "theme = \"golden\"\n").unwrap();
         assert_eq!(read(&dir).theme, ThemePref::Golden);
         // Stored as written on any machine; whether it is honoured is
-        // `crate::theme_in_force`'s call, not the file's.
+        // `theme_in_force`'s call, not the file's.
         fs::write(file_path(&dir), "theme = \"omarchy\"\n").unwrap();
         assert_eq!(read(&dir).theme, ThemePref::Omarchy);
         for pref in [

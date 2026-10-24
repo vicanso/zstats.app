@@ -6,8 +6,8 @@
 //! `mod+r` runs the tab's walk again, Escape closes (and `mod+w`, through
 //! the host's Window menu).
 
-use crate::nsh::root::{self, AuxWindow, CARD_PAD, GROUND, GUTTER, HostAction, Live, paint};
-use crate::nsh::store;
+use crate::nsh::root::{self, AuxWindow, CARD_PAD, GUTTER, HostAction, Live};
+use crate::nsh::{store, theme};
 use crate::state::{StorageTab, ZStatsAppState};
 use crate::{i18n, palette};
 use nsh_core::ui::prelude::*;
@@ -38,23 +38,27 @@ pub fn Storage() -> impl IntoElement {
     on_key("escape", |_| {
         root::ask(HostAction::Close(AuxWindow::Storage))
     });
-    view().size_full().bg(rgba(GROUND)).p(px(GUTTER)).child(
-        view()
-            .rounded(px(12.))
-            .bg(paint(palette::surface()))
-            .p(px(CARD_PAD))
-            .gap(px(6.))
-            .child(
-                text(i18n::tr("disk.storage_title"))
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(paint(palette::text())),
-            )
-            .child(
-                text(live.text(tab_line))
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(paint(palette::text_muted())),
-            ),
-    )
+    view()
+        .size_full()
+        .bg(theme::color(palette::ground))
+        .p(px(GUTTER))
+        .child(
+            view()
+                .rounded(px(12.))
+                .bg(theme::color(palette::surface))
+                .p(px(CARD_PAD))
+                .gap(px(6.))
+                .child(
+                    text(i18n::tr("disk.storage_title"))
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::color(palette::text)),
+                )
+                .child(
+                    text(live.text(tab_line))
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(theme::color(palette::text_muted)),
+                ),
+        )
 }

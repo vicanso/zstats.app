@@ -26,7 +26,7 @@ use crate::nsh::panel::Panel;
 use crate::nsh::root::{self, AuxWindow, HostAction};
 use crate::nsh::settings::Settings;
 use crate::nsh::storage::Storage;
-use crate::nsh::store;
+use crate::nsh::{store, theme};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
 use crate::{
@@ -37,7 +37,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use nsh_platform_linux::gtk4 as gtk;
-use nsh_platform_linux::{AppOptions, AppView, Appearance, Root};
+use nsh_platform_linux::{AppOptions, AppView, Appearance};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -121,10 +121,10 @@ pub fn run() {
     }
     prefs::load();
     i18n::init();
-    // Golden Dark until the NSH front end follows the theme preference
-    // (phase 3 of docs/nsh-migration.md).
-    palette::set_golden(true);
-    tracing::info!("NSH front end starting on GTK (docs/nsh-migration.md, phase 2d)");
+    // Dark until the panel's engine says which (`follow_appearance`) —
+    // unless the preference already does.
+    theme::follow(theme::appearance() != Appearance::Light);
+    tracing::info!("NSH front end starting on GTK (docs/nsh-migration.md, phase 3)");
 
     let mut state = ZStatsAppState::new();
     state.restore_alerts();
@@ -143,6 +143,7 @@ pub fn run() {
             HostAction::Quit => quit(),
             HostAction::Open(aux) => open_aux(aux),
             HostAction::Close(aux) => close_aux(aux),
+            HostAction::Appearance(dark) => follow_appearance(dark),
         }));
     });
 
@@ -212,6 +213,14 @@ fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
     if let Err(e) = thread::Builder::new().name(name.into()).spawn(f) {
         tracing::error!("could not start the {name} thread: {e}");
     }
+}
+
+/// What the panel's engine resolved, dark or not: the palette follows it
+/// (`theme::follow`), and so does the tray, whose glyph is inked from it
+/// here (`tray::ink` — SNI has no template images).
+fn follow_appearance(dark: bool) {
+    theme::follow(dark);
+    store::read(tray::sync);
 }
 
 /// The store's way onto the main loop (`store::Host::main`), and every
@@ -290,7 +299,7 @@ fn build_panel() -> Rc<PanelHost> {
         ..AppOptions::default()
     });
     window.set_child(Some(&view.widget()));
-    view.load(Root::of::<Panel>().into());
+    view.load(root::make::<Panel>().into());
 
     window.connect_is_active_notify(|window| {
         if !window.is_active() {
@@ -471,12 +480,12 @@ fn open_aux(aux: AuxWindow) {
         AuxWindow::Settings => (
             placement::SETTINGS_WINDOW_SIZE,
             i18n::tr("tabs.settings"),
-            Root::of::<Settings>(),
+            root::make::<Settings>(),
         ),
         AuxWindow::Storage => (
             placement::STORAGE_WINDOW_SIZE,
             i18n::tr("disk.storage_title"),
-            Root::of::<Storage>(),
+            root::make::<Storage>(),
         ),
     };
     let window = gtk::Window::new();

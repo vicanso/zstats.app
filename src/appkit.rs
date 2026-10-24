@@ -3,8 +3,10 @@
 //! builds its `NSPanel` itself. Either way what is asked of the window is
 //! the same, and is here.
 
-use crate::placement;
-use objc2_app_kit::NSWindow;
+use crate::{omarchy, placement, prefs};
+use objc2_app_kit::{
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSWindow,
+};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 /// Give a panel a new size, keeping its top edge where it is
@@ -44,4 +46,39 @@ pub fn set_size_keeping_top(ns: &NSWindow, width: f32, height: f32, gap: f32) {
         ),
         true,
     );
+}
+
+/// Pin (or release) AppKit's own appearance to match the theme preference.
+///
+/// Without this a forced theme would only recolour our tokens: the vibrancy
+/// material underneath follows the *window's* appearance, and dark type over
+/// a light Popover blur is exactly the grey fog the background opacities were
+/// tuned to avoid. Pinning `NSApp.appearance` makes every window — and any
+/// appearance AppKit resolves for it — agree with the forced theme; `None`
+/// hands control back to System Settings.
+pub fn pin_appearance() {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let appearance = match prefs::theme_in_force() {
+        // Golden follows the Mac, so the material has to as well. Pinning
+        // Aqua here would freeze the cream variant on a dark desktop.
+        prefs::ThemePref::System | prefs::ThemePref::Golden => None,
+        // Omarchy is pinned to its palette's own mode (a development
+        // build is the only way it reaches a Mac).
+        prefs::ThemePref::Omarchy => NSAppearance::appearanceNamed(if omarchy::palette().dark {
+            // SAFETY: reading AppKit's exported appearance-name constants.
+            unsafe { NSAppearanceNameDarkAqua }
+        } else {
+            // SAFETY: as above.
+            unsafe { NSAppearanceNameAqua }
+        }),
+        // SAFETY: reading AppKit's exported appearance-name constants.
+        prefs::ThemePref::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
+        prefs::ThemePref::Dark => {
+            NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
+        }
+    };
+    app.setAppearance(appearance.as_deref());
 }

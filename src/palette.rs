@@ -47,11 +47,15 @@
 //! beside the theme, and the palette's red still says "crossed a line".
 //!
 //! Selected by [`set_dark`] / [`set_golden`] / [`set_omarchy`] after
-//! every `Theme::change`.
+//! every `Theme::change`. The NSH front end also asks for a token in the
+//! other half of the pair than the one on screen ([`in_mode`]): its
+//! colours carry both halves and its own engine picks one as the
+//! appearance turns.
 
 use crate::color::{Rgba, rgb, rgba};
 use crate::i18n;
 use crate::omarchy::{self, Palette};
+use std::cell::Cell;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -69,7 +73,15 @@ enum Scheme {
 // before the first `apply_appearance`.
 static SCHEME: AtomicU8 = AtomicU8::new(0);
 
+thread_local! {
+    /// The scheme [`in_mode`] pins for this thread while it runs.
+    static PINNED: Cell<Option<Scheme>> = const { Cell::new(None) };
+}
+
 fn scheme() -> Scheme {
+    if let Some(pinned) = PINNED.with(Cell::get) {
+        return pinned;
+    }
     match SCHEME.load(Ordering::Relaxed) {
         1 => Scheme::ClassicLight,
         2 => Scheme::GoldenDark,
@@ -81,6 +93,29 @@ fn scheme() -> Scheme {
 
 fn set_scheme(scheme: Scheme) {
     SCHEME.store(scheme as u8, Ordering::Relaxed);
+}
+
+/// `f`, with every token read on this thread taken from the light or dark
+/// half of the pair on screen — classic or Golden. Omarchy has one half,
+/// its palette's own, and keeps it. Other threads are untouched: the pin
+/// is this thread's alone.
+pub fn in_mode<R>(dark: bool, f: impl FnOnce() -> R) -> R {
+    let pinned = match scheme() {
+        Scheme::ClassicDark | Scheme::ClassicLight if dark => Scheme::ClassicDark,
+        Scheme::ClassicDark | Scheme::ClassicLight => Scheme::ClassicLight,
+        Scheme::GoldenDark | Scheme::GoldenLight if dark => Scheme::GoldenDark,
+        Scheme::GoldenDark | Scheme::GoldenLight => Scheme::GoldenLight,
+        Scheme::Omarchy => Scheme::Omarchy,
+    };
+    pinned_to(pinned, f)
+}
+
+/// `f` with `scheme` pinned on this thread ([`in_mode`]).
+fn pinned_to<R>(scheme: Scheme, f: impl FnOnce() -> R) -> R {
+    let before = PINNED.with(|pin| pin.replace(Some(scheme)));
+    let result = f();
+    PINNED.with(|pin| pin.set(before));
+    result
 }
 
 /// Classic palette. Call after every `Theme::change`.
@@ -150,6 +185,7 @@ fn omarchy_tokens() -> Option<OmarchyTokens> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct OmarchyTokens {
     pub(crate) dark: bool,
+    pub(crate) ground: Rgba,
     pub(crate) surface: Rgba,
     pub(crate) trough: Rgba,
     pub(crate) chip: Rgba,
@@ -184,6 +220,7 @@ impl OmarchyTokens {
         };
         OmarchyTokens {
             dark: p.dark,
+            ground: p.background,
             surface: p.surface,
             // Same language as a card, as the classic dark trough is.
             trough: p.surface,
@@ -234,6 +271,16 @@ fn tone(
         // `set_omarchy` never does; classic dark is the safe paint.
         Scheme::Omarchy => omarchy_tokens().map_or(rgba(classic_dark), |t| omarchy(&t)),
     }
+}
+
+/// The window's ground, under every card. gpui-kit's theme files paint it
+/// on the gpui front end (`background` — the default theme's
+/// `neutral-950` / white, `GOLDEN_JSON`'s two, the Omarchy palette's);
+/// these are the same values, held to them by a test in `theme.rs`, for
+/// the NSH front end, which has no theme file.
+#[inline]
+pub fn ground() -> Rgba {
+    tone(0x0a0a0aff, 0xffffffff, 0x1c1c1eff, 0xf3eee6ff, |t| t.ground)
 }
 
 /// Card / grouped fill. Dark: faint white lift over the glass. Light:
@@ -645,6 +692,35 @@ pub fn text_for(over: bool) -> Rgba {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// The NSH front end paints its ground from [`ground`], the gpui one
+    /// from the theme file; a Golden ground that drifted from the file
+    /// would be a seam between a window and the cards in it.
+    #[test]
+    fn the_golden_ground_is_the_theme_files() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../themes/golden.json")).expect("golden.json");
+        for theme in file["themes"].as_array().expect("themes") {
+            let scheme = if theme["mode"] == "dark" {
+                Scheme::GoldenDark
+            } else {
+                Scheme::GoldenLight
+            };
+            let hex = theme["colors"]["background"].as_str().expect("background");
+            let want = rgb(u32::from_str_radix(&hex[1..], 16).expect("hex"));
+            assert_eq!(pinned_to(scheme, ground), want, "{}", theme["name"]);
+        }
+    }
+
+    /// A pin is this thread's and ends with the call: the scheme on
+    /// screen is what the next read sees.
+    #[test]
+    fn a_pin_holds_inside_the_call_only() {
+        let outside = is_dark();
+        assert!(pinned_to(Scheme::GoldenLight, || !is_dark()));
+        assert!(pinned_to(Scheme::GoldenDark, is_dark));
+        assert_eq!(is_dark(), outside);
+    }
 
     /// The scheme is one global. Tests that switch it hold this, so two
     /// of them running in parallel cannot repaint each other mid-assert.

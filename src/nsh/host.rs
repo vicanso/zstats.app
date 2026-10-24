@@ -38,19 +38,20 @@
 //! into AppKit's bottom-left one.
 
 use crate::appkit;
+use crate::color;
 use crate::geom::{Rect, point, size};
 use crate::metrics::{self, CollectorPace};
 use crate::nsh::panel;
 #[cfg(debug_assertions)]
 use crate::nsh::probe;
 use crate::nsh::root::{self, AuxWindow, HostAction};
-use crate::nsh::store;
 use crate::nsh::windows;
+use crate::nsh::{store, theme};
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
 use crate::{active, autostart, i18n, logger, notice, notify, palette, prefs, updater};
-use nsh_platform_macos::{AppOptions, AppView, Appearance, Root};
+use nsh_platform_macos::{AppOptions, AppView, Appearance};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::sel;
@@ -181,10 +182,13 @@ pub fn run() {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     prefs::load();
     i18n::init();
-    // Golden Dark until the NSH front end follows the theme preference
-    // and the appearance (phase 3 of docs/nsh-migration.md).
-    palette::set_golden(true);
-    tracing::info!("NSH front end starting (docs/nsh-migration.md, phase 2)");
+    // A forced theme pins AppKit too, so a title bar and the system's own
+    // controls agree with it.
+    appkit::pin_appearance();
+    // Dark until the panel's engine says which (`follow_appearance`) —
+    // unless the preference already does.
+    theme::follow(theme::appearance() != Appearance::Light);
+    tracing::info!("NSH front end starting (docs/nsh-migration.md, phase 3)");
 
     let mut state = ZStatsAppState::new();
     // Today's alerts survive a restart, and the tab is the session's —
@@ -207,6 +211,7 @@ pub fn run() {
             HostAction::Quit => quit(),
             HostAction::Open(aux) => windows::open(aux),
             HostAction::Close(aux) => windows::close(aux),
+            HostAction::Appearance(dark) => follow_appearance(dark),
         })
     });
     install_menu(mtm);
@@ -281,6 +286,27 @@ fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
     if let Err(e) = thread::Builder::new().name(name.into()).spawn(f) {
         tracing::error!("could not start the {name} thread: {e}");
     }
+}
+
+/// What the panel's engine resolved, dark or not: the palette follows it
+/// (`theme::follow`), and so does the ground AppKit paints under a window
+/// before its root's first frame.
+fn follow_appearance(dark: bool) {
+    theme::follow(dark);
+    with_host(|host| {
+        host.panel
+            .setBackgroundColor(Some(&ns_color(palette::ground())))
+    });
+}
+
+/// A palette colour as AppKit's.
+pub(super) fn ns_color(c: color::Rgba) -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from(c.r),
+        f64::from(c.g),
+        f64::from(c.b),
+        f64::from(c.a),
+    )
 }
 
 /// The store's way onto the main thread (`store::Host::main`).
@@ -433,14 +459,8 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
-    // Golden Dark's opaque ground (`theme::default_opacity`), under the
-    // page's own until the first frame lands.
-    panel.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        28.0 / 255.0,
-        28.0 / 255.0,
-        30.0 / 255.0,
-        1.0,
-    )));
+    // The theme's ground, under the root's own until its first frame.
+    panel.setBackgroundColor(Some(&ns_color(palette::ground())));
 
     let view = AppView::new(
         mtm,
@@ -452,7 +472,7 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
         },
     );
     panel.setContentView(Some(&view.view()));
-    view.load(Root::of::<panel::Panel>().into());
+    view.load(root::make::<panel::Panel>().into());
     (panel, view)
 }
 

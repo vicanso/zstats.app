@@ -13,17 +13,18 @@
 //! the moment it loses focus, and neither a settings session nor a
 //! minutes-long walk can live on a surface you cannot look away from.
 
-use crate::nsh::root::AuxWindow;
+use crate::nsh::host;
+use crate::nsh::root::{self, AuxWindow};
 use crate::nsh::settings::Settings;
 use crate::nsh::storage::Storage;
 use crate::nsh::store;
-use crate::{autostart, i18n, placement};
-use nsh_platform_macos::{AppOptions, AppView, Appearance, Root};
+use crate::{autostart, i18n, palette, placement};
+use nsh_platform_macos::{AppOptions, AppView, Appearance};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -124,12 +125,12 @@ pub fn open(aux: AuxWindow) {
         AuxWindow::Settings => (
             placement::SETTINGS_WINDOW_SIZE,
             i18n::tr("tabs.settings"),
-            Root::of::<Settings>(),
+            root::make::<Settings>(),
         ),
         AuxWindow::Storage => (
             placement::STORAGE_WINDOW_SIZE,
             i18n::tr("disk.storage_title"),
-            Root::of::<Storage>(),
+            root::make::<Storage>(),
         ),
     };
     let window = build(mtm, size, &title);
@@ -197,8 +198,8 @@ fn closed(aux: AuxWindow) {
     });
 }
 
-/// A titled window that closes, minimises and resizes, centred, on
-/// Golden Dark's ground until its root's first frame lands.
+/// A titled window that closes, minimises and resizes, centred, on the
+/// theme's ground until its root's first frame lands.
 fn build(mtm: MainThreadMarker, size: (f32, f32), title: &str) -> Retained<NSWindow> {
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
@@ -221,12 +222,7 @@ fn build(mtm: MainThreadMarker, size: (f32, f32), title: &str) -> Retained<NSWin
     window.setTitle(&NSString::from_str(title));
     let (min_w, min_h) = placement::AUX_MIN_WINDOW_SIZE;
     window.setContentMinSize(NSSize::new(f64::from(min_w), f64::from(min_h)));
-    window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        28.0 / 255.0,
-        28.0 / 255.0,
-        30.0 / 255.0,
-        1.0,
-    )));
+    window.setBackgroundColor(Some(&host::ns_color(palette::ground())));
     window.center();
     window
 }

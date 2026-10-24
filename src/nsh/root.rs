@@ -1,8 +1,7 @@
 //! What every NSH root shares — there is one per window (the panel,
 //! settings, disk space), each on an engine thread of its own: the way to
-//! the host, the store as an engine reads it, and the few pieces of
-//! Golden Dark the placeholders paint with until phase 3 of
-//! docs/nsh-migration.md gives the front end its themes.
+//! the host, the store as an engine reads it, and how a root is made with
+//! the theme on screen ([`make`]).
 //!
 //! A root never touches AppKit itself: what it needs of a window or the
 //! process goes to the host as a [`HostAction`], which `host.rs` carries
@@ -18,8 +17,8 @@
 //! gpui one does not repaint (`CollectorPace::is_visible`); showing it
 //! sends one more change (`host::mark_shown`).
 
-use crate::color;
-use crate::nsh::store;
+use crate::nsh::{store, theme};
+use crate::palette;
 use crate::state::ZStatsAppState;
 use nsh_base::button;
 use nsh_core::ui::prelude::*;
@@ -32,6 +31,9 @@ pub enum HostAction {
     Quit,
     Open(AuxWindow),
     Close(AuxWindow),
+    /// The appearance NSH resolved for the panel, dark or not — at its
+    /// first frame and whenever it turns ([`theme::follow`]).
+    Appearance(bool),
 }
 
 /// The two ordinary windows beside the panel.
@@ -85,19 +87,18 @@ impl Live {
     }
 }
 
-/// Golden Dark's ground, `#1c1c1e`. The gpui front end takes it from the
-/// kit's theme file (`themes/golden.json`) rather than from the palette,
-/// so there is no token for it yet; phase 3 gives the front end its
-/// themes and this a place in `palette.rs`.
-pub const GROUND: u32 = 0x1c1c1eff;
-
 /// `views::GUTTER` and `widgets::CARD_PAD`.
 pub const GUTTER: f32 = 12.;
 pub const CARD_PAD: f32 = 12.;
 
-/// A palette token as NSH's colour.
-pub fn paint(c: color::Rgba) -> Rgba {
-    c.into()
+/// Root `C`, in the appearance the theme preference asks for
+/// ([`theme::appearance`]). Every window's root is made here, so loading
+/// them again is how a change of theme reaches them.
+pub fn make<C: Component>() -> nsh_core::ui::Root
+where
+    C::Props: Default,
+{
+    nsh_core::ui::Root::of::<C>().appearance(theme::appearance())
 }
 
 /// A text button in the second ink with the chip's fill under the
@@ -107,11 +108,11 @@ pub fn quiet_button(label: String, on_press: impl Fn() + 'static) -> impl IntoEl
         .h(px(24.))
         .px(px(10.))
         .rounded(px(6.))
-        .hover(|s| s.bg(paint(crate::palette::chip())))
+        .hover(|s| s.bg(theme::color(palette::chip)))
         .on_press(on_press)
         .child(
             text(label)
                 .text_size(px(12.))
-                .text_color(paint(crate::palette::text_muted())),
+                .text_color(theme::color(palette::text_muted)),
         )
 }

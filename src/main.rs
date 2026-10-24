@@ -127,7 +127,7 @@ pub(crate) use gpui_app::{
     open_settings_window, open_storage_window, reset_panel_size_pref, set_autostart_pref,
     set_disk_watch_pref, set_keep_awake, set_language_pref, set_notifications_pref,
     set_opacity_pref, set_overview_detail_pref, set_sustained_after_pref,
-    set_sustained_divisor_pref, set_theme_pref, set_tray_pref, sync_panel_notice, theme_in_force,
+    set_sustained_divisor_pref, set_theme_pref, set_tray_pref, sync_panel_notice,
 };
 
 fn main() {

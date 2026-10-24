@@ -77,7 +77,14 @@
 
 ## 阶段 3：界面基础件
 
-主题（Golden Dark / Golden Light / Classic 两套 / Omarchy）、字体（界面字体的等宽数字、等宽字体）、`card`、`big_number`、带最大宽度的 tooltip、`MenuTrigger`、选项 chip、`list_shell`、`expand_mark`、应用图标（`appicon`）、确认对话框。规则照 `.claude/skills/ui-polish`。
+主题（Golden Dark / Golden Light / Classic 两套 / Omarchy）、字体（界面字体的等宽数字、等宽字体）、`card`、`big_number`、带最大宽度的 tooltip、`MenuTrigger`、选项 chip、`list_shell`、`expand_mark`、应用图标（`appicon`）、确认对话框。规则照 `.claude/skills/ui-polish`。分四步：
+
+- **3a 主题（**已完成**，2026-10-24）。** 主题偏好在 NSH 前端生效，四套配色都能画。gpui 版在外观变化时整套重刷 token（`apply_appearance` 再 `Theme::change`）；NSH 不用我们去问：交给它的颜色可以带亮、暗两份（`AdaptiveColor`），引擎按当前外观自己挑。所以 `palette.rs` 加了 `in_mode`——在当前线程上临时钉住当前配色系列（经典或 Golden）的亮或暗那一半，读出 token 后就松开，别的线程不受影响；`nsh/theme.rs` 的 `color` 用它把一个 token 读成亮暗两份。只有换配色系列（经典、Golden、Omarchy，是设置页的事）才需要重新加载各窗口的根组件。根组件都经 `root::make` 创建，带上偏好要求的外观（Light / Dark / Omarchy 调色板自己的，其余跟随系统）。NSH 解析出来的亮暗由面板根组件的一个 effect 报回宿主（`HostAction::Appearance`），宿主据此更新 palette 的全局状态（引擎之外也有人读它：Linux 托盘的墨色、透明度默认值）和窗口在第一帧之前的底色。窗口底色成了 token（`palette::ground`，与 gpui 用的主题文件同值，Golden 两种模式有测试对照 `themes/golden.json`）。共享出来的：`theme_in_force` 进了 `prefs.rs`，钉住 AppKit 外观（`pin_appearance`）进了 `appkit.rs`。
+- **3b 基础件**：字体（等宽数字、等宽字体文件）、`card`、`big_number`、chip、`MenuTrigger`、带最大宽度的 tooltip、`list_shell`、`expand_mark`。
+- **3c 毛玻璃**：经典两套靠毛玻璃加一层半透明底色才对（亮色的卡片是白的，要放在灰色的玻璃上），NSH 的容器层默认不透明（原型的问题 2），要垫一层 `.popover` 材质并清掉容器底色；透明度偏好（`prefs::opacity`）随之生效。
+- **3d 应用图标和确认对话框。**
+
+**3a 结果**：默认构建 440 个测试、只开 `nsh` 的构建 349 个（多出的是 palette 的两条：Golden 的底色等于主题文件、`in_mode` 只在调用期间、只在本线程生效）。只开 `nsh` 的 debug 构建在隔离 HOME 下按四种偏好各截一张：跟随系统（本机暗色）是经典暗色、底 `#0a0a0a`；`golden` 是 `#1c1c1e` 底、`#252528` 卡片；`omarchy`（debug 构建在 Mac 上用 Tokyo Night 兜底）是蓝灰调；`light` 是白底，卡片几乎看不出来——预期之中，经典亮色要等 3c 的毛玻璃。系统外观在运行中翻转时的换色没有实测（不能替你改系统外观）。`make linux-check`：默认构建 434 个、只开 `nsh` 的构建 347 个测试全过，NSH 构建的 clippy 通过。
 
 ## 阶段 4：逐页移植
 
@@ -98,6 +105,6 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 | 0 双前端骨架 | 完成（2026-10-24） |
 | 1 核心 | 完成（2026-10-24） |
 | 2 宿主 | 2a、2b、2c 完成；2d 已写完、只编译过，等 Omarchy 真机 |
-| 3 基础件 | 未开始 |
+| 3 基础件 | 3a 完成；3b、3c、3d 未开始 |
 | 4 逐页 | 未开始 |
 | 5 切换 | 未开始 |

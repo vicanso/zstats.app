@@ -20,6 +20,7 @@ mod root;
 mod settings;
 mod storage;
 mod store;
+mod theme;
 #[cfg(target_os = "macos")]
 mod windows;
 

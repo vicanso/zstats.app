@@ -8,8 +8,8 @@
 //! gpui front end's `secondary-` for the same reason (Super is the
 //! compositor's on a Hyprland desktop).
 
-use crate::nsh::root::{self, AuxWindow, CARD_PAD, GROUND, GUTTER, HostAction, Live, paint};
-use crate::nsh::store;
+use crate::nsh::root::{self, AuxWindow, CARD_PAD, GUTTER, HostAction, Live};
+use crate::nsh::{store, theme};
 use crate::state::{Tab, ZStatsAppState};
 use crate::{APP_NAME, format, i18n, palette, prefs};
 use nsh_core::ui::prelude::*;
@@ -48,6 +48,9 @@ fn store_line(state: &ZStatsAppState) -> String {
 #[component]
 pub fn Panel() -> impl IntoElement {
     let live = Live::follow(ZStatsAppState::panel_visible);
+    // The appearance this engine resolved, for the palette outside it: at
+    // the first frame, and again whenever the system's turns.
+    effect(|| root::ask(HostAction::Appearance(dark())));
     for (i, tab) in Tab::ALL.into_iter().enumerate() {
         on_key(&format!("mod+{}", i + 1), move |_| {
             store::update(|state, fx| state.set_tab(tab, fx));
@@ -61,25 +64,25 @@ pub fn Panel() -> impl IntoElement {
         text(live.text(f))
             .text_size(px(12.))
             .line_height(px(16.))
-            .text_color(paint(palette::text()))
+            .text_color(theme::color(palette::text))
             .tabular_nums()
     };
     view()
         .size_full()
-        .bg(rgba(GROUND))
+        .bg(theme::color(palette::ground))
         .p(px(GUTTER))
         .gap(px(10.))
         .child(
             view()
                 .rounded(px(12.))
-                .bg(paint(palette::surface()))
+                .bg(theme::color(palette::surface))
                 .p(px(CARD_PAD))
                 .gap(px(6.))
                 .child(
                     text(APP_NAME)
                         .text_size(px(13.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(paint(palette::text())),
+                        .text_color(theme::color(palette::text)),
                 )
                 // Not translated: a development build's placeholder, gone
                 // when Overview takes its place in phase 4.
@@ -87,7 +90,7 @@ pub fn Panel() -> impl IntoElement {
                     text("NSH front end — phase 2 of docs/nsh-migration.md")
                         .text_size(px(12.))
                         .line_height(px(16.))
-                        .text_color(paint(palette::text_muted())),
+                        .text_color(theme::color(palette::text_muted)),
                 )
                 .child(figure(cpu_line))
                 .child(figure(memory_line))
@@ -95,7 +98,7 @@ pub fn Panel() -> impl IntoElement {
                 .child(
                     text(env!("CARGO_PKG_VERSION"))
                         .text_size(px(11.))
-                        .text_color(paint(palette::text_dim()))
+                        .text_color(theme::color(palette::text_dim))
                         .tabular_nums(),
                 ),
         )

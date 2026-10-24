@@ -974,7 +974,7 @@ fn interface_card() -> AnyElement {
                 "pref-theme",
                 i18n::tr("config.theme"),
                 themes,
-                crate::theme_in_force(),
+                prefs::theme_in_force(),
                 crate::set_theme_pref,
                 Some(i18n::tr(if omarchy {
                     "config.theme_tip_omarchy"

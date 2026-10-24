@@ -384,7 +384,7 @@ fn theme_mode_for_appearance(appearance: WindowAppearance) -> ThemeMode {
 /// mono family, so [`font::apply`] has to run every time. `appearance` is
 /// what the OS reports; a pinned theme preference wins over it.
 pub(crate) fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
-    let pref = theme_in_force();
+    let pref = prefs::theme_in_force();
     let mode = match pref {
         prefs::ThemePref::Light => ThemeMode::Light,
         prefs::ThemePref::Dark => ThemeMode::Dark,
@@ -401,18 +401,6 @@ pub(crate) fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
         }
     };
     install_palette(pref == prefs::ThemePref::Golden, mode, cx);
-}
-
-/// The theme preference as it applies on this machine. Omarchy is
-/// offered only where `omarchy::selectable` says so; an `app.toml` that
-/// names it anywhere else — copied from an Omarchy box, or written by a
-/// development build — reads as System rather than as a palette nobody
-/// can pick or unpick from the Interface page.
-pub fn theme_in_force() -> prefs::ThemePref {
-    match prefs::theme() {
-        prefs::ThemePref::Omarchy if !omarchy::selectable() => prefs::ThemePref::System,
-        pref => pref,
-    }
 }
 
 /// Paint gpui-kit and our own tokens from an Omarchy palette. The
@@ -458,7 +446,7 @@ fn install_omarchy(palette: omarchy::Palette, cx: &mut App) {
 /// panel is rebuilt on every open, so a theme switch shows up the next
 /// time anyone looks — no file watcher idling in the tray for it.
 pub fn refresh_omarchy_palette(cx: &mut App) {
-    if theme_in_force() != prefs::ThemePref::Omarchy {
+    if prefs::theme_in_force() != prefs::ThemePref::Omarchy {
         return;
     }
     let palette = omarchy::palette();
@@ -467,7 +455,7 @@ pub fn refresh_omarchy_palette(cx: &mut App) {
     }
     install_omarchy(palette, cx);
     #[cfg(target_os = "macos")]
-    apply_ns_appearance();
+    appkit::pin_appearance();
     // The tray glyph is inked from `palette::is_dark` off macOS, and the
     // new theme may have flipped it.
     tray::sync(cx.global::<ZStatsGlobalStore>().read(cx));
@@ -523,45 +511,6 @@ fn install_palette(golden: bool, mode: ThemeMode, cx: &mut App) {
     } else {
         theme::set_dark(mode.is_dark());
     }
-}
-
-/// Pin (or release) AppKit's own appearance to match the theme preference.
-///
-/// Without this a forced theme would only recolour our tokens: the vibrancy
-/// material underneath follows the *window's* appearance, and dark type over
-/// a light Popover blur is exactly the grey fog the background opacities were
-/// tuned to avoid. Pinning `NSApp.appearance` makes every window — and any
-/// appearance AppKit resolves for it — agree with the forced theme; `None`
-/// hands control back to System Settings.
-#[cfg(target_os = "macos")]
-fn apply_ns_appearance() {
-    use objc2_app_kit::{
-        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    };
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return;
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    let appearance = match theme_in_force() {
-        // Golden follows the Mac, so the material has to as well. Pinning
-        // Aqua here would freeze the cream variant on a dark desktop.
-        prefs::ThemePref::System | prefs::ThemePref::Golden => None,
-        // Omarchy is pinned to its palette's own mode (a development
-        // build is the only way it reaches a Mac).
-        prefs::ThemePref::Omarchy => NSAppearance::appearanceNamed(if omarchy::palette().dark {
-            // SAFETY: reading AppKit's exported appearance-name constants.
-            unsafe { NSAppearanceNameDarkAqua }
-        } else {
-            // SAFETY: as above.
-            unsafe { NSAppearanceNameAqua }
-        }),
-        // SAFETY: reading AppKit's exported appearance-name constants.
-        prefs::ThemePref::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
-        prefs::ThemePref::Dark => {
-            NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
-        }
-    };
-    app.setAppearance(appearance.as_deref());
 }
 
 /// The Interface page's launch-at-login switch. The OS records the
@@ -787,7 +736,7 @@ pub fn set_keep_awake(minutes: u32, cx: &mut App) {
 pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
     prefs::set_theme(pref);
     #[cfg(target_os = "macos")]
-    apply_ns_appearance();
+    appkit::pin_appearance();
     apply_appearance(cx.window_appearance(), cx);
     // After `apply_appearance`, which is what moves `palette::is_dark()`.
     // Off macOS the tray glyph is inked from that (macOS templates ink
@@ -2090,7 +2039,7 @@ pub fn run() {
         // Pin AppKit before the first frame, so a forced theme's vibrancy
         // material never briefly renders in the system appearance.
         #[cfg(target_os = "macos")]
-        apply_ns_appearance();
+        appkit::pin_appearance();
         // Resolve light/dark against the OS appearance *before* the window
         // opens, so the first painted frame is already themed (otherwise the
         // stock theme shows for a frame and flashes).
