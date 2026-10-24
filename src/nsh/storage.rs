@@ -5,8 +5,10 @@
 //! (`storagepage.rs`, the directory map's layout in `dirmap.rs`); the
 //! state is the store's, so a walk or a search outlives the window. The
 //! tabs arrived in phase 4k of docs/nsh-migration.md: the frame and
-//! Duplicates first, then the analysis's lists; the directory map's box
-//! stands empty until the map is ported.
+//! Duplicates first, then the analysis's lists, then the directory map —
+//! its tiles views placed in points, not a canvas: a new canvas layer
+//! draws once asynchronously before the host can stop it (the plan's
+//! problem 1), and the map is made again on every click.
 //!
 //! The tab strip stays put, and so does each card's head: only the
 //! result scrolls, inside the card's border. A folder is picked in the
@@ -18,7 +20,7 @@
 
 use crate::assets::CustomIconName;
 use crate::cleanhints;
-use crate::dirmap::NARROW_MAP_H;
+use crate::dirmap::{self, Crumb, Kids, NARROW_MAP_H, Paint, Tile};
 use crate::diskscan::{self, DirHit};
 use crate::dupes::DupeScope;
 use crate::nsh::root::{self, AuxWindow, FolderPick, HostAction, Live};
@@ -116,6 +118,8 @@ pub fn Storage() -> impl IntoElement {
     let wide = computed(move || width.get() >= SIDE_BY_SIDE_MIN_W);
     // The bulk sheet, open while it holds what it would move.
     let sheet: Signal<Option<Sheet>> = signal(None);
+    // The directory map's box as last laid out.
+    let map_size = signal((0.0_f32, 0.0_f32));
     view()
         .size_full()
         .bg(theme::color(palette::ground))
@@ -140,7 +144,7 @@ pub fn Storage() -> impl IntoElement {
                     move || trashed_note(trashed),
                 ))
                 .child(dynamic(move || match tab.get() {
-                    StorageTab::Analysis => analysis_card(live, wide, sheet),
+                    StorageTab::Analysis => analysis_card(live, wide, sheet, map_size),
                     StorageTab::Duplicates => dupes_card(live),
                 })),
         )
@@ -864,14 +868,18 @@ fn dupes_body_of(state: &ZStatsAppState) -> DupesBody {
 fn dupes_card(live: Live) -> AnyElement {
     let head = live.memo(dupes_head);
     let body = live.memo(dupes_body_of);
+    // The card's frame is made again only as the search turns on or off:
+    // its caption's age moves every minute, and a frame made again with
+    // it would throw the list back to its top.
+    let off = computed(move || head.with(|h| h.off));
     dynamic(move || {
-        let h = head.get();
+        let off = off.get();
         let mut parts: Vec<AnyElement> = Vec::new();
-        if !h.off {
-            parts.push(dupes_header(&h));
+        if !off {
+            parts.push(dynamic(move || dupes_header(&head.get())).into_element());
         }
-        parts.push(dupes_scope_row(&h));
-        let content = if h.off {
+        parts.push(dynamic(move || dupes_scope_row(&head.get())).into_element());
+        let content = if off {
             empty_state(
                 i18n::tr("disk.dup_empty_lead"),
                 i18n::tr("disk.dup_empty_cost"),
@@ -1265,22 +1273,61 @@ fn ana_head(state: &ZStatsAppState) -> AnaHead {
 /// The analyser's card: what the shown result is and its run control, one
 /// toolbar line of scope and settings (the exclusions as a drawer under
 /// it), the notes about the result, then the result — beside the map
-/// when the window is wide, under it otherwise.
-fn analysis_card(live: Live, wide: Memo<bool>, sheet: Signal<Option<Sheet>>) -> AnyElement {
+/// when the window is wide, under it otherwise. The frame is made again
+/// only when what it holds changes shape (before the first walk, failed,
+/// walking with nothing yet, a result; wide or not): each part binds its
+/// own piece of the head, whose ages move every minute, and a frame made
+/// again with them would throw the lists back to their top.
+fn analysis_card(
+    live: Live,
+    wide: Memo<bool>,
+    sheet: Signal<Option<Sheet>>,
+    map_size: Signal<(f32, f32)>,
+) -> AnyElement {
     let head = live.memo(ana_head);
     let lists = live.memo(lists_of);
+    let shape = computed(move || {
+        (
+            head.with(|h| match h.phase {
+                Phase::Result { .. } => Phase::Result {
+                    finished: false,
+                    dim: false,
+                },
+                phase => phase,
+            }),
+            wide.get(),
+        )
+    });
+    let dim = computed(move || head.with(|h| matches!(h.phase, Phase::Result { dim: true, .. })));
+    let drawer =
+        computed(move || head.with(|h| (h.exclude_open && !h.running).then(|| h.excludes.clone())));
+    let notes = computed(move || head.with(|h| (h.fda.clone(), h.mismatch.clone())));
     dynamic(move || {
-        let h = head.get();
-        let mut parts: Vec<AnyElement> = Vec::new();
-        if let Some(header) = analysis_header(&h) {
-            parts.push(header);
-        }
-        parts.push(analysis_toolbar(&h));
-        if h.exclude_open && !h.running {
-            parts.push(exclude_drawer(&h.excludes));
-        }
-        let notes = analysis_notes(&h);
-        match h.phase {
+        let (phase, wide) = shape.get();
+        let parts: Vec<AnyElement> = vec![
+            dynamic(move || {
+                head.with(analysis_header)
+                    .unwrap_or_else(|| view().into_element())
+            })
+            .into_element(),
+            dynamic(move || head.with(analysis_toolbar)).into_element(),
+            dynamic(move || match drawer.get() {
+                Some(entries) => exclude_drawer(&entries),
+                None => view().into_element(),
+            })
+            .into_element(),
+        ];
+        let notes = move || {
+            dynamic(move || {
+                let (fda, mismatch) = notes.get();
+                view()
+                    .children(analysis_notes(fda, mismatch))
+                    .into_element()
+            })
+            .into_element()
+        };
+        let faded = move || if dim.get() { 0.5_f32 } else { 1. };
+        match phase {
             Phase::Off => tab_card(
                 parts,
                 empty_state(
@@ -1300,7 +1347,7 @@ fn analysis_card(live: Live, wide: Memo<bool>, sheet: Signal<Option<Sheet>>) -> 
             Phase::Failed => tab_card(
                 parts,
                 view()
-                    .children(notes)
+                    .child(notes())
                     .child(
                         view()
                             .px(px(INSET))
@@ -1309,22 +1356,22 @@ fn analysis_card(live: Live, wide: Memo<bool>, sheet: Signal<Option<Sheet>>) -> 
                     )
                     .into_element(),
             ),
-            Phase::Waiting => tab_card(parts, view().children(notes).into_element()),
-            Phase::Result { dim, .. } => {
+            Phase::Waiting => tab_card(parts, notes()),
+            Phase::Result { .. } => {
                 let lists = view()
-                    .opacity(if dim { 0.5 } else { 1. })
+                    .opacity(faded)
                     .child(dynamic(move || analysis_lists(lists.get(), sheet)))
                     .into_element();
                 let map = view()
-                    .opacity(if dim { 0.5 } else { 1. })
+                    .opacity(faded)
                     .px(px(INSET))
                     .pb(px(INSET))
-                    .child(map_box(wide.get()));
-                if !wide.get() {
+                    .child(dir_map(live, wide, map_size));
+                if !wide {
                     return tab_card(
                         parts,
                         view()
-                            .children(notes)
+                            .child(notes())
                             .child(map.into_element())
                             .child(lists)
                             .into_element(),
@@ -1345,13 +1392,18 @@ fn analysis_card(live: Live, wide: Memo<bool>, sheet: Signal<Option<Sheet>>) -> 
                             .flex_row()
                             .flex_1()
                             .min_h(px(0.))
-                            .child(view().flex_1().min_w(px(0.)).child(map.flex_1()))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(map.flex_1().min_h(px(0.))),
+                            )
                             .child(
                                 scroll()
                                     .flex_none()
                                     .w(px(SIDE_W))
                                     .min_h(px(0.))
-                                    .child(view().children(notes).child(lists)),
+                                    .child(view().child(notes()).child(lists)),
                             ),
                     )
                     .into_element()
@@ -1361,22 +1413,11 @@ fn analysis_card(live: Live, wide: Memo<bool>, sheet: Signal<Option<Sheet>>) -> 
     .into_element()
 }
 
-/// The directory map's box: its size beside the lists (the height it is
-/// given) or above them. Empty until the map is ported.
-fn map_box(fill: bool) -> AnyElement {
-    let area = view().rounded(px(6.)).bg(theme::color(palette::inset));
-    if fill {
-        area.flex_1().min_h(px(0.)).into_element()
-    } else {
-        area.flex_none().h(px(NARROW_MAP_H)).into_element()
-    }
-}
-
 /// The notes about the result on screen: the Full Disk Access gap, and a
 /// result that is not the selected scope's.
-fn analysis_notes(h: &AnaHead) -> Vec<AnyElement> {
+fn analysis_notes(fda: Option<String>, mismatch: Option<String>) -> Vec<AnyElement> {
     let mut notes = Vec::new();
-    if let Some(fda) = h.fda.clone() {
+    if let Some(fda) = fda {
         notes.push(
             view()
                 .px(px(INSET))
@@ -1398,7 +1439,7 @@ fn analysis_notes(h: &AnaHead) -> Vec<AnyElement> {
                 .into_element(),
         );
     }
-    if let Some(line) = h.mismatch.clone() {
+    if let Some(line) = mismatch {
         notes.push(
             view()
                 .px(px(INSET))
@@ -2397,5 +2438,358 @@ fn tick(on: impl Fn() -> bool + Copy + 'static) -> AnyElement {
         .child(when(on, || {
             widgets::icon(CustomIconName::Check, 10., palette::primary_ink)
         }))
+        .into_element()
+}
+
+// ---- the directory map ----------------------------------------------------
+
+/// The map as it stands for a box of its last measured size.
+#[derive(Clone, PartialEq)]
+struct MapView {
+    crumbs: Vec<Crumb>,
+    total: Option<u64>,
+    path: PathBuf,
+    /// The sentence (and a walk's button) in place of tiles.
+    note: Option<(String, Option<String>)>,
+    tiles: Vec<Tile>,
+    interactive: bool,
+}
+
+fn map_of(state: &ZStatsAppState, (width, height): (f32, f32)) -> Option<MapView> {
+    let (result, interactive) = match state.disk_analysis() {
+        DiskAnalysis::Ready(result) => (result, true),
+        DiskAnalysis::Running {
+            partial: Some(result),
+            ..
+        } => (result, false),
+        _ => return None,
+    };
+    let (path, total, kids) = dirmap::level(state, result);
+    let note = dirmap::kids_note(&kids, &path);
+    let tiles = match kids {
+        Kids::Ready(kids) if width > 0. && height > 0. => dirmap::tiles(
+            state,
+            result,
+            &path,
+            total,
+            kids,
+            (width, height),
+            interactive,
+        ),
+        _ => Vec::new(),
+    };
+    // Before the first layout there is no width to fold the path against.
+    let room = if width > 0. {
+        width - dirmap::CRUMB_ROW_RESERVE
+    } else {
+        f32::INFINITY
+    };
+    Some(MapView {
+        crumbs: dirmap::crumbs(state, result, room),
+        total,
+        path,
+        note,
+        tiles,
+        interactive,
+    })
+}
+
+/// The directory map (`storage/dirmap.rs`): the path back up over a box of
+/// tiles, filling the height it is given beside the lists or
+/// [`NARROW_MAP_H`] above them. Tiles are laid out in points against the
+/// box's size as last measured, so a resize lays them out again; the size
+/// is the window root's (`size`), because a box being taken down still
+/// reports a layout after the part that made it has gone.
+fn dir_map(live: Live, fill: bool, size: Signal<(f32, f32)>) -> AnyElement {
+    let map = computed(move || {
+        live.track();
+        let size = size.get();
+        store::read(|state| map_of(state, size))
+    });
+    let column = view().gap(px(6.));
+    let column = if fill {
+        column.flex_1().min_h(px(0.))
+    } else {
+        column
+    };
+    let area = view()
+        .relative()
+        .overflow_hidden()
+        .rounded(px(6.))
+        .bg(theme::color(palette::inset))
+        .on_layout(move |b: &Bounds<Points>| {
+            let next = (b.size.width.0, b.size.height.0);
+            if size.get_untracked() != next {
+                size.set(next);
+            }
+        })
+        .child(dynamic(move || map_body(map.get())));
+    let area = if fill {
+        area.flex_1().min_h(px(0.))
+    } else {
+        area.flex_none().h(px(NARROW_MAP_H))
+    };
+    column
+        .child(dynamic(move || map_crumbs(map.get())))
+        .child(area)
+        .into_element()
+}
+
+/// The way down as a path to click back along, its size and its reveal on
+/// the right.
+fn map_crumbs(map: Option<MapView>) -> AnyElement {
+    let Some(map) = map else {
+        return view().into_element();
+    };
+    let interactive = map.interactive;
+    let parts: Vec<AnyElement> = map
+        .crumbs
+        .into_iter()
+        .map(|crumb| match crumb {
+            Crumb::Separator => text("›")
+                .flex_none()
+                .text_size(px(ROW_PT))
+                .line_height(widgets::line(ROW_PT))
+                .text_color(theme::color(palette::text_dim))
+                .into_element(),
+            Crumb::Level {
+                depth,
+                label,
+                tip,
+                here,
+            } => {
+                let words = text(label)
+                    .number_of_lines(1u32)
+                    .text_size(px(ROW_PT))
+                    .line_height(widgets::line(ROW_PT))
+                    .font_weight(if here {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(theme::color(move || {
+                        if here {
+                            palette::text()
+                        } else {
+                            palette::text_muted()
+                        }
+                    }));
+                let cap = if here {
+                    dirmap::CRUMB_HERE_MAX_W
+                } else {
+                    dirmap::CRUMB_MAX_W
+                };
+                let crumb = nsh_base::button()
+                    .min_w(px(0.))
+                    .max_w(px(cap))
+                    .px(px(dirmap::CRUMB_PAD_W / 2.))
+                    .py(px(1.))
+                    .rounded(px(4.));
+                let crumb = if !here && interactive {
+                    crumb
+                        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                        .on_press(move || store::update(|state, fx| state.map_back_to(depth, fx)))
+                } else {
+                    crumb
+                };
+                view()
+                    .flex_shrink(1.)
+                    .min_w(px(0.))
+                    .tooltip(widgets::wrap_tooltip(tip))
+                    .child(crumb.child(words))
+                    .into_element()
+            }
+        })
+        .collect();
+    let mut right = view().flex_row().flex_none().items_center().gap(px(8.));
+    if let Some(total) = map.total {
+        right = right.child(size_text(total));
+    }
+    right = right.child(reveal_button(map.path, storagepage::reveal_tip()));
+    view()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .justify_between()
+        .gap(px(10.))
+        .child(
+            view()
+                .flex_row()
+                .flex_1()
+                .min_w(px(0.))
+                .items_center()
+                .gap(px(2.))
+                .children(parts)
+                .child(
+                    view()
+                        .pl(px(4.))
+                        .child(widgets::info_icon(widgets::wrap_tooltip(i18n::tr(
+                            "disk.map_hint",
+                        )))),
+                ),
+        )
+        .child(right)
+        .into_element()
+}
+
+/// The tiles, or the sentence in their place.
+fn map_body(map: Option<MapView>) -> AnyElement {
+    let Some(map) = map else {
+        return view().into_element();
+    };
+    if let Some((words, action)) = map.note {
+        let mut note = view()
+            .absolute()
+            .left(px(0.))
+            .top(px(0.))
+            .right(px(0.))
+            .bottom(px(0.))
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .child(
+                text(words)
+                    .text_size(px(ROW_PT))
+                    .line_height(widgets::line(ROW_PT))
+                    .text_color(theme::color(palette::text_muted)),
+            );
+        if let Some(label) = action {
+            note = note.child(measure_button(label));
+        }
+        return note.into_element();
+    }
+    let interactive = map.interactive;
+    view()
+        .absolute()
+        .left(px(0.))
+        .top(px(0.))
+        .right(px(0.))
+        .bottom(px(0.))
+        .children(
+            map.tiles
+                .into_iter()
+                .map(|tile| map_tile(tile, interactive))
+                .collect::<Vec<_>>(),
+        )
+        .into_element()
+}
+
+/// gpui-kit's default small button (`Button::small()`): the map's walk
+/// of a level its index cannot answer.
+fn measure_button(label: String) -> AnyElement {
+    nsh_base::button()
+        .flex_none()
+        .h(px(24.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .border(px(1.))
+        .border_color(theme::color(palette::border))
+        .bg(theme::color(palette::inset))
+        .items_center()
+        .justify_center()
+        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .on_press(|| store::update(|state, fx| state.measure_map_level(fx)))
+        .child(
+            text(label)
+                .text_size(px(14.))
+                .line_height(px(17.5))
+                .text_color(theme::color(palette::text)),
+        )
+        .into_element()
+}
+
+/// One tile: its fill, its name (and size where there is room) in the ink
+/// that stands out from it, the path and share on hover, and a click that
+/// opens it on a finished map.
+fn map_tile(tile: Tile, interactive: bool) -> AnyElement {
+    let fill: Paint = tile.fill();
+    let hover: Paint = tile.hover();
+    let ink = move || dirmap::ink_on(fill.color());
+    let faint = move || {
+        let ink = ink();
+        color::Rgba {
+            a: ink.a * 0.75,
+            ..ink
+        }
+    };
+    let labelled = tile.labelled();
+    let shows_size = tile.shows_size();
+    let Tile {
+        rect,
+        name,
+        bytes,
+        tip,
+        open,
+        nests,
+        name_pt,
+        ..
+    } = tile;
+    let name_text = text(name)
+        .number_of_lines(1u32)
+        .text_size(px(name_pt))
+        .line_height(widgets::line(name_pt))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme::color(ink));
+    let size_line = move || {
+        text(format::memory(bytes))
+            .number_of_lines(1u32)
+            .font_family(widgets::MONO)
+            .text_size(px(META_PT))
+            .line_height(widgets::line(META_PT))
+            .text_color(theme::color(faint))
+    };
+    let label: Option<AnyElement> = labelled.then(|| {
+        if nests {
+            // The strip: name left, size right, one line.
+            view()
+                .flex_row()
+                .h(px(dirmap::HEADER_H - 4.))
+                .items_center()
+                .justify_between()
+                .gap(px(6.))
+                .child(name_text.flex_shrink(1.).min_w(px(0.)))
+                .child(size_line().flex_none())
+                .into_element()
+        } else {
+            let mut column = view().gap(px(1.)).child(name_text);
+            if shows_size {
+                column = column.child(size_line());
+            }
+            column.into_element()
+        }
+    });
+    let body = view()
+        .size_full()
+        .overflow_hidden()
+        .rounded(px(3.))
+        .px(px(6.))
+        .py(px(if nests { 2. } else { 4. }))
+        .bg(theme::color(move || fill.color()));
+    let body = match label {
+        Some(label) => body.child(label),
+        None => body,
+    };
+    let content: AnyElement = match open.filter(|_| interactive) {
+        Some(chain) => nsh_base::button()
+            .size_full()
+            .rounded(px(3.))
+            .hover(move |s| s.bg(theme::color(move || hover.color())))
+            .on_press(move || {
+                let chain = chain.clone();
+                store::update(|state, fx| state.open_in_map(chain, fx));
+            })
+            .child(body.bg(theme::color(|| CLEAR)))
+            .bg(theme::color(move || fill.color()))
+            .into_element(),
+        None => body.into_element(),
+    };
+    view()
+        .absolute()
+        .left(px(rect.x))
+        .top(px(rect.y))
+        .w(px(rect.w))
+        .h(px(rect.h))
+        .tooltip(widgets::tooltip_lines(move || tip.clone()))
+        .child(content)
         .into_element()
 }
