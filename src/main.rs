@@ -65,8 +65,10 @@ mod i18n;
 mod i18n_loader;
 #[cfg(target_os = "linux")]
 mod ipc;
+mod listening;
 mod logger;
 mod metrics;
+mod net;
 mod notice;
 mod notify;
 mod omarchy;
