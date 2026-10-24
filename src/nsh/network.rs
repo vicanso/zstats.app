@@ -510,12 +510,19 @@ fn listening_card(live: Live) -> AnyElement {
                         .items_center()
                         .gap(px(5.))
                         .child(lists::filter_chip(live, LISTEN_FILTER))
-                        .child(dynamic(move || match chip.get() {
-                            Some((label, showing)) => widgets::more_chip(label, showing, || {
-                                store::update(|state, fx| state.toggle_all_listeners(fx))
-                            }),
-                            None => view().into_element(),
-                        }))
+                        // `when`, not an empty view: the row's gap would
+                        // stand after the magnifier for nothing.
+                        .child(when(
+                            move || chip.with(Option::is_some),
+                            move || {
+                                dynamic(move || {
+                                    let (label, showing) = chip.get().unwrap_or_default();
+                                    widgets::more_chip(label, showing, || {
+                                        store::update(|state, fx| state.toggle_all_listeners(fx))
+                                    })
+                                })
+                            },
+                        ))
                         .into_element()
                 })
                 .into_element(),
@@ -633,10 +640,15 @@ fn listener_row(l: ReadSignal<Listener>) -> AnyElement {
                                 }),
                         ),
                 )
-                .child(dynamic(move || match quit.get() {
-                    Some((pid, name, body)) => quit_button(pid, name, body),
-                    None => view().into_element(),
-                })),
+                .child(when(
+                    move || quit.with(Option::is_some),
+                    move || {
+                        dynamic(move || match quit.get() {
+                            Some((pid, name, body)) => quit_button(pid, name, body),
+                            None => view().into_element(),
+                        })
+                    },
+                )),
         )
         .into_element()
 }

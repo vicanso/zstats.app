@@ -15,6 +15,7 @@ mod chart;
 mod chrome;
 mod gallery;
 mod hardware;
+mod history;
 #[cfg(target_os = "macos")]
 mod host;
 #[cfg(target_os = "linux")]

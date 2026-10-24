@@ -1,8 +1,7 @@
 //! The panel's root on NSH: the tab strip, the page of the tab on screen
 //! in a scroll view, and the footer (`chrome.rs`) — `views::root` on the
-//! gpui front end. The pages arrive one by one in phase 4 of
-//! docs/nsh-migration.md; a tab whose page has not is a card that says so.
-//! A debug build run with `ZSTATS_GALLERY` set shows the building blocks
+//! gpui front end; the pages arrived one by one in phase 4 of
+//! docs/nsh-migration.md. A debug build run with `ZSTATS_GALLERY` set shows the building blocks
 //! on live figures (`gallery.rs`) in Overview's place.
 //!
 //! The page is made again only when the tab changes (a memo of it), and
@@ -16,7 +15,7 @@
 
 use crate::nsh::root::{self, CARD_GAP, GUTTER, HostAction, Live};
 use crate::nsh::{
-    alerts, apps, chrome, gallery, hardware, network, overview, processes, store, theme, widgets,
+    alerts, apps, chrome, gallery, hardware, history, network, overview, processes, store, theme,
 };
 use crate::palette;
 use crate::prefs;
@@ -71,7 +70,7 @@ fn page(tab: Tab, live: Live, body: ReadSignal<f32>) -> AnyElement {
         Tab::Hardware => hardware::page(live),
         Tab::Net => network::page(live),
         Tab::Alerts => alerts::page(live),
-        other => not_yet(other),
+        Tab::History => history::page(live, body),
     }
 }
 
@@ -79,19 +78,4 @@ fn page(tab: Tab, live: Live, body: ReadSignal<f32>) -> AnyElement {
 /// `ZSTATS_GALLERY` set.
 fn gallery_asked() -> bool {
     cfg!(debug_assertions) && env::var_os("ZSTATS_GALLERY").is_some()
-}
-
-/// A tab whose page has not reached this front end yet. Not translated —
-/// a development build's card, gone with the last page.
-fn not_yet(tab: Tab) -> AnyElement {
-    widgets::card()
-        .gap(px(6.))
-        .child(widgets::card_header(tab.title(), None))
-        .child(
-            text("Not on the NSH front end yet — phase 4 of docs/nsh-migration.md.")
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .text_color(theme::color(palette::text_muted)),
-        )
-        .into_element()
 }

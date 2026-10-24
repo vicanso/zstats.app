@@ -96,6 +96,13 @@ pub fn app_mark(pid: u32, name: &str, title: &str) -> AnyElement {
     mark(appicon::icon_for_pid(pid, name), title)
 }
 
+/// [`app_mark`] for a row read back from the records — History's: the
+/// icon only while the pid still runs a program of the recorded name
+/// (`appicon::icon_for_record`), the letter otherwise.
+pub fn record_mark(pid: u32, name: &str, title: &str) -> AnyElement {
+    mark(appicon::icon_for_record(pid, name), title)
+}
+
 fn mark(icon: Option<Icon>, title: &str) -> AnyElement {
     match icon {
         Some(icon) => image(SharedString::from(icon.data_uri))
@@ -848,6 +855,91 @@ pub fn menu_trigger(
     // No tooltip under the open menu, and the hover's fill kept while it
     // is open — as on the cup.
     let open = signal(false);
+    menu_of(
+        open,
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(3.))
+            .px(px(7.))
+            .py(px(1.))
+            .rounded_full()
+            .border(px(1.))
+            .border_color(move || {
+                theme::color(move || {
+                    if open.get() {
+                        palette::border()
+                    } else {
+                        palette::border_subtle()
+                    }
+                })
+            })
+            .bg(move || {
+                theme::color(move || {
+                    if open.get() {
+                        palette::surface_raised()
+                    } else {
+                        CLEAR
+                    }
+                })
+            })
+            .hover(|s| {
+                s.bg(theme::color(palette::surface_raised))
+                    .border_color(theme::color(palette::border))
+            })
+            .tooltip(live_tooltip(tip).disabled(move || open.get()))
+            .child(
+                text(label)
+                    .text_size(px(9.))
+                    .line_height(line(9.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::color(palette::text_muted)),
+            )
+            .child(icon(CustomIconName::ChevronDown, 8., palette::text_dim)),
+        choices,
+    )
+}
+
+/// [`menu_trigger`] worn as a card's title — History's lens, which names
+/// the ordering and is the control that switches it: the title's words
+/// and a chevron after them, padded for the hover's fill and pulled back
+/// so the title still starts on the card's text line.
+pub fn title_menu(
+    label: impl IntoReactive<SharedString>,
+    tip: impl Fn() -> String + 'static,
+    choices: Vec<Choice>,
+) -> AnyElement {
+    let open = signal(false);
+    menu_of(
+        open,
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(3.))
+            .min_w(px(0.))
+            .px(px(4.))
+            .ml(px(-4.))
+            .rounded(px(4.))
+            .bg(move || {
+                theme::color(move || {
+                    if open.get() {
+                        palette::surface_raised()
+                    } else {
+                        CLEAR
+                    }
+                })
+            })
+            .hover(|s| s.bg(theme::color(palette::surface_raised)))
+            .tooltip(live_tooltip(tip).disabled(move || open.get()))
+            .child(list_title(label).flex_shrink(1.))
+            .child(icon(CustomIconName::ChevronDown, 10., palette::text_dim)),
+        choices,
+    )
+}
+
+/// The menu a trigger opens: `choices`, the one in force checked, with
+/// `open` following it.
+fn menu_of(open: Signal<bool>, trigger: View, choices: Vec<Choice>) -> AnyElement {
     let mut popup = menu()
         .offset(px(4.))
         .on_open(move || open.set(true))
@@ -862,47 +954,7 @@ pub fn menu_trigger(
                 .outline_color(theme::color(palette::border))
                 .shadow_lg()
         })
-        .trigger(
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(3.))
-                .px(px(7.))
-                .py(px(1.))
-                .rounded_full()
-                .border(px(1.))
-                .border_color(move || {
-                    theme::color(move || {
-                        if open.get() {
-                            palette::border()
-                        } else {
-                            palette::border_subtle()
-                        }
-                    })
-                })
-                .bg(move || {
-                    theme::color(move || {
-                        if open.get() {
-                            palette::surface_raised()
-                        } else {
-                            CLEAR
-                        }
-                    })
-                })
-                .hover(|s| {
-                    s.bg(theme::color(palette::surface_raised))
-                        .border_color(theme::color(palette::border))
-                })
-                .tooltip(live_tooltip(tip).disabled(move || open.get()))
-                .child(
-                    text(label)
-                        .text_size(px(9.))
-                        .line_height(line(9.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme::color(palette::text_muted)),
-                )
-                .child(icon(CustomIconName::ChevronDown, 8., palette::text_dim)),
-        );
+        .trigger(trigger);
     for choice in choices {
         let Choice { label, on, choose } = choice;
         let on = Rc::new(on);
