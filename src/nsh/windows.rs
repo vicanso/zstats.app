@@ -195,6 +195,17 @@ pub fn number(aux: AuxWindow) -> Option<isize> {
     OPEN.with_borrow(|open| open[slot(aux)].as_ref().map(|o| o.window.windowNumber()))
 }
 
+/// Sets `aux`'s content to `width` × `height` points, if it is open (the
+/// probe's `resize`).
+#[cfg(debug_assertions)]
+pub fn resize(aux: AuxWindow, width: f64, height: f64) {
+    OPEN.with_borrow(|open| {
+        if let Some(open) = &open[slot(aux)] {
+            open.window.setContentSize(NSSize::new(width, height));
+        }
+    });
+}
+
 /// Closes `aux` if it is open. On the main thread.
 pub fn close(aux: AuxWindow) {
     let window = OPEN.with_borrow(|open| open[slot(aux)].as_ref().map(|o| o.window.clone()));

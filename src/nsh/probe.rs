@@ -27,6 +27,8 @@
 //!                                 or the one named, so shortcuts and menus
 //!                                 see it as typed
 //! open settings|storage           the settings or disk-space window
+//! resize settings|storage W H     that window's content at W×H points, so
+//!                                 a page longer than it can be seen whole
 //! type TEXT                       key events for each character
 //! info                            window number, frame, key and first responder
 //! quit
@@ -162,6 +164,11 @@ fn run(line: &str) {
         "open" => windows::open(
             aux_named(rest.first().copied().unwrap_or("")).unwrap_or(AuxWindow::Settings),
         ),
+        "resize" => {
+            if let Some(aux) = aux_named(rest.first().copied().unwrap_or("")) {
+                windows::resize(aux, num(1), num(2));
+            }
+        }
         "detail" => {
             prefs::set_overview_detail(rest.first() == Some(&"1"));
             host::show(h, None, false);

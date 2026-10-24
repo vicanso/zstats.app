@@ -21,7 +21,7 @@ use crate::nsh::root::{self, AuxWindow, HostAction, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
-use crate::settingspage::{self, Autostart, Choices, SettingsSection};
+use crate::settingspage::{self, Autostart, Choices, SettingsSection, ThresholdRow};
 use crate::state::ZStatsAppState;
 use crate::{autostart, i18n, palette};
 use nsh_core::ui::prelude::*;
@@ -193,6 +193,7 @@ fn section_icon(section: SettingsSection) -> CustomIconName {
 fn page(live: Live, section: SettingsSection) -> AnyElement {
     match section {
         SettingsSection::Interface => interface_card(live),
+        SettingsSection::Alerts => alerts_page(live),
         other => not_yet(other),
     }
 }
@@ -573,5 +574,273 @@ fn opacity_row(live: Live) -> AnyElement {
                 )))),
         )
         .child(view().flex_row().mt(px(6.)).gap(px(4.)).children(chips))
+        .into_element()
+}
+
+/// A card's title and the ⓘ that carries its standing note
+/// (`config::titled`).
+fn titled(title: String, tip: String) -> AnyElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .min_w(px(0.))
+        .child(widgets::list_title(title).flex_shrink(1.))
+        .child(widgets::info_icon(widgets::wrap_tooltip(tip)))
+        .into_element()
+}
+
+/// Writes one `config.toml` key through the store (`apply_setting`, the
+/// CLI's `-add`).
+fn apply(key: &'static str, value: &'static str) {
+    store::update(|state, fx| {
+        if let Err(e) = state.apply_setting(key, value, fx) {
+            tracing::error!("apply {key}={value}: {e}");
+        }
+    });
+}
+
+/// What the Alerts page shows: the rules and the per-subject overrides,
+/// or nothing to show while there is no readable config.
+#[derive(Clone, PartialEq)]
+struct Rules {
+    thresholds: Vec<ThresholdRow>,
+    overrides: Vec<(&'static str, String, f64)>,
+}
+
+fn rules_of(state: &ZStatsAppState) -> Option<Rules> {
+    let file = state.settings()?;
+    Some(Rules {
+        thresholds: settingspage::threshold_rows(file),
+        overrides: settingspage::override_rows(&file.alerts),
+    })
+}
+
+/// The thresholds, and the per-subject rules written from alert cards.
+fn alerts_page(live: Live) -> AnyElement {
+    let rules = live.memo(rules_of);
+    dynamic(move || match rules.get() {
+        None => widgets::empty_card(
+            i18n::tr("config.unavailable"),
+            i18n::tr("config.unavailable_body"),
+        ),
+        Some(rules) => {
+            let page = view().gap(px(8.)).child(thresholds_card(rules.thresholds));
+            if rules.overrides.is_empty() {
+                page.into_element()
+            } else {
+                page.child(overrides_card(rules.overrides)).into_element()
+            }
+        }
+    })
+    .into_element()
+}
+
+fn thresholds_card(rows: Vec<ThresholdRow>) -> AnyElement {
+    let last = rows.len().saturating_sub(1);
+    widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                i18n::tr("config.thresholds"),
+                i18n::tr("config.thresholds_note"),
+            ),
+            Some(file_note("config.toml")),
+        ))
+        .children(
+            rows.into_iter()
+                .enumerate()
+                .map(|(i, row)| threshold_row(row, i == last))
+                .collect::<Vec<_>>(),
+        )
+        .into_element()
+}
+
+/// A rule: its name and key on the left, how many subjects override it
+/// and its value on the right, its presets under them.
+fn threshold_row(row: ThresholdRow, last: bool) -> AnyElement {
+    let ThresholdRow {
+        key,
+        setting,
+        overrides,
+    } = row;
+    let mut figures = view().flex_row().items_center().gap(px(6.));
+    if overrides > 0 {
+        figures = figures.child(
+            text(settingspage::override_count(overrides))
+                .rounded_full()
+                .border(px(1.))
+                .border_color(theme::color(|| palette::accent_wash(45)))
+                .px(px(6.))
+                .text_size(px(8.5))
+                .line_height(widgets::line(8.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::color(palette::accent_light)),
+        );
+    }
+    figures = figures.child(
+        text(setting.shown.clone())
+            .font_family(widgets::MONO)
+            .text_size(px(10.))
+            .line_height(widgets::line(10.))
+            .text_color(theme::color(palette::text)),
+    );
+    let chips: Vec<AnyElement> = settingspage::threshold_choices(key)
+        .into_iter()
+        .map(|(label, value)| {
+            let on = label == setting.lit;
+            setting_chip(label, on, move || apply(key, value))
+        })
+        .collect();
+    view()
+        .px(px(ROW_PAD_X))
+        .py(px(7.))
+        .border_b(px(if last { 0. } else { 1. }))
+        .border_color(theme::color(palette::border_subtle))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            text(settingspage::threshold_label(key))
+                                .text_size(px(11.))
+                                .line_height(widgets::line(11.))
+                                .text_color(theme::color(palette::ink)),
+                        )
+                        .child(widgets::info_icon(widgets::wrap_tooltip(
+                            settingspage::threshold_key_tip(key),
+                        ))),
+                )
+                .child(figures),
+        )
+        .child(view().flex_row().mt(px(6.)).gap(px(4.)).children(chips))
+        .into_element()
+}
+
+/// A preset under a rule (`config::setting_chips`): the option chip's
+/// look, a little tighter.
+fn setting_chip(label: String, on: bool, act: impl Fn() + 'static) -> AnyElement {
+    nsh_base::button()
+        .flex_none()
+        .rounded_full()
+        .border(px(1.))
+        .border_color(theme::color(move || palette::choice_line(on)))
+        .bg(theme::color(move || palette::choice_fill(on)))
+        .hover(move |s| s.bg(theme::color(move || palette::choice_hover(on))))
+        .px(px(7.))
+        .py(px(1.))
+        .on_press(act)
+        .child(
+            text(label)
+                .text_size(px(10.))
+                .line_height(widgets::line(10.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::color(move || palette::choice_ink(on))),
+        )
+        .into_element()
+}
+
+/// Every per-subject override, each with the way back to the rule.
+fn overrides_card(rows: Vec<(&'static str, String, f64)>) -> AnyElement {
+    let total = rows.len();
+    widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                i18n::tr("config.overrides"),
+                i18n::tr("config.overrides_note"),
+            ),
+            Some(widgets::note(settingspage::override_count(total)).into_element()),
+        ))
+        .children(
+            rows.into_iter()
+                .enumerate()
+                .map(|(i, (key, name, value))| override_row(key, name, value, i + 1 == total))
+                .collect::<Vec<_>>(),
+        )
+        .into_element()
+}
+
+/// One override: who it is for, which rule, what it was set to, and the
+/// control that drops it.
+fn override_row(key: &'static str, name: String, value: f64, last: bool) -> AnyElement {
+    let removal = name.clone();
+    view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .px(px(ROW_PAD_X))
+        .py(px(7.))
+        .border_b(px(if last { 0. } else { 1. }))
+        .border_color(theme::color(palette::border_subtle))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    text(name)
+                        .number_of_lines(1u32)
+                        .text_size(px(11.))
+                        .line_height(widgets::line(11.))
+                        .text_color(theme::color(palette::ink)),
+                )
+                .child(
+                    text(key)
+                        .font_family(widgets::MONO)
+                        .text_size(px(9.))
+                        .line_height(widgets::line(9.))
+                        .text_color(theme::color(palette::text_dim)),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    text(settingspage::override_value(value))
+                        .font_family(widgets::MONO)
+                        .text_size(px(10.))
+                        .line_height(widgets::line(10.))
+                        .text_color(theme::color(palette::text)),
+                )
+                .child(
+                    view()
+                        .flex_none()
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.override_reset_tip")))
+                        .child(
+                            nsh_base::button()
+                                .rounded_full()
+                                .border(px(1.))
+                                .border_color(theme::color(palette::border))
+                                .bg(theme::color(palette::inset))
+                                .px(px(7.))
+                                .py(px(1.))
+                                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                                .on_press(move || {
+                                    let name = removal.clone();
+                                    store::update(|state, fx| {
+                                        if let Err(e) = state.remove_alert_override(key, &name, fx)
+                                        {
+                                            tracing::warn!("remove {key} override for {name}: {e}");
+                                        }
+                                    });
+                                })
+                                .child(
+                                    text(i18n::tr("config.override_reset"))
+                                        .text_size(px(10.))
+                                        .line_height(widgets::line(10.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme::color(palette::text)),
+                                ),
+                        ),
+                ),
+        )
         .into_element()
 }
