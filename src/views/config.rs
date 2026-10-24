@@ -50,7 +50,6 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Icon, IconName, Sizable, h_flex, v_flex};
 use rust_i18n::t;
-use std::collections::BTreeMap;
 // The next four serve the Full Disk Access probe alone, which is a
 // TCC question and does not exist off macOS.
 #[cfg(target_os = "macos")]
@@ -63,8 +62,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use zstats::CollectorConfig;
-use zstats::alerts::ActiveThresholds;
-use zstats::settings::PressureAlert;
 
 /// The nav row's icon. Settings2 on Advanced is where config.toml's own
 /// knobs are; the footer gear that opens this window is the same glyph.
@@ -1981,98 +1978,8 @@ fn interval_row(
 /// nothing to type. It was a second line under every name until
 /// 2026-10-12 — nine lines of `alert-app-mem-bytes` for the readers who
 /// came to pick a number.
-fn threshold_label(key: &str) -> String {
-    i18n::tr(match key {
-        "alert-cpu" => "config.th_cpu",
-        "alert-mem" => "config.th_mem",
-        "alert-mem-bytes" => "config.th_mem_bytes",
-        "alert-app-cpu" => "config.th_app_cpu",
-        "alert-app-mem" => "config.th_app_mem",
-        "alert-app-mem-bytes" => "config.th_app_mem_bytes",
-        "alert-disk" => "config.th_disk",
-        "alert-disk-free" => "config.th_disk_free",
-        "alert-pressure" => "config.th_pressure",
-        "alert-cooldown" => "config.th_cooldown",
-        // Unreachable for the ten rows above; a future key shows its
-        // own name rather than a blank until it is given one.
-        other => return other.to_string(),
-    })
-}
-
 fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
-    let a = &file.alerts;
-    // zstats' own resolution of what runs when a key is unset — "unset"
-    // alone would hide the threshold actually in force. Base values are
-    // independent of the template layer (templates only refine per-name
-    // overrides), so the builtin-template variant is exact and costs no IO.
-    let eff = ActiveThresholds::from_config(a);
-    let rows: [(&'static str, Setting, usize); 10] = [
-        (
-            "alert-cpu",
-            fmt_pct_setting(a.cpu, eff.cpu.base().map(f64::from)),
-            a.cpu_overrides.len(),
-        ),
-        (
-            "alert-mem",
-            // Effective memory shares are fractions; the file speaks percent.
-            fmt_pct_setting(a.mem, eff.memory.base().map(|f| f * 100.0)),
-            a.mem_overrides.len(),
-        ),
-        (
-            // The absolute half of the memory bar (zstats 0.5): the rule
-            // fires on the LOWER of the share above and this ceiling.
-            "alert-mem-bytes",
-            fmt_bytes_setting(a.mem_bytes, eff.memory_bytes),
-            0,
-        ),
-        (
-            "alert-app-cpu",
-            fmt_pct_setting(a.app_cpu, eff.app_cpu.base().map(f64::from)),
-            a.app_cpu_overrides.len(),
-        ),
-        (
-            "alert-app-mem",
-            fmt_pct_setting(a.app_mem, eff.app_memory.base().map(|f| f * 100.0)),
-            a.app_mem_overrides.len(),
-        ),
-        (
-            // The same ceiling one level up. It was missing here, so
-            // this card said "App memory default (40%)" while the Alerts
-            // tab's armed list said 8.0 GB — the ceiling biting, unnamed.
-            "alert-app-mem-bytes",
-            fmt_bytes_setting(a.app_mem_bytes, eff.app_memory_bytes),
-            0,
-        ),
-        (
-            "alert-disk",
-            fmt_pct_setting(a.disk, eff.disk.base().map(|f| f64::from(f) * 100.0)),
-            a.disk_overrides.len(),
-        ),
-        (
-            // The disk rule's second line (zstats 0.7.2): a volume that
-            // keeps filling is reported again, critical, once its free
-            // space is under the lower of this and half the room the
-            // capacity line leaves. Under capacity because it refines it
-            // and dies with it — `alert-disk` 0 turns both off.
-            "alert-disk-free",
-            disk_free_setting(a.disk_free, eff.disk_free_bytes, eff.disk.base().is_some()),
-            0,
-        ),
-        (
-            "alert-pressure",
-            pressure_setting(a.pressure, eff.pressure),
-            0,
-        ),
-        (
-            "alert-cooldown",
-            match a.cooldown {
-                Some(d) => Setting::set(format::humanize(d)),
-                None => Setting::unset(format::humanize(eff.cooldown)),
-            },
-            0,
-        ),
-    ];
-
+    let rows = settingspage::threshold_rows(file);
     widgets::list_shell()
         .child(widgets::list_header(
             titled(
@@ -2084,9 +1991,15 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
         ))
         .children({
             let total = rows.len();
-            rows.into_iter()
-                .enumerate()
-                .map(move |(i, (k, v, overrides))| {
+            rows.into_iter().enumerate().map(
+                move |(
+                    i,
+                    settingspage::ThresholdRow {
+                        key: k,
+                        setting: v,
+                        overrides,
+                    },
+                )| {
                     v_flex()
                         .px(px(13.))
                         .py(px(7.))
@@ -2105,7 +2018,7 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                                             div()
                                                 .text_size(px(11.))
                                                 .text_color(theme::ink())
-                                                .child(threshold_label(k)),
+                                                .child(settingspage::threshold_label(k)),
                                         )
                                         // The key, for whoever types it
                                         // into config.toml or `zstats
@@ -2113,7 +2026,7 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                                         // would go looking for it.
                                         .child(widgets::info_icon(
                                             ("cfg-th-key", i),
-                                            t!("config.th_key_tip", key = k).to_string(),
+                                            settingspage::threshold_key_tip(k),
                                         )),
                                 )
                                 .child(
@@ -2130,10 +2043,7 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                                                     .text_size(px(8.5))
                                                     .font_weight(gpui::FontWeight::MEDIUM)
                                                     .text_color(theme::accent_light())
-                                                    .child(
-                                                        t!("config.override", count = overrides)
-                                                            .to_string(),
-                                                    ),
+                                                    .child(settingspage::override_count(overrides)),
                                             )
                                         })
                                         .child(
@@ -2146,7 +2056,8 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
                                 ),
                         )
                         .child(div().mt(px(6.)).child(threshold_chips(k, &v.lit)))
-                })
+                },
+            )
         })
         .into_any_element()
 }
@@ -2167,36 +2078,9 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
 /// Sorted by name inside each group, which is `BTreeMap`'s own order —
 /// stable across renders, so a row does not move under the pointer
 /// between the read and the click.
-/// Every override in the file, flattened to (rule key, subject, value)
-/// and ordered by rule then name. Pure so the flattening — five maps,
-/// two numeric widths, one row shape — can be tested without a config
-/// file or a frame.
-fn override_rows(a: &zstats::settings::AlertsConfig) -> Vec<(&'static str, String, f64)> {
-    // Percent for every one of them — zstats parses `name=30` into
-    // these maps as 30, and `0` is that subject's "never alert". Two
-    // widths upstream (f32 for the CPU-ish rules, f64 for the memory
-    // ones); both widen to f64 here rather than the row carrying which.
-    let wide = |m: &BTreeMap<String, f32>| -> Vec<(String, f64)> {
-        m.iter().map(|(n, v)| (n.clone(), f64::from(*v))).collect()
-    };
-    let exact = |m: &BTreeMap<String, f64>| -> Vec<(String, f64)> {
-        m.iter().map(|(n, v)| (n.clone(), *v)).collect()
-    };
-    [
-        ("alert-cpu", wide(&a.cpu_overrides)),
-        ("alert-mem", exact(&a.mem_overrides)),
-        ("alert-app-cpu", wide(&a.app_cpu_overrides)),
-        ("alert-app-mem", exact(&a.app_mem_overrides)),
-        ("alert-disk", wide(&a.disk_overrides)),
-    ]
-    .into_iter()
-    .flat_map(|(key, entries)| entries.into_iter().map(move |(name, v)| (key, name, v)))
-    .collect()
-}
-
 fn overrides_card(state: &ZStatsAppState) -> Option<AnyElement> {
     let file = state.settings()?;
-    let rows = override_rows(&file.alerts);
+    let rows = settingspage::override_rows(&file.alerts);
     // Nothing set is not an empty state worth a card: the thresholds
     // above already say every rule is on its base value.
     if rows.is_empty() {
@@ -2211,9 +2095,7 @@ fn overrides_card(state: &ZStatsAppState) -> Option<AnyElement> {
                     i18n::tr("config.overrides"),
                     i18n::tr("config.overrides_note"),
                 ),
-                Some(widgets::note(
-                    t!("config.override", count = total).to_string(),
-                )),
+                Some(widgets::note(settingspage::override_count(total))),
             ))
             .children(
                 rows.into_iter()
@@ -2282,11 +2164,7 @@ fn override_row(i: usize, total: usize, key: &'static str, name: String, value: 
                         .text_color(theme::text())
                         // `0` is not "no value" — it is this subject
                         // opting out of the rule, and reads as such.
-                        .child(if value == 0.0 {
-                            i18n::tr("alerts.off")
-                        } else {
-                            format!("{value:.0}%")
-                        }),
+                        .child(settingspage::override_value(value)),
                 )
                 .child(
                     div()
@@ -2320,75 +2198,7 @@ fn override_row(i: usize, total: usize, key: &'static str, name: String, value: 
 }
 
 fn threshold_chips(key: &'static str, current: &str) -> AnyElement {
-    let off = i18n::tr("alerts.off");
-    let chips = match key {
-        "alert-cpu" => vec![
-            ("20%".into(), "20"),
-            ("30%".into(), "30"),
-            ("50%".into(), "50"),
-            ("80%".into(), "80"),
-            (off, "0"),
-        ],
-        "alert-mem" => vec![
-            ("15%".into(), "15"),
-            ("25%".into(), "25"),
-            ("40%".into(), "40"),
-            ("60%".into(), "60"),
-            (off, "0"),
-        ],
-        // `g` = GiB in zstats' size parser; the decimal `gb` would store
-        // values the "4 GB" display form (GiB-multiples) can't round-trip.
-        "alert-mem-bytes" => vec![
-            ("2 GB".into(), "2g"),
-            ("4 GB".into(), "4g"),
-            ("8 GB".into(), "8g"),
-            (off, "0"),
-        ],
-        "alert-app-cpu" => vec![
-            ("200%".into(), "200"),
-            ("400%".into(), "400"),
-            ("800%".into(), "800"),
-            (off, "0"),
-        ],
-        "alert-app-mem" => vec![
-            ("30%".into(), "30"),
-            ("40%".into(), "40"),
-            ("60%".into(), "60"),
-            (off, "0"),
-        ],
-        "alert-app-mem-bytes" => vec![
-            ("4 GB".into(), "4g"),
-            ("8 GB".into(), "8g"),
-            ("16 GB".into(), "16g"),
-            (off, "0"),
-        ],
-        "alert-disk" => vec![
-            ("80%".into(), "80"),
-            ("90%".into(), "90"),
-            ("95%".into(), "95"),
-            (off, "0"),
-        ],
-        // 0 is "no floor", not "off": the half of what the capacity line
-        // leaves still makes a critical line.
-        "alert-disk-free" => vec![
-            ("5 GB".into(), "5g"),
-            ("10 GB".into(), "10g"),
-            ("20 GB".into(), "20g"),
-            (i18n::tr("config.th_disk_free_none"), "0"),
-        ],
-        "alert-pressure" => vec![
-            (i18n::tr("alerts.warning"), "warning"),
-            (i18n::tr("alerts.critical"), "critical"),
-            (i18n::tr("alerts.off"), "off"),
-        ],
-        "alert-cooldown" => vec![
-            ("5m".into(), "5m"),
-            ("10m".into(), "10m"),
-            ("30m".into(), "30m"),
-        ],
-        _ => Vec::new(),
-    };
-    setting_chips(key, key, current, chips)
+    setting_chips(key, key, current, settingspage::threshold_choices(key))
 }
 
 fn setting_chips(
@@ -2423,100 +2233,6 @@ fn setting_chips(
         .into_any_element()
 }
 
-/// One rule's value two ways: as its row prints it — the file's own, or
-/// the default labelled as such — and as the chip label that value
-/// reads as. The chips matched the printed form, so a rule nobody had
-/// touched read "default (30%)" over five unlit chips: the one card
-/// where every rule is at its default was the one that never said which
-/// chip that is.
-struct Setting {
-    shown: String,
-    lit: String,
-}
-
-impl Setting {
-    fn set(value: String) -> Self {
-        Self {
-            shown: value.clone(),
-            lit: value,
-        }
-    }
-
-    fn unset(effective: String) -> Self {
-        Self {
-            shown: default_at(effective.clone()),
-            lit: effective,
-        }
-    }
-}
-
-/// The file's value when set; otherwise the effective default, labeled as
-/// such, so an untouched key still tells the user what the engine runs.
-fn fmt_pct_setting<T: Into<f64> + Copy>(file: Option<T>, effective_pct: Option<f64>) -> Setting {
-    match file {
-        None => Setting::unset(match effective_pct {
-            Some(v) => format!("{v:.0}%"),
-            None => i18n::tr("alerts.off"),
-        }),
-        Some(v) if v.into() == 0.0 => Setting::set(i18n::tr("alerts.off")),
-        Some(v) => Setting::set(format!("{:.0}%", v.into())),
-    }
-}
-
-/// The memory rule's absolute ceiling. Values are whole GiB in practice
-/// (the chips only offer those), so the clean "4 GB" form applies; a
-/// hand-edited odd value falls back to the byte formatter.
-fn fmt_bytes_setting(file: Option<u64>, effective: Option<u64>) -> Setting {
-    const GIB: u64 = 1 << 30;
-    let clean = |v: u64| {
-        if v.is_multiple_of(GIB) {
-            format!("{} GB", v / GIB)
-        } else {
-            format::memory(v)
-        }
-    };
-    match file {
-        None => Setting::unset(match effective {
-            Some(v) => clean(v),
-            None => i18n::tr("alerts.off"),
-        }),
-        Some(0) => Setting::set(i18n::tr("alerts.off")),
-        Some(v) => Setting::set(clean(v)),
-    }
-}
-
-/// [`fmt_bytes_setting`] for `alert-disk-free`, whose 0 means something
-/// else: it removes the absolute floor and leaves the critical line at
-/// half the room the capacity line leaves, where every other byte key's
-/// 0 turns its rule off. Off only when the disk rule itself is, which
-/// takes this line with it.
-fn disk_free_setting(file: Option<u64>, effective: Option<u64>, rule_on: bool) -> Setting {
-    match file {
-        _ if !rule_on => Setting::set(i18n::tr("alerts.off")),
-        Some(0) => Setting::set(i18n::tr("config.th_disk_free_none")),
-        _ => fmt_bytes_setting(file, effective),
-    }
-}
-
-/// Same for the pressure tri-state. `effective` uses zstats' encoding:
-/// 2 = warning, 4 = critical, `None` = rule off.
-fn pressure_setting(file: Option<PressureAlert>, effective: Option<u32>) -> Setting {
-    match file {
-        Some(PressureAlert::Off) => Setting::set(i18n::tr("alerts.off")),
-        Some(PressureAlert::Warning) => Setting::set(i18n::tr("alerts.warning")),
-        Some(PressureAlert::Critical) => Setting::set(i18n::tr("alerts.critical")),
-        None => Setting::unset(match effective {
-            Some(level) if level >= 4 => i18n::tr("alerts.critical"),
-            Some(_) => i18n::tr("alerts.warning"),
-            None => i18n::tr("alerts.off"),
-        }),
-    }
-}
-
-fn default_at(value: String) -> String {
-    t!("config.default_at", value = value).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2531,41 +2247,5 @@ mod tests {
         assert_eq!(download_fraction(3_300_000, 6_600_000), Some(0.5));
         assert_eq!(download_fraction(6_600_000, 6_600_000), Some(1.0));
         assert_eq!(download_fraction(1_000, 0), None, "no length, no bar");
-    }
-
-    /// Five maps, two numeric widths, one row shape — and the order is
-    /// what the reader scans: rule first (200% means one thing for an
-    /// app tree and something absurd for a process), name inside it.
-    #[test]
-    fn override_rows_flatten_every_map_in_a_readable_order() {
-        let mut a = zstats::settings::AlertsConfig::default();
-        a.cpu_overrides.insert("node".into(), 70.0);
-        a.cpu_overrides.insert("Google Chrome".into(), 45.0);
-        a.mem_overrides.insert("Xcode".into(), 25.0);
-        a.app_cpu_overrides.insert("zed".into(), 600.0);
-        a.app_mem_overrides.insert("Slack".into(), 12.0);
-        a.disk_overrides.insert("/".into(), 95.0);
-        // A base value is not an override and must not appear.
-        a.cpu = Some(40.0);
-
-        let rows = override_rows(&a);
-        assert_eq!(
-            rows.iter()
-                .map(|(k, n, v)| (*k, n.as_str(), *v))
-                .collect::<Vec<_>>(),
-            vec![
-                // BTreeMap order inside each rule: "Google Chrome"
-                // before "node", and stable across renders so a row
-                // cannot move under the pointer between read and click.
-                ("alert-cpu", "Google Chrome", 45.0),
-                ("alert-cpu", "node", 70.0),
-                ("alert-mem", "Xcode", 25.0),
-                ("alert-app-cpu", "zed", 600.0),
-                ("alert-app-mem", "Slack", 12.0),
-                ("alert-disk", "/", 95.0),
-            ]
-        );
-        // Nothing set is no card at all, not an empty one.
-        assert!(override_rows(&zstats::settings::AlertsConfig::default()).is_empty());
     }
 }

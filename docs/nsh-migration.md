@@ -135,6 +135,14 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 - 更新 `CLAUDE.md`、`README.md` / `README-zh.md`、`docs/design.md`、`.claude/skills/ui-polish`。
 - 删掉 gpui 前端、`patches/gpui-pre-linux`、`dock.rs` 和其他只为 gpui 存在的绕路代码。
 
+## 待你判断
+
+迁移中遇到、需要你拍板但不挡迁移的事，记在这里，迁移照原样（与 gpui 版一致）继续。
+
+1. **NSH 上游 PR（canvas 的 `drawsAsynchronously`）。** 分支 `macos-canvas-draws-asynchronously` 在你 fork 的 `~/github/nsh` 里，nsh-compat 的配套改动在 `target/nsh-compat/nsh-compat` 的 `props-draws-asynchronously` 分支；推送、开 PR 由你来。合并发版后，`host::draw_canvases_in_place` 的遍历可以换成在 canvas 上设这个属性，Network 流量行“按位置复用、多余的位置折叠”的写法（4g）也可以退回按程序复用。
+2. **gpui 版 History 的行区域多减了一个过滤行。** `views/history.rs` 借用 Processes 的 `rows_height`，Processes 的过滤框开着时 History 的行区域也会矮 34pt（History 页没有过滤框）。NSH 版照样复刻了（`lists::rows_budget`）。要不要两边都改成不减？
+3. **英文下设置窗口“主题”那行太挤。** 五个 chip 贴到 ⓘ 旁边（gpui 版本来就这样）。要不要改排版（比如 chip 换到标签下面一行，像“不透明度”那样）？
+
 ## 进度
 
 | 阶段 | 状态 |
