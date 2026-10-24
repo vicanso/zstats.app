@@ -315,6 +315,76 @@ pub fn expand_row(label: String, value: impl Fn() -> String + 'static, last: boo
     }
 }
 
+/// `widgets::KV_TIP_FROM`: a value this long may be cut short, and earns
+/// the whole of it on hover.
+const KV_TIP_FROM: usize = 12;
+
+/// One "label ……… value" cell of a two-up grid (`widgets::kv_row`): the
+/// label gives way, the value keeps at most a little over half the cell
+/// and is cut short past that, whole on hover; a hairline under it unless
+/// `last`.
+fn kv_cell(label: String, value: impl Fn() -> String + Clone + 'static, last: bool) -> View {
+    let long = {
+        let value = value.clone();
+        move || value().chars().count() >= KV_TIP_FROM
+    };
+    let tip = value.clone();
+    let row = view()
+        .flex_row()
+        .justify_between()
+        .gap(px(8.))
+        .py(px(5.))
+        .child(
+            text(label)
+                .flex_1()
+                .min_w(px(0.))
+                .number_of_lines(1u32)
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text_muted)),
+        )
+        .child(
+            view()
+                .flex_none()
+                .max_w(relative(0.55))
+                .min_w(px(0.))
+                .tooltip(widgets::live_tooltip(tip).disabled(move || !long()))
+                .child(
+                    text(value)
+                        .number_of_lines(1u32)
+                        .tabular_nums()
+                        .text_size(px(11.))
+                        .line_height(widgets::line(11.))
+                        .text_color(theme::color(palette::text)),
+                ),
+        );
+    if last {
+        row
+    } else {
+        row.border_b(px(1.))
+            .border_color(theme::color(palette::border_subtle))
+    }
+}
+
+/// Key/value pairs two-up, the first half down the left column
+/// (`widgets::kv_pairs`); `value(i)` reads the i-th pair's figure.
+pub fn kv_columns(labels: Vec<String>, value: impl Fn(usize) -> String + Copy + 'static) -> View {
+    let mid = labels.len().div_ceil(2);
+    let column = |range: std::ops::Range<usize>, labels: &[String]| {
+        let end = range.end;
+        let cells: Vec<View> = range
+            .map(|i| kv_cell(labels[i].clone(), move || value(i), i + 1 == end))
+            .collect();
+        view().flex_1().min_w(px(0.)).children(cells)
+    };
+    view()
+        .flex_row()
+        .gap(px(14.))
+        .mt(px(10.))
+        .child(column(0..mid, &labels))
+        .child(column(mid..labels.len(), &labels))
+}
+
 /// One alert bar: its label, and the layer in a word with its ⓘ while a
 /// per-name entry decided it; the figure at the right
 /// (`processes::bar_row`).

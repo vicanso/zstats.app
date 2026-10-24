@@ -22,6 +22,7 @@ mod overview;
 mod panel;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe;
+mod processes;
 mod root;
 mod settings;
 mod storage;
