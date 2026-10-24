@@ -11,9 +11,9 @@
 //! open (`panel_visit`).
 
 use crate::assets::CustomIconName;
-use crate::color::{Rgba, rgba};
+use crate::color::Rgba;
 use crate::nsh::root::{self, AuxWindow, CARD_GAP, GUTTER, HostAction, Live};
-use crate::nsh::widgets;
+use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::state::{Tab, ZStatsAppState};
 use crate::{awake, format, i18n, palette, prefs};
@@ -32,9 +32,6 @@ const CELL: f32 = 30.;
 
 /// `views::FOOTER_HEIGHT`.
 const FOOTER_HEIGHT: f32 = 44.;
-
-/// Nothing painted.
-const CLEAR: Rgba = rgba(0x00000000);
 
 fn tab_icon(tab: Tab) -> CustomIconName {
     match tab {

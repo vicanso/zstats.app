@@ -148,6 +148,7 @@ pub fn page(live: Live) -> AnyElement {
                         APP_NAME,
                         Some(widgets::menu_trigger(
                             move || format!("↓ {}", sort.get()),
+                            || "Orders the rows.".to_owned(),
                             vec![sort_choice("CPU"), sort_choice("Memory"), sort_choice("Name")],
                         )),
                     )),

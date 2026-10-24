@@ -128,6 +128,11 @@ pub enum CustomIconName {
     /// The quiet ⓘ beside a card's title (`nsh::widgets::info_icon`);
     /// gpui's `IconName::Info`.
     Info,
+    /// The NSH lists' name filter (`nsh/apps.rs`): lucide `search`, the
+    /// header's control, and `x`, the field's clear — gpui's
+    /// `IconName::Search` and gpui-kit's cleanable input.
+    Search,
+    Close,
 }
 
 impl CustomIconName {
@@ -154,6 +159,8 @@ impl CustomIconName {
             CustomIconName::Bell => "icons/bell.svg",
             CustomIconName::Settings => "icons/settings-2.svg",
             CustomIconName::Info => "icons/info.svg",
+            CustomIconName::Search => "icons/search.svg",
+            CustomIconName::Close => "icons/x.svg",
         }
     }
 }
@@ -200,6 +207,8 @@ mod tests {
             CustomIconName::Bell,
             CustomIconName::Settings,
             CustomIconName::Info,
+            CustomIconName::Search,
+            CustomIconName::Close,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

@@ -182,7 +182,7 @@ fn lit_value(matched: Option<Option<f64>>, base: Option<Option<f64>>) -> Option<
 /// word and ⓘ beside the label — putting "override" in the figure
 /// itself is what used to truncate "CPU alert" to "CPU…" at 320px.
 /// `yours` picks the word: the user's own entry, or the alert table's.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BarDisplay {
     pub text: String,
     pub overridden: bool,

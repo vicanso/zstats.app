@@ -15,7 +15,7 @@
 //! compositor's on a Hyprland desktop).
 
 use crate::nsh::root::{self, CARD_GAP, GUTTER, HostAction, Live};
-use crate::nsh::{chrome, gallery, overview, store, theme, widgets};
+use crate::nsh::{apps, chrome, gallery, overview, store, theme, widgets};
 use crate::palette;
 use crate::prefs;
 use crate::state::{Tab, ZStatsAppState};
@@ -38,26 +38,33 @@ pub fn Panel() -> impl IntoElement {
         store::changed();
     });
     let tab = live.memo(ZStatsAppState::tab);
+    // The page's height on screen, for the lists that end on a whole row
+    // at the gap above the footer.
+    let body = signal(0.0_f32);
     view()
         .size_full()
         .bg(theme::color(palette::panel_ground))
         .child(chrome::tab_strip(live, tab))
         .child(
-            scroll().flex_1().child(
-                view()
-                    .px(px(GUTTER))
-                    .pb(px(CARD_GAP))
-                    .child(dynamic(move || page(tab.get(), live))),
-            ),
+            scroll()
+                .flex_1()
+                .on_layout(move |b: &Bounds<Points>| body.set(b.size.height.0))
+                .child(
+                    view()
+                        .px(px(GUTTER))
+                        .pb(px(CARD_GAP))
+                        .child(dynamic(move || page(tab.get(), live, body.read_only()))),
+                ),
         )
         .child(chrome::footer(live))
 }
 
-/// The page of `tab`.
-fn page(tab: Tab, live: Live) -> AnyElement {
+/// The page of `tab`; `body` is the height it has on screen.
+fn page(tab: Tab, live: Live, body: ReadSignal<f32>) -> AnyElement {
     match tab {
         Tab::Overview if gallery_asked() => gallery::page(live),
         Tab::Overview => overview::page(live),
+        Tab::Apps => apps::page(live, body),
         other => not_yet(other),
     }
 }

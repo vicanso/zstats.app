@@ -19,10 +19,10 @@
 
 use crate::appicon::{self, Icon};
 use crate::assets::{self, CustomIconName};
-use crate::color::Rgba;
+use crate::color::{Rgba, rgba};
 use crate::nsh::root::CARD_PAD;
 use crate::nsh::theme;
-use crate::{i18n, palette};
+use crate::{format, i18n, palette};
 use nsh_base::{TooltipElement, alert_dialog, menu, menu_item, tooltip};
 use nsh_core::ui::prelude::*;
 use std::collections::HashMap;
@@ -267,6 +267,134 @@ pub fn card_header(title: impl Into<SharedString>, right: Option<AnyElement>) ->
 /// `widgets::HEADLINE` and `HEADLINE_UNIT`.
 const HEADLINE: f32 = 20.;
 const HEADLINE_UNIT: f32 = 13.;
+
+/// Nothing painted: a fill that comes and goes with a state.
+pub const CLEAR: Rgba = rgba(0x00000000);
+
+/// A [`list_shell`]'s title row: padded, no divider (rows carry the
+/// hairlines). The title shrinks and the right slot does not
+/// (`widgets::list_header`).
+pub fn list_header(title: AnyElement, right: Option<AnyElement>) -> View {
+    let row = view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .px(px(CARD_PAD))
+        .pt(px(11.))
+        .pb(px(9.))
+        .child(view().flex_1().min_w(px(0.)).child(title));
+    match right {
+        Some(right) => row.child(view().flex_none().child(right)),
+        None => row,
+    }
+}
+
+/// A list header's title: 12px, the first ink, cut short before its
+/// neighbours are.
+pub fn list_title(words: impl IntoReactive<SharedString>) -> Text {
+    text(words)
+        .number_of_lines(1u32)
+        .text_size(px(12.))
+        .line_height(line(12.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::color(palette::text))
+}
+
+/// A small caption at the foot of a card, or under a list's header
+/// (`widgets::note`).
+pub fn note(words: impl IntoReactive<SharedString>) -> Text {
+    text(words)
+        .text_size(px(10.))
+        .line_height(line(10.))
+        .text_color(theme::color(palette::text_dim))
+}
+
+/// A small filled tag on a row: "This app", "Daily disk check"
+/// (`processes::pill`), in the accent's wash when `accent`.
+pub fn pill(words: impl IntoReactive<SharedString>, accent: bool) -> View {
+    view().flex_none().child(
+        text(words)
+            .rounded(px(3.))
+            .px(px(4.))
+            .bg(theme::color(move || {
+                if accent {
+                    palette::accent_wash(14)
+                } else {
+                    palette::inset()
+                }
+            }))
+            .text_size(px(9.))
+            .line_height(line(9.))
+            .text_color(theme::color(move || {
+                if accent {
+                    palette::accent_light()
+                } else {
+                    palette::tiny_label(palette::text_muted())
+                }
+            })),
+    )
+}
+
+/// `widgets::NAME_TIP_FROM`: a name this long is likely cut short, and
+/// earns the whole of it on hover.
+const NAME_TIP_FROM: usize = 16;
+
+/// A process or app name that may be cut short, shown as
+/// `format::display_name` gives it, with a muted tail that survives the
+/// cut — `Zed · cargo` keeps `· cargo`, the news (`truncating_name` and
+/// `truncating_name_tailed`); the whole name on hover when it is likely
+/// cut. Bound to what `name` and `tail` read.
+pub fn name_tailed(
+    name: impl Fn() -> String + Clone + 'static,
+    tail: impl Fn() -> Option<String> + Clone + 'static,
+    size: f32,
+    weight: FontWeight,
+) -> View {
+    let full = {
+        let (name, tail) = (name.clone(), tail.clone());
+        move || match tail() {
+            Some(tail) => format!("{} · {tail}", name()),
+            None => name(),
+        }
+    };
+    let long = {
+        let (name, full) = (name.clone(), full.clone());
+        move || {
+            let name = name();
+            format::display_name(&name).len() != name.len()
+                || full().chars().count() >= NAME_TIP_FROM
+        }
+    };
+    let has_tail = {
+        let tail = tail.clone();
+        move || tail().is_some()
+    };
+    view()
+        .flex_row()
+        .flex_1()
+        .min_w(px(0.))
+        .items_baseline()
+        .gap(px(4.))
+        .tooltip(live_tooltip(full).disabled(move || !long()))
+        .child(
+            text(move || format::display_name(&name()).to_owned())
+                .flex_shrink(1.)
+                .number_of_lines(1u32)
+                .text_size(px(size))
+                .line_height(line(size))
+                .font_weight(weight)
+                .text_color(theme::color(palette::text)),
+        )
+        .child(when(has_tail, move || {
+            let tail = tail.clone();
+            text(move || format!("· {}", tail().unwrap_or_default()))
+                .flex_none()
+                .text_size(px(size))
+                .line_height(line(size))
+                .text_color(theme::color(palette::text_muted))
+        }))
+}
 
 /// A headline figure with its sign against it: "42" and "%".
 pub fn big_number(
@@ -590,11 +718,21 @@ pub struct Choice {
 
 /// A control with several states opens a menu rather than cycling on a
 /// click (CLAUDE.md, "A control says what it is"): `label` worn as a
-/// chip — the outline and a chevron after it — and `choices` in the menu
-/// it opens, the one in force checked.
-pub fn menu_trigger(label: impl IntoReactive<SharedString>, choices: Vec<Choice>) -> AnyElement {
+/// chip — the outline of the "All" chip beside it and a chevron after it,
+/// at its size (`MenuTrigger::chip`) — `tip` on hover while the menu is
+/// shut, and `choices` in the menu it opens, the one in force checked.
+pub fn menu_trigger(
+    label: impl IntoReactive<SharedString>,
+    tip: impl Fn() -> String + 'static,
+    choices: Vec<Choice>,
+) -> AnyElement {
+    // No tooltip under the open menu, and the hover's fill kept while it
+    // is open — as on the cup.
+    let open = signal(false);
     let mut popup = menu()
         .offset(px(4.))
+        .on_open(move || open.set(true))
+        .on_close(move || open.set(false))
         .popup_style(|s| {
             s.min_w(px(140.))
                 .p(px(4.))
@@ -610,18 +748,37 @@ pub fn menu_trigger(label: impl IntoReactive<SharedString>, choices: Vec<Choice>
                 .flex_row()
                 .items_center()
                 .gap(px(3.))
-                .h(px(20.))
-                .px(px(8.))
+                .px(px(7.))
+                .py(px(1.))
                 .rounded_full()
                 .border(px(1.))
-                .border_color(theme::color(palette::border_subtle))
+                .border_color(move || {
+                    theme::color(move || {
+                        if open.get() {
+                            palette::border()
+                        } else {
+                            palette::border_subtle()
+                        }
+                    })
+                })
+                .bg(move || {
+                    theme::color(move || {
+                        if open.get() {
+                            palette::surface_raised()
+                        } else {
+                            CLEAR
+                        }
+                    })
+                })
                 .hover(|s| {
                     s.bg(theme::color(palette::surface_raised))
                         .border_color(theme::color(palette::border))
                 })
+                .tooltip(live_tooltip(tip).disabled(move || open.get()))
                 .child(
                     text(label)
-                        .text_size(px(10.))
+                        .text_size(px(9.))
+                        .line_height(line(9.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::color(palette::text_muted)),
                 )
@@ -657,7 +814,7 @@ pub fn menu_trigger(label: impl IntoReactive<SharedString>, choices: Vec<Choice>
                 })),
         );
     }
-    popup.into_element()
+    view().flex_none().child(popup).into_element()
 }
 
 /// Ask before something that cannot be taken back, then run `on_ok` only
