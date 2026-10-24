@@ -36,6 +36,7 @@ mod assets;
 mod autostart;
 mod awake;
 mod cachepreset;
+mod chart;
 mod cleanhints;
 mod diskscan;
 mod diskwatch;
