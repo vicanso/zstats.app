@@ -21,6 +21,7 @@ mod settings;
 mod storage;
 mod store;
 mod theme;
+mod widgets;
 #[cfg(target_os = "macos")]
 mod windows;
 

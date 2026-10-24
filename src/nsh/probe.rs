@@ -105,8 +105,18 @@ fn run(line: &str) {
         ),
         "hide" => host::hide(h),
         "click" => {
+            // A click makes the panel key (its root takes the keyboard),
+            // and a key non-activating panel takes the keystrokes meant
+            // for the app in front — the person's, typing while this
+            // runs: a ⌘2 meant for their terminal once switched the
+            // panel's tab. Unless it was key already, it gives the
+            // keyboard back.
+            let was_key = h.panel.isKeyWindow();
             mouse(h, NSEventType::LeftMouseDown, num(0), num(1));
             mouse(h, NSEventType::LeftMouseUp, num(0), num(1));
+            if !was_key {
+                h.panel.resignKeyWindow();
+            }
         }
         "tray" => click_status_item(MainThreadMarker::from(&*h.panel)),
         "banner" => host::show_alerts(),

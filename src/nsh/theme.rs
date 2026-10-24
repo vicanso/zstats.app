@@ -46,9 +46,10 @@ pub fn follow(dark: bool) {
 }
 
 /// `token` in both halves of the pair on screen, for NSH to choose from.
-pub fn color(token: fn() -> Rgba) -> AdaptiveColor {
+/// A token that takes a value (`palette::choice_fill(on)`) is a closure.
+pub fn color(token: impl Fn() -> Rgba) -> AdaptiveColor {
     let half = |dark| -> Hsla {
-        let rgba: nsh_core::Rgba = palette::in_mode(dark, token).into();
+        let rgba: nsh_core::Rgba = palette::in_mode(dark, &token).into();
         rgba.into()
     };
     AdaptiveColor {

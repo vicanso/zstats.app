@@ -17,7 +17,7 @@
 //! gpui one does not repaint (`CollectorPace::is_visible`); showing it
 //! sends one more change (`host::mark_shown`).
 
-use crate::nsh::{store, theme};
+use crate::nsh::{store, theme, widgets};
 use crate::palette;
 use crate::state::ZStatsAppState;
 use nsh_base::button;
@@ -78,12 +78,17 @@ impl Live {
         Live(revision)
     }
 
-    /// A closure of `f` over the store, for a text to bind.
-    pub fn text(self, f: fn(&ZStatsAppState) -> String) -> impl Fn() -> String + 'static {
+    /// A closure of `f` over the store, for a text or a style to bind.
+    pub fn read<T: 'static>(self, f: fn(&ZStatsAppState) -> T) -> impl Fn() -> T + Clone + 'static {
         move || {
             self.0.get();
             store::read(f)
         }
+    }
+
+    /// [`Live::read`] for a text.
+    pub fn text(self, f: fn(&ZStatsAppState) -> String) -> impl Fn() -> String + Clone + 'static {
+        self.read(f)
     }
 }
 
@@ -92,13 +97,17 @@ pub const GUTTER: f32 = 12.;
 pub const CARD_PAD: f32 = 12.;
 
 /// Root `C`, in the appearance the theme preference asks for
-/// ([`theme::appearance`]). Every window's root is made here, so loading
-/// them again is how a change of theme reaches them.
+/// ([`theme::appearance`]) and with the bundled mono face. Every window's
+/// root is made here, so loading them again is how a change of theme
+/// reaches them.
 pub fn make<C: Component>() -> nsh_core::ui::Root
 where
     C::Props: Default,
 {
-    nsh_core::ui::Root::of::<C>().appearance(theme::appearance())
+    widgets::fonts()
+        .into_iter()
+        .fold(nsh_core::ui::Root::of::<C>(), |root, font| root.font(font))
+        .appearance(theme::appearance())
 }
 
 /// A text button in the second ink with the chip's fill under the

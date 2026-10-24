@@ -78,7 +78,7 @@ impl AssetSource for Assets {
 /// of silently leaving a hole in the tab strip. gpui's `Icon::path()`
 /// resolves through `AssetSource` at paint time and cannot be checked any
 /// earlier.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CustomIconName {
     AppWindow,
     Cpu,
@@ -110,6 +110,12 @@ pub enum CustomIconName {
     /// The same toggle while the panel is long: lucide
     /// `chevrons-down-up`, the two chevrons closing.
     Collapse,
+    /// The NSH front end's disclosure and menu chevrons (`nsh/widgets.rs`),
+    /// lucide's, which the gpui front end takes from gpui-kit's own set
+    /// (`IconName::ChevronDown`, `ChevronRight`). NSH has no icon set; it
+    /// draws the glyphs this file names.
+    ChevronDown,
+    ChevronRight,
 }
 
 impl CustomIconName {
@@ -129,6 +135,8 @@ impl CustomIconName {
             CustomIconName::Trash => "icons/trash.svg",
             CustomIconName::Expand => "icons/chevrons-up-down.svg",
             CustomIconName::Collapse => "icons/chevrons-down-up.svg",
+            CustomIconName::ChevronDown => "icons/chevron-down.svg",
+            CustomIconName::ChevronRight => "icons/chevron-right.svg",
         }
     }
 }
@@ -168,6 +176,8 @@ mod tests {
             CustomIconName::Trash,
             CustomIconName::Expand,
             CustomIconName::Collapse,
+            CustomIconName::ChevronDown,
+            CustomIconName::ChevronRight,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

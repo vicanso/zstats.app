@@ -283,6 +283,27 @@ pub fn ground() -> Rgba {
     tone(0x0a0a0aff, 0xffffffff, 0x1c1c1eff, 0xf3eee6ff, |t| t.ground)
 }
 
+/// A menu's or a tooltip's fill: opaque, since it floats over whatever
+/// is under it, where a card's lift would let the text beneath show
+/// through. gpui-kit's `popover.background` in each theme file — the
+/// default theme's `neutral-950` / white, `GOLDEN_JSON`'s card colour,
+/// the Omarchy palette's surface.
+#[inline]
+pub fn popover() -> Rgba {
+    tone(0x0a0a0aff, 0xffffffff, 0x252528ff, 0xfbf8f3ff, |t| {
+        t.surface
+    })
+}
+
+/// A menu item under the pointer, on [`popover`]: gpui-kit's
+/// `accent.background` — `neutral-800` / `neutral-100`, Golden's chip
+/// step (`#36363a` over `#252528`; the two had been equal, and a hovered
+/// item could not be seen), the Omarchy chip.
+#[inline]
+pub fn popover_hover() -> Rgba {
+    tone(0x262626ff, 0xf5f5f5ff, 0x36363aff, 0xe8dfd2ff, |t| t.chip)
+}
+
 /// Card / grouped fill. Dark: faint white lift over the glass. Light:
 /// nearly solid white, so cards sit on the grey panel the way Settings
 /// groups do.
@@ -693,11 +714,11 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// The NSH front end paints its ground from [`ground`], the gpui one
-    /// from the theme file; a Golden ground that drifted from the file
-    /// would be a seam between a window and the cards in it.
+    /// The NSH front end paints its ground and its menus from these, the
+    /// gpui one from the theme file; a Golden value that drifted from the
+    /// file would be a seam between the two front ends.
     #[test]
-    fn the_golden_ground_is_the_theme_files() {
+    fn the_golden_ground_and_menus_are_the_theme_files() {
         let file: serde_json::Value =
             serde_json::from_str(include_str!("../themes/golden.json")).expect("golden.json");
         for theme in file["themes"].as_array().expect("themes") {
@@ -706,9 +727,22 @@ mod tests {
             } else {
                 Scheme::GoldenLight
             };
-            let hex = theme["colors"]["background"].as_str().expect("background");
-            let want = rgb(u32::from_str_radix(&hex[1..], 16).expect("hex"));
-            assert_eq!(pinned_to(scheme, ground), want, "{}", theme["name"]);
+            let color = |key: &str| {
+                let hex = theme["colors"][key].as_str().expect(key);
+                rgb(u32::from_str_radix(&hex[1..], 16).expect("hex"))
+            };
+            let name = &theme["name"];
+            assert_eq!(pinned_to(scheme, ground), color("background"), "{name}");
+            assert_eq!(
+                pinned_to(scheme, popover),
+                color("popover.background"),
+                "{name}"
+            );
+            assert_eq!(
+                pinned_to(scheme, popover_hover),
+                color("accent.background"),
+                "{name}"
+            );
         }
     }
 
