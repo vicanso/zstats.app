@@ -13,6 +13,7 @@ use crate::i18n;
 use crate::notice::{self, Notice};
 use crate::placement;
 use crate::prefs;
+use crate::pressure;
 use crate::series::{self, Point};
 use crate::state::{MemoryCreep, Tab, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
@@ -47,30 +48,6 @@ const TOP_N_SHORT: usize = 5;
 /// One row of the apps card. Also the unit a taller panel buys rows in
 /// ([`apps_rows`]).
 const APP_ROW: f32 = 34.;
-
-/// Per-core bar turns accent past this.
-const CORE_HOT: f32 = 85.0;
-/// Swap past this share of **physical memory** is worth colour — display
-/// only. The kernel can still report pressure Normal while a lot of the
-/// working set has been pushed to disk; that is the signal the badge
-/// will not give, and it is what this is for.
-///
-/// Measured against RAM, and not against swap's own allocation, because
-/// macOS sizes swap on demand: `/System/Volumes/VM/` holds uniform 1 GB
-/// files and the kernel adds one whenever free swap drops to roughly a
-/// file's worth. Steady state is therefore `used/total ≈ (N-1)/N` for N
-/// files, which *rises toward 100% as the machine swaps more* — 80% at
-/// five files, 86% at seven, 93% at fourteen. A share-of-allocation bar
-/// is consequently permanently crossed on any Mac that ever grew past
-/// about five swapfiles, and was observed painting red on a machine
-/// sitting at 55% memory free. Against RAM the same reading is 24%, and
-/// the number means the same thing on a 16 GB laptop as on a 128 GB
-/// desktop.
-///
-/// 50 is a judgement, not a derivation: half the physical memory's worth
-/// of pages living on disk. Apple Silicon swaps readily well below that
-/// without anything being wrong.
-const SWAP_HOT: f32 = 50.0;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(snapshot) = state.latest().map(|t| &t.snapshot) else {
@@ -129,11 +106,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     }
     cards
 }
-
-/// The kernel's memory-pressure level at critical (1 is normal, 2
-/// warning). The only tier that earns a word of its own, beside the
-/// memory row's name and in the long form's badge.
-const PRESSURE_CRITICAL: u32 = 4;
 
 /// The short form's first row, there only while there is something to
 /// say: the sentence, tinted by what it says — red when an alert is
@@ -475,7 +447,7 @@ fn facts(state: &ZStatsAppState, snapshot: &SystemSnapshot) -> AnyElement {
     .to_string();
     let critical = mem
         .pressure_level
-        .is_some_and(|level| level >= PRESSURE_CRITICAL);
+        .is_some_and(|level| level >= pressure::PRESSURE_CRITICAL);
     let memory_words = if critical {
         format!("{} · {available}", i18n::tr("overview.pressure_critical"))
     } else {
@@ -998,7 +970,7 @@ fn processor(
                 .pt(px(8.))
                 .gap(px(6.))
                 .children(levels.iter().map(|level| {
-                    let over = level.usage_percent > CORE_HOT;
+                    let over = level.usage_percent > hot::CORE_HOT;
                     h_flex()
                         .items_center()
                         .gap(px(8.))
@@ -1222,26 +1194,6 @@ fn mem_climb_tag(climbers: &[MemoryCreep], total_bytes: u64) -> Option<AnyElemen
     )
 }
 
-/// The kernel's available percent for the pressure badge — only beside a
-/// verdict. Without a level the badge reads `—` or "not measured", and a
-/// percentage hung on either would be a figure with nothing to explain.
-fn badge_available(level: Option<u32>, kernel_available: Option<u32>) -> Option<u32> {
-    level.and(kernel_available)
-}
-
-/// Compressor segments moved per second, as (out, in) — `None` while both
-/// are still, not yet measured (the first sample), or not measurable (off
-/// macOS). A settled machine gets no clause rather than a pair of zeros:
-/// zstats' own pressure line makes the same call, and it is what lets the
-/// memory card and the pressure alert's sentence grow only when there is
-/// something to read.
-pub(crate) fn swap_moving(ins: Option<u64>, outs: Option<u64>) -> Option<(u64, u64)> {
-    match (outs, ins) {
-        (Some(outs), Some(ins)) if outs > 0 || ins > 0 => Some((outs, ins)),
-        _ => None,
-    }
-}
-
 /// One line under Swap / Compressed while the compressor is swapping:
 /// `Swapping  out 120/s · in 40/s`. The badge says memory is tight; this
 /// says how hard macOS is working to stay there — a warning with nothing
@@ -1259,7 +1211,7 @@ pub(crate) fn swap_moving(ins: Option<u64>, outs: Option<u64>) -> Option<(u64, u
 /// in accent and is never compared to anything here.
 fn swap_activity_tag(mem: &MemorySnapshot) -> Option<AnyElement> {
     let thrashing = mem.swap_thrashing == Some(true);
-    let moving = swap_moving(mem.swap_ins_per_sec, mem.swap_outs_per_sec);
+    let moving = pressure::swap_moving(mem.swap_ins_per_sec, mem.swap_outs_per_sec);
     if !thrashing && moving.is_none() {
         return None;
     }
@@ -1315,38 +1267,7 @@ fn memory(
     alarm: bool,
     recent: Recent<'_>,
 ) -> AnyElement {
-    // The kernel's own verdict, not a number we derive: 1 normal, 2 warning,
-    // 4 critical. Absent has two readings and they are not the same
-    // sentence: this build cannot measure pressure at all, or it can and
-    // has nothing yet. zstats 0.5.2 answers the first through
-    // `capabilities`, so the panel stops inferring it from a `None` —
-    // on macOS the capability is true and every arm below reads exactly
-    // as it did.
-    let supported = caps.memory_pressure;
-    let (label, tip) = match mem.pressure_level {
-        Some(l) if l >= PRESSURE_CRITICAL => (
-            i18n::tr("overview.pressure_critical"),
-            i18n::tr("overview.pressure_tip_critical"),
-        ),
-        Some(l) if l >= 2 => (
-            i18n::tr("overview.pressure_warning"),
-            i18n::tr("overview.pressure_tip_warning"),
-        ),
-        Some(_) => (
-            i18n::tr("overview.pressure_normal"),
-            i18n::tr("overview.pressure_tip_normal"),
-        ),
-        None if !supported => (
-            i18n::tr("overview.pressure_none"),
-            i18n::tr("overview.pressure_tip_none"),
-        ),
-        // Measurable here, just not measured yet — the same `—` every
-        // other waiting figure shows, not a claim about the platform.
-        None => (
-            format::PLACEHOLDER.to_string(),
-            i18n::tr("overview.pressure_tip_waiting"),
-        ),
-    };
+    let (label, tip) = pressure::badge(mem, caps.memory_pressure);
     // The badge is red when an alert is behind memory — the verdict that
     // turns the menu bar and the short form's memory row — and never for
     // the kernel's level alone. It was red at "Warning", which is where
@@ -1367,20 +1288,6 @@ fn memory(
             Hsla::from(theme::card_line()),
         )
     };
-    // The figure the verdict is derived from (`kern.memorystatus_level`),
-    // printed in the badge beside the verdict — "Normal · 62% available" —
-    // not as a row next to Used, where a lower "available" would read as a
-    // contradiction rather than as the kernel's narrower definition. The
-    // word stays in the badge: a bare "62%" beside a memory card reads as
-    // used. The tooltip says why it differs from free GB. macOS only.
-    let (label, tip) = match badge_available(mem.pressure_level, mem.kernel_available_percent) {
-        Some(pct) => (
-            t!("overview.pressure_badge", level = label, pct = pct).to_string(),
-            format!("{tip} {}", t!("overview.pressure_tip_kernel", pct = pct)),
-        ),
-        None => (label, tip),
-    };
-
     let total = mem.total_bytes.max(1) as f32;
     let compressed = mem.compressed_bytes.unwrap_or(0).min(mem.used_bytes);
     let resident = mem.used_bytes.saturating_sub(compressed);
@@ -1401,17 +1308,7 @@ fn memory(
     // the bar both omit. Used and Free stay words: the slices they mark
     // are used − compressed and total − used, figures zstats does not
     // report and this app does not derive.
-    // Deliberately not `mem.swap_used_percent`: that field *is* swap
-    // against its own allocation, the ratio [`SWAP_HOT`] explains is
-    // unusable here. Dividing those two bytes locally would also have
-    // been a second copy of a figure zstats already reports, which
-    // CLAUDE.md forbids. This asks something zstats does not answer, and
-    // only ever to pick a colour.
-    //
-    // The `> 0` is not division safety — `total` is already floored at 1
-    // — but a guard against a collector reporting no memory at all, where
-    // that floor would turn any swap into a huge percentage and paint red.
-    let swap_hot = mem.total_bytes > 0 && (mem.swap_used_bytes as f32 / total) * 100.0 >= SWAP_HOT;
+    let swap_hot = hot::swap_hot(mem);
     let rows = vec![(
         i18n::tr("overview.swap"),
         format!(
@@ -2241,15 +2138,6 @@ mod tests {
         assert_eq!(app_pct_ink(40.0, true), theme::text_for(true));
     }
 
-    #[test]
-    fn the_kernel_percent_rides_the_badge_only_beside_a_verdict() {
-        assert_eq!(badge_available(Some(1), Some(62)), Some(62));
-        assert_eq!(badge_available(Some(4), Some(8)), Some(8));
-        // Waiting for a first sample, or a platform with neither figure
-        assert_eq!(badge_available(None, Some(62)), None);
-        assert_eq!(badge_available(Some(1), None), None);
-    }
-
     /// The tag names what crossed the floor, in the store's order —
     /// and nothing at all when nothing did, which is the common hour.
     #[test]
@@ -2273,16 +2161,6 @@ mod tests {
             .collect();
         assert_eq!(named, ["a", "b"]);
         assert!(mem_climbers(&all[2..], total).is_empty());
-    }
-
-    #[test]
-    fn swap_activity_is_news_only_while_something_moves() {
-        assert_eq!(swap_moving(Some(40), Some(120)), Some((120, 40)));
-        assert_eq!(swap_moving(Some(0), Some(3)), Some((3, 0)));
-        // Settled, first sample, off macOS: no clause at all
-        assert_eq!(swap_moving(Some(0), Some(0)), None);
-        assert_eq!(swap_moving(None, None), None);
-        assert_eq!(swap_moving(Some(5), None), None);
     }
 
     fn group(pid: u32, name: &str, cpu: f32) -> ProcessGroupSnapshot {

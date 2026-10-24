@@ -227,6 +227,21 @@ fn shell() -> View {
         .outline_color(theme::color(palette::card_line))
 }
 
+/// gpui's line height for a text that sets none — the font's size times
+/// φ — to the nearest whole point. NSH's own default is tighter, so an
+/// element ported from one whose gpui twin sets no line height takes
+/// this, or its rows come out shorter than the page they port: the long
+/// Overview stood 46 short without it. Whole points because NSH rounds a
+/// text's measured height up to one (`measure_text`), where gpui keeps
+/// the fraction: φ times 10 became 17 against gpui's 16.2, and over a
+/// page of such rows the long Overview ran 5 past its height and
+/// scrolled. In points rather than `relative(..)`, which NSH 0.2.0 drops
+/// without a word (it is written out as a percentage, and the line
+/// height's parser refuses one).
+pub fn line(size: f32) -> Points {
+    px((size * 1.618).round())
+}
+
 /// A card's title, and on its right an optional element that gives way
 /// before the title does.
 pub fn card_header(title: impl Into<SharedString>, right: Option<AnyElement>) -> View {
@@ -239,6 +254,7 @@ pub fn card_header(title: impl Into<SharedString>, right: Option<AnyElement>) ->
             text(title.into())
                 .flex_none()
                 .text_size(px(12.))
+                .line_height(line(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::color(palette::text)),
         );
@@ -309,12 +325,14 @@ fn headline(
             text(value)
                 .tabular_nums()
                 .text_size(px(HEADLINE))
+                .line_height(line(HEADLINE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::color(palette::text)),
         )
         .child(
             text(unit)
                 .text_size(px(HEADLINE_UNIT))
+                .line_height(line(HEADLINE_UNIT))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::color(palette::text_muted)),
         )
@@ -357,6 +375,98 @@ pub fn meter(
         )
 }
 
+/// One segment of a [`stacked_meter`]: its share of the whole track, and
+/// its paint.
+pub struct Segment {
+    pub fraction: Box<dyn Fn() -> f32>,
+    pub fill: fn() -> Rgba,
+}
+
+/// One track, several adjacent segments (memory: resident, then
+/// compressed); what is left of the track is the leftover.
+pub fn stacked_meter(segments: Vec<Segment>, height: f32) -> View {
+    let parts: Vec<View> = segments
+        .into_iter()
+        .map(|Segment { fraction, fill }| {
+            view()
+                .h_full()
+                .w(move || relative(fraction().clamp(0., 1.)))
+                .bg(theme::color(fill))
+        })
+        .collect();
+    view()
+        .h(px(height))
+        .w_full()
+        .rounded_full()
+        .bg(theme::color(palette::track))
+        .overflow_hidden()
+        .child(view().flex_row().size_full().children(parts))
+}
+
+/// How a legend's swatch is drawn: the paint of a meter's slice, or
+/// hollow for the leftover track — empty, not another colour.
+pub enum LegendMark {
+    Fill(fn() -> Rgba),
+    Hollow,
+}
+
+/// One entry of a colour key under a stacked meter: a short bar and its
+/// caption, `tip` on hover. A row of them is the key (`gap` 12).
+pub fn legend_item(
+    mark: LegendMark,
+    label: impl IntoReactive<SharedString>,
+    tip: TooltipElement,
+) -> View {
+    let swatch = view().w(px(10.)).h(px(6.)).rounded(px(2.)).flex_none();
+    let swatch = match mark {
+        LegendMark::Fill(fill) => swatch.bg(theme::color(fill)),
+        LegendMark::Hollow => swatch
+            .border(px(1.))
+            .border_color(theme::color(palette::text_dim)),
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(5.))
+        .tooltip(tip)
+        .child(swatch)
+        .child(
+            text(label)
+                .text_size(px(10.))
+                .line_height(line(10.))
+                .text_color(theme::color(palette::text_dim)),
+        )
+}
+
+/// One pair of a packed key/value row (`widgets::kv_packed`): the label
+/// beside its figure, the figure in the alarm's ink while `hot`.
+pub fn kv_pair(
+    key: impl Into<SharedString>,
+    value: impl IntoReactive<SharedString>,
+    hot: impl Fn() -> bool + 'static,
+) -> View {
+    view()
+        .flex_row()
+        .flex_none()
+        .items_baseline()
+        .gap(px(8.))
+        .child(
+            text(key.into())
+                .flex_none()
+                .text_size(px(11.))
+                .line_height(line(11.))
+                .text_color(theme::color(palette::text_muted)),
+        )
+        .child(
+            text(value)
+                .flex_none()
+                .tabular_nums()
+                .text_size(px(11.))
+                .line_height(line(11.))
+                .text_color(move || theme::color(|| palette::text_for(hot()))),
+        )
+}
+
 /// An option chip: one of a row of choices, `on` while it is the one in
 /// force — the theme's selected look on, the neutral chip off.
 pub fn option_chip(
@@ -386,6 +496,9 @@ pub fn option_chip(
 /// How far a tooltip may run before it wraps: inside the panel it
 /// explains (`widgets::wrap_tooltip`).
 const TIP_WIDTH: f32 = 220.;
+
+/// A tooltip's line height, a multiple of its 11px (`widgets::wrap_tooltip`).
+const TIP_LINE: f32 = 1.35;
 
 /// The second tier's opacity (`widgets::TIP_DETAIL_OPACITY`).
 const TIP_DETAIL_OPACITY: f32 = 0.66;
@@ -424,6 +537,28 @@ pub fn live_tooltip(tip: impl Fn() -> String + 'static) -> TooltipElement {
     )
 }
 
+/// A tooltip of several lines in one ink (`widgets::wrap_tooltip_lines`):
+/// a list, where [`wrap_tooltip`]'s second tier would dim all but the
+/// first. Its lines follow what `lines` reads.
+pub fn tooltip_lines(lines: impl Fn() -> Vec<String> + 'static) -> TooltipElement {
+    bubble().child(
+        view()
+            .max_w(px(TIP_WIDTH))
+            .gap(px(2.))
+            .child(dynamic(move || {
+                lines()
+                    .into_iter()
+                    .map(|line| {
+                        text(line)
+                            .text_size(px(11.))
+                            .line_height(px(11. * TIP_LINE))
+                            .text_color(theme::color(palette::text))
+                    })
+                    .collect::<Vec<_>>()
+            })),
+    )
+}
+
 /// The tooltip's bubble: the opaque popover fill, a hairline.
 fn bubble() -> TooltipElement {
     tooltip()
@@ -440,7 +575,7 @@ fn bubble() -> TooltipElement {
 fn tier((i, words): (usize, String)) -> Text {
     text(words)
         .text_size(px(11.))
-        .line_height(relative(1.35))
+        .line_height(px(11. * TIP_LINE))
         .text_color(theme::color(palette::text))
         .opacity(if i > 0 { TIP_DETAIL_OPACITY } else { 1. })
 }

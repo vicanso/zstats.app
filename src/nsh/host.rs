@@ -327,6 +327,15 @@ fn clear_surface_ground(host: &Host) {
 /// store's `fit_panel`), so a chart that mounts later — a tab switched to,
 /// a page's first sample — draws in place by the next one. A walk of the
 /// panel's few dozen layers.
+///
+/// A canvas that mounts is still drawn once asynchronously first, and
+/// nothing out here can prevent it: NSH creates the layer while applying
+/// the engine's batch inside a Core Animation transaction of its own, and
+/// that commit draws it (`surface.rs`, `drain`). Measured on Overview's
+/// form switch, 2026-10-24: about 100 MB of "owned physical footprint
+/// (graphics)" for a second, until the next tick's walk. Walking when the
+/// canvas is first laid out was tried, from its `on_layout`: the walk runs
+/// before the batch is applied, or after it was drawn, never between.
 fn draw_canvases_in_place(host: &Host) {
     fn walk(layer: &CALayer) {
         if layer.drawsAsynchronously() {

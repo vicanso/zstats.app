@@ -15,7 +15,6 @@
 //! through `zstats::settings::apply_add` so they match the CLI, then the
 //! collector reloads `[alerts]` in place.
 
-use super::overview;
 use super::widgets::{self, card};
 use crate::alertlog::{self, DayLog};
 use crate::alerttpl;
@@ -27,6 +26,7 @@ use crate::format;
 use crate::i18n;
 use crate::notify;
 use crate::prefs;
+use crate::pressure;
 use crate::state::{
     GrowthNotice, MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore,
 };
@@ -1292,7 +1292,7 @@ fn alert_sentence(event: &AlertEvent) -> String {
             // builds from the fields, so it arrives only if we add it.
             // What it tells the reader: the level says tight, the rate
             // says whether the machine is still fighting when this fired.
-            if let Some((outs, ins)) = overview::swap_moving(*swap_ins_per_sec, *swap_outs_per_sec)
+            if let Some((outs, ins)) = pressure::swap_moving(*swap_ins_per_sec, *swap_outs_per_sec)
             {
                 text.push_str(" · ");
                 text.push_str(

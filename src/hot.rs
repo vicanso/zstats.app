@@ -1,14 +1,17 @@
 //! Whether a process or a tree wears a row's only colour: a burst over
 //! one core, or a long low hold the sustained watcher saw (`watch.rs`) —
 //! and never this app's own CPU while the daily disk check explains it.
-//! Display only, like every threshold the views keep: nothing here fires
-//! an alert. Shared by both front ends since the NSH Overview (phase 4b
-//! of docs/nsh-migration.md); the gpui Processes, Apps and Overview pages
-//! read it too, so a pid is red in all of them or in none.
+//! Beside it the two other lines a figure turns colour at, a core's and
+//! swap's. Display only, like every threshold the views keep: nothing
+//! here fires an alert. Shared by both front ends since the NSH Overview
+//! (phases 4b and 4c of docs/nsh-migration.md); the gpui Processes, Apps
+//! and Overview pages read it too, so a pid is red in all of them or in
+//! none.
 
 use crate::state::ZStatsAppState;
 use std::process;
 use std::time::Instant;
+use zstats::snapshot::MemorySnapshot;
 
 /// A burst this big is worth colour — one whole core.
 ///
@@ -17,6 +20,45 @@ use std::time::Instant;
 /// severity cue. One core is still a fixed percentage, not scaled by
 /// hardware: the same 110% is red here and there.
 pub const HOT_PERCENT: f64 = 100.0;
+
+/// A core cluster's bar turns accent past this (Overview's P/E rows).
+pub const CORE_HOT: f32 = 85.0;
+
+/// Swap past this share of **physical memory** is worth colour — display
+/// only. The kernel can still report pressure Normal while a lot of the
+/// working set has been pushed to disk; that is the signal the badge
+/// will not give, and it is what this is for.
+///
+/// Measured against RAM, and not against swap's own allocation, because
+/// macOS sizes swap on demand: `/System/Volumes/VM/` holds uniform 1 GB
+/// files and the kernel adds one whenever free swap drops to roughly a
+/// file's worth. Steady state is therefore `used/total ≈ (N-1)/N` for N
+/// files, which *rises toward 100% as the machine swaps more* — 80% at
+/// five files, 86% at seven, 93% at fourteen. A share-of-allocation bar
+/// is consequently permanently crossed on any Mac that ever grew past
+/// about five swapfiles, and was observed painting red on a machine
+/// sitting at 55% memory free. Against RAM the same reading is 24%, and
+/// the number means the same thing on a 16 GB laptop as on a 128 GB
+/// desktop.
+///
+/// 50 is a judgement, not a derivation: half the physical memory's worth
+/// of pages living on disk. Apple Silicon swaps readily well below that
+/// without anything being wrong.
+pub const SWAP_HOT: f32 = 50.0;
+
+/// Whether the Swap figure wears colour ([`SWAP_HOT`]).
+///
+/// Deliberately not `mem.swap_used_percent`: that field *is* swap
+/// against its own allocation, the ratio [`SWAP_HOT`] explains is
+/// unusable here. Dividing those two bytes locally would also have been
+/// a second copy of a figure zstats already reports, which CLAUDE.md
+/// forbids. This asks something zstats does not answer, and only ever
+/// to pick a colour. The `total_bytes > 0` is a guard against a
+/// collector reporting no memory at all, where any swap would otherwise
+/// be a huge percentage and paint red.
+pub fn swap_hot(mem: &MemorySnapshot) -> bool {
+    mem.total_bytes > 0 && (mem.swap_used_bytes as f32 / mem.total_bytes as f32) * 100.0 >= SWAP_HOT
+}
 
 /// Whether a row gets the page's only colour. Overview's top trees use
 /// the burst half of this (`sustained = false`) so a 110% tree is red

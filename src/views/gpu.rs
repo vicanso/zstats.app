@@ -21,7 +21,7 @@ use rust_i18n::t;
 use zstats::snapshot::GpuSnapshot;
 
 /// The busy bar turns accent here. The same line as a CPU core
-/// (`overview::CORE_HOT`): a GPU pinned near full is the same kind of
+/// (`hot::CORE_HOT`): a GPU pinned near full is the same kind of
 /// fact as a core pinned near full. Display only, like every threshold in
 /// `views/` — zstats has no GPU rule, and this fires nothing.
 const GPU_HOT: f32 = 85.0;

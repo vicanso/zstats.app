@@ -77,8 +77,9 @@ fn ink(c: Rgba) -> Hsla {
     c.into()
 }
 
-/// `palette::gauge` at [`CHART_DIM`]: the history behind the lead.
-fn dim_ink() -> Rgba {
+/// `palette::gauge` at [`CHART_DIM`]: the history behind the lead, and
+/// the memory meter's compressed slice.
+pub fn dim_ink() -> Rgba {
     let gauge = palette::gauge();
     Rgba {
         a: gauge.a * CHART_DIM,

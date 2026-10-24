@@ -5,28 +5,37 @@
 //! The short form (phase 4b of docs/nsh-migration.md): the notice row while
 //! there is something to announce, the vitals card (the processor's figure
 //! and its half hour as a line, then four facts), and the apps card. The
-//! long form arrives in phase 4c.
+//! long form (phase 4c): the processor card, the apps card, the memory
+//! card and the disk-and-network card, each chart with its caption line.
 //!
 //! What the page reads is gathered into a few plain values (`Vitals`,
-//! `TopApps`, the notice) as memos of the store, and the elements bind to
-//! them: a tick re-reads the store, and only what came out different is
-//! drawn again. A row of the apps card is kept by its pid (`each`), so a
+//! `Processor`, `Memory`, `TopApps`, the notice, each chart's caption) as
+//! memos of the store, and the elements bind to them: a tick re-reads the
+//! store, and only what came out different is drawn again. A row of the apps card is kept by its pid (`each`), so a
 //! program that stays in the list keeps its row — and its icon — while its
 //! figure moves.
 
-use crate::chart::{ChartUnit, CurveStroke};
+use crate::assets::CustomIconName;
+use crate::chart::{
+    CHART_CAPTION, CHART_CAPTION_GAP, CURVE_H, CURVE_TOP, ChartUnit, CurveStroke, MEM_AXIS_TOP,
+};
 use crate::notice::{self, Notice};
 use crate::nsh::chart::{self as canvas_chart, Chart};
 use crate::nsh::root::{self, AuxWindow, CARD_GAP, HostAction, Live};
-use crate::nsh::widgets;
+use crate::nsh::widgets::{self, LegendMark, Segment};
 use crate::nsh::{store, theme};
-use crate::state::{Tab, ZStatsAppState};
-use crate::{chart, format, hot, i18n, palette, placement, prefs, series, trend};
+use crate::series::{Point, Series};
+use crate::state::{MemoryCreep, Tab, ZStatsAppState};
+use crate::{chart, format, hot, i18n, palette, placement, prefs, pressure, series, trend};
+use nsh_base::TooltipElement;
 use nsh_core::ui::prelude::*;
 use rust_i18n::t;
 use std::collections::HashSet;
 use std::time::Instant;
 use zstats::snapshot::{ProcessGroupSnapshot, SystemSnapshot};
+
+/// `overview::TOP_N`: the long form's apps.
+const TOP_N: usize = 3;
 
 /// `overview::TOP_N_SHORT`: the short form's apps.
 const TOP_N_SHORT: usize = 5;
@@ -45,12 +54,11 @@ const NOTICE_ROW: f32 = 36.;
 /// climbing. Display only.
 const RISE_FLOOR: f32 = 15.0;
 
-/// `overview::PRESSURE_CRITICAL`: the kernel's pressure level at
-/// critical, the only tier that earns a word beside memory's.
-const PRESSURE_CRITICAL: u32 = 4;
+/// `overview::MEM_RISE_N`: how many climbers the memory card's tag lists
+/// on hover.
+const MEM_RISE_N: usize = 3;
 
-/// Overview's page: the short form, or (until phase 4c) a card where the
-/// long one will be.
+/// Overview's page, in the form the preference picks.
 pub fn page(live: Live) -> AnyElement {
     let sampled = live.memo(|state: &ZStatsAppState| state.latest().is_some());
     let detail = live.watch(prefs::overview_detail);
@@ -62,10 +70,7 @@ pub fn page(live: Live) -> AnyElement {
             );
         }
         if detail.get() {
-            return widgets::empty_card(
-                "Overview".to_owned(),
-                "The detailed form arrives in phase 4c of docs/nsh-migration.md.".to_owned(),
-            );
+            return long_form(live);
         }
         short_form(live)
     })
@@ -80,7 +85,17 @@ fn short_form(live: Live) -> AnyElement {
             move || notice_row(shown),
         ))
         .child(vitals_card(live))
-        .child(top_apps(live))
+        .child(top_apps(live, false))
+        .into_element()
+}
+
+fn long_form(live: Live) -> AnyElement {
+    view()
+        .gap(px(CARD_GAP))
+        .child(processor_card(live))
+        .child(top_apps(live, true))
+        .child(memory_card(live))
+        .child(io_card(live))
         .into_element()
 }
 
@@ -213,7 +228,7 @@ fn vitals(state: &ZStatsAppState) -> Vitals {
     .to_string();
     let critical = mem
         .pressure_level
-        .is_some_and(|level| level >= PRESSURE_CRITICAL);
+        .is_some_and(|level| level >= pressure::PRESSURE_CRITICAL);
     let memory = Share {
         percent: format!("{}%", format::whole_pct(mem.used_percent)),
         hot: memory_alarm,
@@ -534,12 +549,13 @@ struct TopApps {
 
 /// How many rows the card shows (`overview::apps_rows`): the form's
 /// count, and one more for each row's worth of panel dragged on top of it.
-fn rows_wanted(state: &ZStatsAppState, base: usize) -> usize {
+fn rows_wanted(state: &ZStatsAppState, detail: bool) -> usize {
+    let base = if detail { TOP_N } else { TOP_N_SHORT };
     let Some(bounds) = state.window_bounds() else {
         return base;
     };
-    let notice = notice::has_notice(state);
-    let (_, own) = placement::window_size(false, notice, placement::Dragged::default());
+    let notice = !detail && notice::has_notice(state);
+    let (_, own) = placement::window_size(detail, notice, placement::Dragged::default());
     let spare = bounds.size.height - own;
     if spare < APP_ROW {
         return base;
@@ -547,7 +563,7 @@ fn rows_wanted(state: &ZStatsAppState, base: usize) -> usize {
     base + (spare / APP_ROW).floor() as usize
 }
 
-fn top_apps_of(state: &ZStatsAppState) -> Option<TopApps> {
+fn top_apps_of(state: &ZStatsAppState, detail: bool) -> Option<TopApps> {
     let tick = state.latest()?;
     let groups = tick.snapshot.process_groups.as_deref()?;
     let processes = tick
@@ -557,7 +573,7 @@ fn top_apps_of(state: &ZStatsAppState) -> Option<TopApps> {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let topology = state.member_processes().unwrap_or(processes);
-    let n = rows_wanted(state, TOP_N_SHORT);
+    let n = rows_wanted(state, detail);
     let mut risers: Vec<_> = groups
         .iter()
         .filter_map(|g| {
@@ -630,9 +646,10 @@ fn pad_rising<'a>(
 }
 
 /// Who is using the machine, ranked (`overview::top_apps`): climbers this
-/// hour when there are any, the current processor ranking otherwise.
-fn top_apps(live: Live) -> AnyElement {
-    let top = live.memo(top_apps_of);
+/// hour when there are any, the current processor ranking otherwise. The
+/// two forms differ only in how many rows.
+fn top_apps(live: Live, detail: bool) -> AnyElement {
+    let top = live.watch(move || store::read(|state| top_apps_of(state, detail)));
     let off = move || top.with(Option::is_none);
     dynamic(move || {
         if off() {
@@ -789,4 +806,916 @@ fn app_row(row: ReadSignal<AppRow>) -> AnyElement {
                 ),
         )
         .into_element()
+}
+
+/// One of the long form's charts (`overview::Chart`): which rings it
+/// draws, the lead first, and how it reads.
+#[derive(Clone, Copy)]
+struct Recent {
+    rings: fn(&ZStatsAppState) -> Vec<&Series>,
+    /// The arrow before each line's peak in the caption, when a chart has
+    /// two lines and the caption has to say which is which.
+    arrows: &'static [Option<&'static str>],
+    /// The axis top, from the bucketed lines.
+    scale: fn(&[Vec<Point>]) -> f64,
+    stroke: CurveStroke,
+    unit: ChartUnit,
+    /// The glyph at the head of the caption, for a chart whose card does
+    /// not already say what it is.
+    icon: Option<CustomIconName>,
+    /// Whether the axis top is printed in the well's corner: the two
+    /// charts whose top moves.
+    corner_label: bool,
+    tip: &'static str,
+}
+
+fn cpu_rings(state: &ZStatsAppState) -> Vec<&Series> {
+    vec![state.cpu_series()]
+}
+
+fn memory_rings(state: &ZStatsAppState) -> Vec<&Series> {
+    vec![state.memory_series()]
+}
+
+/// Download leads; upload stays on the chart, dimmer.
+fn net_rings(state: &ZStatsAppState) -> Vec<&Series> {
+    vec![state.net_down_series(), state.net_up_series()]
+}
+
+fn cpu_scale(marks: &[Vec<Point>]) -> f64 {
+    marks
+        .first()
+        .map_or(chart::CPU_AXIS_LOW, |points| chart::cpu_axis_top(points))
+}
+
+fn memory_scale(_: &[Vec<Point>]) -> f64 {
+    MEM_AXIS_TOP
+}
+
+/// One ceiling for both lines, so the two heights compare.
+fn net_scale(marks: &[Vec<Point>]) -> f64 {
+    chart::net_scale(&marks.concat())
+}
+
+const CPU_RECENT: Recent = Recent {
+    rings: cpu_rings,
+    arrows: &[None],
+    scale: cpu_scale,
+    stroke: CurveStroke::Smooth,
+    unit: ChartUnit::Percent,
+    icon: None,
+    corner_label: true,
+    tip: "overview.cpu_curve_tip",
+};
+
+const MEMORY_RECENT: Recent = Recent {
+    rings: memory_rings,
+    arrows: &[None],
+    scale: memory_scale,
+    stroke: CurveStroke::Bars,
+    unit: ChartUnit::Percent,
+    icon: None,
+    corner_label: false,
+    tip: "overview.mem_curve_tip",
+};
+
+const NET_RECENT: Recent = Recent {
+    rings: net_rings,
+    arrows: &[Some("↓"), Some("↑")],
+    scale: net_scale,
+    stroke: CurveStroke::Smooth,
+    unit: ChartUnit::Rate,
+    icon: Some(CustomIconName::Network),
+    corner_label: true,
+    tip: "overview.net_curve_tip",
+};
+
+fn chart_of(recent: Recent, state: &ZStatsAppState) -> Chart {
+    let now = Instant::now();
+    let rings = (recent.rings)(state);
+    let marks: Vec<Vec<Point>> = rings
+        .iter()
+        .map(|ring| match recent.stroke {
+            CurveStroke::Bars => chart::bar_buckets(ring.points(), now),
+            CurveStroke::Smooth => chart::buckets(ring.points(), now),
+        })
+        .collect();
+    Chart {
+        scale: (recent.scale)(&marks),
+        span: rings.iter().filter_map(|ring| ring.span(now)).max(),
+        marks,
+        now,
+        stroke: recent.stroke,
+    }
+}
+
+/// What a chart's caption line and corner say.
+#[derive(Clone, PartialEq, Default)]
+struct Readout {
+    /// Whether any ring holds a point: the chart's slot is there from the
+    /// first one, so the card does not jump when the second draws a mark.
+    held: bool,
+    /// The highest point drawn on each line, arrowed when there are two.
+    peaks: Vec<String>,
+    span: String,
+    corner: Option<String>,
+}
+
+fn readout_of(recent: Recent, state: &ZStatsAppState) -> Readout {
+    let held = (recent.rings)(state)
+        .iter()
+        .any(|ring| !ring.points().is_empty());
+    let chart = chart_of(recent, state);
+    let peaks = recent
+        .arrows
+        .iter()
+        .zip(&chart.marks)
+        .map(|(arrow, points)| {
+            let value = chart::reading(recent.unit, chart::peak(points));
+            match arrow {
+                Some(arrow) => format!("{arrow} {value}"),
+                None => value,
+            }
+        })
+        .collect();
+    Readout {
+        held,
+        peaks,
+        span: chart
+            .span
+            .map(series::span_label)
+            .unwrap_or_else(|| format::PLACEHOLDER.to_string()),
+        corner: (recent.corner_label && chart::corner_label_earned(&chart.marks))
+            .then(|| chart::scale_label(recent.unit, chart.scale)),
+    }
+}
+
+/// One chart, once a ring holds a point (`overview::recent_line`): the
+/// well, and under it the highest point drawn and how long the window has
+/// been collecting.
+fn recent_chart(live: Live, recent: Recent) -> AnyElement {
+    let read = live.watch(move || store::read(|state| readout_of(recent, state)));
+    let tip = format!(
+        "{} {}",
+        i18n::tr(recent.tip),
+        i18n::tr("overview.chart_gap_tip")
+    );
+    when(
+        move || read.with(|r| r.held),
+        move || {
+            view()
+                .mt(px(CURVE_TOP))
+                .flex_none()
+                .tooltip(widgets::wrap_tooltip(&tip))
+                .child(canvas_chart::well(
+                    move || {
+                        live.track();
+                        store::read(|state| chart_of(recent, state))
+                    },
+                    CURVE_H,
+                    move || read.with(|r| r.corner.clone()),
+                ))
+                .child(chart_caption(read, recent))
+        },
+    )
+    .into_element()
+}
+
+/// `overview::chart_readout`: the peaks after "Max", the lead's in the
+/// first ink and the dimmed line's dimmed — the caption doubles as the
+/// key to which stroke is which — and the span at the right.
+fn chart_caption(read: Memo<Readout>, recent: Recent) -> View {
+    let caption = |words: SharedString| {
+        text(words)
+            .flex_none()
+            .text_size(px(10.))
+            .line_height(px(CHART_CAPTION))
+            .text_color(theme::color(palette::text_dim))
+    };
+    let figure = |i: usize, ink: fn() -> crate::color::Rgba| {
+        text(move || read.with(|r| r.peaks.get(i).cloned().unwrap_or_default()))
+            .flex_none()
+            .tabular_nums()
+            .text_size(px(10.))
+            .line_height(px(CHART_CAPTION))
+            .text_color(theme::color(ink))
+    };
+    let mut peaks = view().flex_row().items_center().gap(px(8.));
+    for i in 0..recent.arrows.len() {
+        peaks = peaks.child(figure(
+            i,
+            if i == 0 {
+                palette::text
+            } else {
+                palette::text_muted
+            },
+        ));
+    }
+    let mut lead = view().flex_row().items_center().gap(px(4.));
+    if let Some(icon) = recent.icon {
+        lead = lead.child(widgets::icon(icon, 10., palette::text_dim));
+    }
+    view()
+        .flex_row()
+        .mt(px(CHART_CAPTION_GAP))
+        .h(px(CHART_CAPTION))
+        .w_full()
+        .items_center()
+        .justify_between()
+        .child(
+            lead.child(caption(i18n::tr("overview.chart_peak").into()))
+                .child(peaks),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .child(caption(i18n::tr("overview.chart_span").into()))
+                .child(
+                    text(move || read.with(|r| r.span.clone()))
+                        .flex_none()
+                        .tabular_nums()
+                        .text_size(px(10.))
+                        .line_height(px(CHART_CAPTION))
+                        .text_color(theme::color(palette::text)),
+                ),
+        )
+}
+
+/// A footnote beside a figure: 10px, the third ink, its tooltip.
+fn footnote(words: impl Fn() -> String + 'static, tip: TooltipElement) -> View {
+    view().flex_none().tooltip(tip).child(
+        text(words)
+            .tabular_nums()
+            .text_size(px(10.))
+            .line_height(widgets::line(10.))
+            .text_color(theme::color(palette::text_dim)),
+    )
+}
+
+/// One performance cluster's row.
+#[derive(Clone, PartialEq)]
+struct Cluster {
+    label: String,
+    fraction: f32,
+    pct: String,
+    over: bool,
+}
+
+/// What the processor card shows.
+#[derive(Clone, PartialEq, Default)]
+struct Processor {
+    /// Brand plus the rated clock, "Apple M4 Pro (4.5 GHz)".
+    caption: String,
+    watts: Option<String>,
+    usage: String,
+    load: String,
+    cores: u32,
+    uptime: String,
+    clusters: Vec<Cluster>,
+}
+
+fn processor(state: &ZStatsAppState) -> Processor {
+    let Some(snapshot) = state.latest().map(|t| &t.snapshot) else {
+        return Processor::default();
+    };
+    let cpu = &snapshot.cpu;
+    let freq = cpu
+        .frequency_mhz
+        .map(|mhz| format!("{:.1} GHz", mhz as f64 / 1000.0));
+    let caption = match (cpu.brand.as_deref(), freq.as_deref()) {
+        (Some(brand), Some(freq)) => {
+            t!("overview.brand_freq", brand = brand, freq = freq).to_string()
+        }
+        (Some(brand), None) => brand.to_string(),
+        (None, Some(freq)) => freq.to_string(),
+        (None, None) => i18n::tr("overview.freq_unknown"),
+    };
+    let load = &snapshot.load;
+    Processor {
+        caption,
+        watts: snapshot
+            .battery
+            .as_ref()
+            .and_then(|b| b.power_watts)
+            .and_then(format::whole_watts)
+            .map(|watts| format!("{watts} W")),
+        usage: format::whole_pct(cpu.usage_percent),
+        load: t!(
+            "overview.load",
+            one = format::load(load.load1),
+            five = format::load(load.load5),
+            fifteen = format::load(load.load15)
+        )
+        .to_string(),
+        cores: cpu.logical_cores,
+        uptime: t!(
+            "overview.uptime",
+            time = format::uptime_short(snapshot.host.uptime_secs)
+        )
+        .to_string(),
+        clusters: cpu
+            .perf_levels
+            .as_ref()
+            .filter(|levels| levels.len() > 1)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .map(|level| Cluster {
+                        label: cluster_label(&level.name, level.logical_cores),
+                        fraction: level.usage_percent / 100.0,
+                        pct: format::pct_col(level.usage_percent),
+                        over: level.usage_percent > hot::CORE_HOT,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Activity Monitor / Stats wording: "P-cores · 8", not "P·8".
+fn cluster_label(name: &str, cores: u32) -> String {
+    let pretty = match name {
+        "P" | "p" | "Performance" | "performance" => i18n::tr("overview.p_cores"),
+        "E" | "e" | "Efficiency" | "efficiency" => i18n::tr("overview.e_cores"),
+        other => other.to_string(),
+    };
+    format!("{pretty} · {cores}")
+}
+
+/// `overview::processor`: the chip and its draw in the header, the figure
+/// at the card's edge with load and uptime hugging the right, the half
+/// hour, then the performance clusters where there are several.
+fn processor_card(live: Live) -> View {
+    let p = live.memo(processor);
+    let clusters = move || p.with(|p| p.clusters.clone());
+    widgets::card()
+        .child(widgets::card_header(
+            i18n::tr("overview.processor"),
+            Some(processor_caption(p)),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .w_full()
+                .items_baseline()
+                .justify_between()
+                .gap(px(10.))
+                .mt(px(4.))
+                .child(
+                    view()
+                        .flex_none()
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("overview.usage_tip")))
+                        .child(widgets::big_number(
+                            move || p.with(|p| p.usage.clone()),
+                            "%",
+                        )),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .min_w(px(0.))
+                        .items_baseline()
+                        .justify_end()
+                        .gap(px(12.))
+                        .child(footnote(
+                            move || p.with(|p| p.load.clone()),
+                            widgets::live_tooltip(move || {
+                                t!("overview.load_tip", cores = p.with(|p| p.cores)).to_string()
+                            }),
+                        ))
+                        .child(footnote(
+                            move || p.with(|p| p.uptime.clone()),
+                            widgets::wrap_tooltip(i18n::tr("overview.uptime_tip")),
+                        )),
+                ),
+        )
+        .child(recent_chart(live, CPU_RECENT))
+        .child(when(
+            move || p.with(|p| !p.clusters.is_empty()),
+            move || {
+                view().pt(px(8.)).gap(px(6.)).child(each(
+                    clusters,
+                    |c: &Cluster| c.label.clone(),
+                    |c, _| cluster_row(c),
+                ))
+            },
+        ))
+}
+
+/// The chip's name — what gives way when the header is tight — and the
+/// live draw when the battery reports one.
+fn processor_caption(p: Memo<Processor>) -> AnyElement {
+    view()
+        .flex_row()
+        .min_w(px(0.))
+        .items_center()
+        .gap(px(8.))
+        .child(
+            view()
+                .min_w(px(0.))
+                .tooltip(widgets::wrap_tooltip(i18n::tr("overview.freq_tip")))
+                .child(
+                    text(move || p.with(|p| p.caption.clone()))
+                        .number_of_lines(1u32)
+                        .text_size(px(10.))
+                        .line_height(widgets::line(10.))
+                        .text_color(theme::color(palette::text_dim)),
+                ),
+        )
+        .child(when(
+            move || p.with(|p| p.watts.is_some()),
+            move || {
+                footnote(
+                    move || p.with(|p| p.watts.clone().unwrap_or_default()),
+                    widgets::wrap_tooltip(i18n::tr("overview.watts_tip")),
+                )
+            },
+        ))
+        .into_element()
+}
+
+fn cluster_row(c: ReadSignal<Cluster>) -> AnyElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            text(move || c.with(|c| c.label.clone()))
+                .w(px(96.))
+                .flex_none()
+                .number_of_lines(1u32)
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::color(palette::text_muted)),
+        )
+        .child(view().flex_1().child(widgets::meter(
+            move || c.with(|c| c.fraction),
+            move || palette::gauge_for(c.with(|c| c.over)),
+            5.,
+        )))
+        .child(
+            text(move || c.with(|c| c.pct.clone()))
+                .w(px(44.))
+                .flex_none()
+                .tabular_nums()
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text)),
+        )
+        .into_element()
+}
+
+/// The biggest memory climber this hour, for the tag at the right of the
+/// memory card's headline row (`overview::mem_climb_tag`).
+#[derive(Clone, PartialEq, Default)]
+struct Climb {
+    lead: String,
+    name: String,
+    delta: String,
+    /// The tooltip's first line: the climbers, up to [`MEM_RISE_N`].
+    listed: String,
+}
+
+fn climb_of(climbers: &[MemoryCreep], total_bytes: u64) -> Option<Climb> {
+    let floor = trend::mem_rise_floor(total_bytes);
+    let named: Vec<&MemoryCreep> = climbers.iter().filter(|c| c.climb_bytes >= floor).collect();
+    let top = named.first()?;
+    let listed = named
+        .iter()
+        .take(MEM_RISE_N)
+        .map(|c| {
+            t!(
+                "overview.mem_rise_item",
+                name = c.name.clone(),
+                delta = format::memory(c.climb_bytes)
+            )
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(Climb {
+        lead: if named.len() > 1 {
+            format!("{} ×{}", i18n::tr("overview.mem_rise_short"), named.len())
+        } else {
+            i18n::tr("overview.mem_rise_short")
+        },
+        name: top.name.clone(),
+        delta: format!("+{}", format::memory(top.climb_bytes)),
+        listed: format!("{}  {listed}", i18n::tr("overview.mem_rise_lead")),
+    })
+}
+
+/// The compressor's activity at the end of the Swap row
+/// (`overview::swap_activity_tag`): the kernel's thrashing verdict alone,
+/// or the segments moved per second.
+#[derive(Clone, PartialEq)]
+struct SwapTag {
+    thrashing: bool,
+    figures: String,
+}
+
+fn swap_tag_of(state: &ZStatsAppState) -> Option<SwapTag> {
+    let mem = &state.latest()?.snapshot.memory;
+    let thrashing = mem.swap_thrashing == Some(true);
+    let moving = pressure::swap_moving(mem.swap_ins_per_sec, mem.swap_outs_per_sec);
+    if !thrashing && moving.is_none() {
+        return None;
+    }
+    let (outs, ins) = moving.unwrap_or((0, 0));
+    Some(SwapTag {
+        thrashing,
+        figures: t!(
+            "overview.swap_activity",
+            outs = format::thousands(outs as usize),
+            ins = format::thousands(ins as usize)
+        )
+        .to_string(),
+    })
+}
+
+/// What the memory card shows.
+#[derive(Clone, PartialEq, Default)]
+struct Memory {
+    badge: String,
+    badge_tip: String,
+    /// An alert is behind memory: the badge's red.
+    alarm: bool,
+    used: String,
+    used_of: String,
+    climb: Option<Climb>,
+    /// The bar's two slices, as shares of the whole memory.
+    resident: f32,
+    compressed: f32,
+    /// The legend's "Compressed 3.2 GB", while there is any.
+    compressed_label: Option<String>,
+    swap: String,
+    swap_hot: bool,
+}
+
+fn memory(state: &ZStatsAppState) -> Memory {
+    let Some(snapshot) = state.latest().map(|t| &t.snapshot) else {
+        return Memory::default();
+    };
+    let mem = &snapshot.memory;
+    let (badge, badge_tip) = pressure::badge(mem, snapshot.capabilities.memory_pressure);
+    let total = mem.total_bytes.max(1) as f32;
+    let compressed = mem.compressed_bytes.unwrap_or(0).min(mem.used_bytes);
+    let resident = mem.used_bytes.saturating_sub(compressed);
+    Memory {
+        badge,
+        badge_tip,
+        alarm: state.memory_needs_attention(),
+        used: format::gb(mem.used_bytes),
+        used_of: t!("overview.used_of", total = format::gb(mem.total_bytes)).to_string(),
+        climb: climb_of(&state.memory_climbers(), mem.total_bytes),
+        resident: resident as f32 / total,
+        compressed: compressed as f32 / total,
+        compressed_label: (compressed > 0).then(|| {
+            format!(
+                "{} {}",
+                i18n::tr("overview.compressed"),
+                format::gb(compressed)
+            )
+        }),
+        swap: format!(
+            "{} / {}",
+            format::gb(mem.swap_used_bytes),
+            format::gb(mem.swap_total_bytes)
+        ),
+        swap_hot: hot::swap_hot(mem),
+    }
+}
+
+/// `overview::memory`: the pressure badge, used of total with the climb
+/// tag at the right, the half hour as bars, the bar of used and
+/// compressed with its key, and the Swap row closing the card.
+fn memory_card(live: Live) -> View {
+    let m = live.memo(memory);
+    let tag = live.memo(swap_tag_of);
+    widgets::card()
+        .child(widgets::card_header(
+            i18n::tr("overview.memory"),
+            Some(pressure_badge(m)),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .w_full()
+                .items_baseline()
+                .justify_between()
+                .gap(px(10.))
+                .mt(px(8.))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_none()
+                        .items_baseline()
+                        .gap(px(4.))
+                        .child(widgets::big_figure(move || m.with(|m| m.used.clone())))
+                        .child(
+                            text(move || m.with(|m| m.used_of.clone()))
+                                .tabular_nums()
+                                .text_size(px(12.))
+                                .line_height(widgets::line(12.))
+                                .text_color(theme::color(palette::text_muted)),
+                        ),
+                )
+                .child(when(
+                    move || m.with(|m| m.climb.is_some()),
+                    move || climb_tag(m),
+                )),
+        )
+        .child(recent_chart(live, MEMORY_RECENT))
+        .child(view().mt(px(10.)).child(widgets::stacked_meter(
+            vec![
+                Segment {
+                    fraction: Box::new(move || m.with(|m| m.resident)),
+                    fill: palette::gauge,
+                },
+                Segment {
+                    fraction: Box::new(move || m.with(|m| m.compressed)),
+                    fill: canvas_chart::dim_ink,
+                },
+            ],
+            6.,
+        )))
+        .child(
+            view()
+                .flex_row()
+                .mt(px(8.))
+                .gap(px(12.))
+                .child(widgets::legend_item(
+                    LegendMark::Fill(palette::gauge),
+                    i18n::tr("overview.used"),
+                    widgets::wrap_tooltip(i18n::tr("overview.used_tip")),
+                ))
+                .child(when(
+                    move || m.with(|m| m.compressed_label.is_some()),
+                    move || {
+                        widgets::legend_item(
+                            LegendMark::Fill(canvas_chart::dim_ink),
+                            move || m.with(|m| m.compressed_label.clone().unwrap_or_default()),
+                            widgets::wrap_tooltip(i18n::tr("overview.compressed_tip")),
+                        )
+                    },
+                ))
+                .child(widgets::legend_item(
+                    LegendMark::Hollow,
+                    i18n::tr("overview.free"),
+                    widgets::wrap_tooltip(i18n::tr("overview.free_tip")),
+                )),
+        )
+        .child(
+            view()
+                .flex_row()
+                .w_full()
+                .mt(px(10.))
+                .items_baseline()
+                .justify_between()
+                .gap(px(12.))
+                .child(widgets::kv_pair(
+                    i18n::tr("overview.swap"),
+                    move || m.with(|m| m.swap.clone()),
+                    move || m.with(|m| m.swap_hot),
+                ))
+                .child(when(
+                    move || tag.with(Option::is_some),
+                    move || swap_tag(tag),
+                )),
+        )
+}
+
+/// The kernel's verdict as a pill — red only when an alert is behind
+/// memory, never for the kernel's level alone.
+fn pressure_badge(m: Memo<Memory>) -> AnyElement {
+    let alarm = move || m.with(|m| m.alarm);
+    view()
+        .flex_none()
+        .tooltip(widgets::live_tooltip(move || {
+            m.with(|m| m.badge_tip.clone())
+        }))
+        .child(
+            text(move || m.with(|m| m.badge.clone()))
+                .rounded_full()
+                .border(px(1.))
+                .border_color(move || {
+                    theme::color(move || {
+                        if alarm() {
+                            palette::accent_wash(40)
+                        } else {
+                            palette::card_line()
+                        }
+                    })
+                })
+                .bg(move || {
+                    theme::color(move || {
+                        if alarm() {
+                            palette::accent_wash(14)
+                        } else {
+                            palette::track()
+                        }
+                    })
+                })
+                .px(px(8.))
+                .py(px(2.))
+                .text_size(px(10.))
+                .line_height(widgets::line(10.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || {
+                    theme::color(move || {
+                        if alarm() {
+                            palette::accent_light()
+                        } else {
+                            palette::text_muted()
+                        }
+                    })
+                }),
+        )
+        .into_element()
+}
+
+/// `Climbing  Zed +1.1 GB`, `×3` on the lead when there are more and the
+/// rest on hover; the name gives way before the figure does.
+fn climb_tag(m: Memo<Memory>) -> View {
+    let climb = move || m.with(|m| m.climb.clone().unwrap_or_default());
+    view()
+        .flex_row()
+        .min_w(px(0.))
+        .items_baseline()
+        .justify_end()
+        .gap(px(6.))
+        .tooltip(widgets::tooltip_lines(move || {
+            vec![climb().listed, i18n::tr("overview.mem_rise_tip")]
+        }))
+        .child(
+            text(move || climb().lead)
+                .flex_none()
+                .text_size(px(10.))
+                .line_height(widgets::line(10.))
+                .text_color(theme::color(palette::text_dim)),
+        )
+        .child(
+            text(move || climb().name)
+                .flex_shrink(1.)
+                .number_of_lines(1u32)
+                .tabular_nums()
+                .text_size(px(10.))
+                .line_height(widgets::line(10.))
+                .text_color(theme::color(palette::text_muted)),
+        )
+        .child(
+            text(move || climb().delta)
+                .flex_none()
+                .tabular_nums()
+                .text_size(px(10.))
+                .line_height(widgets::line(10.))
+                .text_color(theme::color(palette::text_muted)),
+        )
+}
+
+/// The thrashing verdict in the accent with the figures on hover, or the
+/// figures — mono outside a CJK locale, whose words would not be.
+fn swap_tag(tag: Memo<Option<SwapTag>>) -> AnyElement {
+    let thrashing = computed(move || tag.with(|t| t.as_ref().is_some_and(|t| t.thrashing)));
+    let figures = move || tag.with(|t| t.as_ref().map(|t| t.figures.clone()).unwrap_or_default());
+    dynamic(move || {
+        let row = view()
+            .flex_row()
+            .min_w(px(0.))
+            .items_baseline()
+            .justify_end();
+        if thrashing.get() {
+            return row
+                .tooltip(widgets::tooltip_lines(move || {
+                    vec![figures(), i18n::tr("overview.swap_activity_tip")]
+                }))
+                .child(
+                    text(i18n::tr("overview.swap_thrashing"))
+                        .flex_none()
+                        .text_size(px(10.))
+                        .line_height(widgets::line(10.))
+                        .text_color(theme::color(palette::accent)),
+                )
+                .into_element();
+        }
+        let words = text(figures)
+            .number_of_lines(1u32)
+            .text_size(px(10.))
+            .line_height(widgets::line(10.))
+            .text_color(theme::color(palette::text_muted));
+        let words = if i18n::is_cjk() {
+            words
+        } else {
+            words.font_family(widgets::MONO)
+        };
+        row.tooltip(widgets::wrap_tooltip(i18n::tr(
+            "overview.swap_activity_tip",
+        )))
+        .child(words)
+        .into_element()
+    })
+}
+
+/// The disk's and the network's rates, R and W against ↓ and ↑.
+#[derive(Clone, PartialEq, Default)]
+struct Rates {
+    disk: (String, String),
+    net: (String, String),
+}
+
+fn rates_of(state: &ZStatsAppState) -> Option<Rates> {
+    let io = &state.latest()?.snapshot.io_totals;
+    let sides = [
+        io.disk_read_bytes_per_sec,
+        io.disk_write_bytes_per_sec,
+        io.network_received_bytes_per_sec,
+        io.network_transmitted_bytes_per_sec,
+    ];
+    if sides.iter().all(Option::is_none) {
+        return None;
+    }
+    let side = |arrow: &str, rate: Option<u64>| format!("{arrow} {}", format::rate(rate));
+    Some(Rates {
+        disk: (side("R", sides[0]), side("W", sides[1])),
+        net: (side("↓", sides[2]), side("↑", sides[3])),
+    })
+}
+
+/// `overview::io_card`: the rates row and the network chart under a
+/// title; no card while neither has anything.
+fn io_card(live: Live) -> AnyElement {
+    let rates = live.memo(rates_of);
+    let held = live.memo(|state: &ZStatsAppState| {
+        net_rings(state)
+            .iter()
+            .any(|ring| !ring.points().is_empty())
+    });
+    let pair = move |pick: fn(&Rates) -> &(String, String)| {
+        move || rates.with(|r| r.as_ref().map(|r| pick(r).clone()).unwrap_or_default())
+    };
+    when(
+        move || rates.with(Option::is_some) || held.get(),
+        move || {
+            widgets::card()
+                .child(widgets::card_header(i18n::tr("overview.io_title"), None))
+                .child(view().mt(px(8.)).child(when(
+                    move || rates.with(Option::is_some),
+                    move || {
+                        view()
+                            .flex_row()
+                            .gap(px(16.))
+                            .child(io_cell(
+                                CustomIconName::HardDrive,
+                                i18n::tr("overview.io_disk"),
+                                pair(|r| &r.disk),
+                            ))
+                            .child(io_cell(
+                                CustomIconName::Network,
+                                i18n::tr("overview.io_net"),
+                                pair(|r| &r.net),
+                            ))
+                    },
+                )))
+                .child(recent_chart(live, NET_RECENT))
+        },
+    )
+    .into_element()
+}
+
+/// One half of the rates row: the glyph, named on hover, and its two
+/// rates in the mono face.
+fn io_cell(
+    icon: CustomIconName,
+    label: String,
+    pair: impl Fn() -> (String, String) + Copy + 'static,
+) -> View {
+    let rate = |words: Box<dyn Fn() -> String>| {
+        text(words)
+            .font_family(widgets::MONO)
+            .text_size(px(10.))
+            .line_height(widgets::line(10.))
+            .text_color(theme::color(palette::text_muted))
+    };
+    view()
+        .flex_row()
+        .flex_1()
+        .min_w(px(0.))
+        .items_center()
+        .gap(px(6.))
+        .child(
+            view()
+                .flex_none()
+                .tooltip(widgets::wrap_tooltip(label))
+                .child(widgets::icon(icon, 12., palette::text_dim)),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap(px(6.))
+                .child(rate(Box::new(move || pair().0)))
+                .child(rate(Box::new(move || pair().1))),
+        )
 }

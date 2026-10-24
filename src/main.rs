@@ -71,6 +71,7 @@ mod opener;
 mod palette;
 mod placement;
 mod prefs;
+mod pressure;
 mod procscan;
 mod proxy;
 mod series;
