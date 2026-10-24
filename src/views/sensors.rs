@@ -2,7 +2,8 @@
 //! the lower half of the Hardware tab, after the disk cards.
 
 use super::widgets::{self, card};
-use crate::format;
+use crate::hardware;
+use crate::hot;
 use crate::i18n;
 use crate::state::{ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
@@ -13,40 +14,6 @@ use gpui::{
 };
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
-
-/// A sensor reads as hot at this fraction of its own ceiling — the same
-/// `celsius / ceiling` the list sorts by, so the red readings are always
-/// the top rows. Only a display rule, like every threshold in `views/`.
-///
-/// A fraction, not degrees, because a flat line cannot rank hardware
-/// with different ceilings. The old absolute 80 °C did two things wrong
-/// at once: on an Apple Silicon machine working hard, *every* pACC/eACC
-/// channel sits at 81–84 °C — 34 red rows carry exactly as much
-/// information as zero — while a battery cell at 55 °C, five degrees
-/// from its own 60 °C limit, stayed neutral. Ninety percent of the
-/// firmware's own number colours the one that is actually near its
-/// line and lets the merely-warm stay quiet.
-const HOT_FRACTION: f32 = 0.9;
-/// Ceiling assumed when a sensor reports no critical point of its own. With
-/// [`HOT_FRACTION`] this puts the no-crit colour line at 99 °C — far
-/// above the old 80, deliberately: for hardware whose ceiling we do not
-/// know, "hot" was a guess, and a CPU genuinely at 99 °C is past any
-/// plausible one.
-const ASSUMED_MAX_CELSIUS: f32 = 110.0;
-/// Rows shown before "show more". Apple Silicon firmware exposes dozens of
-/// channels and most sit within a degree of each other; the few nearest
-/// their own limits carry the story, and the full list would bury the disk
-/// and battery cards that share this tab. Hot sensors are never hidden —
-/// the cap only ever swallows quiet ones, and since the sort key and the
-/// colour key are the same fraction, the hot rows are always a prefix the
-/// truncation cannot reach into.
-///
-/// Four: two rows of the grid. It was chosen to fill the tab when each
-/// sensor had its own row and a meter, and this card was the only one
-/// that could grow; the drive and GPU cards now sit above it on macOS,
-/// so four is simply the few nearest their limits — a floor, with "show
-/// more" for the rest.
-const SENSOR_PREVIEW: usize = 4;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(tick) = state.latest() else {
@@ -65,34 +32,11 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             i18n::tr("sensors.nothing_body"),
         ),
         Some(temps) => {
-            // Closest to its own limit first — not raw degrees, which
-            // cannot rank hardware with different ceilings: an 84 °C core
-            // with crit 110 has a quarter of its range left, a 55 °C
-            // battery cell with crit 60 has five degrees. Sorting by that
-            // fraction puts the second one on top where it belongs. It
-            // also makes "hot rows are a prefix" structural: sort key and
-            // colour key are the same number, where the old absolute sort
-            // could push a near-its-limit sensor below the preview cut and
-            // hide it.
-            // The hottest reading in degrees, for the header. The rows rank
-            // by share of each sensor's own limit (above), so the top row
-            // is not always this one — and "how hot is it" is the first
-            // question, answered here before the raw labels below.
-            let hottest = temps.iter().map(|t| t.celsius).fold(f32::MIN, f32::max);
-            let mut sorted: Vec<_> = temps.iter().collect();
-            sorted.sort_by(|a, b| crit_fraction(b).total_cmp(&crit_fraction(a)));
+            // Closest to its own limit first, never hiding a hot one, and
+            // the hottest in degrees for the header (`hardware::sensors`).
+            let list = hardware::sensors(temps, state.show_all_sensors());
+            let (hottest, sorted, hideable) = (list.hottest, list.rows, list.hideable);
             let show_all = state.show_all_sensors();
-            // How many the collapse would hide, independent of the current
-            // state — same rule as the Network chip, so the control stays
-            // a toggle instead of going inert once expanded.
-            let hot = sorted
-                .iter()
-                .filter(|t| sensor_hot(t.celsius, t.critical_celsius))
-                .count();
-            let hideable = sorted.len().saturating_sub(SENSOR_PREVIEW.max(hot));
-            if !show_all {
-                sorted.truncate(SENSOR_PREVIEW.max(hot));
-            }
             // Same card and the same two-up cells as the Battery card
             // under it, so the two read as one kind of block.
             card()
@@ -172,7 +116,7 @@ fn sensor_grid(sorted: &[&zstats::snapshot::TemperatureSnapshot]) -> AnyElement 
 }
 
 fn sensor_cell(index: usize, t: &zstats::snapshot::TemperatureSnapshot, last: bool) -> AnyElement {
-    let hot = sensor_hot(t.celsius, t.critical_celsius);
+    let hot = hot::sensor_hot(t.celsius, t.critical_celsius);
     div()
         .id(("sensor", index))
         .flex_1()
@@ -181,7 +125,7 @@ fn sensor_cell(index: usize, t: &zstats::snapshot::TemperatureSnapshot, last: bo
             // Raw firmware labels; deliberately not prettified, so they
             // match other tools.
             t.label.clone().into(),
-            limits_label(t).into(),
+            hardware::limits_label(t).into(),
             i18n::tr("sensors.limit_tip").into(),
         ]))
         .child(widgets::kv_row(
@@ -191,51 +135,6 @@ fn sensor_cell(index: usize, t: &zstats::snapshot::TemperatureSnapshot, last: bo
             hot,
         ))
         .into_any_element()
-}
-
-/// What the firmware reports beside the reading.
-///
-/// zstats' `max_celsius` is the **highest reading observed**, not a
-/// thermal limit — painting "max 52" next to 51.8 °C read as "at the
-/// ceiling" when the bar (drawn against 110 °C / crit) was only half
-/// full. The label now says *peak*. Colour and order use [`ceiling`].
-fn limits_label(t: &zstats::snapshot::TemperatureSnapshot) -> String {
-    match (t.max_celsius, t.critical_celsius) {
-        (Some(m), Some(c)) => t!(
-            "sensors.max_crit",
-            max = format!("{m:.0}"),
-            crit = format!("{c:.0}")
-        )
-        .to_string(),
-        (Some(m), None) => t!("sensors.max_only", max = format!("{m:.0}")).to_string(),
-        (None, Some(c)) => t!("sensors.crit_only", crit = format!("{c:.0}")).to_string(),
-        (None, None) => i18n::tr("sensors.no_limits"),
-    }
-}
-
-/// The number a reading is measured against, for both order and colour.
-///
-/// Critical when the firmware reports one — that *is* a ceiling.
-/// Otherwise [`ASSUMED_MAX_CELSIUS`], never the observed peak: the
-/// hottest sensor on the page *is* the peak, so against it the top row
-/// would be at its limit by construction.
-fn ceiling(crit: Option<f32>) -> f32 {
-    crit.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0)
-}
-
-/// How much of its own range this sensor has used — the list's sort key
-/// and (against [`HOT_FRACTION`]) the colour's input. One definition so
-/// the two can never disagree: the top row is the first to turn red.
-fn crit_fraction(t: &zstats::snapshot::TemperatureSnapshot) -> f32 {
-    t.celsius / ceiling(t.critical_celsius)
-}
-
-/// Colour turns at [`HOT_FRACTION`] of the sensor's own ceiling — never
-/// against the observed peak, which is not a danger line, and never
-/// against a flat degree count, which cannot tell a core five degrees
-/// into its range from a battery cell five degrees from its limit.
-fn sensor_hot(celsius: f32, crit: Option<f32>) -> bool {
-    celsius / ceiling(crit) >= HOT_FRACTION
 }
 
 /// The expand/collapse control in the header, borrowed from the Network
@@ -284,236 +183,18 @@ fn more_chip(hideable: usize, showing: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// What the battery is doing, for the card's header: where the power
-/// comes from and, while there is one, how long until full or empty —
-/// "Charging · 1h 20m to full", "On battery · 3h 40m left", "Plugged in
-/// · full". zstats' doc for `state` says frontends derive "on AC" from
-/// it, and these are its words for the states that say so (a battery
-/// that is not discharging is on an external source); "unknown", or a
-/// word it adds later, says nothing rather than a guess.
-///
-/// The time was a cell of the grid, and the header carried zstats' raw
-/// word ("full", untranslated). A cell that comes and goes meant the
-/// grid was padded to six to hold its height, and on a full Mac that
-/// reports no cell temperature two of the six were blank under a
-/// hairline — read as a broken card. Here the time costs no cell.
-fn battery_status(b: &zstats::snapshot::BatterySnapshot) -> Option<String> {
-    let with_time = |bare: &str, timed: &str, secs: Option<u64>| match secs {
-        Some(secs) => t!(timed, time = format::uptime(secs)).to_string(),
-        None => i18n::tr(bare),
-    };
-    Some(match b.state.to_ascii_lowercase().as_str() {
-        "charging" => with_time(
-            "sensors.status_charging",
-            "sensors.status_charging_for",
-            b.time_to_full_secs,
-        ),
-        "discharging" => with_time(
-            "sensors.status_on_battery",
-            "sensors.status_on_battery_for",
-            b.time_to_empty_secs,
-        ),
-        "full" => i18n::tr("sensors.status_full"),
-        "paused" => i18n::tr("sensors.status_paused"),
-        "empty" => i18n::tr("sensors.status_empty"),
-        _ => return None,
-    })
-}
-
-/// The battery's facts two-up. Only the ones this machine reports, so
-/// the grid is the same size from one sample to the next without blank
-/// cells to hold it: the left column is the battery now (charge, power,
-/// and the cell temperature where there is one), the right its wear.
-/// An odd count leaves the bottom-right cell empty, so the two columns'
-/// hairlines still meet.
-fn battery_grid(b: &zstats::snapshot::BatterySnapshot) -> AnyElement {
-    widgets::kv_columns(battery_cells(b))
-}
-
-/// [`battery_grid`]'s cells, label and value, in `kv_columns` order.
-fn battery_cells(b: &zstats::snapshot::BatterySnapshot) -> Vec<(String, String)> {
-    let charge = (i18n::tr("sensors.charge"), format::pct(b.charge_percent));
-    // zstats' `power_watts` is the present flow either way, and `state`
-    // says which: "Draw" beside "charging" read as the machine's own use.
-    let draw = (
-        i18n::tr(power_label_key(&b.state)),
-        b.power_watts
-            .map_or(format::PLACEHOLDER.to_string(), |w| format!("{w:.1} W")),
-    );
-    let health = (
-        i18n::tr("sensors.health"),
-        b.health_percent
-            .map_or(format::PLACEHOLDER.into(), format::pct),
-    );
-    let cycles = (
-        i18n::tr("sensors.cycles"),
-        b.cycle_count
-            .map_or(format::PLACEHOLDER.to_string(), |c| c.to_string()),
-    );
-    // A cell temperature this machine does not report is not a row: a
-    // dash under "Cell temp" said nothing a missing row does not.
-    let temp = b
-        .temperature_celsius
-        .map(|c| (i18n::tr("sensors.cell_temp"), format!("{c:.1} °C")));
-    let mut cells = vec![charge, draw];
-    cells.extend(temp);
-    cells.extend([health, cycles]);
-    // `kv_columns` fills the left column first, so a blank pushed last
-    // lands bottom right.
-    if cells.len() % 2 == 1 {
-        cells.push((String::new(), "\u{00a0}".into()));
-    }
-    cells
-}
-
-/// The power cell's label for this battery state: the same zstats field
-/// is charging power or draw.
-fn power_label_key(state: &str) -> &'static str {
-    match state.to_ascii_lowercase().as_str() {
-        "charging" => "sensors.charging_power",
-        "discharging" | "empty" => "sensors.draw",
-        _ => "sensors.power",
-    }
-}
-
 fn with_battery_card(temps_card: AnyElement, tick: &zstats::Tick) -> Vec<AnyElement> {
     let battery_card = match tick.snapshot.battery.as_ref() {
         None => widgets::empty_card(i18n::tr("sensors.battery"), i18n::tr("sensors.no_battery")),
         Some(b) => card()
             .child(widgets::card_header(
                 i18n::tr("sensors.battery"),
-                battery_status(b).map(widgets::note),
+                hardware::battery_status(b).map(widgets::note),
             ))
-            .child(battery_grid(b))
+            .child(widgets::kv_columns(hardware::battery_cells(b)))
             .pb_2()
             .into_any_element(),
     };
 
     vec![temps_card, battery_card]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use zstats::snapshot::BatterySnapshot;
-
-    fn battery(state: &str, to_empty: Option<u64>, to_full: Option<u64>) -> BatterySnapshot {
-        BatterySnapshot {
-            state: state.into(),
-            charge_percent: 100.0,
-            health_percent: None,
-            cycle_count: None,
-            temperature_celsius: None,
-            power_watts: None,
-            time_to_full_secs: to_full,
-            time_to_empty_secs: to_empty,
-        }
-    }
-
-    #[test]
-    fn the_power_cell_is_named_for_the_direction_of_flow() {
-        assert_eq!(power_label_key("Charging"), "sensors.charging_power");
-        assert_eq!(power_label_key("Discharging"), "sensors.draw");
-        assert_eq!(power_label_key("Full"), "sensors.power");
-    }
-
-    /// The header says where the power comes from, and the one time
-    /// that applies while there is one. zstats' words arrive lowercase
-    /// from the battery crate, though its doc capitalises them.
-    #[test]
-    fn the_header_says_where_the_power_comes_from_and_for_how_long() {
-        let status = |state, to_empty, to_full| battery_status(&battery(state, to_empty, to_full));
-        assert_eq!(
-            status("discharging", Some(3600), None),
-            Some(t!("sensors.status_on_battery_for", time = format::uptime(3600)).to_string())
-        );
-        assert_eq!(
-            status("Charging", None, Some(900)),
-            Some(t!("sensors.status_charging_for", time = format::uptime(900)).to_string())
-        );
-        assert_eq!(
-            status("discharging", None, None),
-            Some(i18n::tr("sensors.status_on_battery")),
-            "no estimate yet is the state alone"
-        );
-        assert_eq!(
-            status("full", None, None),
-            Some(i18n::tr("sensors.status_full"))
-        );
-        assert_eq!(
-            status("paused", None, None),
-            Some(i18n::tr("sensors.status_paused"))
-        );
-        assert_eq!(status("unknown", None, Some(900)), None, "no guess");
-    }
-
-    /// No blank cell holds the grid's height any more, so a Mac that
-    /// reports no cell temperature is a full two-by-two; one that does
-    /// leaves only the bottom-right cell empty.
-    #[test]
-    fn the_battery_grid_has_no_blank_but_the_one_an_odd_count_needs() {
-        let blank = |cells: &[(String, String)]| cells.iter().filter(|(k, _)| k.is_empty()).count();
-        let cells = battery_cells(&battery("full", None, None));
-        assert_eq!(cells.len(), 4);
-        assert_eq!(blank(&cells), 0);
-        let mut warm = battery("full", None, None);
-        warm.temperature_celsius = Some(31.4);
-        let cells = battery_cells(&warm);
-        assert_eq!(cells.len(), 6);
-        assert_eq!(blank(&cells), 1);
-        assert!(cells[5].0.is_empty(), "the blank is bottom right");
-        assert_eq!(
-            cells[2].0,
-            i18n::tr("sensors.cell_temp"),
-            "temperature sits with the now"
-        );
-    }
-
-    #[test]
-    fn the_ceiling_is_never_the_observed_peak() {
-        // The hottest sensor *is* the peak. Measured against it, the top
-        // row would sit at its limit by construction — which is what
-        // "max 52" next to 51.8 °C looked like, when 51.8 / 110 is half.
-        assert_eq!(ceiling(None), ASSUMED_MAX_CELSIUS);
-        assert_eq!(ceiling(Some(100.0)), 100.0);
-    }
-
-    fn temp(celsius: f32, crit: Option<f32>) -> zstats::snapshot::TemperatureSnapshot {
-        zstats::snapshot::TemperatureSnapshot {
-            label: "t".into(),
-            celsius,
-            max_celsius: None,
-            critical_celsius: crit,
-        }
-    }
-
-    #[test]
-    fn hot_means_near_its_own_ceiling_not_past_a_flat_line() {
-        // The all-red machine: every cluster channel at 81–84 °C against
-        // a 110 °C assumed ceiling is warm, not near a limit. Under the
-        // old flat 80 °C line all 34 rows coloured and the colour said
-        // nothing.
-        assert!(!sensor_hot(84.0, None));
-        assert!(!sensor_hot(84.0, Some(110.0)));
-        // The one the flat line missed: five degrees from its own limit.
-        assert!(sensor_hot(55.0, Some(60.0)));
-        assert!(sensor_hot(92.0, Some(100.0)), "90% of crit colours");
-        assert!(!sensor_hot(70.0, Some(100.0)));
-        assert!(sensor_hot(99.5, None), "no-crit line sits at 90% of 110");
-    }
-
-    #[test]
-    fn the_ranking_puts_the_endangered_sensor_above_the_merely_warm() {
-        // 55/60 has used 92% of its range; 84/110 has used 76%. Raw
-        // degrees would bury the battery cell under every cluster
-        // channel — the exact row the page exists to surface.
-        let battery = temp(55.0, Some(60.0));
-        let core = temp(84.0, Some(110.0));
-        assert!(crit_fraction(&battery) > crit_fraction(&core));
-        // And the sort key IS the colour key, so the hot set is always
-        // a prefix of the list — the preview truncation can only ever
-        // swallow quiet rows.
-        assert!(sensor_hot(battery.celsius, battery.critical_celsius));
-        assert!(!sensor_hot(core.celsius, core.critical_celsius));
-    }
 }

@@ -11,20 +11,14 @@
 //! and this card names no culprit.
 
 use super::widgets::{self, card};
-use crate::format;
+use crate::hardware;
+use crate::hot;
 use crate::i18n;
 use crate::state::ZStatsAppState;
 use crate::theme;
 use gpui::{AnyElement, Hsla, IntoElement, ParentElement, Styled, div, px};
 use gpui_kit::component::h_flex;
-use rust_i18n::t;
 use zstats::snapshot::GpuSnapshot;
-
-/// The busy bar turns accent here. The same line as a CPU core
-/// (`hot::CORE_HOT`): a GPU pinned near full is the same kind of
-/// fact as a core pinned near full. Display only, like every threshold in
-/// `views/` — zstats has no GPU rule, and this fires nothing.
-const GPU_HOT: f32 = 85.0;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(tick) = state.latest() else {
@@ -33,11 +27,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let snapshot = &tick.snapshot;
     // Same two silences as the drives card: no such concept on this
     // platform, or the file turned the channel off.
-    let file_allows = state
-        .settings()
-        .and_then(|s| s.collector.as_ref())
-        .is_none_or(|c| c.collect_gpu);
-    if !snapshot.capabilities.gpu || !file_allows {
+    if !hardware::gpus_shown(state) {
         return Vec::new();
     }
     match snapshot.gpus.as_deref() {
@@ -55,11 +45,8 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 
 fn gpu_card(gpu: &GpuSnapshot) -> AnyElement {
     let busy = gpu.utilization_percent;
-    let hot = busy >= GPU_HOT;
-    let name = match gpu.cores {
-        Some(cores) => t!("gpu.name_cores", name = gpu.name.clone(), cores = cores).to_string(),
-        None => gpu.name.clone(),
-    };
+    let hot = busy >= hot::GPU_HOT;
+    let name = hardware::gpu_name(gpu);
     card()
         .child(widgets::card_header(
             i18n::tr("gpu.title"),
@@ -90,48 +77,11 @@ fn gpu_card(gpu: &GpuSnapshot) -> AnyElement {
             Hsla::from(theme::gauge_for(hot)),
             6.,
         )))
-        .child(widgets::kv_pairs(detail_rows(gpu)))
+        .child(widgets::kv_pairs(
+            hardware::gpu_detail_rows(gpu)
+                .into_iter()
+                .map(|(k, v)| (k, v, false))
+                .collect(),
+        ))
         .into_any_element()
-}
-
-/// The figures under the bar, each only where the driver publishes it —
-/// an Intel Mac's discrete GPU reports a different set than Apple
-/// Silicon, and a row of `—` for a field this driver never has would
-/// read as "not yet".
-fn detail_rows(gpu: &GpuSnapshot) -> Vec<(String, String, bool)> {
-    let pct = |label: &str, v: Option<f32>| v.map(|v| (i18n::tr(label), format::pct(v), false));
-    let bytes = |label: &str, v: Option<u64>| v.map(|b| (i18n::tr(label), format::gb(b), false));
-    [
-        pct("gpu.renderer", gpu.renderer_utilization_percent),
-        pct("gpu.tiler", gpu.tiler_utilization_percent),
-        bytes("gpu.mem_in_use", gpu.memory_in_use_bytes),
-        bytes("gpu.mem_allocated", gpu.memory_allocated_bytes),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn gpu(renderer: Option<f32>, in_use: Option<u64>) -> GpuSnapshot {
-        GpuSnapshot {
-            name: "Apple M4 Pro".into(),
-            cores: Some(20),
-            utilization_percent: 12.0,
-            renderer_utilization_percent: renderer,
-            tiler_utilization_percent: None,
-            memory_in_use_bytes: in_use,
-            memory_allocated_bytes: None,
-        }
-    }
-
-    #[test]
-    fn only_the_figures_the_driver_publishes_get_a_row() {
-        assert_eq!(detail_rows(&gpu(None, None)).len(), 0);
-        assert_eq!(detail_rows(&gpu(Some(10.0), None)).len(), 1);
-        assert_eq!(detail_rows(&gpu(Some(10.0), Some(1 << 30))).len(), 2);
-    }
 }

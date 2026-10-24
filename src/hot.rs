@@ -1,8 +1,8 @@
 //! Whether a process or a tree wears a row's only colour: a burst over
 //! one core, or a long low hold the sustained watcher saw (`watch.rs`) —
 //! and never this app's own CPU while the daily disk check explains it.
-//! Beside it the two other lines a figure turns colour at, a core's and
-//! swap's. Display only, like every threshold the views keep: nothing
+//! Beside it the other lines a figure turns colour at: a core's, swap's,
+//! a full volume's, a busy GPU's and a sensor near its own ceiling. Display only, like every threshold the views keep: nothing
 //! here fires an alert. Shared by both front ends since the NSH Overview
 //! (phases 4b and 4c of docs/nsh-migration.md); the gpui Processes, Apps
 //! and Overview pages read it too, so a pid is red in all of them or in
@@ -11,7 +11,7 @@
 use crate::state::ZStatsAppState;
 use std::process;
 use std::time::Instant;
-use zstats::snapshot::MemorySnapshot;
+use zstats::snapshot::{DiskSnapshot, MemorySnapshot, TemperatureSnapshot};
 
 /// A burst this big is worth colour — one whole core.
 ///
@@ -60,6 +60,68 @@ pub fn swap_hot(mem: &MemorySnapshot) -> bool {
     mem.total_bytes > 0 && (mem.swap_used_bytes as f32 / mem.total_bytes as f32) * 100.0 >= SWAP_HOT
 }
 
+/// The design's default disk alert bar: a volume's bar wears the accent
+/// past it (Hardware's volume cards).
+pub const FULL_PERCENT: f32 = 90.0;
+
+/// Whether a volume's bar wears the accent: past [`FULL_PERCENT`], and
+/// not removable — a full removable drive is normal, a full boot volume
+/// is not.
+pub fn volume_full(disk: &DiskSnapshot) -> bool {
+    disk.used_percent > FULL_PERCENT && !disk.is_removable
+}
+
+/// A GPU's busy bar turns accent here. The same line as a CPU core
+/// ([`CORE_HOT`]): a GPU pinned near full is the same kind of fact as a
+/// core pinned near full. zstats has no GPU rule, and this fires nothing.
+pub const GPU_HOT: f32 = 85.0;
+
+/// A sensor reads as hot at this fraction of its own ceiling — the same
+/// `celsius / ceiling` the list sorts by, so the red readings are always
+/// the top rows.
+///
+/// A fraction, not degrees, because a flat line cannot rank hardware
+/// with different ceilings. The old absolute 80 °C did two things wrong
+/// at once: on an Apple Silicon machine working hard, *every* pACC/eACC
+/// channel sits at 81–84 °C — 34 red rows carry exactly as much
+/// information as zero — while a battery cell at 55 °C, five degrees
+/// from its own 60 °C limit, stayed neutral. Ninety percent of the
+/// firmware's own number colours the one that is actually near its
+/// line and lets the merely-warm stay quiet.
+pub const HOT_FRACTION: f32 = 0.9;
+
+/// Ceiling assumed when a sensor reports no critical point of its own.
+/// With [`HOT_FRACTION`] this puts the no-crit colour line at 99 °C — far
+/// above the old 80, deliberately: for hardware whose ceiling we do not
+/// know, "hot" was a guess, and a CPU genuinely at 99 °C is past any
+/// plausible one.
+pub const ASSUMED_MAX_CELSIUS: f32 = 110.0;
+
+/// The number a reading is measured against, for both order and colour.
+///
+/// Critical when the firmware reports one — that *is* a ceiling.
+/// Otherwise [`ASSUMED_MAX_CELSIUS`], never the observed peak: the
+/// hottest sensor on the page *is* the peak, so against it the top row
+/// would be at its limit by construction.
+pub fn ceiling(crit: Option<f32>) -> f32 {
+    crit.unwrap_or(ASSUMED_MAX_CELSIUS).max(1.0)
+}
+
+/// How much of its own range a sensor has used — the sensor list's sort
+/// key and (against [`HOT_FRACTION`]) the colour's input. One definition
+/// so the two can never disagree: the top row is the first to turn red.
+pub fn crit_fraction(t: &TemperatureSnapshot) -> f32 {
+    t.celsius / ceiling(t.critical_celsius)
+}
+
+/// Colour turns at [`HOT_FRACTION`] of the sensor's own ceiling — never
+/// against the observed peak, which is not a danger line, and never
+/// against a flat degree count, which cannot tell a core five degrees
+/// into its range from a battery cell five degrees from its limit.
+pub fn sensor_hot(celsius: f32, crit: Option<f32>) -> bool {
+    celsius / ceiling(crit) >= HOT_FRACTION
+}
+
 /// Whether a row gets the page's only colour. Overview's top trees use
 /// the burst half of this (`sustained = false`) so a 110% tree is red
 /// here and there.
@@ -101,6 +163,54 @@ mod tests {
     /// holding a share for long enough. The old rule could only see
     /// bursts, so the daemon that had been at 60% all afternoon looked
     /// exactly like one at 3%.
+    #[test]
+    fn the_ceiling_is_never_the_observed_peak() {
+        // The hottest sensor *is* the peak. Measured against it, the top
+        // row would sit at its limit by construction — which is what
+        // "max 52" next to 51.8 °C looked like, when 51.8 / 110 is half.
+        assert_eq!(ceiling(None), ASSUMED_MAX_CELSIUS);
+        assert_eq!(ceiling(Some(100.0)), 100.0);
+    }
+
+    fn temp(celsius: f32, crit: Option<f32>) -> TemperatureSnapshot {
+        TemperatureSnapshot {
+            label: "t".into(),
+            celsius,
+            max_celsius: None,
+            critical_celsius: crit,
+        }
+    }
+
+    #[test]
+    fn hot_means_near_its_own_ceiling_not_past_a_flat_line() {
+        // The all-red machine: every cluster channel at 81–84 °C against
+        // a 110 °C assumed ceiling is warm, not near a limit. Under the
+        // old flat 80 °C line all 34 rows coloured and the colour said
+        // nothing.
+        assert!(!sensor_hot(84.0, None));
+        assert!(!sensor_hot(84.0, Some(110.0)));
+        // The one the flat line missed: five degrees from its own limit.
+        assert!(sensor_hot(55.0, Some(60.0)));
+        assert!(sensor_hot(92.0, Some(100.0)), "90% of crit colours");
+        assert!(!sensor_hot(70.0, Some(100.0)));
+        assert!(sensor_hot(99.5, None), "no-crit line sits at 90% of 110");
+    }
+
+    #[test]
+    fn the_ranking_puts_the_endangered_sensor_above_the_merely_warm() {
+        // 55/60 has used 92% of its range; 84/110 has used 76%. Raw
+        // degrees would bury the battery cell under every cluster
+        // channel — the exact row the page exists to surface.
+        let battery = temp(55.0, Some(60.0));
+        let core = temp(84.0, Some(110.0));
+        assert!(crit_fraction(&battery) > crit_fraction(&core));
+        // And the sort key IS the colour key, so the hot set is always
+        // a prefix of the list — the preview truncation can only ever
+        // swallow quiet rows.
+        assert!(sensor_hot(battery.celsius, battery.critical_celsius));
+        assert!(!sensor_hot(core.celsius, core.critical_celsius));
+    }
+
     #[test]
     fn a_long_hold_is_hot_even_though_it_never_crosses_the_burst_line() {
         assert!(is_hot(110.0, false), "one core and a bit is a burst");

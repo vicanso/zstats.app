@@ -9,6 +9,8 @@ use super::widgets::{self, card};
 use crate::confirm;
 use crate::font;
 use crate::format;
+use crate::hardware;
+use crate::hot;
 use crate::i18n;
 #[cfg(target_os = "macos")]
 use crate::opener;
@@ -22,19 +24,7 @@ use gpui::{
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex};
 use rust_i18n::t;
-use std::process;
 use zstats::snapshot::DiskSnapshot;
-
-/// The design's default disk alert bar.
-const FULL_PERCENT: f32 = 90.0;
-
-/// Whether a volume's bar wears the accent: past [`FULL_PERCENT`], and
-/// not removable — a full removable drive is normal, a full boot volume
-/// is not. One rule for this tab's cards and Overview's disk row, so a
-/// volume is red in both or in neither.
-pub(super) fn is_full(disk: &DiskSnapshot) -> bool {
-    disk.used_percent > FULL_PERCENT && !disk.is_removable
-}
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let Some(tick) = state.latest() else {
@@ -78,7 +68,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
             // and what the disk alert fires on, so recomputing it here could
             // only ever produce a number that disagrees with both.
             let used_pct = d.used_percent;
-            let hot = is_full(d);
+            let hot = hot::volume_full(d);
 
             card()
                 .child(
@@ -94,7 +84,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(theme::text())
                                 .truncate()
-                                .child(volume_title(d)),
+                                .child(hardware::volume_title(d)),
                         )
                         // One door to the space analysis, on the volume
                         // that holds ~. Both queries behind it are
@@ -160,7 +150,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                                 .to_string(),
                             ),
                         )
-                        .child(div().child(volume_footer_id(d))),
+                        .child(div().child(hardware::volume_footer_id(d))),
                 )
                 // The line the capacity meter cannot say: purgeable
                 // space and local snapshots — where a full disk often
@@ -171,39 +161,6 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         })
         .collect();
     cards
-}
-
-/// The volume's name as the Finder shows it — "Macintosh HD", not "/".
-///
-/// zstats reports it (`DiskSnapshot::name`), so this is a display choice
-/// and not a second source: the panel used to paint the mount point,
-/// which names the volume correctly and identifies it to nobody outside
-/// a terminal. The mount point is still on the card, in the footer where
-/// the file system already is. Falls back to it when the OS gave no name
-/// — an unnamed volume must not render a blank title.
-fn volume_title(disk: &DiskSnapshot) -> String {
-    if disk.name.trim().is_empty() {
-        disk.mount_point.clone()
-    } else {
-        disk.name.clone()
-    }
-}
-
-/// The footer's right slot: "/ · apfs · SSD". The technical identity, in
-/// the smallest text on the card, so moving the name up top loses
-/// nothing. The drive kind joined it from the header, where its outlined
-/// pill sat beside the Analyze button and read as a second button.
-fn volume_footer_id(disk: &DiskSnapshot) -> String {
-    let mut parts = Vec::new();
-    if !disk.name.trim().is_empty() {
-        parts.push(disk.mount_point.as_str());
-    }
-    parts.push(disk.file_system.as_str());
-    let kind = disk.kind.trim();
-    if !kind.is_empty() && !kind.eq_ignore_ascii_case("unknown") {
-        parts.push(kind);
-    }
-    parts.join(" · ")
 }
 
 /// Opens the disk-space window (large files + the directory analyser).
@@ -241,17 +198,7 @@ pub(super) fn storage_chip() -> AnyElement {
 /// Display and honest pointing only — the tooltip says whose figures
 /// these are and that reclaiming is the system's (or tmutil's) job.
 fn space_line(state: &ZStatsAppState) -> Option<AnyElement> {
-    let info = state.space_info()?;
-    let mut parts = Vec::new();
-    if let Some(purgeable) = info.purgeable_bytes.filter(|p| *p > 0) {
-        parts.push(t!("disk.purgeable", v = format::memory(purgeable)).to_string());
-    }
-    if info.snapshots > 0 {
-        parts.push(t!("disk.snapshots", n = info.snapshots).to_string());
-    }
-    if parts.is_empty() {
-        return None;
-    }
+    let line = hardware::space_extra(state)?;
     Some(
         div()
             .id("disk-space-extra")
@@ -259,7 +206,7 @@ fn space_line(state: &ZStatsAppState) -> Option<AnyElement> {
             .text_size(px(10.))
             .text_color(theme::text_dim())
             .tooltip(widgets::wrap_tooltip(i18n::tr("disk.space_extra_tip")))
-            .child(parts.join(" · "))
+            .child(line)
             .into_any_element(),
     )
 }
@@ -325,8 +272,8 @@ fn eject_badge(index: usize, disk: &DiskSnapshot) -> Option<AnyElement> {
     }
 }
 
-/// Unmount / eject a removable volume. Never the boot volume — the
-/// badge is only rendered for `is_removable`, and this is a second gate.
+/// Unmount / eject a removable volume, off the main thread
+/// (`hardware::eject`, which refuses the boot volume a second time).
 ///
 /// On success the collector is woken rather than the card being hidden
 /// here: the volume list the panel paints is zstats', and a row that
@@ -335,16 +282,12 @@ fn eject_badge(index: usize, disk: &DiskSnapshot) -> Option<AnyElement> {
 /// sample land in milliseconds instead of at the end of the cadence, so
 /// the row goes away because the OS no longer lists the volume.
 fn eject(mount: &str, cx: &mut gpui::App) {
-    if !safe_to_eject(mount) {
-        tracing::warn!("refusing to eject {mount}");
-        return;
-    }
     let mount = mount.to_string();
     let mount_for_hide = mount.clone();
     cx.spawn(async move |cx| {
         let ejected = cx
             .background_executor()
-            .spawn(async move { run_eject(&mount) })
+            .spawn(async move { hardware::eject(&mount) })
             .await;
         if ejected {
             cx.update(|cx| {
@@ -362,129 +305,4 @@ fn eject(mount: &str, cx: &mut gpui::App) {
         }
     })
     .detach();
-}
-
-/// The subprocess half, off the main thread. `true` only when the tool
-/// reported success — a failed eject must not shorten the wait for a
-/// sample that would show the volume still mounted.
-fn run_eject(mount: &str) -> bool {
-    match eject_command(mount) {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!("eject {mount}: {e}");
-            false
-        }
-    }
-}
-
-/// `diskutil eject`: unmount and power the drive down in one step.
-#[cfg(target_os = "macos")]
-fn eject_command(mount: &str) -> Result<(), String> {
-    run_tool("diskutil", &["eject", mount])
-}
-
-/// udisks, the desktop's own path — it lets the user who plugged the
-/// drive in unmount it without root, which plain `umount` does not (that
-/// wants `CAP_SYS_ADMIN` unless fstab says `user`, and a removable drive
-/// a desktop auto-mounted under `/run/media` is never in fstab). So the
-/// mount point is resolved to its device with `findmnt`, unmounted
-/// through `udisksctl`, and the drive then powered off the way "safely
-/// remove" does — that last step best-effort, because a drive with a
-/// second partition still mounted refuses it and that is not a failed
-/// eject of *this* volume. Without udisks (a headless box) it falls back
-/// to `umount` and whatever permissions the user has.
-#[cfg(not(target_os = "macos"))]
-fn eject_command(mount: &str) -> Result<(), String> {
-    if !tool_exists("udisksctl") {
-        return run_tool("umount", &[mount]);
-    }
-    let out = process::Command::new("findmnt")
-        .args(["-rn", "-o", "SOURCE", "--mountpoint", mount])
-        .output()
-        .map_err(|e| format!("findmnt: {e}"))?;
-    let device = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() || device.is_empty() {
-        return Err(format!("findmnt: no device is mounted at {mount}"));
-    }
-    run_tool("udisksctl", &["unmount", "-b", &device])?;
-    if let Err(e) = run_tool("udisksctl", &["power-off", "-b", &device]) {
-        tracing::debug!("power-off after unmount: {e}");
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn tool_exists(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
-}
-
-/// Run a tool and turn a non-zero exit into its stderr.
-fn run_tool(tool: &str, args: &[&str]) -> Result<(), String> {
-    let out = process::Command::new(tool)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{tool}: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{tool} failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
-}
-
-fn safe_to_eject(mount: &str) -> bool {
-    let mount = mount.trim_end_matches('/');
-    !matches!(
-        mount,
-        "" | "/" | "/System" | "/System/Volumes/Data" | "/home" | "/Users"
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn snapshot(name: &str, mount: &str) -> DiskSnapshot {
-        DiskSnapshot {
-            name: name.into(),
-            mount_point: mount.into(),
-            file_system: "apfs".into(),
-            kind: "SSD".into(),
-            is_removable: false,
-            total_bytes: 0,
-            available_bytes: 0,
-            used_percent: 0.0,
-            read_bytes_per_sec: None,
-            write_bytes_per_sec: None,
-        }
-    }
-
-    /// The title is the volume's name, the footer keeps the mount point —
-    /// and a nameless volume must still title itself with something.
-    #[test]
-    fn volume_title_prefers_the_name_and_keeps_the_mount_point_below() {
-        let boot = snapshot("Macintosh HD", "/");
-        assert_eq!(volume_title(&boot), "Macintosh HD");
-        assert_eq!(volume_footer_id(&boot), "/ · apfs · SSD");
-
-        let unnamed = snapshot("  ", "/Volumes/disk3s2");
-        assert_eq!(volume_title(&unnamed), "/Volumes/disk3s2");
-        // The title already is the mount point; repeating it below would
-        // be the same string twice on one card.
-        assert_eq!(volume_footer_id(&unnamed), "apfs · SSD");
-        let mut unknown = snapshot("Data", "/Volumes/Data");
-        unknown.kind = "Unknown".into();
-        assert_eq!(volume_footer_id(&unknown), "/Volumes/Data · apfs");
-    }
-
-    #[test]
-    fn will_not_eject_the_boot_volume() {
-        assert!(!safe_to_eject("/"));
-        assert!(!safe_to_eject("/System/Volumes/Data"));
-        assert!(safe_to_eject("/Volumes/Zedis Installer"));
-    }
 }

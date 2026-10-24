@@ -13,6 +13,7 @@
 use super::widgets;
 use crate::font;
 use crate::format;
+use crate::hardware;
 use crate::i18n;
 use crate::state::ZStatsAppState;
 use crate::theme;
@@ -31,15 +32,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         return Vec::new();
     };
     let snapshot = &tick.snapshot;
-    // A platform without the concept (Linux, Windows today) and a file
-    // that turned the channel off both get no card: neither is a state
-    // this tab can do anything about, and "unavailable" in a card would
-    // be chrome on every visit.
-    let file_allows = state
-        .settings()
-        .and_then(|s| s.collector.as_ref())
-        .is_none_or(|c| c.collect_drives);
-    if !snapshot.capabilities.drive_io || !file_allows {
+    // A platform without the concept and a file that turned the channel
+    // off both get no card: "unavailable" in a card would be chrome on
+    // every visit.
+    if !hardware::drives_shown(state) {
         return Vec::new();
     }
 
@@ -82,20 +78,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
 /// Name and model on top with the queue depth pinned right; the two
 /// directions underneath; errors only when there are any.
 fn drive_row(index: usize, drive: &DriveSnapshot, last: bool) -> AnyElement {
-    let identity = match (&drive.model, drive.size_bytes) {
-        (Some(model), Some(size)) => format!("{model} · {}", format::capacity(size)),
-        (Some(model), None) => model.clone(),
-        (None, Some(size)) => format::capacity(size),
-        (None, None) => String::new(),
-    };
+    let identity = hardware::drive_identity(drive);
     let errors = drive.read_errors + drive.write_errors;
-    // No baseline yet — the first read after arriving on the tab (the
-    // switch restarts drive rates from nothing). Two rows of `R — · —`
-    // and a `Q —` read as a broken card; one quiet word says the numbers
-    // are on their way, and the queue waits with them.
-    let measuring = drive.read_ops_per_sec.is_none()
-        && drive.write_ops_per_sec.is_none()
-        && drive.queue_depth.is_none();
+    let measuring = hardware::drive_measuring(drive);
     v_flex()
         .px(px(widgets::CARD_PAD))
         .py(px(8.))

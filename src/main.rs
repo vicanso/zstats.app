@@ -58,6 +58,7 @@ mod format;
 mod fullscan;
 mod geom;
 mod glyph;
+mod hardware;
 mod history;
 mod hot;
 mod i18n;
