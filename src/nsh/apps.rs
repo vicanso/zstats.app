@@ -13,10 +13,9 @@
 //! All chip swaps the list for a one-off scan of every tree, a virtual
 //! list whose rows are the same rows at their own height.
 
-use crate::alertbars::{self, BarDisplay, Resolved};
+use crate::alertbars::BarDisplay;
 use crate::applist;
-use crate::assets::CustomIconName;
-use crate::diskwatch::Hold;
+use crate::nsh::lists::{self, Editor, ROW_PAD, ScanChip, ScanWords};
 use crate::nsh::root::{CARD_GAP, CARD_PAD, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
@@ -30,10 +29,6 @@ use std::collections::{HashMap, HashSet};
 use std::process;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
 
-/// What stands above and below a collapsed row's lines, before the fit
-/// gives the row its share of the leftover (`processes::ROW_PAD`).
-const ROW_PAD: f32 = 7.;
-
 /// A collapsed row, hairline included: the padding twice, the first line
 /// (the 13px figure's 21, over the 12px name's 19), the 3 under it, the
 /// 10px second line's 16, the meter's 4 and 3, the hairline. The gpui
@@ -41,18 +36,17 @@ const ROW_PAD: f32 = 7.;
 /// whole points (`widgets::line`).
 const COLLAPSED_ROW: f32 = ROW_PAD + ROW_PAD + 21. + 3. + 16. + 4. + 3. + 1.;
 
-/// The pinned header: 11 above the 12px title's 19, 9 under it
-/// (`processes::LIST_HEADER`).
-const LIST_HEADER: f32 = 11. + 19. + 9.;
+/// The All chip's words.
+const SCAN_WORDS: ScanWords = ScanWords {
+    chip: "apps.full_chip",
+    scanning: "apps.full_scanning",
+    back: "apps.full_back",
+    chip_tip: "apps.full_chip_tip",
+    back_tip: "apps.full_back_tip",
+};
 
-/// The open filter row: the field's 28 and the 6 under it
-/// (`processes::FILTER_ROW_HEIGHT`).
-const FILTER_ROW: f32 = 34.;
-const FIELD_H: f32 = 28.;
-
-/// Never shorter than this, however small the window gets
-/// (`processes::FULL_LIST_MIN`).
-const LIST_MIN: f32 = 120.;
+/// The two rules an app's chips edit.
+const KEYS: [&str; 2] = ["alert-app-cpu", "alert-app-mem"];
 
 /// The page: waiting, collection off, the top list, or the full scan.
 #[derive(Clone, Copy, PartialEq)]
@@ -181,14 +175,7 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
         return Top::default();
     };
     let shown = applist::top_rows(state, groups);
-    let chrome = LIST_HEADER
-        + if state.proc_filter_open() {
-            FILTER_ROW
-        } else {
-            0.
-        };
-    let budget = (body - CARD_GAP - chrome).max(LIST_MIN);
-    let fit = rows::fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
+    let fit = rows::fit_rows(lists::rows_budget(state, body), COLLAPSED_ROW, ROW_PAD);
     let repeated = repeated(&shown, state);
     let bar_full = applist::bar_full_for(state.app_sort(), shown.iter().copied());
     let rows: Vec<Row> = shown
@@ -211,27 +198,13 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
     }
 }
 
-/// The header's left side: how many trees, and the one ⓘ for both notes.
-fn count_title(count: impl Fn() -> String + 'static) -> AnyElement {
-    view()
-        .flex_row()
-        .items_center()
-        .gap(px(4.))
-        .min_w(px(0.))
-        .child(widgets::list_title(count).flex_shrink(1.))
-        .child(widgets::info_icon(widgets::tooltip_lines(|| {
-            vec![i18n::tr("apps.cpu_basis_tip"), i18n::tr("apps.cap_note")]
-        })))
-        .into_element()
-}
-
 /// The header's controls: the filter, the sort, the All chip.
 fn controls(live: Live) -> AnyElement {
     view()
         .flex_row()
         .items_center()
         .gap(px(5.))
-        .child(filter_chip(live))
+        .child(lists::filter_chip(live))
         .child(sort_control(live))
         .child(full_scan_chip(live))
         .into_element()
@@ -261,10 +234,17 @@ fn top_card(live: Live, body: ReadSignal<f32>) -> View {
     });
     widgets::list_shell()
         .child(widgets::list_header(
-            count_title(move || t!("apps.count_of", shown = count.get()).to_string()),
+            // One ⓘ for both notes: what the CPU figure is, and what a
+            // tree is.
+            lists::count_title(
+                move || t!("apps.count_of", shown = count.get()).to_string(),
+                widgets::tooltip_lines(|| {
+                    vec![i18n::tr("apps.cpu_basis_tip"), i18n::tr("apps.cap_note")]
+                }),
+            ),
             Some(controls(live)),
         ))
-        .child(filter_row(live))
+        .child(lists::filter_row(live))
         .child(
             scroll()
                 .max_h(move || px(top.with(|t| t.viewport)))
@@ -282,12 +262,7 @@ fn top_card(live: Live, body: ReadSignal<f32>) -> View {
                 ))
                 .child(when(
                     move || top.with(|t| t.no_match),
-                    || {
-                        view()
-                            .px(px(CARD_PAD))
-                            .py(px(10.))
-                            .child(widgets::note(i18n::tr("apps.filter_no_match")))
-                    },
+                    || lists::no_match("apps.filter_no_match"),
                 )),
         )
 }
@@ -345,7 +320,7 @@ fn full_card(live: Live, body: ReadSignal<f32>) -> View {
         }
     });
     widgets::list_shell()
-        .h(move || px((body.get() - CARD_GAP).max(LIST_MIN)))
+        .h(move || px((body.get() - CARD_GAP).max(lists::LIST_MIN)))
         .child(widgets::list_header(
             widgets::list_title(move || full.with(|f| f.title.clone())).into_element(),
             Some(controls(live)),
@@ -356,15 +331,10 @@ fn full_card(live: Live, body: ReadSignal<f32>) -> View {
                 .pb(px(8.))
                 .child(widgets::note(move || full.with(|f| f.note.clone()))),
         )
-        .child(filter_row(live))
+        .child(lists::filter_row(live))
         .child(when(
             move || full.with(|f| f.rows.is_empty()),
-            || {
-                view()
-                    .px(px(CARD_PAD))
-                    .py(px(10.))
-                    .child(widgets::note(i18n::tr("apps.filter_no_match")))
-            },
+            || lists::no_match("apps.filter_no_match"),
         ))
         .child(
             virtual_list(
@@ -410,109 +380,6 @@ fn empty_row(index: usize) -> Row {
     }
 }
 
-/// The header control that opens the name filter.
-fn filter_chip(live: Live) -> AnyElement {
-    let on = live.memo(ZStatsAppState::proc_filter_open);
-    view()
-        .flex_none()
-        .tooltip(widgets::wrap_tooltip(i18n::tr("processes.filter_tip")))
-        .child(
-            nsh_base::button()
-                .rounded(px(4.))
-                .p(px(2.))
-                .bg(move || theme::color(move || if on.get() { palette::chip() } else { CLEAR }))
-                .hover(|s| s.bg(theme::color(palette::surface_raised)))
-                .on_press(move || {
-                    let open = on.get_untracked();
-                    store::update(|state, fx| {
-                        if open {
-                            state.close_proc_filter(fx);
-                        } else {
-                            state.open_proc_filter(fx);
-                        }
-                    });
-                })
-                .child(widgets::icon(CustomIconName::Search, 11., move || {
-                    if on.get() {
-                        palette::text()
-                    } else {
-                        palette::text_muted()
-                    }
-                })),
-        )
-        .into_element()
-}
-
-/// The name filter's field while it is open, focused as it appears; the
-/// clear empties it, as Escape does on the gpui front end.
-fn filter_row(live: Live) -> AnyElement {
-    let on = live.memo(ZStatsAppState::proc_filter_open);
-    let query = live.memo(|state: &ZStatsAppState| state.proc_filter_text().to_owned());
-    let typed = signal(String::new());
-    when(
-        move || on.get(),
-        move || {
-            typed.set(String::new());
-            view()
-                .h(px(FILTER_ROW))
-                .px(px(CARD_PAD))
-                .pb(px(FILTER_ROW - FIELD_H))
-                .child(
-                    view()
-                        .flex_row()
-                        .h(px(FIELD_H))
-                        .items_center()
-                        .gap(px(6.))
-                        .px(px(8.))
-                        .rounded(px(6.))
-                        .border(px(1.))
-                        .border_color(theme::color(palette::border))
-                        .child(widgets::icon(
-                            CustomIconName::Search,
-                            12.,
-                            palette::text_dim,
-                        ))
-                        .child(
-                            input()
-                                .flex_1()
-                                .value(move || typed.get())
-                                .placeholder(i18n::tr("processes.filter_placeholder"))
-                                .auto_focus(true)
-                                .auto_correct(false)
-                                .text_size(px(12.))
-                                .text_color(theme::color(palette::text))
-                                .on_change(move |text: &str| {
-                                    typed.set(text.to_owned());
-                                    store::update(|state, fx| state.set_proc_filter_text(text, fx));
-                                }),
-                        )
-                        .child(when(
-                            move || !query.with(String::is_empty),
-                            move || {
-                                nsh_base::button()
-                                    .flex_none()
-                                    .rounded_full()
-                                    .p(px(2.))
-                                    .hover(|s| s.bg(theme::color(palette::surface_raised)))
-                                    .on_press(move || {
-                                        typed.set(String::new());
-                                        store::update(|state, fx| {
-                                            state.set_proc_filter_text("", fx)
-                                        });
-                                    })
-                                    .child(widgets::icon(
-                                        CustomIconName::Close,
-                                        11.,
-                                        palette::text_dim,
-                                    ))
-                            },
-                        )),
-                )
-        },
-    )
-    .into_element()
-}
-
 /// CPU or memory, as a menu.
 fn sort_control(live: Live) -> AnyElement {
     let sort = live.memo(ZStatsAppState::app_sort);
@@ -541,93 +408,15 @@ fn sort_control(live: Live) -> AnyElement {
 }
 
 /// The chip that asks for every tree, and the one that gives the top
-/// list back; no hover while a scan is in flight.
+/// list back.
 fn full_scan_chip(live: Live) -> AnyElement {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Chip {
-        Off,
-        Running,
-        Showing,
-    }
     let chip = live.memo(|state: &ZStatsAppState| match state.full_app_scan() {
-        FullAppScan::Running => Chip::Running,
-        FullAppScan::Ready(_) => Chip::Showing,
-        _ => Chip::Off,
+        FullAppScan::Running => ScanChip::Running,
+        FullAppScan::Ready(_) => ScanChip::Showing,
+        _ => ScanChip::Off,
     });
-    view()
-        .flex_none()
-        .tooltip(widgets::live_tooltip(move || {
-            i18n::tr(if chip.get() == Chip::Showing {
-                "apps.full_back_tip"
-            } else {
-                "apps.full_chip_tip"
-            })
-        }))
-        .child(
-            nsh_base::button()
-                .rounded_full()
-                .border(px(1.))
-                .border_color(move || {
-                    theme::color(move || {
-                        if chip.get() == Chip::Showing {
-                            palette::border()
-                        } else {
-                            palette::border_subtle()
-                        }
-                    })
-                })
-                .bg(move || {
-                    theme::color(move || {
-                        if chip.get() == Chip::Showing {
-                            palette::chip()
-                        } else {
-                            CLEAR
-                        }
-                    })
-                })
-                .hover(move |s| {
-                    if chip.get_untracked() == Chip::Off {
-                        s.bg(theme::color(palette::surface_raised))
-                            .border_color(theme::color(palette::border))
-                    } else {
-                        s
-                    }
-                })
-                .px(px(7.))
-                .py(px(1.))
-                .on_press(|| store::update(|state, fx| state.toggle_full_app_scan(fx)))
-                .child(
-                    text(move || {
-                        i18n::tr(match chip.get() {
-                            Chip::Running => "apps.full_scanning",
-                            Chip::Showing => "apps.full_back",
-                            Chip::Off => "apps.full_chip",
-                        })
-                    })
-                    .text_size(px(9.))
-                    .line_height(widgets::line(9.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(move || {
-                        theme::color(move || match chip.get() {
-                            Chip::Running => palette::text_dim(),
-                            Chip::Showing => palette::text(),
-                            Chip::Off => palette::text_muted(),
-                        })
-                    }),
-                ),
-        )
-        .into_element()
-}
-
-/// This app's own row while the daily disk check is its work: what the
-/// badge says.
-fn disk_check_label(state: &ZStatsAppState) -> Option<String> {
-    state.disk_check_running().then(|| {
-        i18n::tr(match state.disk_check_held() {
-            None => "processes.disk_check",
-            Some(Hold::OnBattery) => "processes.disk_check_power",
-            Some(Hold::Busy) => "processes.disk_check_quiet",
-        })
+    lists::full_scan_chip(chip, SCAN_WORDS, || {
+        store::update(|state, fx| state.toggle_full_app_scan(fx))
     })
 }
 
@@ -638,7 +427,7 @@ fn app_row(row: Memo<Row>, live: Live) -> AnyElement {
     let pid = computed(move || row.with(|r| r.pid));
     // The mark is made again only when the program on the row changes.
     let ident = computed(move || row.with(|r| (r.pid, r.name.clone(), r.title.clone())));
-    let badge = live.memo(disk_check_label);
+    let badge = live.memo(lists::disk_check_label);
     let own = move || pid.get() == process::id();
     let pad = move || row.with(|r| r.pad);
     view()
@@ -705,24 +494,7 @@ fn app_row(row: Memo<Row>, live: Live) -> AnyElement {
                                                 ))
                                                 .child(when(
                                                     move || own() && badge.with(Option::is_some),
-                                                    move || {
-                                                        view()
-                                                            .flex_none()
-                                                            .tooltip(widgets::wrap_tooltip(
-                                                                i18n::tr(
-                                                                    "processes.disk_check_tip",
-                                                                ),
-                                                            ))
-                                                            .child(widgets::pill(
-                                                                move || {
-                                                                    badge.with(|b| {
-                                                                        b.clone()
-                                                                            .unwrap_or_default()
-                                                                    })
-                                                                },
-                                                                false,
-                                                            ))
-                                                    },
+                                                    move || lists::disk_check_badge(badge),
                                                 )),
                                         )
                                         .child(
@@ -839,10 +611,8 @@ struct Expansion {
     members: Vec<Member>,
     fetching: bool,
     missing: usize,
-    /// What the chips' two rows light, once the settings are read.
-    lit: Option<[Option<String>; 2]>,
-    /// What the chips' rows are percentages of.
-    caption: Option<String>,
+    /// The chips that edit the bars, once the settings are read.
+    editor: Option<Editor>,
     /// The tree's name and identity for Quit, while it can be asked to.
     quit: Option<(String, String)>,
 }
@@ -876,30 +646,7 @@ fn expansion_of(state: &ZStatsAppState, pid: u32) -> Expansion {
     let Some(g) = g else {
         return Expansion::default();
     };
-    let total = tick.snapshot.memory.total_bytes;
-    let (cpu_bar, mem_bar, lit) = match state.settings() {
-        Some(file) => {
-            let bars = Resolved::of(file);
-            let eff = bars.eff();
-            let cpu =
-                alertbars::pct_bar_text(eff.app_cpu.override_for(&g.name), eff.app_cpu.base())
-                    .decided_by(bars.in_force("alert-app-cpu", &g.name));
-            let mem = alertbars::mem_bar_text(
-                eff.app_memory.override_for(&g.name),
-                eff.app_memory_bar_bytes(&g.name, total),
-                eff.app_memory.base(),
-            )
-            .decided_by(bars.in_force("alert-app-mem", &g.name));
-            let lit = ["alert-app-cpu", "alert-app-mem"]
-                .map(|key| bars.in_force(key, &g.name).and_then(|held| held.lit));
-            (cpu, mem, Some(lit))
-        }
-        None => (
-            BarDisplay::plain(format::PLACEHOLDER),
-            BarDisplay::plain(format::PLACEHOLDER),
-            None,
-        ),
-    };
+    let (cpu_bar, mem_bar) = applist::alert_bars(&g, state);
     let source = state.member_processes().unwrap_or(tick_ps);
     let mut members = fullscan::tree_members(g.root_pid, source);
     members.sort_by_key(|p| Reverse(snap_memory(p)));
@@ -945,10 +692,7 @@ fn expansion_of(state: &ZStatsAppState, pid: u32) -> Expansion {
         members,
         fetching,
         missing,
-        lit,
-        caption: state
-            .settings()
-            .map(|_| t!("processes.th_caption", total = format::memory(total)).to_string()),
+        editor: lists::editor_of(state, &g.name, KEYS),
         quit: terminate::can_quit_app(g.root_pid)
             .then(|| (trend::tree_key(&g).to_string(), g.name.clone())),
         name: g.name,
@@ -973,12 +717,12 @@ fn expand_block(live: Live, pid: u32) -> View {
                     view()
                         .flex_1()
                         .min_w(px(0.))
-                        .child(expand_row(
+                        .child(lists::expand_row(
                             i18n::tr("apps.root_pid"),
                             field(|x| x.root_pid.clone()),
                             false,
                         ))
-                        .child(expand_row(
+                        .child(lists::expand_row(
                             i18n::tr("processes.mem_footprint"),
                             field(|x| x.footprint.clone()),
                             true,
@@ -988,24 +732,24 @@ fn expand_block(live: Live, pid: u32) -> View {
                     view()
                         .flex_1()
                         .min_w(px(0.))
-                        .child(expand_row(
+                        .child(lists::expand_row(
                             i18n::tr("apps.cpu"),
                             field(|x| x.cpu.clone()),
                             false,
                         ))
-                        .child(expand_row(
+                        .child(lists::expand_row(
                             i18n::tr("processes.mem_rss"),
                             field(|x| x.rss.clone()),
                             true,
                         )),
                 ),
         )
-        .child(bar_row(
+        .child(lists::bar_row(
             i18n::tr("processes.bar_cpu"),
             move || x.with(|x| x.cpu_bar.clone()),
             false,
         ))
-        .child(bar_row(
+        .child(lists::bar_row(
             i18n::tr("processes.bar_mem"),
             move || x.with(|x| x.mem_bar.clone()),
             true,
@@ -1084,116 +828,18 @@ fn expand_block(live: Live, pid: u32) -> View {
             },
         ))
         .child(when(
-            move || x.with(|x| x.lit.is_some()),
-            move || threshold_editor(x),
+            move || x.with(|x| x.editor.is_some()),
+            move || {
+                lists::threshold_editor(
+                    move || x.with(|x| x.editor.clone().unwrap_or_default()),
+                    KEYS,
+                )
+            },
         ))
         .child(when(
             move || x.with(|x| x.quit.is_some()),
-            move || view().flex_row().justify_end().child(quit_button(pid, x)),
+            move || quit_button(pid, x),
         ))
-}
-
-/// One figure of the expansion's grid: its label, which gives way, and
-/// the figure.
-fn expand_row(label: String, value: impl Fn() -> String + 'static, last: bool) -> View {
-    let row = view()
-        .flex_row()
-        .justify_between()
-        .gap(px(8.))
-        .py(px(5.))
-        .child(
-            text(label)
-                .flex_1()
-                .min_w(px(0.))
-                .number_of_lines(1u32)
-                .text_size(px(11.))
-                .line_height(widgets::line(11.))
-                .text_color(theme::color(palette::text_muted)),
-        )
-        .child(
-            text(value)
-                .flex_none()
-                .tabular_nums()
-                .text_size(px(11.))
-                .line_height(widgets::line(11.))
-                .text_color(theme::color(palette::text)),
-        );
-    if last {
-        row
-    } else {
-        row.border_b(px(1.))
-            .border_color(theme::color(palette::border_subtle))
-    }
-}
-
-/// One alert bar: its label, and the layer in a word with its ⓘ while a
-/// per-name entry decided it; the figure at the right
-/// (`processes::bar_row`).
-fn bar_row(label: String, bar: impl Fn() -> BarDisplay + Copy + 'static, last: bool) -> View {
-    let row = view()
-        .flex_row()
-        .justify_between()
-        .items_center()
-        .gap(px(8.))
-        .py(px(5.))
-        .child(
-            view()
-                .flex_row()
-                .flex_1()
-                .min_w(px(0.))
-                .items_center()
-                .gap(px(4.))
-                .child(
-                    text(label)
-                        .flex_shrink(1.)
-                        .number_of_lines(1u32)
-                        .text_size(px(11.))
-                        .line_height(widgets::line(11.))
-                        .text_color(theme::color(palette::text_muted)),
-                )
-                .child(when(
-                    move || bar().overridden,
-                    move || {
-                        let words = move || {
-                            if bar().yours {
-                                ("processes.bar_yours", "processes.bar_yours_tip")
-                            } else {
-                                ("processes.bar_table", "processes.bar_table_tip")
-                            }
-                        };
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(4.))
-                            .child(
-                                text(move || i18n::tr(words().0))
-                                    .flex_none()
-                                    .text_size(px(9.5))
-                                    .line_height(widgets::line(9.5))
-                                    .text_color(theme::color(|| {
-                                        palette::tiny_label(palette::text_dim())
-                                    })),
-                            )
-                            .child(widgets::info_icon(widgets::live_tooltip(move || {
-                                i18n::tr(words().1)
-                            })))
-                    },
-                )),
-        )
-        .child(
-            text(move || bar().text)
-                .flex_none()
-                .tabular_nums()
-                .text_size(px(11.))
-                .line_height(widgets::line(11.))
-                .text_color(theme::color(palette::text)),
-        );
-    if last {
-        row
-    } else {
-        row.border_b(px(1.))
-            .border_color(theme::color(palette::border_subtle))
-    }
 }
 
 fn member_row(m: ReadSignal<Member>) -> AnyElement {
@@ -1231,128 +877,30 @@ fn member_figure(words: impl Fn() -> String + 'static) -> Text {
         .text_color(theme::color(palette::text_muted))
 }
 
-/// The tree's two app-level rules, editable where they are shown: one
-/// chip row each, the one its bar reads as lit
-/// (`processes::threshold_editor`). Keyed on the executable's name, as
-/// the bars are.
-fn threshold_editor(x: Memo<Expansion>) -> View {
-    let mut col = view()
-        .mt(px(8.))
-        .pt(px(8.))
-        .gap(px(4.))
-        .border_t(px(1.))
-        .border_color(theme::color(palette::border_subtle))
-        .child(widgets::note(move || {
-            x.with(|x| x.caption.clone().unwrap_or_default())
-        }));
-    for (i, (key, label)) in [
-        ("alert-app-cpu", i18n::tr("processes.bar_cpu_short")),
-        ("alert-app-mem", i18n::tr("processes.bar_mem_short")),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        col = col.child(threshold_row(x, i, key, label));
-    }
-    col
-}
-
-fn threshold_row(x: Memo<Expansion>, i: usize, key: &'static str, label: String) -> View {
-    let chips: Vec<AnyElement> = alertbars::presets(key)
-        .into_iter()
-        .map(|(chip_label, value)| {
-            let on =
-                move || x.with(|x| x.lit.as_ref().and_then(|lit| lit[i].as_deref()) == Some(value));
-            nsh_base::button()
-                .flex_none()
-                .rounded_full()
-                .border(px(1.))
-                .border_color(move || theme::color(move || palette::choice_line(on())))
-                .bg(move || theme::color(move || palette::choice_fill(on())))
-                .hover(move |s| s.bg(theme::color(move || palette::choice_hover(on()))))
-                .px(px(6.))
-                .on_press(move || {
-                    let name = x.with_untracked(|x| x.name.clone());
-                    store::update(|state, fx| {
-                        if let Err(e) = state.apply_alert_override(key, &name, value, fx) {
-                            tracing::error!("alert override failed: {e}");
-                        }
-                    });
-                })
-                .child(
-                    text(chip_label)
-                        .text_size(px(9.5))
-                        .line_height(widgets::line(9.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(move || theme::color(move || palette::choice_ink(on()))),
-                )
-                .into_element()
-        })
-        .collect();
-    view()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .child(
-            text(label)
-                .flex_none()
-                .w(px(54.))
-                .number_of_lines(1u32)
-                .text_size(px(9.5))
-                .line_height(widgets::line(9.5))
-                .text_color(theme::color(|| palette::tiny_label(palette::text_dim()))),
-        )
-        .child(
-            view()
-                .flex_row()
-                .flex_1()
-                .min_w(px(0.))
-                .gap(px(3.))
-                .children(chips),
-        )
-}
-
-/// Quit, in the accent's outline, behind a confirm: the same request as
-/// ⌘Q, which the app may refuse.
+/// Quit, behind a confirm: the same request as ⌘Q, which the app may
+/// refuse.
 fn quit_button(pid: u32, x: Memo<Expansion>) -> AnyElement {
-    nsh_base::button()
-        .mt(px(8.))
-        .h(px(20.))
-        .px(px(8.))
-        .rounded(px(5.))
-        .border(px(1.))
-        .border_color(theme::color(|| palette::accent_wash(45)))
-        .items_center()
-        .justify_center()
-        .hover(|s| s.bg(theme::color(|| palette::accent_wash(10))))
-        .on_press(move || {
-            let Some((display, identity)) = x.with_untracked(|x| x.quit.clone()) else {
-                return;
-            };
-            widgets::confirm(
-                t!("apps.quit_title", name = display.clone()).to_string(),
-                t!("apps.quit_body", name = display).to_string(),
-                i18n::tr("apps.quit_ok"),
-                move || {
-                    if !terminate::request_quit(pid, &identity) {
-                        tracing::warn!("quit request for pid {pid} was not delivered");
-                    }
-                },
-            );
-        })
-        .child(
-            text(i18n::tr("apps.quit_ok"))
-                .text_size(px(10.))
-                .line_height(widgets::line(10.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::color(palette::accent_light)),
-        )
-        .into_element()
+    lists::quit_button(i18n::tr("apps.quit_ok"), move || {
+        let Some((display, identity)) = x.with_untracked(|x| x.quit.clone()) else {
+            return;
+        };
+        widgets::confirm(
+            t!("apps.quit_title", name = display.clone()).to_string(),
+            t!("apps.quit_body", name = display).to_string(),
+            i18n::tr("apps.quit_ok"),
+            move || {
+                if !terminate::request_quit(pid, &identity) {
+                    tracing::warn!("quit request for pid {pid} was not delivered");
+                }
+            },
+        );
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nsh::lists::LIST_HEADER;
 
     /// The region at the three standard heights: the page is the panel less
     /// the tab strip's 60 and the footer's 44, the region that less the

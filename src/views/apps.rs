@@ -12,7 +12,6 @@
 
 use super::processes;
 use super::widgets;
-use crate::alertbars::{self, BarDisplay, Resolved};
 use crate::applist;
 use crate::confirm;
 use crate::font;
@@ -486,36 +485,8 @@ fn app_row(
     .into_any_element()
 }
 
-/// Identity + the two memory figures, then the members the row total
-/// is the sum of. Hovering a giant tooltip over those figures (the
-/// previous layout) hid the numbers it was trying to explain.
-/// Both whole-app alert bars for this tree's name — zstats' `app_cpu` /
-/// `app_mem` rules resolved through the live template table, in the
-/// same words as the process expansion (`processes::pct_bar_text`).
-fn app_bars(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> (BarDisplay, BarDisplay) {
-    let Some(file) = state.settings() else {
-        return (
-            BarDisplay::plain(format::PLACEHOLDER),
-            BarDisplay::plain(format::PLACEHOLDER),
-        );
-    };
-    let bars = Resolved::of(file);
-    let eff = bars.eff();
-    let total = state.latest().map(|t| t.snapshot.memory.total_bytes);
-    (
-        alertbars::pct_bar_text(eff.app_cpu.override_for(&g.name), eff.app_cpu.base())
-            .decided_by(bars.in_force("alert-app-cpu", &g.name)),
-        alertbars::mem_bar_text(
-            eff.app_memory.override_for(&g.name),
-            total.and_then(|t| eff.app_memory_bar_bytes(&g.name, t)),
-            eff.app_memory.base(),
-        )
-        .decided_by(bars.in_force("alert-app-mem", &g.name)),
-    )
-}
-
 fn expand_block(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> AnyElement {
-    let (cpu_bar, mem_bar) = app_bars(g, state);
+    let (cpu_bar, mem_bar) = applist::alert_bars(g, state);
     let tick_ps = state
         .latest()
         .and_then(|t| t.snapshot.processes.as_deref().map(Vec::as_slice))

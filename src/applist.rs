@@ -5,6 +5,7 @@
 //! CPU (`views/apps.rs` says why). Shared since the NSH Apps page (phase
 //! 4d of docs/nsh-migration.md).
 
+use crate::alertbars::{self, BarDisplay, Resolved};
 use crate::i18n;
 use crate::rows::BAR_FLOOR_PERCENT;
 use crate::state::{AppSort, ZStatsAppState};
@@ -56,6 +57,31 @@ pub fn face_of(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> trend::Face 
         state.member_processes().unwrap_or(live),
         live,
         state.member_pgids(),
+    )
+}
+
+/// Both whole-app alert bars for this tree's name — zstats' `app_cpu` /
+/// `app_mem` rules resolved through the live template table, in the same
+/// words as the process expansion (`alertbars::pct_bar_text`).
+pub fn alert_bars(g: &ProcessGroupSnapshot, state: &ZStatsAppState) -> (BarDisplay, BarDisplay) {
+    let Some(file) = state.settings() else {
+        return (
+            BarDisplay::plain(format::PLACEHOLDER),
+            BarDisplay::plain(format::PLACEHOLDER),
+        );
+    };
+    let bars = Resolved::of(file);
+    let eff = bars.eff();
+    let total = state.latest().map(|t| t.snapshot.memory.total_bytes);
+    (
+        alertbars::pct_bar_text(eff.app_cpu.override_for(&g.name), eff.app_cpu.base())
+            .decided_by(bars.in_force("alert-app-cpu", &g.name)),
+        alertbars::mem_bar_text(
+            eff.app_memory.override_for(&g.name),
+            total.and_then(|t| eff.app_memory_bar_bytes(&g.name, t)),
+            eff.app_memory.base(),
+        )
+        .decided_by(bars.in_force("alert-app-mem", &g.name)),
     )
 }
 

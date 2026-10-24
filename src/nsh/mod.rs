@@ -17,6 +17,7 @@ mod gallery;
 mod host;
 #[cfg(target_os = "linux")]
 mod linux;
+mod lists;
 mod overview;
 mod panel;
 #[cfg(all(target_os = "macos", debug_assertions))]

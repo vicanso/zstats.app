@@ -74,6 +74,7 @@ mod palette;
 mod placement;
 mod prefs;
 mod pressure;
+mod proclist;
 mod procscan;
 mod proxy;
 mod rows;
