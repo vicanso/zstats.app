@@ -2078,7 +2078,7 @@ fn interval_row(
     current: Duration,
     chips: &'static [(&'static str, &'static str)],
 ) -> AnyElement {
-    let shown = humanize(current);
+    let shown = format::humanize(current);
     v_flex()
         .px(px(13.))
         .py(px(7.))
@@ -2214,8 +2214,8 @@ fn thresholds_card(file: &zstats::settings::FileConfig) -> AnyElement {
         (
             "alert-cooldown",
             match a.cooldown {
-                Some(d) => Setting::set(humanize(d)),
-                None => Setting::unset(humanize(eff.cooldown)),
+                Some(d) => Setting::set(format::humanize(d)),
+                None => Setting::unset(format::humanize(eff.cooldown)),
             },
             0,
         ),
@@ -2665,19 +2665,6 @@ fn default_at(value: String) -> String {
     t!("config.default_at", value = value).to_string()
 }
 
-/// Durations the way the config file writes them. Shared with the Alerts
-/// empty state, which quotes the effective cooldown.
-pub(super) fn humanize(d: Duration) -> String {
-    let ms = d.as_millis();
-    if ms >= 60_000 && ms.is_multiple_of(60_000) {
-        format!("{}m", ms / 60_000)
-    } else if ms.is_multiple_of(1_000) {
-        format!("{}s", ms / 1_000)
-    } else {
-        format!("{ms}ms")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2728,13 +2715,5 @@ mod tests {
         );
         // Nothing set is no card at all, not an empty one.
         assert!(override_rows(&zstats::settings::AlertsConfig::default()).is_empty());
-    }
-
-    #[test]
-    fn humanize_matches_file_form() {
-        assert_eq!(humanize(Duration::ZERO), "0s");
-        assert_eq!(humanize(Duration::from_secs(2)), "2s");
-        assert_eq!(humanize(Duration::from_secs(60)), "1m");
-        assert_eq!(humanize(Duration::from_millis(500)), "500ms");
     }
 }

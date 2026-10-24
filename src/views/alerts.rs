@@ -16,23 +16,18 @@
 //! collector reloads `[alerts]` in place.
 
 use super::widgets::{self, card};
-use crate::alertbars::{self, BarSource, InForce, Resolved};
+use crate::alertbars;
+use crate::alertlist::{self, Goto, OverrideTarget, QuitSubject};
 use crate::alertlog::{self, DayLog};
 use crate::assets;
 use crate::confirm;
-use crate::diskwatch;
 use crate::font;
 use crate::format;
 use crate::i18n;
-use crate::notify;
-use crate::prefs;
-use crate::pressure;
 use crate::state::{
     GrowthNotice, MemoryCreep, SeenAlert, SustainedNotice, ZStatsAppState, ZStatsGlobalStore,
 };
-use crate::terminate;
 use crate::theme;
-use crate::trend;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -43,8 +38,8 @@ use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
-use zstats::settings::{FileConfig, PressureAlert};
-use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity};
+use zstats::settings::FileConfig;
+use zstats::{AlertDetail, AlertEvent, AlertSubject, Severity};
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let live: Vec<&SeenAlert> = state.alerts().iter().filter(|s| s.live).collect();
@@ -72,7 +67,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let after = state.sustained_rule().after;
     let mut watchers: Vec<(Duration, AnyElement)> = Vec::new();
     if let (Some(ago), Some(card)) = (
-        newest_noticed_ago(&holdings, after),
+        alertlist::newest_noticed_ago(&holdings, after),
         sustained_from(&holdings),
     ) {
         watchers.push((ago, card));
@@ -88,7 +83,10 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     watchers.sort_by_key(|(ago, _)| *ago);
     let ages: Vec<Duration> = live.iter().map(|s| s.age()).collect();
     let agos: Vec<Duration> = watchers.iter().map(|(ago, _)| *ago).collect();
-    for (at, (_, card)) in watch_cards_at(&ages, &agos).into_iter().zip(watchers) {
+    for (at, (_, card)) in alertlist::watch_cards_at(&ages, &agos)
+        .into_iter()
+        .zip(watchers)
+    {
         now.splice(at..at, std::iter::once(card));
     }
 
@@ -146,37 +144,6 @@ fn empty_card(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
-/// How long ago the watcher started pointing at this stretch: the hold
-/// itself is `after` old by then, but that is the bar, not the news.
-fn newest_noticed_ago(holdings: &[SustainedNotice], after: Duration) -> Option<Duration> {
-    holdings
-        .iter()
-        .map(|n| n.duration.saturating_sub(after))
-        .min()
-}
-
-/// Index in the live list (newest first) a watcher card belongs at.
-/// A watch noticed more recently than a live report sits above it.
-fn watch_insert_at(live_ages: &[Duration], noticed_ago: Duration) -> usize {
-    live_ages
-        .iter()
-        .position(|age| noticed_ago < *age)
-        .unwrap_or(live_ages.len())
-}
-
-/// Final indices for the watcher cards among the live episodes, one per
-/// noticed-ago, which the caller passes sorted ascending (newest
-/// first). Each card lands `k` past its own slot because the `k` cards
-/// before it are already in the list — and `watch_insert_at` is
-/// monotonic in `ago`, so those cards always sit at or before it.
-fn watch_cards_at(live_ages: &[Duration], noticed_agos: &[Duration]) -> Vec<usize> {
-    noticed_agos
-        .iter()
-        .enumerate()
-        .map(|(k, ago)| watch_insert_at(live_ages, *ago) + k)
-        .collect()
-}
-
 fn earlier_heading() -> AnyElement {
     div()
         .px(px(widgets::CARD_PAD))
@@ -186,11 +153,6 @@ fn earlier_heading() -> AnyElement {
         .child(i18n::tr("alerts.earlier"))
         .into_any_element()
 }
-
-/// Rows a day shows before folding the rest into "+N more": enough to
-/// read a busy day, not enough for one day to push the week off the
-/// panel.
-const PAST_ROWS_PER_DAY: usize = 6;
 
 /// The past week, read-only: a heading, then one shell per day with a
 /// line per episode — time, severity as the dot the cards use, subject,
@@ -238,14 +200,9 @@ fn past_heading() -> AnyElement {
 }
 
 fn past_day_card(day: &DayLog) -> AnyElement {
-    let count = day.episodes.len();
-    let count_text = if count == 1 {
-        i18n::tr("alerts.past_count_one")
-    } else {
-        t!("alerts.past_count", count = count).to_string()
-    };
-    let groups = past_groups(&day.episodes);
-    let shown = groups.len().min(PAST_ROWS_PER_DAY);
+    let count_text = alertlist::past_count(day.episodes.len());
+    let groups = alertlist::past_groups(&day.episodes);
+    let shown = groups.len().min(alertlist::PAST_ROWS_PER_DAY);
     let hidden = groups.len() - shown;
     let today = jiff::Zoned::now().date();
     widgets::list_shell()
@@ -273,62 +230,9 @@ fn past_day_card(day: &DayLog) -> AnyElement {
         .into_any_element()
 }
 
-/// A day's episodes with the same subject and kind, as one row: a
-/// program that crossed the CPU line twice is one fact with a count, and
-/// as two rows its pids (history, by the time anyone reads this) were
-/// the only difference. Most recent first, like the episodes.
-fn past_groups(episodes: &[alertlog::Restored]) -> Vec<Vec<&alertlog::Restored>> {
-    let mut groups: Vec<Vec<&alertlog::Restored>> = Vec::new();
-    for e in episodes {
-        let key = (subject_name(&e.event.subject), e.event.kind());
-        match groups
-            .iter_mut()
-            .find(|g| (subject_name(&g[0].event.subject), g[0].event.kind()) == key)
-        {
-            Some(group) => group.push(e),
-            None => groups.push(vec![e]),
-        }
-    }
-    groups
-}
-
-/// A subject without its pid — what makes two episodes the same story.
-pub(super) fn subject_name(subject: &AlertSubject) -> String {
-    match subject {
-        AlertSubject::Process {
-            name, display_name, ..
-        }
-        | AlertSubject::App {
-            name, display_name, ..
-        } => display_name.as_deref().unwrap_or(name).to_string(),
-        other => subject_label(other),
-    }
-}
-
 fn past_row(index: usize, group: &[&alertlog::Restored], last: bool) -> AnyElement {
-    let e = group[0];
-    let critical = group
-        .iter()
-        .any(|e| e.event.severity() == Severity::Critical);
-    let dismissed = group.iter().all(|e| e.dismissed);
-    let label = if group.len() == 1 {
-        subject_label(&e.event.subject)
-    } else {
-        format!("{} ×{}", subject_name(&e.event.subject), group.len())
-    };
-    // Each time (and pid, for a process) that the count stands for.
-    let times: Vec<gpui::SharedString> = group
-        .iter()
-        .map(|e| match &e.event.subject {
-            AlertSubject::Process { pid, .. } => format!(
-                "{} · {}",
-                format::clock(e.at),
-                t!("processes.pid_only", pid = pid)
-            )
-            .into(),
-            _ => format::clock(e.at).into(),
-        })
-        .collect();
+    let row = alertlist::past_row(group);
+    let times: Vec<SharedString> = row.times.iter().cloned().map(SharedString::from).collect();
     h_flex()
         .items_center()
         .gap(px(8.))
@@ -343,7 +247,7 @@ fn past_row(index: usize, group: &[&alertlog::Restored], last: bool) -> AnyEleme
                 .font_features(font::tnum())
                 .text_size(px(10.))
                 .text_color(theme::text_dim())
-                .child(format::clock(e.at)),
+                .child(row.at),
         )
         // Severity as the cards paint it: accent past the line, ink
         // otherwise — the one colour rule every threshold shares. Its
@@ -355,12 +259,10 @@ fn past_row(index: usize, group: &[&alertlog::Restored], last: bool) -> AnyEleme
                 .w(px(6.))
                 .h(px(6.))
                 .rounded_full()
-                .bg(theme::fill_for(critical))
-                .tooltip(widgets::wrap_tooltip(i18n::tr(if critical {
-                    "alerts.severity_critical"
-                } else {
-                    "alerts.severity_warning"
-                }))),
+                .bg(theme::fill_for(row.critical))
+                .tooltip(widgets::wrap_tooltip(alertlist::severity_word(
+                    row.critical,
+                ))),
         )
         .child(
             div()
@@ -370,31 +272,23 @@ fn past_row(index: usize, group: &[&alertlog::Restored], last: bool) -> AnyEleme
                 .truncate()
                 .text_size(px(11.))
                 .text_color(theme::text())
-                .when(group.len() > 1, |d| {
+                .when(!times.is_empty(), |d| {
                     d.tooltip(widgets::wrap_tooltip_lines(times.clone()))
                 })
-                .child(label),
+                .child(row.label),
         )
         .child(
             div()
                 .flex_none()
                 .text_size(px(9.5))
                 .text_color(theme::tiny_label(theme::text_muted()))
-                .child(i18n::tr(past_kind_key(e.event.kind()))),
+                .child(row.kind),
         )
-        .children(dismissed.then(|| widgets::outline_pill(i18n::tr("alerts.past_dismissed"))))
+        .children(
+            row.dismissed
+                .then(|| widgets::outline_pill(i18n::tr("alerts.past_dismissed"))),
+        )
         .into_any_element()
-}
-
-fn past_kind_key(kind: AlertKind) -> &'static str {
-    match kind {
-        AlertKind::Cpu => "alerts.kind_cpu",
-        AlertKind::Memory => "alerts.kind_mem",
-        AlertKind::AppCpu => "alerts.kind_app_cpu",
-        AlertKind::AppMemory => "alerts.kind_app_mem",
-        AlertKind::Disk => "alerts.kind_disk",
-        AlertKind::Pressure => "alerts.kind_pressure",
-    }
 }
 
 /// One episode card. Keyed by the episode's own id, never by position:
@@ -402,7 +296,6 @@ fn past_kind_key(kind: AlertKind) -> &'static str {
 /// hand this card's hover / expansion state to whichever alert took the
 /// slot.
 fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
-    let selected = state.selected_alert();
     let settings = state.settings();
     let i = seen.seq as usize;
     let critical = seen.event.severity() == Severity::Critical;
@@ -411,10 +304,10 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
     } else {
         Hsla::from(theme::border())
     };
-    let target = override_target(&seen.event);
+    let target = alertlist::override_target(&seen.event);
     let expanded = target
         .as_ref()
-        .is_some_and(|t| selected.is_some_and(|(k, n)| k.as_str() == t.key && n == &t.name));
+        .is_some_and(|t| alertlist::editing(state, t));
     let card_id = SharedString::from(format!("alert-{i}"));
 
     card()
@@ -429,7 +322,7 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
                 .mt(px(3.))
                 .text_size(px(9.5))
                 .text_color(theme::tiny_label(theme::text_muted()))
-                .child(alert_sentence(&seen.event)),
+                .child(alertlist::alert_sentence(&seen.event)),
         )
         // What to do about it, in a sentence — the card said what
         // crossed and by how much, and left the reader there. Live
@@ -439,14 +332,12 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
             d.child(
                 div()
                     .mt(px(4.))
-                    .child(widgets::note(i18n::tr(advice_key(&seen.event)))),
+                    .child(widgets::note(i18n::tr(alertlist::advice_key(&seen.event)))),
             )
         })
         .children(consumer_rows(i, &seen.event, seen.live))
-        .when_some(seen.event.repeat_after, |d, after| {
-            d.child(div().mt(px(8.)).child(widgets::note(
-                t!("alerts.follow_up", when = format::span(after)).to_string(),
-            )))
+        .when_some(alertlist::follow_up(&seen.event), |d, words| {
+            d.child(div().mt(px(8.)).child(widgets::note(words)))
         })
         .when_some(target.filter(|_| expanded), |d, tgt| {
             d.child(threshold_editor(i, &tgt, settings))
@@ -455,31 +346,8 @@ fn alert_card(seen: &SeenAlert, state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
-/// The one thing a reader can do about each kind of alert. Keyed on
-/// the kind and severity zstats reported and nothing else: this is
-/// copy, not a second opinion about the condition. A disk at its
-/// critical line gets its own: "have a look when you can" is the wrong
-/// sentence under "almost out of space".
-fn advice_key(event: &AlertEvent) -> &'static str {
-    match event.kind() {
-        AlertKind::Cpu | AlertKind::AppCpu => "alerts.do_cpu",
-        AlertKind::Memory | AlertKind::AppMemory => "alerts.do_mem",
-        AlertKind::Disk if event.severity() == Severity::Critical => "alerts.do_disk_critical",
-        AlertKind::Disk => "alerts.do_disk",
-        AlertKind::Pressure => "alerts.do_pressure",
-    }
-}
-
 fn alert_when(seen: &SeenAlert) -> AnyElement {
-    widgets::note(match seen.span() {
-        Some(span) => t!(
-            "alerts.episode_span",
-            ago = format::ago(seen.age()),
-            span = format::span(span)
-        )
-        .to_string(),
-        None => format::ago(seen.age()),
-    })
+    widgets::note(alertlist::when_text(seen))
 }
 
 /// The sustained-load watcher's holdings, as a read-only card. This is
@@ -547,14 +415,7 @@ fn sustained_from(active: &[SustainedNotice]) -> Option<AnyElement> {
                             .font_features(font::tnum())
                             .text_size(px(10.))
                             .text_color(theme::text_muted())
-                            .child(
-                                t!(
-                                    "alerts.sustained_subtitle",
-                                    duration = format::took(notice.duration),
-                                    cpu = format::pct(notice.cpu_avg as f32)
-                                )
-                                .to_string(),
-                            ),
+                            .child(alertlist::sustained_line(notice)),
                     )
                     .into_any_element()
             }))
@@ -618,14 +479,7 @@ fn creep_from(creeps: &[(MemoryCreep, Duration)]) -> Option<AnyElement> {
                             .font_features(font::tnum())
                             .text_size(px(10.))
                             .text_color(theme::text_muted())
-                            .child(
-                                t!(
-                                    "alerts.creep_row",
-                                    delta = format::memory(creep.climb_bytes),
-                                    now = format::memory(creep.now_bytes)
-                                )
-                                .to_string(),
-                            ),
+                            .child(alertlist::creep_line(creep)),
                     )
                     .into_any_element()
             }))
@@ -672,7 +526,6 @@ fn growth_from(growth: &[(GrowthNotice, Duration)]) -> Option<AnyElement> {
                     .child(i18n::tr("alerts.growth_note")),
             )
             .children(growth.iter().enumerate().map(|(i, (notice, _))| {
-                let days = (notice.over.as_secs_f64() / 86_400.0).round().max(1.0) as u64;
                 h_flex()
                     .items_center()
                     .justify_between()
@@ -697,15 +550,7 @@ fn growth_from(growth: &[(GrowthNotice, Duration)]) -> Option<AnyElement> {
                             .font_features(font::tnum())
                             .text_size(px(10.))
                             .text_color(theme::text_muted())
-                            .child(
-                                t!(
-                                    "alerts.growth_row",
-                                    grew = format::memory(notice.growth.grew),
-                                    days = days,
-                                    now = format::memory(notice.growth.now)
-                                )
-                                .to_string(),
-                            ),
+                            .child(alertlist::growth_line(notice)),
                     )
                     .into_any_element()
             }))
@@ -713,160 +558,8 @@ fn growth_from(growth: &[(GrowthNotice, Duration)]) -> Option<AnyElement> {
     )
 }
 
-/// The rules the engine is armed with right now, resolved through
-/// zstats' own [`ActiveThresholds`] (same source as the Config tab, so
-/// the two can never disagree). One pair per rule — a single joined
-/// line wrapped mid-token at 320px (`CPU 30 Memory:`). `None` with no
-/// readable config: the empty body already covers the waiting state.
-///
-/// The third field marks a wide row — a watcher's sentence ("in an hour
-/// · ≥2.0 GB") that does not fit half the card; the thresholds are a few
-/// characters and go two to a row ([`armed_block`]). The figure is the
-/// last token, so it ends on the same edge as the right-hand column.
-fn armed_rows(state: &ZStatsAppState) -> Option<Vec<(String, String, bool)>> {
-    let file = state.settings()?;
-    let eff = zstats::alerts::ActiveThresholds::from_config(&file.alerts);
-    let mut rows = Vec::new();
-    if let Some(v) = eff.cpu.base() {
-        rows.push((i18n::tr("alerts.kind_cpu"), format!("{v:.0}%"), false));
-    }
-    // Memory bars are the LOWER of a share and an absolute ceiling, so
-    // the percentage alone overstates them: 25% reads as 16 GB on a
-    // 64 GiB machine while the rule actually trips at 4 GB. zstats
-    // resolves the effective figure itself — ask it rather than paint
-    // half the rule. The empty name matches no override, which is what
-    // "the base bar" means here.
-    let total = state.latest().map(|tick| tick.snapshot.memory.total_bytes);
-    match total.and_then(|t| eff.memory_bar_bytes("", t)) {
-        Some(bytes) => rows.push((i18n::tr("alerts.kind_mem"), format::memory(bytes), false)),
-        // Before the first sample there is no total to resolve against;
-        // the share is all that can be said honestly.
-        None => {
-            if let Some(f) = eff.memory.base() {
-                rows.push((
-                    i18n::tr("alerts.kind_mem"),
-                    format!("{:.0}%", f * 100.0),
-                    false,
-                ));
-            }
-        }
-    }
-    // The whole-app rules, which zstats 0.5.1 made reachable (the app
-    // memory bar gained an absolute ceiling; a share of RAM alone was
-    // unreachable on the machines browsers actually run on). They are
-    // half of what "per-program thresholds" means, so an armed list
-    // that omits them understates the watch.
-    if let Some(v) = eff.app_cpu.base() {
-        rows.push((i18n::tr("alerts.kind_app_cpu"), format!("{v:.0}%"), false));
-    }
-    if let Some(bytes) = total.and_then(|t| eff.app_memory_bar_bytes("", t)) {
-        rows.push((
-            i18n::tr("alerts.kind_app_mem"),
-            format::memory(bytes),
-            false,
-        ));
-    }
-    if let Some(f) = eff.disk.base() {
-        rows.push((
-            i18n::tr("alerts.kind_disk"),
-            format!("{:.0}%", f64::from(f) * 100.0),
-            false,
-        ));
-        // The second line (zstats 0.7.2), for the startup disk: free
-        // space under which it is reported again, critical. zstats
-        // resolves it against the volume's size — half of what 90%
-        // leaves is 13 GB on a 256 GB disk and 100 GB on a 2 TB one,
-        // which the absolute floor then caps — so it is asked rather
-        // than worked out here, and there is nothing to say before the
-        // first sample lists the volume.
-        let startup = state
-            .latest()
-            .and_then(|tick| tick.snapshot.disks.as_deref())
-            .and_then(|disks| disks.iter().find(|d| d.mount_point == "/"));
-        if let Some(below) = startup
-            .map(|d| eff.disk_critical_below_bytes(f, d.total_bytes))
-            .filter(|below| *below > 0)
-        {
-            rows.push((
-                i18n::tr("alerts.kind_disk_critical"),
-                format!("< {}", format::capacity(below)),
-                false,
-            ));
-        }
-    }
-    rows.push((
-        i18n::tr("alerts.kind_sustained"),
-        t!(
-            "alerts.watch_sustained",
-            cpu = format!("{:.0}%", state.sustained_bar_percent()),
-            after = format::span(state.sustained_rule().after)
-        )
-        .to_string(),
-        true,
-    ));
-    // The other watcher: a list that names one and not the other would
-    // make the creep card (and its banner) look like they came from
-    // nowhere.
-    rows.push((
-        i18n::tr("alerts.kind_creep"),
-        t!(
-            "alerts.watch_creep",
-            delta = format::memory(trend::creep_notify_bytes(total.unwrap_or(0)))
-        )
-        .to_string(),
-        true,
-    ));
-    // The daily disk check is the other watcher with a banner; listed
-    // while it is on, for the creep row's reason.
-    if prefs::disk_watch() {
-        rows.push((
-            i18n::tr("alerts.kind_growth"),
-            t!(
-                "alerts.watch_growth",
-                delta = format::memory(diskwatch::NOTIFY_BYTES)
-            )
-            .to_string(),
-            true,
-        ));
-    }
-    rows.push((
-        i18n::tr("alerts.empty_cooldown"),
-        super::config::humanize(eff.cooldown),
-        false,
-    ));
-    // The master switch, said where the watching is listed: a banner
-    // that quietly never arrives reads as a rule that stopped firing —
-    // the same reason every filtered banner logs its verdict.
-    if !prefs::notifications() {
-        rows.push((
-            i18n::tr("alerts.armed_notifications"),
-            i18n::tr("alerts.armed_muted"),
-            true,
-        ));
-    }
-    Some(rows)
-}
-
 fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
-    let rows = armed_rows(state)?;
-    // The short thresholds two to a row, then each watcher's sentence on
-    // a row of its own — nine single rows were a third of the tab for a
-    // reference list. Order within each kind is `armed_rows`'.
-    let (short, wide): (Vec<_>, Vec<_>) = rows.into_iter().partition(|(_, _, wide)| !wide);
-    // `(cells, half)`: a half row is a threshold row, whose single cell
-    // (an odd count) keeps half the width.
-    let mut lines: Vec<(Vec<(String, String)>, bool)> = short
-        .chunks(2)
-        .map(|pair| {
-            (
-                pair.iter()
-                    .map(|(k, v, _)| (k.clone(), v.clone()))
-                    .collect(),
-                true,
-            )
-        })
-        .collect();
-    lines.extend(wide.into_iter().map(|(k, v, _)| (vec![(k, v)], false)));
+    let lines = alertlist::armed_lines(alertlist::armed_rows(state)?);
     let last = lines.len().saturating_sub(1);
     // `wide`: one sentence across the card. The label yields, and the
     // sentence stays whole at the right edge — the same edge the column
@@ -912,11 +605,7 @@ fn armed_block(state: &ZStatsAppState) -> Option<AnyElement> {
                     )
                     .child(widgets::info_icon(
                         "alerts-watching-info",
-                        i18n::tr(if prefs::notifications() {
-                            "alerts.footer_note"
-                        } else {
-                            "alerts.footer_note_muted"
-                        }),
+                        alertlist::watching_tip(),
                     )),
             )
             .children(lines.into_iter().enumerate().map(|(i, (line, half))| {
@@ -1074,49 +763,19 @@ fn alert_head(
     .into_any_element()
 }
 
-/// Where a card's subject lives on the panel. Disk stays ungated: a
-/// volume is still that volume after a restart. Process and app jumps
-/// need [`SeenAlert::live`] — a restored card's pid may now belong to
-/// someone else, the same reason the quit button stays off.
-#[derive(Debug, PartialEq, Eq)]
-enum Goto {
-    Hardware,
-    Process(u32),
-    App(u32),
-}
-
-fn goto_target(seen: &SeenAlert) -> Option<Goto> {
-    match &seen.event.subject {
-        AlertSubject::Volume { .. } if matches!(seen.event.kind(), AlertKind::Disk) => {
-            Some(Goto::Hardware)
-        }
-        AlertSubject::Process { pid, .. } if seen.live => Some(Goto::Process(*pid)),
-        AlertSubject::App { root_pid, .. } if seen.live => Some(Goto::App(*root_pid)),
-        _ => None,
-    }
-}
-
 /// Jump to the tab that actually shows this subject. An explicit
 /// control rather than a clickable card: macOS does not change the
 /// pointer over clickable things, so "the whole card does something"
 /// has no way to announce itself.
 fn goto_button(index: usize, seen: &SeenAlert) -> Option<Button> {
-    let target = goto_target(seen)?;
-    let (id, icon, tip) = match target {
-        Goto::Hardware => (
-            ("goto-hardware", index),
-            Icon::new(IconName::HardDrive),
-            i18n::tr("alerts.goto_hardware"),
-        ),
-        Goto::Process(_) => (
-            ("goto-process", index),
-            Icon::new(IconName::Cpu),
-            i18n::tr("alerts.goto_process"),
-        ),
+    let target = alertlist::goto_target(seen)?;
+    let tip = target.tip();
+    let (id, icon) = match target {
+        Goto::Hardware => (("goto-hardware", index), Icon::new(IconName::HardDrive)),
+        Goto::Process(_) => (("goto-process", index), Icon::new(IconName::Cpu)),
         Goto::App(_) => (
             ("goto-app", index),
             Icon::from(assets::CustomIconName::AppWindow),
-            i18n::tr("alerts.goto_app"),
         ),
     };
     Some(
@@ -1144,267 +803,20 @@ fn alert_title(subject: &AlertSubject) -> AnyElement {
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme::text())
         .truncate()
-        .child(subject_label(subject))
+        .child(alertlist::subject_label(subject))
         .into_any_element()
 }
 
-/// The alert's sentence, in the reader's language.
-///
-/// zstats ships `AlertEvent::summary()`, and its own documentation says
-/// a frontend with its own layout or language should build from the
-/// fields instead — which is exactly what this does. **Nothing is
-/// recomputed**: every figure here is read off the event that fired, and
-/// deciding that it should fire stayed in the rule engine. Only the
-/// wording is ours.
-///
-/// Two things the English summary carries are deliberately dropped,
-/// because this card already shows them better:
-///
-/// - the subject's name, which is the card's title one line above;
-/// - the pressure alert's `top:` list, which the card renders underneath
-///   as real rows with a quit button on each.
-///
-/// The notification banner has its own, terser set of these
-/// (`notify_body`, `alerts.notify_*`): a macOS banner gets two lines, a
-/// card gets as many as it needs. The wording differs on purpose; the
-/// figures cannot drift apart, because both read the same fields off the
-/// same event.
-fn alert_sentence(event: &AlertEvent) -> String {
-    let pct = |v: f64| format!("{v:.0}");
-    match &event.detail {
-        AlertDetail::Cpu {
-            avg_percent,
-            threshold_percent,
-            window,
-            runaway,
-        } => t!(
-            if *runaway {
-                "alerts.msg_cpu_runaway"
-            } else {
-                "alerts.msg_cpu"
-            },
-            window = format::span(*window),
-            avg = pct(*avg_percent),
-            threshold = pct(*threshold_percent)
-        )
-        .to_string(),
-        AlertDetail::Memory {
-            avg_bytes,
-            share_percent,
-            threshold_bytes,
-            threshold_percent,
-            window,
-        } => t!(
-            "alerts.msg_memory",
-            window = format::span(*window),
-            used = format::memory(*avg_bytes),
-            share = pct(*share_percent),
-            // Bytes are the rule's native unit, but the field carries a
-            // serde default of zero, so a card restored from a file an
-            // older build wrote has none. The percent it was always
-            // expressed against is the honest stand-in — "0 B" would be
-            // a threshold nothing could cross.
-            threshold = if *threshold_bytes > 0 {
-                format::memory(*threshold_bytes)
-            } else {
-                format!("{}%", pct(*threshold_percent))
-            }
-        )
-        .to_string(),
-        // zstats 0.7.2 gave the disk rule a second line: a volume that
-        // keeps filling is reported again, Critical, once its free space
-        // is under `critical_below_bytes`. The critical sentence leads
-        // with what is left, as zstats' own summary does — the figure the
-        // reader acts on. A warning says where the critical line is, so
-        // the second report does not arrive from nowhere. A card restored
-        // from a file written before the tier carries 0: no line to name.
-        AlertDetail::Disk {
-            used_percent,
-            available_bytes,
-            total_bytes,
-            critical_below_bytes,
-            ..
-        } if available_bytes < critical_below_bytes => t!(
-            "alerts.msg_disk_critical",
-            used = pct(*used_percent),
-            available = format::capacity(*available_bytes),
-            total = format::capacity(*total_bytes),
-            critical = format::capacity(*critical_below_bytes)
-        )
-        .to_string(),
-        AlertDetail::Disk {
-            used_percent,
-            threshold_percent,
-            available_bytes,
-            total_bytes,
-            critical_below_bytes,
-        } => {
-            let mut text = t!(
-                "alerts.msg_disk",
-                used = pct(*used_percent),
-                threshold = pct(*threshold_percent),
-                available = format::capacity(*available_bytes),
-                total = format::capacity(*total_bytes)
-            )
-            .to_string();
-            if *critical_below_bytes > 0 {
-                text.push_str(" · ");
-                text.push_str(
-                    t!(
-                        "alerts.msg_disk_next",
-                        critical = format::capacity(*critical_below_bytes)
-                    )
-                    .as_ref(),
-                );
-            }
-            text
-        }
-        AlertDetail::Pressure {
-            level: _,
-            sustained,
-            swap_used_bytes,
-            swap_total_bytes,
-            compressed_bytes,
-            swap_ins_per_sec,
-            swap_outs_per_sec,
-            ..
-        } => {
-            // The kernel's own word for the level, the same one the
-            // Overview card shows — not a number, because 2 and 4 are
-            // labels rather than a scale (zstats says so on the field).
-            // Level is the WARNING / CRITICAL pill already. Repeating
-            // "Warning" mid-sentence wrapped as a second heading.
-            let mut text = t!(
-                "alerts.msg_pressure",
-                span = format::span(*sustained),
-                swap_used = format::memory(*swap_used_bytes),
-                swap_total = format::memory(*swap_total_bytes)
-            )
-            .to_string();
-            if let Some(compressed) = compressed_bytes {
-                text.push_str(" · ");
-                text.push_str(
-                    t!("alerts.msg_compressed", size = format::memory(*compressed)).as_ref(),
-                );
-            }
-            // zstats' own summary gained this clause in 0.5.7; this card
-            // builds from the fields, so it arrives only if we add it.
-            // What it tells the reader: the level says tight, the rate
-            // says whether the machine is still fighting when this fired.
-            if let Some((outs, ins)) = pressure::swap_moving(*swap_ins_per_sec, *swap_outs_per_sec)
-            {
-                text.push_str(" · ");
-                text.push_str(
-                    t!(
-                        "alerts.msg_swapping",
-                        outs = format::thousands(outs as usize),
-                        ins = format::thousands(ins as usize)
-                    )
-                    .as_ref(),
-                );
-            }
-            text
-        }
-    }
-}
-
-/// Who the alert is about, in the design's compact form.
-fn subject_label(subject: &AlertSubject) -> String {
-    match subject {
-        // Display name first (zstats 0.5.3): the card is read by a
-        // person, and "Electron" names every stock-packaged Electron
-        // app at once. The matchable identity is still `name` — the
-        // gear's threshold editor below keys on it, deliberately.
-        AlertSubject::Process {
-            pid,
-            name,
-            display_name,
-        } => t!(
-            "alerts.process",
-            name = display_name.as_deref().unwrap_or(name),
-            pid = *pid
-        )
-        .to_string(),
-        AlertSubject::App {
-            name,
-            display_name,
-            process_count,
-            ..
-        } => t!(
-            "alerts.app",
-            name = display_name.as_deref().unwrap_or(name),
-            count = *process_count
-        )
-        .to_string(),
-        AlertSubject::Volume { mount_point } => notify::volume_title(mount_point),
-        AlertSubject::System => i18n::tr("alerts.system"),
-    }
-}
-
-/// The quit button, on memory alerts only. Freeing memory means evicting
-/// the holder — unlike CPU spikes, which pass on their own often enough
-/// that eviction from an alert card would be premature. The decision that
-/// something is over the line stays zstats' (this consumes its event);
-/// the click, the confirm sheet and the delivery are `terminate`'s.
+/// The quit button, on memory alerts only (`alertlist::quit_subject` says
+/// whom, and when there is none).
 fn quit_button(index: usize, seen: &SeenAlert) -> Option<Button> {
-    // A restored card's pid may belong to something else entirely by
-    // now — see [`SeenAlert::live`]. No button rather than a button
-    // that could hit the wrong target.
-    if !seen.live {
-        return None;
-    }
-    let event = &seen.event;
-    // The confirm sheet speaks the name a person recognises; delivery
-    // matches on `name`, the identity thresholds use. A recycled pid
-    // that now holds a different program must not inherit this button.
-    let (pid, display, identity) = match (&event.subject, event.kind()) {
-        (
-            AlertSubject::Process {
-                pid,
-                name,
-                display_name,
-            },
-            AlertKind::Memory,
-        ) => (
-            *pid,
-            display_name.clone().unwrap_or_else(|| name.clone()),
-            name.clone(),
-        ),
-        (
-            AlertSubject::App {
-                root_pid,
-                name,
-                display_name,
-                ..
-            },
-            AlertKind::AppMemory,
-        ) => (
-            *root_pid,
-            display_name.clone().unwrap_or_else(|| name.clone()),
-            name.clone(),
-        ),
-        _ => return None,
-    };
-    // No control that could only fail: a subject this user cannot signal
-    // (root-owned, init, ourselves, or already gone) simply gets no button.
-    if !terminate::can_term(pid) || !terminate::can_quit(pid) {
-        return None;
-    }
-    Some(quit_request_button(
-        ("quit-subject", index).into(),
-        pid,
-        display,
-        identity,
-    ))
+    let subject = alertlist::quit_subject(seen)?;
+    Some(quit_request_button(("quit-subject", index).into(), subject))
 }
 
 /// The refusable-quit control itself, shared between the memory alert's
-/// head and the pressure card's consumer rows. Callers gate on
-/// `terminate::can_term` and `can_quit` first. `display` is the sheet;
-/// `identity` is what delivery matches against the live `p_comm`.
-fn quit_request_button(id: gpui::ElementId, pid: u32, display: String, identity: String) -> Button {
-    use crate::terminate::QuitMethod;
-
+/// head and the pressure card's consumer rows.
+fn quit_request_button(id: gpui::ElementId, subject: QuitSubject) -> Button {
     Button::new(id)
         // Log-out, not the footer's power glyph: that one quits *this*
         // app, and seeing both on the Alerts tab made the two requests
@@ -1414,32 +826,17 @@ fn quit_request_button(id: gpui::ElementId, pid: u32, display: String, identity:
         ))
         .ghost()
         .xsmall()
-        .tooltip(t!("alerts.quit_tip", name = display.clone()).to_string())
+        .tooltip(subject.tip())
         .on_click(move |_, window, cx| {
-            // Resolved at click time, not render time: whether the pid
-            // still counts as an application can change in between, and
-            // the sheet must describe what will actually be sent.
-            // On Linux there is only the signal tier, and the sheet says
-            // so — the same button, one sentence fewer.
-            let body = match terminate::method_for(pid) {
-                #[cfg(target_os = "macos")]
-                QuitMethod::App => t!("alerts.quit_body_app", name = display.clone()),
-                QuitMethod::Term => t!("alerts.quit_body_term", name = display.clone()),
-            }
-            .to_string();
-            let title = t!("alerts.quit_title", name = display.clone()).to_string();
-            let identity = identity.clone();
+            let (title, body) = subject.sheet();
+            let subject = subject.clone();
             confirm::ask(
                 window,
                 cx,
                 title,
                 body,
                 i18n::tr("alerts.quit_ok"),
-                move |_| {
-                    if !terminate::request_quit(pid, &identity) {
-                        tracing::warn!("quit request for pid {pid} was not delivered");
-                    }
-                },
+                move |_| subject.request(),
             );
         })
 }
@@ -1476,7 +873,7 @@ fn consumer_rows(index: usize, event: &AlertEvent, live: bool) -> Option<AnyElem
                             // "The half of a pressure alert a person
                             // acts on" — zstats' own reason for putting
                             // the display name on the consumer.
-                            .child(c.display_name.clone().unwrap_or_else(|| c.name.clone())),
+                            .child(alertlist::consumer_name(c)),
                     )
                     .child(
                         h_flex()
@@ -1489,63 +886,17 @@ fn consumer_rows(index: usize, event: &AlertEvent, live: bool) -> Option<AnyElem
                                     .text_color(theme::text_muted())
                                     .child(format::memory(c.bytes)),
                             )
-                            .children(live.then(|| consumer_quit(index, i, c)).flatten()),
+                            .children(alertlist::consumer_quit(c, live).map(|subject| {
+                                quit_request_button(
+                                    SharedString::from(format!("quit-consumer-{index}-{i}")).into(),
+                                    subject,
+                                )
+                            })),
                     )
                     .into_any_element()
             }))
             .into_any_element(),
     )
-}
-
-fn consumer_quit(index: usize, row: usize, c: &zstats::alerts::MemoryConsumer) -> Option<Button> {
-    if !terminate::can_term(c.pid) || !terminate::can_quit(c.pid) {
-        return None;
-    }
-    let display = c.display_name.clone().unwrap_or_else(|| c.name.clone());
-    Some(quit_request_button(
-        SharedString::from(format!("quit-consumer-{index}-{row}")).into(),
-        c.pid,
-        display,
-        c.name.clone(),
-    ))
-}
-
-/// The `[alerts]` key + override name this event writes when the user
-/// picks a new threshold. `name` is empty for the global pressure rule.
-#[derive(Clone)]
-pub(super) struct OverrideTarget {
-    pub(super) key: &'static str,
-    pub(super) name: String,
-}
-
-fn override_target(event: &AlertEvent) -> Option<OverrideTarget> {
-    match (&event.subject, event.kind()) {
-        (AlertSubject::Process { name, .. }, AlertKind::Cpu) => Some(OverrideTarget {
-            key: "alert-cpu",
-            name: name.clone(),
-        }),
-        (AlertSubject::Process { name, .. }, AlertKind::Memory) => Some(OverrideTarget {
-            key: "alert-mem",
-            name: name.clone(),
-        }),
-        (AlertSubject::App { name, .. }, AlertKind::AppCpu) => Some(OverrideTarget {
-            key: "alert-app-cpu",
-            name: name.clone(),
-        }),
-        (AlertSubject::App { name, .. }, AlertKind::AppMemory) => Some(OverrideTarget {
-            key: "alert-app-mem",
-            name: name.clone(),
-        }),
-        (AlertSubject::Volume { mount_point }, AlertKind::Disk) => Some(OverrideTarget {
-            key: "alert-disk",
-            name: mount_point.clone(),
-        }),
-        (AlertSubject::System, AlertKind::Pressure) => Some(OverrideTarget {
-            key: "alert-pressure",
-            name: String::new(),
-        }),
-        _ => None,
-    }
 }
 
 /// Quiet hours for this episode's banners, below the threshold chips.
@@ -1554,10 +905,7 @@ fn override_target(event: &AlertEvent) -> Option<OverrideTarget> {
 /// untouched — only the interruption stops, and only until the deadline.
 fn snooze_row(index: usize, event: &AlertEvent, state: &ZStatsAppState) -> AnyElement {
     let active = state.snoozed_until(event);
-    let caption = match active {
-        Some(time) => t!("alerts.snoozed_until", time = time).to_string(),
-        None => i18n::tr("alerts.snooze_hint"),
-    };
+    let caption = alertlist::snooze_caption(active);
 
     let chip = |slug: &str, label: String| {
         div()
@@ -1581,17 +929,15 @@ fn snooze_row(index: usize, event: &AlertEvent, state: &ZStatsAppState) -> AnyEl
         .gap(px(4.))
         .child(div().mr(px(2.)).child(widgets::note(caption)));
     if active.is_none() {
-        for (slug, label_key, hours) in
-            [("1h", "alerts.snooze_1h", 1), ("3h", "alerts.snooze_3h", 3)]
-        {
+        for (label_key, hours) in alertlist::SNOOZE_CHOICES {
             let event = event.clone();
-            row = row.child(
-                chip(slug, i18n::tr(label_key)).on_click(move |_, _window, cx| {
+            row = row.child(chip(&format!("{hours}h"), i18n::tr(label_key)).on_click(
+                move |_, _window, cx| {
                     cx.global::<ZStatsGlobalStore>()
                         .clone()
                         .update(cx, |state, cx| state.snooze_banners(&event, hours, cx));
-                }),
-            );
+                },
+            ));
         }
     } else {
         let event = event.clone();
@@ -1611,27 +957,7 @@ fn threshold_editor(
     target: &OverrideTarget,
     settings: Option<&FileConfig>,
 ) -> AnyElement {
-    // The caption names the layer and the chips light its value, both
-    // from the one resolution ([`in_force`]) the bar itself comes from.
-    let held = settings.map(|s| in_force(s, target));
-    let current = held.as_ref().and_then(|h| h.lit.clone());
-    let caption = match &held {
-        Some(InForce {
-            lit: Some(v),
-            source,
-        }) => {
-            let value = display_value(target.key, v);
-            match source {
-                BarSource::Yours => t!("alerts.override_at", value = value).to_string(),
-                BarSource::Table => t!("alerts.table_at", value = value).to_string(),
-                BarSource::Base => t!("alerts.default_at", value = value).to_string(),
-            }
-        }
-        // A global memory bar is the lower of a share and a ceiling,
-        // which no single preset stands for.
-        Some(_) => i18n::tr("alerts.default_plain"),
-        None => i18n::tr("alerts.threshold_unknown"),
-    };
+    let (caption, current) = alertlist::threshold_caption(settings, target);
 
     div()
         .mt(px(10.))
@@ -1682,304 +1008,4 @@ fn threshold_editor(
                 })),
         )
         .into_any_element()
-}
-
-/// What one target's chips light and which layer its caption names.
-pub(super) fn in_force(settings: &FileConfig, target: &OverrideTarget) -> InForce {
-    Resolved::of(settings)
-        .in_force(target.key, &target.name)
-        // Disk and pressure have no table layer and no ceiling: the
-        // file is the whole answer.
-        .unwrap_or_else(|| InForce {
-            lit: configured_value(Some(settings), target),
-            source: if is_overridden(Some(settings), target) {
-                BarSource::Yours
-            } else {
-                BarSource::Base
-            },
-        })
-}
-
-fn configured_value(settings: Option<&FileConfig>, target: &OverrideTarget) -> Option<String> {
-    let a = &settings?.alerts;
-    match target.key {
-        "alert-cpu" => a
-            .cpu_overrides
-            .get(&target.name)
-            .copied()
-            .or(a.cpu)
-            .or(Some(30.0))
-            .map(fmt_pct),
-        "alert-mem" => a
-            .mem_overrides
-            .get(&target.name)
-            .copied()
-            .or(a.mem)
-            .or(Some(25.0))
-            .map(fmt_pct_f64),
-        "alert-app-cpu" => a
-            .app_cpu_overrides
-            .get(&target.name)
-            .copied()
-            .or(a.app_cpu)
-            .or(Some(200.0))
-            .map(fmt_pct),
-        "alert-app-mem" => a
-            .app_mem_overrides
-            .get(&target.name)
-            .copied()
-            .or(a.app_mem)
-            .or(Some(40.0))
-            .map(fmt_pct_f64),
-        "alert-disk" => a
-            .disk_overrides
-            .get(&target.name)
-            .copied()
-            .or(a.disk)
-            .or(Some(90.0))
-            .map(fmt_pct),
-        "alert-pressure" => Some(
-            match a.pressure.unwrap_or(PressureAlert::Warning) {
-                PressureAlert::Off => "off",
-                PressureAlert::Warning => "warning",
-                PressureAlert::Critical => "critical",
-            }
-            .into(),
-        ),
-        _ => None,
-    }
-}
-
-fn is_overridden(settings: Option<&FileConfig>, target: &OverrideTarget) -> bool {
-    let Some(a) = settings.map(|s| &s.alerts) else {
-        return false;
-    };
-    match target.key {
-        "alert-cpu" => a.cpu_overrides.contains_key(&target.name),
-        "alert-mem" => a.mem_overrides.contains_key(&target.name),
-        "alert-app-cpu" => a.app_cpu_overrides.contains_key(&target.name),
-        "alert-app-mem" => a.app_mem_overrides.contains_key(&target.name),
-        "alert-disk" => a.disk_overrides.contains_key(&target.name),
-        "alert-pressure" => a.pressure.is_some(),
-        _ => false,
-    }
-}
-
-fn fmt_pct(v: f32) -> String {
-    format!("{v:.0}")
-}
-
-fn fmt_pct_f64(v: f64) -> String {
-    format!("{v:.0}")
-}
-
-fn display_value(key: &str, raw: &str) -> String {
-    if raw == "0" || raw == "off" {
-        return i18n::tr("alerts.off");
-    }
-    match (key, raw) {
-        ("alert-pressure", "warning") => i18n::tr("alerts.warning"),
-        ("alert-pressure", "critical") => i18n::tr("alerts.critical"),
-        ("alert-pressure", _) => raw.to_string(),
-        _ => format!("{raw}%"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use zstats::AlertDetail;
-
-    fn cpu_process(name: &str) -> AlertEvent {
-        AlertEvent {
-            subject: AlertSubject::Process {
-                pid: 1,
-                name: name.into(),
-                display_name: None,
-            },
-            detail: AlertDetail::Cpu {
-                avg_percent: 90.0,
-                threshold_percent: 30.0,
-                window: Duration::from_secs(60),
-                runaway: false,
-            },
-            repeat_after: None,
-        }
-    }
-
-    #[test]
-    fn process_cpu_writes_alert_cpu_override() {
-        let t = override_target(&cpu_process("ghostty")).expect("target");
-        assert_eq!(t.key, "alert-cpu");
-        assert_eq!(t.name, "ghostty");
-    }
-
-    #[test]
-    fn a_day_folds_repeats_of_one_subject_and_kind_into_a_row() {
-        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        let episode = |pid: u32, name: &str| alertlog::Restored {
-            event: AlertEvent {
-                subject: AlertSubject::Process {
-                    pid,
-                    name: name.into(),
-                    display_name: None,
-                },
-                ..cpu_process(name)
-            },
-            first_at: at,
-            at,
-            reports: 1,
-            dismissed: false,
-        };
-        let day = vec![
-            episode(98054, "Telegram"),
-            episode(1, "zstats"),
-            episode(12931, "Telegram"),
-        ];
-        let groups = past_groups(&day);
-        assert_eq!(groups.len(), 2, "two Telegram episodes, one row");
-        assert_eq!(groups[0].len(), 2);
-        // Most recent first, as the day's file lists them.
-        assert!(matches!(
-            groups[0][0].event.subject,
-            AlertSubject::Process { pid: 98054, .. }
-        ));
-        assert_eq!(groups[1].len(), 1);
-    }
-
-    fn seen(event: AlertEvent, live: bool) -> SeenAlert {
-        SeenAlert::for_test(event, live)
-    }
-
-    #[test]
-    fn a_live_process_card_jumps_to_that_pid() {
-        assert_eq!(
-            goto_target(&seen(cpu_process("ghostty"), true)),
-            Some(Goto::Process(1))
-        );
-        assert_eq!(
-            goto_target(&seen(cpu_process("ghostty"), false)),
-            None,
-            "a restored card's pid may now belong to someone else"
-        );
-    }
-
-    #[test]
-    fn a_disk_card_jumps_to_hardware_even_when_restored() {
-        let event = AlertEvent {
-            subject: AlertSubject::Volume {
-                mount_point: "/".into(),
-            },
-            detail: AlertDetail::Disk {
-                used_percent: 99.0,
-                threshold_percent: 90.0,
-                available_bytes: 0,
-                total_bytes: 1 << 30,
-                critical_below_bytes: 0,
-            },
-            repeat_after: None,
-        };
-        assert_eq!(goto_target(&seen(event, false)), Some(Goto::Hardware));
-    }
-
-    #[test]
-    fn a_live_app_card_jumps_to_the_tree() {
-        let event = AlertEvent {
-            subject: AlertSubject::App {
-                root_pid: 42,
-                name: "Chrome".into(),
-                display_name: None,
-                process_count: 12,
-            },
-            detail: AlertDetail::Cpu {
-                avg_percent: 200.0,
-                threshold_percent: 80.0,
-                window: Duration::from_secs(60),
-                runaway: false,
-            },
-            repeat_after: None,
-        };
-        assert_eq!(goto_target(&seen(event, true)), Some(Goto::App(42)));
-    }
-
-    /// A hold that just crossed the two-hour bar is news; a live alert
-    /// last reported hours ago is not, even though it is a "real" alert.
-    #[test]
-    fn a_just_noticed_hold_sits_above_stale_live_alerts() {
-        let live = [Duration::from_secs(4 * 3600), Duration::from_secs(9 * 3600)];
-        assert_eq!(watch_insert_at(&live, Duration::from_secs(2 * 60)), 0);
-    }
-
-    #[test]
-    fn a_fresh_live_alert_keeps_the_top() {
-        let live = [Duration::from_secs(30), Duration::from_secs(4 * 3600)];
-        assert_eq!(watch_insert_at(&live, Duration::from_secs(2 * 60)), 1);
-    }
-
-    #[test]
-    fn with_no_live_alerts_sustained_is_first() {
-        assert_eq!(watch_insert_at(&[], Duration::from_secs(60)), 0);
-    }
-
-    #[test]
-    fn an_old_hold_falls_through_to_the_bottom_of_live() {
-        let live = [Duration::from_secs(60)];
-        assert_eq!(watch_insert_at(&live, Duration::from_secs(3 * 3600)), 1);
-    }
-
-    /// Two watcher cards land among the live episodes without shoving
-    /// each other: the second card's slot is computed as if the first
-    /// were already in the list.
-    #[test]
-    fn two_watch_cards_offset_each_other() {
-        let live = [Duration::from_secs(60), Duration::from_secs(10 * 60)];
-        // Noticed 30s and 5m ago: one above the fresh alert, one
-        // between the alerts — the 5m card shifts by the 30s one.
-        let agos = [Duration::from_secs(30), Duration::from_secs(5 * 60)];
-        assert_eq!(watch_cards_at(&live, &agos), vec![0, 2]);
-        // Both newer than every live report: they take the top two
-        // slots in their own order.
-        let both_fresh = [Duration::from_secs(10), Duration::from_secs(30)];
-        assert_eq!(watch_cards_at(&live, &both_fresh), vec![0, 1]);
-        // No live episodes at all: the cards simply stack.
-        assert_eq!(watch_cards_at(&[], &agos), vec![0, 1]);
-    }
-
-    #[test]
-    fn noticed_ago_is_the_hold_minus_the_bar() {
-        let n = SustainedNotice {
-            pid: 1,
-            name: "ghostty".into(),
-            cpu_avg: 23.7,
-            duration: crate::watch::DEFAULT_SUSTAINED_AFTER + Duration::from_secs(120),
-        };
-        let after = crate::watch::DEFAULT_SUSTAINED_AFTER;
-        assert_eq!(
-            newest_noticed_ago(&[n], after),
-            Some(Duration::from_secs(120))
-        );
-        assert_eq!(newest_noticed_ago(&[], after), None);
-    }
-
-    #[test]
-    fn system_pressure_has_no_per_name_override() {
-        let event = AlertEvent {
-            subject: AlertSubject::System,
-            detail: AlertDetail::Pressure {
-                level: 2,
-                sustained: Duration::from_secs(60),
-                swap_used_bytes: 0,
-                swap_total_bytes: 0,
-                compressed_bytes: None,
-                swap_ins_per_sec: None,
-                swap_outs_per_sec: None,
-                top_consumers: Vec::new(),
-            },
-            repeat_after: None,
-        };
-        let t = override_target(&event).expect("target");
-        assert_eq!(t.key, "alert-pressure");
-        assert!(t.name.is_empty());
-    }
 }

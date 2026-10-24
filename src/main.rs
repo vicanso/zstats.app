@@ -36,6 +36,7 @@ compile_error!(
 mod about;
 mod active;
 mod alertbars;
+mod alertlist;
 mod alertlog;
 mod alerttpl;
 mod appicon;
