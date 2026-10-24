@@ -54,20 +54,6 @@ const WINDOW_BACKGROUND: WindowBackgroundAppearance = if cfg!(target_os = "macos
 } else {
     WindowBackgroundAppearance::Opaque
 };
-/// Dark: one thin wash over the whole window — a tint in our token's
-/// hue, not protection. The protection is the popover material
-/// (`use_popover_material`): its luminosity clamp keeps the ground dark
-/// over any wallpaper — but only down to mid-grey against pure white,
-/// so the wash still shares the load: 0.35 keeps the dim captions
-/// legible there while a coloured desktop still shines through
-/// clearly. 0.55 (the raw-blur era's value) stacked on the material
-/// read as fully opaque; 0.20 washed the captions out on white.
-const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.35 } else { 1.0 };
-/// Light mode is deliberately near-opaque: vibrancy there is pale-on-pale,
-/// so the blur reads as barely anything while the desktop's detail still
-/// bleeds through and fights the dark text. Legibility wins; the effect is
-/// conceded. Dark mode keeps it, where the contrast actually carries.
-const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
 
 /// Vertical padding inside an auxiliary window's scrolling body (both
 /// settings and disk-space use it). Named because `about_card`'s height
@@ -344,10 +330,7 @@ impl Render for ZStatsApp {
         #[cfg(target_os = "linux")]
         self.dismiss_when_pointer_leaves(window, cx);
 
-        let tint = prefs::opacity().unwrap_or(theme::default_opacity(
-            BACKGROUND_OPACITY_DARK,
-            BACKGROUND_OPACITY_LIGHT,
-        ));
+        let tint = theme::window_opacity();
         div()
             .relative()
             .size_full()

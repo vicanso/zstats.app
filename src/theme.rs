@@ -13,7 +13,7 @@ use crate::omarchy::Palette;
 use crate::palette::{self, OmarchyTokens};
 use gpui::Rgba;
 
-pub use crate::palette::{default_opacity, omarchy_palette_is, set_dark, set_golden, set_omarchy};
+pub use crate::palette::{omarchy_palette_is, set_dark, set_golden, set_omarchy, window_opacity};
 
 /// gpui-kit theme file for the golden pair. Loaded into `ThemeRegistry`
 /// when the preference is Golden; the names `Golden Light` / `Golden Dark`

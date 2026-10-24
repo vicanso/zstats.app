@@ -81,8 +81,10 @@
 
 - **3a 主题（**已完成**，2026-10-24）。** 主题偏好在 NSH 前端生效，四套配色都能画。gpui 版在外观变化时整套重刷 token（`apply_appearance` 再 `Theme::change`）；NSH 不用我们去问：交给它的颜色可以带亮、暗两份（`AdaptiveColor`），引擎按当前外观自己挑。所以 `palette.rs` 加了 `in_mode`——在当前线程上临时钉住当前配色系列（经典或 Golden）的亮或暗那一半，读出 token 后就松开，别的线程不受影响；`nsh/theme.rs` 的 `color` 用它把一个 token 读成亮暗两份。只有换配色系列（经典、Golden、Omarchy，是设置页的事）才需要重新加载各窗口的根组件。根组件都经 `root::make` 创建，带上偏好要求的外观（Light / Dark / Omarchy 调色板自己的，其余跟随系统）。NSH 解析出来的亮暗由面板根组件的一个 effect 报回宿主（`HostAction::Appearance`），宿主据此更新 palette 的全局状态（引擎之外也有人读它：Linux 托盘的墨色、透明度默认值）和窗口在第一帧之前的底色。窗口底色成了 token（`palette::ground`，与 gpui 用的主题文件同值，Golden 两种模式有测试对照 `themes/golden.json`）。共享出来的：`theme_in_force` 进了 `prefs.rs`，钉住 AppKit 外观（`pin_appearance`）进了 `appkit.rs`。
 - **3b 基础件（**已完成**，2026-10-24）。** `nsh/widgets.rs`：gpui 版 `views/widgets.rs`、`MenuTrigger`、选项 chip 的 NSH 写法，尺寸、墨色、规则都照原样（原件上的注释解释了为什么，不重复）。`card` / `list_shell` / `card_header`、`big_number` / `big_figure` / `big_figure_with`（只在空格处切开 `format` 已经拼好的字符串，不重算）、`outline_pill`、`meter`、`option_chip`、`menu_trigger`（下拉菜单，当前项打勾）、`wrap_tooltip`（两段式、220 宽换行）、`expand_mark`、`icon`。和 gpui 版的区别只在画法：颜色都是亮暗两份；卡片的细线是 `outline`，不占布局（gpui 那边要用零模糊的内阴影才能做到）；图标是打包进来的 SVG，转成 `data:` URI 交给 NSH 渲染，再按墨色着色——NSH 没有图标集，gpui-kit 的 lucide 图标这里没有，页面用到哪个就把哪个放进 `assets/icons`（这次先放了 `chevron-down` / `chevron-right`，进了 `CustomIconName`，嵌入测试也覆盖）；等宽字体 JetBrains Mono 由 `root::make` 随每个根组件注册（`Root::font`），文件和 gpui 用的同一份。菜单和 tooltip 的底色是新的不透明 token：`palette::popover` / `popover_hover`，取 gpui 主题文件里的 `popover.background` / `accent.background`，Golden 两种模式有测试对照 `golden.json`；卡片那种半透明的提亮色会让下面的字透上来。占位面板改成了这些基础件的样张，数据都接实时状态。
-- **3c 毛玻璃**：经典两套靠毛玻璃加一层半透明底色才对（亮色的卡片是白的，要放在灰色的玻璃上），NSH 的容器层默认不透明（原型的问题 2），要垫一层 `.popover` 材质并清掉容器底色；透明度偏好（`prefs::opacity`）随之生效。
+- **3c 毛玻璃（**已完成**，2026-10-24）。** macOS 面板的内容视图换成 `.popover` 材质、behind-window 的 `NSVisualEffectView`，NSH 的视图作为它的子视图（跟着窗口缩放），面板本身不再不透明。根组件用 `palette::panel_ground` 画底：窗口底色乘上面板透明度。透明度是读者的 Opacity 偏好，没设置时取当前配色的默认值：Golden Dark 不透明，经典暗色 0.35，经典亮色 0.80，Linux 上都是 1——这几个值连同理由从 `gpui_app.rs` 挪进了 `palette.rs`（`GLASS_DARK` / `GLASS_LIGHT`、`window_opacity`），gpui 版也改读它。因为 token 按亮暗两半分别求值，透明度也是两半各自的。gpui 版要三层（gpui 自己的模糊视图、它上面我们插的材质视图、根视图的底色），其中一层还得防着 AppKit 重绘时被换掉材质；窗口归自己管之后只要材质这一层加底色。NSH 的容器层底色（原型的问题 2）在两个时机清掉：面板显示后，以及收到面板报回的外观变化之后——NSH 只在算出的颜色变化时才重设它，而且是在主线程上、在引擎听说外观变化之前。canvas 的异步绘制开关（原型的问题 1，`draw_canvases_in_place`）也写好了，显示时调用；现在还没有页面画 canvas，阶段 4 的图表来了以后要在新 canvas 挂上时再调。两个普通窗口仍是不透明的，和 gpui 版一样。顺带：crate 根对死代码的放宽改成对称的——只开一个前端的构建都放宽，两个都开的构建（`make lint` 检查的就是它）照报，因为共享模块里本来就有只被另一个前端调用的函数。
 - **3d 应用图标和确认对话框。**
+
+**3c 结果**：默认构建 440 个测试、只开 `nsh` 的构建 349 个。只开 `nsh` 的 debug 构建按三种偏好各截一张：跟随系统（经典暗色）透出灰色的毛玻璃，卡片是白色提亮，选中的 chip 是品牌红的淡色；`light`（经典亮色）是灰色玻璃上的白卡片，和 gpui 版一样，3a 里卡片看不见的问题没有了；`golden` 仍是不透明的 `#1c1c1e`。白色桌面上的亮度钳制、透明度偏好的其他取值、运行中切换外观后容器层是否被清掉，都没有专门测。`make linux-check`：434 / 347 个测试全过，NSH 构建的 clippy 通过。
 
 **3b 结果**：默认构建 440 个测试、只开 `nsh` 的构建 349 个。只开 `nsh` 的 debug 构建（Golden Dark）用 probe 逐项实测：样张截图里各件都对——20 号的数字和 13 号的单位、香槟色进度条随 tick 走、胶囊、带 SVG 箭头的菜单按钮、展开箭头、选中和未选中的 chip、JetBrains Mono 的版本号；点展开箭头，箭头朝下、细节行出现；点 chip，选中态移过去；打开菜单，弹层不透明、当前项打勾，选一项后按钮文字跟着变、菜单关闭；悬停版本号，两段式 tooltip 在 220 宽处换行、第二段变暗。实测中修了两处：菜单弹层原本用卡片的半透明提亮色，下面的字透了上来（于是有了 `popover` token）；`wrap_tooltip` 起初返回 `nsh_base` 的 `Tooltip` 组件，而 NSH 给元素挂 tooltip 时会再包一层提示浮层，浮层套浮层，里面那层永远不显示——改为只返回气泡本身。**测试方式上的一个教训**：probe 点面板会让它成为 key 窗口，之后用户在前台应用里按的键会被面板截走（一次测试中用户在终端按的 ⌘2 把面板切到了 Apps 页）；probe 的 `click` 现在点完会把 key 交还。`make linux-check`：434 / 347 个测试全过，NSH 构建的 clippy 通过。
 
@@ -107,6 +109,6 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 | 0 双前端骨架 | 完成（2026-10-24） |
 | 1 核心 | 完成（2026-10-24） |
 | 2 宿主 | 2a、2b、2c 完成；2d 已写完、只编译过，等 Omarchy 真机 |
-| 3 基础件 | 3a、3b 完成；3c、3d 未开始 |
+| 3 基础件 | 3a、3b、3c 完成；3d 未开始 |
 | 4 逐页 | 未开始 |
 | 5 切换 | 未开始 |

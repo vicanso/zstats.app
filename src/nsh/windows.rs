@@ -17,9 +17,9 @@ use crate::nsh::host;
 use crate::nsh::root::{self, AuxWindow};
 use crate::nsh::settings::Settings;
 use crate::nsh::storage::Storage;
-use crate::nsh::store;
+use crate::nsh::{store, theme};
 use crate::{autostart, i18n, palette, placement};
-use nsh_platform_macos::{AppOptions, AppView, Appearance};
+use nsh_platform_macos::{AppOptions, AppView};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -139,7 +139,7 @@ pub fn open(aux: AuxWindow) {
         AppOptions {
             app_id: "com.github.vicanso.zstats".to_owned(),
             size: (size.0 as i32, size.1 as i32),
-            appearance: Appearance::Dark,
+            appearance: theme::appearance(),
             ..AppOptions::default()
         },
     );

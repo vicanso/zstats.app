@@ -55,6 +55,7 @@
 use crate::color::{Rgba, rgb, rgba};
 use crate::i18n;
 use crate::omarchy::{self, Palette};
+use crate::prefs;
 use std::cell::Cell;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -281,6 +282,16 @@ fn tone(
 #[inline]
 pub fn ground() -> Rgba {
     tone(0x0a0a0aff, 0xffffffff, 0x1c1c1eff, 0xf3eee6ff, |t| t.ground)
+}
+
+/// The panel's ground at its opacity ([`window_opacity`]): what it paints
+/// over the glass — all of it on Golden Dark, a wash on the classic pair.
+#[inline]
+pub fn panel_ground() -> Rgba {
+    Rgba {
+        a: window_opacity(),
+        ..ground()
+    }
 }
 
 /// A menu's or a tooltip's fill: opaque, since it floats over whatever
@@ -589,6 +600,29 @@ pub fn card_line() -> Rgba {
     } else {
         border()
     }
+}
+
+/// Dark: one thin wash over the whole window — a tint in our token's
+/// hue, not protection. The protection is the popover material
+/// (`use_popover_material`): its luminosity clamp keeps the ground dark
+/// over any wallpaper — but only down to mid-grey against pure white,
+/// so the wash still shares the load: 0.35 keeps the dim captions
+/// legible there while a coloured desktop still shines through
+/// clearly. 0.55 (the raw-blur era's value) stacked on the material
+/// read as fully opaque; 0.20 washed the captions out on white.
+pub const GLASS_DARK: f32 = if cfg!(target_os = "macos") { 0.35 } else { 1.0 };
+/// Light mode is deliberately near-opaque: vibrancy there is pale-on-pale,
+/// so the blur reads as barely anything while the desktop's detail still
+/// bleeds through and fights the dark text. Legibility wins; the effect is
+/// conceded. Dark mode keeps it, where the contrast actually carries.
+pub const GLASS_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
+
+/// How solid the panel's ground is: the reader's Opacity, or this
+/// scheme's default ([`default_opacity`] over [`GLASS_DARK`] and
+/// [`GLASS_LIGHT`]).
+#[inline]
+pub fn window_opacity() -> f32 {
+    prefs::opacity().unwrap_or(default_opacity(GLASS_DARK, GLASS_LIGHT))
 }
 
 /// How solid the panel's ground is when the reader has not said.

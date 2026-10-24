@@ -2,11 +2,16 @@
 // app pops an empty terminal behind the window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // While the interface moves from gpui to NSH (docs/nsh-migration.md), a
-// build without the gpui front end compiles every shared module but calls
-// only the part of each that the NSH front end has reached so far — and
-// re-exports, from the store above all, that only gpui's views import.
-// The rest is the gpui front end's, and is not dead.
-#![cfg_attr(not(feature = "gpui"), allow(dead_code, unused_imports))]
+// shared module carries what either front end calls, and a build with one
+// of them compiles all of it: the NSH-only build has the store's
+// re-exports only gpui's views import, the gpui-only build the palette's
+// halves only NSH reads. Dead code is reported where both are built —
+// the configuration `make lint` checks, where nothing shared is unused
+// unless it really is.
+#![cfg_attr(
+    not(all(feature = "gpui", feature = "nsh")),
+    allow(dead_code, unused_imports)
+)]
 
 // macOS and Linux. Anything else fails here rather than six files later,
 // with the same reasoning the macOS-only guard carried before: a scatter

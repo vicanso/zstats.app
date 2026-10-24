@@ -295,7 +295,7 @@ fn build_panel() -> Rc<PanelHost> {
         app_id: APP_ID.to_owned(),
         title: APP_NAME.to_owned(),
         size: (width, height),
-        appearance: Appearance::Dark,
+        appearance: theme::appearance(),
         ..AppOptions::default()
     });
     window.set_child(Some(&view.widget()));
@@ -497,7 +497,7 @@ fn open_aux(aux: AuxWindow) {
         app_id: APP_ID.to_owned(),
         title: title.clone(),
         size: (size.0 as i32, size.1 as i32),
-        appearance: Appearance::Dark,
+        appearance: theme::appearance(),
         ..AppOptions::default()
     });
     window.set_child(Some(&view.widget()));

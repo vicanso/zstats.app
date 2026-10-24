@@ -50,20 +50,22 @@ use crate::nsh::{store, theme};
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
-use crate::{active, autostart, i18n, logger, notice, notify, palette, prefs, updater};
+use crate::{active, autostart, i18n, logger, notice, notify, prefs, updater};
 use nsh_platform_macos::{AppOptions, AppView, Appearance};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::sel;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSMenu, NSMenuItem,
-    NSPanel, NSScreen, NSWindowButton, NSWindowCollectionBehavior, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
+    NSColor, NSMenu, NSMenuItem, NSPanel, NSScreen, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowButton,
+    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
+use objc2_quartz_core::CALayer;
 use std::cell::{Cell, OnceCell};
 use std::fs;
 use std::rc::Rc;
@@ -79,8 +81,9 @@ const POPUP_LEVEL: isize = 101;
 /// they live here rather than in a static.
 pub struct Host {
     pub panel: Retained<NSPanel>,
-    /// Kept for the engine it runs: dropping the view stops it.
-    _view: Rc<AppView>,
+    /// The root's surface; kept for the engine it runs, too — dropping the
+    /// view stops it.
+    view: Rc<AppView>,
     _delegate: Retained<PanelDelegate>,
 }
 
@@ -221,7 +224,7 @@ pub fn run() {
     panel.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     let host = Rc::new(Host {
         panel,
-        _view: view,
+        view,
         _delegate: delegate,
     });
     HOST.with(|h| {
@@ -293,10 +296,51 @@ fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
 /// before its root's first frame.
 fn follow_appearance(dark: bool) {
     theme::follow(dark);
-    with_host(|host| {
-        host.panel
-            .setBackgroundColor(Some(&ns_color(palette::ground())))
-    });
+    // NSH has just walled the glass off again for the new appearance.
+    with_host(clear_surface_ground);
+}
+
+/// NSH fills the view that holds a root with an opaque colour — the
+/// root's own when that is opaque, otherwise near-black or white by the
+/// appearance — and sets it again only when that colour changes, which is
+/// when the appearance turns (`follow_background` in its `system.rs`).
+/// Under a translucent ground that fill is a wall in front of the glass,
+/// so it is cleared after each time it can have been set: the panel shown,
+/// and the appearance followed — NSH sets it on the main thread before its
+/// engine hears of the change, and the panel's root reports it from the
+/// engine. The prototype's finding 2; an NSH option would be the right
+/// fix.
+fn clear_surface_ground(host: &Host) {
+    if let Some(layer) = host.view.view().layer() {
+        layer.setBackgroundColor(None);
+    }
+}
+
+/// NSH draws every canvas with `drawsAsynchronously` (its `view.rs`, a
+/// main-thread saving measured on its Stocks demo). On macOS 27 that cost
+/// the prototype ~97 MB of GPU memory for a moment on every redraw,
+/// however little the canvas drew — the panel's footprint swung between
+/// 26 and 126 MB — and in place it drew for less CPU, not more
+/// (`~/github/nsh-panel-spike/FINDINGS.md`, finding 1). This walks the
+/// panel's layers and turns it off. No page draws a canvas yet; Overview's
+/// charts will (phase 4), and need it asked again whenever a new one
+/// mounts.
+fn draw_canvases_in_place(host: &Host) {
+    fn walk(layer: &CALayer) {
+        if layer.drawsAsynchronously() {
+            layer.setDrawsAsynchronously(false);
+        }
+        // SAFETY: read on the main thread, where the layer tree is
+        // changed; the array is a snapshot of it.
+        if let Some(children) = unsafe { layer.sublayers() } {
+            for child in children.iter() {
+                walk(&child);
+            }
+        }
+    }
+    if let Some(layer) = host.view.view().layer() {
+        walk(&layer);
+    }
 }
 
 /// A palette colour as AppKit's.
@@ -459,19 +503,37 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
-    // The theme's ground, under the root's own until its first frame.
-    panel.setBackgroundColor(Some(&ns_color(palette::ground())));
 
     let view = AppView::new(
         mtm,
         AppOptions {
             app_id: "com.github.vicanso.zstats".to_owned(),
             size: (width as i32, height as i32),
-            appearance: Appearance::Dark,
+            appearance: theme::appearance(),
             ..AppOptions::default()
         },
     );
-    panel.setContentView(Some(&view.view()));
+    // The glass: the stock popover material behind the root, whose
+    // luminosity clamp keeps the ground dark over a white wallpaper — the
+    // gpui front end's middle layer (`use_popover_material`; CLAUDE.md on
+    // vibrancy). The root paints the scheme's ground over it at the
+    // panel's opacity (`palette::panel_ground`): all of it on Golden Dark,
+    // a wash on the classic pair. gpui needed its own blur view under this
+    // one and a material pinned against AppKit's repaints; a window that
+    // is ours needs only the material.
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    let glass = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame);
+    glass.setMaterial(NSVisualEffectMaterial::Popover);
+    glass.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    glass.setState(NSVisualEffectState::Active);
+    let surface = view.view();
+    surface.setFrame(frame);
+    surface.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    glass.addSubview(&surface);
+    panel.setContentView(Some(&glass));
     view.load(root::make::<panel::Panel>().into());
     (panel, view)
 }
@@ -503,6 +565,8 @@ pub fn show(host: &Host, anchor: Option<TrayAnchor>, make_key: bool) {
     if make_key {
         host.panel.makeKeyWindow();
     }
+    clear_surface_ground(host);
+    draw_canvases_in_place(host);
     // A frame that did not change posts no notification.
     record_frame(host);
     mark_shown();

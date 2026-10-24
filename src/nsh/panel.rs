@@ -105,7 +105,7 @@ pub fn Panel() -> impl IntoElement {
     };
     view()
         .size_full()
-        .bg(theme::color(palette::ground))
+        .bg(theme::color(palette::panel_ground))
         .p(px(GUTTER))
         .gap(px(10.))
         .child(
