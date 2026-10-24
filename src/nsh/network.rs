@@ -374,7 +374,11 @@ fn sparkline(runs: impl Fn() -> Vec<Vec<(f32, f32)>> + 'static) -> AnyElement {
         palette::in_mode(dark, || paint_trace(&runs, w, h))
     })
     .size_full()
-    .on_layout(move |b: &Bounds<Points>| size.set((b.size.width.0, b.size.height.0)))
+    .on_layout(move |b: &Bounds<Points>| {
+        // A box being taken down still reports a layout after the
+        // part that made it is gone.
+        let _ = size.try_set((b.size.width.0, b.size.height.0));
+    })
     .into_element()
 }
 

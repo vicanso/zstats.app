@@ -2519,8 +2519,8 @@ fn dir_map(live: Live, fill: bool, size: Signal<(f32, f32)>) -> AnyElement {
         .bg(theme::color(palette::inset))
         .on_layout(move |b: &Bounds<Points>| {
             let next = (b.size.width.0, b.size.height.0);
-            if size.get_untracked() != next {
-                size.set(next);
+            if size.try_get() != Some(next) {
+                let _ = size.try_set(next);
             }
         })
         .child(dynamic(move || map_body(map.get())));

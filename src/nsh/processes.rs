@@ -353,7 +353,8 @@ fn top_card(live: Live, body: ReadSignal<f32>) -> View {
                 .max_h(move || px(top.with(|t| t.viewport)))
                 .element_ref(&region)
                 .on_layout(move |_: &Bounds<Points>| {
-                    if let Some(at) = reveal.get_untracked() {
+                    // `try_`: a page being taken down still reports a layout.
+                    if let Some(Some(at)) = reveal.try_get() {
                         reveal.set(None);
                         region.scroll_to(point(px(0.), px(at)), false);
                     }
@@ -478,7 +479,8 @@ fn full_card(live: Live, body: ReadSignal<f32>) -> View {
             .estimated_item_size(px(COLLAPSED_ROW))
             .element_ref(&list)
             .on_layout(move |_: &Bounds<Points>| {
-                if let Some(ix) = reveal.get_untracked() {
+                // `try_`: a page being taken down still reports a layout.
+                if let Some(Some(ix)) = reveal.try_get() {
                     reveal.set(None);
                     list.scroll_to_index(ix as u32, Percentage(0.), px(0.), false);
                 }
