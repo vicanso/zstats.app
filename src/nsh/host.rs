@@ -216,6 +216,11 @@ pub fn run() {
             HostAction::Close(aux) => windows::close(aux),
             HostAction::Appearance(dark) => follow_appearance(dark),
             HostAction::FitForm => fit_form(),
+            HostAction::Wake => {
+                if let Some(pace) = PACE.get() {
+                    pace.wake();
+                }
+            }
         })
     });
     install_menu(mtm);

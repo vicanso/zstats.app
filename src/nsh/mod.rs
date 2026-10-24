@@ -13,6 +13,7 @@ mod apps;
 mod chart;
 mod chrome;
 mod gallery;
+mod hardware;
 #[cfg(target_os = "macos")]
 mod host;
 #[cfg(target_os = "linux")]

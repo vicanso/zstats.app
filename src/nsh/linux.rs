@@ -145,6 +145,11 @@ pub fn run() {
             HostAction::Close(aux) => close_aux(aux),
             HostAction::Appearance(dark) => follow_appearance(dark),
             HostAction::FitForm => fit_form(),
+            HostAction::Wake => {
+                if let Some(pace) = PACE.get() {
+                    pace.wake();
+                }
+            }
         }));
     });
 

@@ -37,6 +37,10 @@ pub enum HostAction {
     /// Overview's form changed (the footer's toggle): the panel takes that
     /// form's height.
     FitForm,
+    /// Sample now rather than at the end of the cadence: a volume was just
+    /// ejected, and the next snapshot should stop listing it
+    /// (`CollectorPace::wake`).
+    Wake,
 }
 
 /// The two ordinary windows beside the panel.
