@@ -34,8 +34,7 @@ use crate::prefs;
 pub use crate::settingspage::SettingsSection;
 use crate::settingspage::{self, Autostart};
 use crate::state::{
-    CachesSync, HintsSync, TemplateSync, UpdateStatus, WebhookTest, ZStatsAppState,
-    ZStatsGlobalStore,
+    CachesSync, HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore,
 };
 use crate::theme;
 use crate::updater;
@@ -60,7 +59,6 @@ use std::fs;
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
 use zstats::CollectorConfig;
 
 /// The nav row's icon. Settings2 on Advanced is where config.toml's own
@@ -1153,20 +1151,8 @@ fn proxy_row(input: &Entity<InputState>, valid: bool) -> AnyElement {
 /// find out. The test's verdict is dropped as soon as the URL changes.
 fn webhook_row(state: &ZStatsAppState, input: &Entity<InputState>, valid: bool) -> AnyElement {
     let test = state.webhook_test();
-    let sending = matches!(test, Some(WebhookTest::Sending));
-    let can_test = valid && !sending && !prefs::webhook().is_empty();
-    let verdict = match test {
-        Some(WebhookTest::Sending) => Some((i18n::tr("config.webhook_test_sending"), false)),
-        Some(WebhookTest::Delivered(status)) => Some((
-            t!("config.webhook_test_ok", status = status).to_string(),
-            false,
-        )),
-        Some(WebhookTest::Failed(error)) => Some((
-            t!("config.webhook_test_failed", error = error.as_str()).to_string(),
-            true,
-        )),
-        None => None,
-    };
+    let can_test = settingspage::webhook_can_test(valid, test);
+    let verdict = settingspage::webhook_verdict(test);
     v_flex()
         .px(px(13.))
         .py(px(8.))
@@ -1442,22 +1428,13 @@ fn pref_row<T: Copy + PartialEq + 'static>(
 /// it had simply stopped working.
 fn template_card(state: &ZStatsAppState) -> AnyElement {
     let loaded = alerttpl::info();
-    let line = match &loaded.source {
-        alerttpl::Source::Builtin(n) => t!("config.template_builtin", n = n).to_string(),
-        alerttpl::Source::User(n) => t!("config.template_user", n = n).to_string(),
-        alerttpl::Source::Broken(_) => i18n::tr("config.template_broken"),
-    };
+    let line = settingspage::template_source(&loaded);
     widgets::list_shell()
         .child(widgets::list_header(
             titled(
                 "cfg-template-info",
                 i18n::tr("config.template"),
-                // Names the platform file it pulls, because the local
-                // name cannot: zstats fixes the override at
-                // `template.toml` with no platform in it, and ~/.zstats
-                // may be synced between machines whose process names
-                // have nothing in common.
-                t!("config.template_note", file = alerttpl::FILE).to_string(),
+                settingspage::template_tip(),
             ),
             Some(widgets::note(line)),
         ))
@@ -1471,12 +1448,7 @@ fn template_card(state: &ZStatsAppState) -> AnyElement {
                 .child(template_update_chip(state))
                 .children(loaded.source.has_override().then(template_builtin_chip)),
         )
-        .children(match &loaded.source {
-            alerttpl::Source::Broken(e) => Some(template_line(
-                t!("config.template_broken_body", e = e.as_str()).to_string(),
-            )),
-            _ => None,
-        })
+        .children(settingspage::template_broken(&loaded).map(template_line))
         // The gear dot's landing spot: the probe found a clean,
         // different table. The line names the news; the Update chip
         // above is the action; "not this one" is display-layer only,
@@ -1571,36 +1543,7 @@ fn template_chip(id: &'static str) -> Stateful<Div> {
 
 /// The last press's outcome, in one honest line under the row.
 fn template_sync_note(state: &ZStatsAppState) -> Option<AnyElement> {
-    use crate::alerttpl::RemoteUpdate;
-    let text = match state.template_sync()? {
-        TemplateSync::Running => return None,
-        TemplateSync::Done(RemoteUpdate::Updated(n)) => {
-            t!("config.template_updated", n = n).to_string()
-        }
-        TemplateSync::Done(RemoteUpdate::AlreadyCurrent) => i18n::tr("config.template_current"),
-        // Named as its own outcome, never folded into a failure: a
-        // format the local zstats cannot read is answered by updating
-        // the app, and "download failed" would send someone to check
-        // their network instead.
-        TemplateSync::Done(RemoteUpdate::VersionMismatch { found, expected }) => t!(
-            "config.template_version",
-            found = found.map_or_else(|| "—".to_string(), |v| v.to_string()),
-            expected = expected
-        )
-        .to_string(),
-        TemplateSync::Done(RemoteUpdate::Invalid(e)) => {
-            t!("config.template_invalid", e = e.as_str()).to_string()
-        }
-        TemplateSync::Done(RemoteUpdate::Failed(e)) => {
-            t!("config.template_failed", e = e.as_str()).to_string()
-        }
-        TemplateSync::Reverted => i18n::tr("config.template_reverted"),
-        TemplateSync::NothingToRevert => i18n::tr("config.template_nothing"),
-        TemplateSync::RevertFailed(e) => {
-            t!("config.template_revert_failed", e = e.as_str()).to_string()
-        }
-    };
-    Some(template_line(text))
+    settingspage::template_outcome(state.template_sync()).map(template_line)
 }
 
 fn template_line(text: String) -> AnyElement {
@@ -1619,20 +1562,15 @@ fn template_line(text: String) -> AnyElement {
 /// ~/.zstats/&lt;cleanhints::FILE&gt;, one click here and the annotations and
 /// suggestions follow, no restart.
 fn hints_card(state: &ZStatsAppState) -> AnyElement {
-    let (from_user, count) = cleanhints::info();
-    let source = if from_user {
-        t!("config.hints_user", n = count)
-    } else {
-        t!("config.hints_builtin", n = count)
-    };
+    let source = settingspage::hints_source();
     widgets::list_shell()
         .child(widgets::list_header(
             titled(
                 "cfg-hints-info",
                 i18n::tr("config.hints"),
-                t!("config.hints_note", file = cleanhints::FILE).to_string(),
+                settingspage::hints_tip(),
             ),
-            Some(widgets::note(source.to_string())),
+            Some(widgets::note(source)),
         ))
         .child(
             h_flex()
@@ -1707,43 +1645,31 @@ fn hints_update_chip(state: &ZStatsAppState) -> AnyElement {
 
 /// The last fetch's outcome, in one honest line under the row.
 fn hints_sync_note(state: &ZStatsAppState) -> Option<AnyElement> {
-    let Some(HintsSync::Done(outcome)) = state.hints_sync() else {
-        return None;
-    };
-    use crate::cleanhints::RemoteUpdate;
-    let text = match outcome {
-        RemoteUpdate::Updated(n) => t!("config.hints_updated", n = n).to_string(),
-        RemoteUpdate::AlreadyCurrent => i18n::tr("config.hints_current"),
-        RemoteUpdate::Invalid => i18n::tr("config.hints_remote_invalid"),
-        RemoteUpdate::Failed(e) => t!("config.hints_update_failed", e = e.as_str()).to_string(),
-    };
-    Some(
-        div()
-            .px(px(13.))
-            .pb(px(9.))
-            .child(widgets::note(text))
-            .into_any_element(),
-    )
+    settingspage::hints_outcome(state.hints_sync()).map(sync_line)
+}
+
+/// A table card's last outcome, under its buttons.
+fn sync_line(text: String) -> AnyElement {
+    div()
+        .px(px(13.))
+        .pb(px(9.))
+        .child(widgets::note(text))
+        .into_any_element()
 }
 
 /// Walk roots for the Caches chip — same override/fetch shape as the
 /// cleanhints card above it, a different file so a pulled annotation
 /// cannot change what gets scanned.
 fn caches_card(state: &ZStatsAppState) -> AnyElement {
-    let (from_user, count) = cachepreset::info();
-    let source = if from_user {
-        t!("config.caches_user", n = count)
-    } else {
-        t!("config.caches_builtin", n = count)
-    };
+    let source = settingspage::caches_source();
     widgets::list_shell()
         .child(widgets::list_header(
             titled(
                 "cfg-caches-info",
                 i18n::tr("config.caches_preset"),
-                t!("config.caches_preset_note", file = cachepreset::FILE).to_string(),
+                settingspage::caches_tip(),
             ),
-            Some(widgets::note(source.to_string())),
+            Some(widgets::note(source)),
         ))
         .child(
             h_flex()
@@ -1814,34 +1740,10 @@ fn caches_update_chip(state: &ZStatsAppState) -> AnyElement {
 }
 
 fn caches_sync_note(state: &ZStatsAppState) -> Option<AnyElement> {
-    let Some(CachesSync::Done(outcome)) = state.caches_sync() else {
-        return None;
-    };
-    use crate::cachepreset::RemoteUpdate;
-    let text = match outcome {
-        RemoteUpdate::Updated(n) => t!("config.hints_updated", n = n).to_string(),
-        RemoteUpdate::AlreadyCurrent => i18n::tr("config.hints_current"),
-        RemoteUpdate::Invalid => i18n::tr("config.hints_remote_invalid"),
-        RemoteUpdate::Failed(e) => t!("config.hints_update_failed", e = e.as_str()).to_string(),
-    };
-    Some(
-        div()
-            .px(px(13.))
-            .pb(px(9.))
-            .child(widgets::note(text))
-            .into_any_element(),
-    )
+    settingspage::caches_outcome(state.caches_sync()).map(sync_line)
 }
 
 fn collection_card(c: &CollectorConfig) -> AnyElement {
-    use crate::metrics::{
-        PANEL_DISK_IO_INTERVAL, PANEL_NETWORK_INTERVAL, PANEL_PROCESS_INTERVAL, panel_interval,
-    };
-
-    let process = panel_interval(c.process_refresh_interval, PANEL_PROCESS_INTERVAL);
-    let disk_io = panel_interval(c.disk_io_refresh_interval, PANEL_DISK_IO_INTERVAL);
-    let network = panel_interval(c.network_refresh_interval, PANEL_NETWORK_INTERVAL);
-
     widgets::list_shell()
         .child(widgets::list_header(
             titled(
@@ -1851,37 +1753,12 @@ fn collection_card(c: &CollectorConfig) -> AnyElement {
             ),
             Some(file_note("file-note-collection", "config.toml")),
         ))
-        .child(interval_row(
-            0,
-            "cfg-proc",
-            "process-interval",
-            i18n::tr("config.collect_processes"),
-            i18n::tr("config.collect_processes_tip"),
-            process,
-            &[("5s", "5s"), ("10s", "10s"), ("15s", "15s")],
-        ))
-        // No row for process disk IO: it rides the process-table pass and
-        // has no cadence of its own — a second control writing the same
-        // key would just fight this one. The fact lives in the process
-        // row's ⓘ instead.
-        .child(interval_row(
-            1,
-            "cfg-disk",
-            "disk-interval",
-            i18n::tr("config.collect_disks"),
-            i18n::tr("config.collect_disks_tip"),
-            disk_io,
-            &[("10s", "10s"), ("15s", "15s"), ("30s", "30s")],
-        ))
-        .child(interval_row(
-            2,
-            "cfg-net",
-            "network-interval",
-            i18n::tr("config.collect_networks"),
-            i18n::tr("config.collect_networks_tip"),
-            network,
-            &[("10s", "10s"), ("15s", "15s"), ("30s", "30s")],
-        ))
+        .children(
+            settingspage::interval_rows(c)
+                .into_iter()
+                .enumerate()
+                .map(|(i, row)| interval_row(i, row)),
+        )
         .child(
             h_flex()
                 .items_center()
@@ -1907,27 +1784,20 @@ fn collection_card(c: &CollectorConfig) -> AnyElement {
                     "max-processes",
                     "max-processes",
                     &c.max_processes.to_string(),
-                    vec![
-                        ("20".into(), "20"),
-                        ("50".into(), "50"),
-                        ("100".into(), "100"),
-                        ("200".into(), "200"),
-                    ],
+                    settingspage::max_processes_choices(),
                 )),
         )
         .into_any_element()
 }
 
-fn interval_row(
-    i: usize,
-    id: &'static str,
-    key: &'static str,
-    label: String,
-    tip: String,
-    current: Duration,
-    chips: &'static [(&'static str, &'static str)],
-) -> AnyElement {
-    let shown = format::humanize(current);
+fn interval_row(i: usize, row: settingspage::IntervalRow) -> AnyElement {
+    let settingspage::IntervalRow {
+        key,
+        label,
+        tip,
+        shown,
+        choices,
+    } = row;
     v_flex()
         .px(px(13.))
         .py(px(7.))
@@ -1958,15 +1828,9 @@ fn interval_row(
                 ),
         )
         .child(
-            div().mt(px(6.)).child(setting_chips(
-                id,
-                key,
-                &shown,
-                chips
-                    .iter()
-                    .map(|(label, value)| ((*label).to_string(), *value))
-                    .collect(),
-            )),
+            div()
+                .mt(px(6.))
+                .child(setting_chips(key, key, &shown, choices)),
         )
         .into_any_element()
 }

@@ -5,9 +5,12 @@
 //! too, and says why each row is the way it is.
 
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
-use crate::{autostart, finder, format, i18n, omarchy, opener};
+use crate::state::{CachesSync, HintsSync, TemplateSync, WebhookTest};
+use crate::{alerttpl, autostart, cachepreset, cleanhints, finder, format, i18n, omarchy, opener};
 use rust_i18n::t;
 use std::collections::BTreeMap;
+use std::time::Duration;
+use zstats::CollectorConfig;
 use zstats::alerts::ActiveThresholds;
 use zstats::settings::{AlertsConfig, FileConfig, PressureAlert};
 
@@ -562,6 +565,206 @@ fn pressure_setting(file: Option<PressureAlert>, effective: Option<u32>) -> Sett
             None => i18n::tr("alerts.off"),
         }),
     }
+}
+
+// --- The Advanced page -----------------------------------------------------------
+
+/// A cadence row of the collection card: the `config.toml` key, its name
+/// and ⓘ, the cadence in force as the file writes it, and its presets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IntervalRow {
+    pub key: &'static str,
+    pub label: String,
+    pub tip: String,
+    pub shown: String,
+    pub choices: Vec<(String, &'static str)>,
+}
+
+/// The collection card's three cadences. No row for process disk IO: it
+/// rides the process-table pass and has no cadence of its own — a second
+/// control writing the same key would just fight this one. The fact lives
+/// in the process row's ⓘ instead.
+pub fn interval_rows(c: &CollectorConfig) -> Vec<IntervalRow> {
+    use crate::metrics::{
+        PANEL_DISK_IO_INTERVAL, PANEL_NETWORK_INTERVAL, PANEL_PROCESS_INTERVAL, panel_interval,
+    };
+    let row =
+        |key, label: &str, tip: &str, current: Duration, choices: [&'static str; 3]| IntervalRow {
+            key,
+            label: i18n::tr(label),
+            tip: i18n::tr(tip),
+            shown: format::humanize(current),
+            choices: choices.into_iter().map(|c| (c.to_string(), c)).collect(),
+        };
+    vec![
+        row(
+            "process-interval",
+            "config.collect_processes",
+            "config.collect_processes_tip",
+            panel_interval(c.process_refresh_interval, PANEL_PROCESS_INTERVAL),
+            ["5s", "10s", "15s"],
+        ),
+        row(
+            "disk-interval",
+            "config.collect_disks",
+            "config.collect_disks_tip",
+            panel_interval(c.disk_io_refresh_interval, PANEL_DISK_IO_INTERVAL),
+            ["10s", "15s", "30s"],
+        ),
+        row(
+            "network-interval",
+            "config.collect_networks",
+            "config.collect_networks_tip",
+            panel_interval(c.network_refresh_interval, PANEL_NETWORK_INTERVAL),
+            ["10s", "15s", "30s"],
+        ),
+    ]
+}
+
+/// How many processes the collector keeps.
+pub fn max_processes_choices() -> Vec<(String, &'static str)> {
+    ["20", "50", "100", "200"]
+        .into_iter()
+        .map(|c| (c.to_string(), c))
+        .collect()
+}
+
+/// The alert table's card: which table is live, the ⓘ (naming the
+/// platform file it pulls, because the local name cannot — zstats fixes
+/// the override at `template.toml`, and ~/.zstats may be synced between
+/// machines whose process names have nothing in common), and why a
+/// refused override is refused.
+pub fn template_source(loaded: &alerttpl::Loaded) -> String {
+    match &loaded.source {
+        alerttpl::Source::Builtin(n) => t!("config.template_builtin", n = n).to_string(),
+        alerttpl::Source::User(n) => t!("config.template_user", n = n).to_string(),
+        alerttpl::Source::Broken(_) => i18n::tr("config.template_broken"),
+    }
+}
+
+pub fn template_tip() -> String {
+    t!("config.template_note", file = alerttpl::FILE).to_string()
+}
+
+pub fn template_broken(loaded: &alerttpl::Loaded) -> Option<String> {
+    match &loaded.source {
+        alerttpl::Source::Broken(e) => {
+            Some(t!("config.template_broken_body", e = e.as_str()).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The last press's outcome on the alert table, in one honest line; `None`
+/// while a fetch runs or before any. A format the local zstats cannot read
+/// is its own outcome, never folded into a failure: it is answered by
+/// updating the app, and "download failed" would send someone to check
+/// their network instead.
+pub fn template_outcome(sync: Option<&TemplateSync>) -> Option<String> {
+    use crate::alerttpl::RemoteUpdate;
+    Some(match sync? {
+        TemplateSync::Running => return None,
+        TemplateSync::Done(RemoteUpdate::Updated(n)) => {
+            t!("config.template_updated", n = n).to_string()
+        }
+        TemplateSync::Done(RemoteUpdate::AlreadyCurrent) => i18n::tr("config.template_current"),
+        TemplateSync::Done(RemoteUpdate::VersionMismatch { found, expected }) => t!(
+            "config.template_version",
+            found = found.map_or_else(|| "—".to_string(), |v| v.to_string()),
+            expected = expected
+        )
+        .to_string(),
+        TemplateSync::Done(RemoteUpdate::Invalid(e)) => {
+            t!("config.template_invalid", e = e.as_str()).to_string()
+        }
+        TemplateSync::Done(RemoteUpdate::Failed(e)) => {
+            t!("config.template_failed", e = e.as_str()).to_string()
+        }
+        TemplateSync::Reverted => i18n::tr("config.template_reverted"),
+        TemplateSync::NothingToRevert => i18n::tr("config.template_nothing"),
+        TemplateSync::RevertFailed(e) => {
+            t!("config.template_revert_failed", e = e.as_str()).to_string()
+        }
+    })
+}
+
+/// The clean hints' card: built-in or the user's file, and how many.
+pub fn hints_source() -> String {
+    let (from_user, count) = cleanhints::info();
+    if from_user {
+        t!("config.hints_user", n = count).to_string()
+    } else {
+        t!("config.hints_builtin", n = count).to_string()
+    }
+}
+
+pub fn hints_tip() -> String {
+    t!("config.hints_note", file = cleanhints::FILE).to_string()
+}
+
+/// The last fetch of the clean hints, in one line.
+pub fn hints_outcome(sync: Option<&HintsSync>) -> Option<String> {
+    use crate::cleanhints::RemoteUpdate;
+    let Some(HintsSync::Done(outcome)) = sync else {
+        return None;
+    };
+    Some(match outcome {
+        RemoteUpdate::Updated(n) => t!("config.hints_updated", n = n).to_string(),
+        RemoteUpdate::AlreadyCurrent => i18n::tr("config.hints_current"),
+        RemoteUpdate::Invalid => i18n::tr("config.hints_remote_invalid"),
+        RemoteUpdate::Failed(e) => t!("config.hints_update_failed", e = e.as_str()).to_string(),
+    })
+}
+
+/// The cache roots' card — the clean hints' shape, a different file so a
+/// pulled annotation cannot change what gets scanned.
+pub fn caches_source() -> String {
+    let (from_user, count) = cachepreset::info();
+    if from_user {
+        t!("config.caches_user", n = count).to_string()
+    } else {
+        t!("config.caches_builtin", n = count).to_string()
+    }
+}
+
+pub fn caches_tip() -> String {
+    t!("config.caches_preset_note", file = cachepreset::FILE).to_string()
+}
+
+/// The last fetch of the cache roots, in one line.
+pub fn caches_outcome(sync: Option<&CachesSync>) -> Option<String> {
+    use crate::cachepreset::RemoteUpdate;
+    let Some(CachesSync::Done(outcome)) = sync else {
+        return None;
+    };
+    Some(match outcome {
+        RemoteUpdate::Updated(n) => t!("config.hints_updated", n = n).to_string(),
+        RemoteUpdate::AlreadyCurrent => i18n::tr("config.hints_current"),
+        RemoteUpdate::Invalid => i18n::tr("config.hints_remote_invalid"),
+        RemoteUpdate::Failed(e) => t!("config.hints_update_failed", e = e.as_str()).to_string(),
+    })
+}
+
+/// What the webhook's test said, and whether it failed; nothing to show
+/// while the URL does not parse.
+pub fn webhook_verdict(test: Option<&WebhookTest>) -> Option<(String, bool)> {
+    Some(match test? {
+        WebhookTest::Sending => (i18n::tr("config.webhook_test_sending"), false),
+        WebhookTest::Delivered(status) => (
+            t!("config.webhook_test_ok", status = status).to_string(),
+            false,
+        ),
+        WebhookTest::Failed(error) => (
+            t!("config.webhook_test_failed", error = error.as_str()).to_string(),
+            true,
+        ),
+    })
+}
+
+/// Whether the webhook's test can be sent: a valid URL, none in flight,
+/// and something to send to.
+pub fn webhook_can_test(valid: bool, test: Option<&WebhookTest>) -> bool {
+    valid && !matches!(test, Some(WebhookTest::Sending)) && !prefs::webhook().is_empty()
 }
 
 #[cfg(test)]
