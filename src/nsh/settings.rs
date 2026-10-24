@@ -22,8 +22,8 @@ use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
 use crate::settingspage::{self, Autostart, Choices, SettingsSection, ThresholdRow};
-use crate::state::ZStatsAppState;
-use crate::{autostart, i18n, palette};
+use crate::state::{CachesSync, HintsSync, TemplateSync, WebhookTest, ZStatsAppState};
+use crate::{alerttpl, autostart, cachepreset, cleanhints, i18n, palette, proxy, watch, webhook};
 use nsh_core::ui::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -194,6 +194,7 @@ fn page(live: Live, section: SettingsSection) -> AnyElement {
     match section {
         SettingsSection::Interface => interface_card(live),
         SettingsSection::Alerts => alerts_page(live),
+        SettingsSection::Advanced => advanced_page(live),
         other => not_yet(other),
     }
 }
@@ -842,5 +843,621 @@ fn override_row(key: &'static str, name: String, value: f64, last: bool) -> AnyE
                         ),
                 ),
         )
+        .into_element()
+}
+
+/// Everything that is not a threshold: the watcher's two knobs, the
+/// webhook and the proxy, the collector's cadences, the three tables that
+/// update from GitHub, and the reset. The two fields are made once — a
+/// card made again on a change would take the caret out of them.
+fn advanced_page(live: Live) -> AnyElement {
+    let collector = live.memo(|state: &ZStatsAppState| {
+        state.settings().map(|file| {
+            let c = file.collector.clone().unwrap_or_default();
+            (settingspage::interval_rows(&c), c.max_processes.to_string())
+        })
+    });
+    view()
+        .gap(px(8.))
+        .child(advanced_card(live))
+        .child(dynamic(move || match collector.get() {
+            Some((rows, max)) => view()
+                .gap(px(8.))
+                .child(collection_card(rows, max))
+                .child(template_card(live))
+                .into_element(),
+            None => view().into_element(),
+        }))
+        .child(table_card(live, Table::Hints))
+        .child(table_card(live, Table::Caches))
+        .child(reset_card())
+        .into_element()
+}
+
+/// The `app.toml` settings that answer a question few people arrive with.
+fn advanced_card(live: Live) -> AnyElement {
+    let bar = live.memo(|state: &ZStatsAppState| format!("{:.0}", state.sustained_bar_percent()));
+    widgets::list_shell()
+        .child(widgets::list_header(
+            widgets::list_title(i18n::tr("config.advanced")).into_element(),
+            Some(file_note("app.toml")),
+        ))
+        .child(pref_row(
+            live,
+            i18n::tr("config.sustained_after"),
+            Some(i18n::tr("config.sustained_after_tip")),
+            settingspage::sustained_after_choices(),
+            || (prefs::sustained_after().as_secs() / 60) as u16,
+            |minutes: u16| {
+                // The default chip stores nothing, so the key leaves the
+                // file rather than pinning today's default into it.
+                let default = (watch::DEFAULT_SUSTAINED_AFTER.as_secs() / 60) as u16;
+                prefs::set_sustained_after((minutes != default).then_some(minutes));
+                changed();
+            },
+        ))
+        .child(dynamic(move || {
+            let _ = bar.get();
+            pref_row(
+                live,
+                i18n::tr("config.sustained_divisor"),
+                Some(store::read(|state| {
+                    settingspage::sustained_divisor_tip(state.sustained_bar_percent())
+                })),
+                settingspage::sustained_divisor_choices(),
+                prefs::sustained_divisor,
+                |divisor: u8| {
+                    prefs::set_sustained_divisor(
+                        (divisor != prefs::DEFAULT_SUSTAINED_DIVISOR).then_some(divisor),
+                    );
+                    changed();
+                },
+            )
+        }))
+        .child(webhook_row(live))
+        .child(proxy_row())
+        .into_element()
+}
+
+/// A free-text setting's field (`Input::xsmall`): 20 tall, its words at
+/// 12, the outline the page's chips wear.
+fn field(placeholder: String, initial: String, change: impl Fn(&str) + 'static) -> AnyElement {
+    input()
+        .h(px(20.))
+        .px(px(4.))
+        .rounded(px(6.))
+        .border(px(1.))
+        .border_color(theme::color(palette::border))
+        .value(initial)
+        .placeholder(placeholder)
+        .auto_correct(false)
+        .text_size(px(12.))
+        .text_color(theme::color(palette::text))
+        .on_change(move |text: &str| change(text))
+        .into_element()
+}
+
+/// A line under a field: why it is refused, or what its test answered.
+fn field_note(
+    words: impl Fn() -> String + 'static,
+    alarm: impl Fn() -> bool + Copy + 'static,
+) -> Text {
+    text(words)
+        .mt(px(4.))
+        .text_size(px(10.))
+        .line_height(widgets::line(10.))
+        .text_color(move || {
+            theme::color(move || {
+                if alarm() {
+                    palette::accent_light()
+                } else {
+                    palette::text_dim()
+                }
+            })
+        })
+}
+
+/// Where notifications are also POSTed, with a button that sends one
+/// marked test and says what the endpoint answered.
+fn webhook_row(live: Live) -> AnyElement {
+    let valid = signal(webhook::valid(&prefs::webhook()));
+    let test = live.memo(|state: &ZStatsAppState| {
+        (
+            settingspage::webhook_verdict(state.webhook_test()),
+            matches!(state.webhook_test(), Some(WebhookTest::Sending)),
+        )
+    });
+    let can_test = move || {
+        let (_, sending) = test.get();
+        valid.get() && !sending && !prefs::webhook().is_empty()
+    };
+    view()
+        .px(px(ROW_PAD_X))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(theme::color(palette::border_subtle))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            text(i18n::tr("config.webhook"))
+                                .text_size(px(11.))
+                                .line_height(widgets::line(11.))
+                                .text_color(theme::color(palette::ink)),
+                        )
+                        .child(widgets::info_icon(widgets::wrap_tooltip(i18n::tr(
+                            "config.webhook_tip",
+                        )))),
+                )
+                .child(
+                    nsh_base::button()
+                        .flex_none()
+                        .rounded_full()
+                        .border(px(1.))
+                        .border_color(theme::color(palette::border))
+                        .bg(theme::color(palette::inset))
+                        .px(px(10.))
+                        .py(px(3.))
+                        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                        .on_press(move || {
+                            if can_test() {
+                                store::update(|state, fx| state.test_webhook(fx));
+                            }
+                        })
+                        .child(
+                            text(i18n::tr("config.webhook_test"))
+                                .text_size(px(11.))
+                                .line_height(widgets::line(11.))
+                                .text_color(move || {
+                                    theme::color(move || {
+                                        if can_test() {
+                                            palette::text()
+                                        } else {
+                                            palette::text_faint()
+                                        }
+                                    })
+                                }),
+                        ),
+                ),
+        )
+        .child(view().mt(px(6.)).child(field(
+            i18n::tr("config.webhook_placeholder"),
+            prefs::webhook(),
+            move |text| {
+                let ok = webhook::valid(text);
+                valid.set(ok);
+                if ok {
+                    // Read at each send: the next notification goes to the
+                    // new address, no restart.
+                    prefs::set_webhook(text);
+                }
+                store::update(|state, fx| state.forget_webhook_test(fx));
+            },
+        )))
+        .child(when(
+            move || !valid.get(),
+            || field_note(|| i18n::tr("config.webhook_invalid"), || true),
+        ))
+        .child(when(
+            move || valid.get() && test.with(|(verdict, _)| verdict.is_some()),
+            move || {
+                field_note(
+                    move || test.with(|(v, _)| v.as_ref().map(|v| v.0.clone()).unwrap_or_default()),
+                    move || test.with(|(v, _)| v.as_ref().is_some_and(|v| v.1)),
+                )
+            },
+        ))
+        .into_element()
+}
+
+/// The outbound proxy for the app's fetches; only a value the resolver can
+/// act on is kept. The card's last row: no divider under it.
+fn proxy_row() -> AnyElement {
+    let valid = signal(proxy::is_valid_proxy_setting(&prefs::proxy()));
+    view()
+        .px(px(ROW_PAD_X))
+        .py(px(8.))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    text(i18n::tr("config.proxy"))
+                        .text_size(px(11.))
+                        .line_height(widgets::line(11.))
+                        .text_color(theme::color(palette::ink)),
+                )
+                .child(widgets::info_icon(widgets::wrap_tooltip(i18n::tr(
+                    "config.proxy_tip",
+                )))),
+        )
+        .child(view().mt(px(6.)).child(field(
+            i18n::tr("config.proxy_placeholder"),
+            prefs::proxy(),
+            move |text| {
+                let ok = proxy::is_valid_proxy_setting(text);
+                valid.set(ok);
+                if ok {
+                    // Persists and mirrors into the proxy resolver — the
+                    // next fetch picks it up, no restart.
+                    prefs::set_proxy(text);
+                }
+            },
+        )))
+        .child(when(
+            move || !valid.get(),
+            || field_note(|| i18n::tr("config.proxy_invalid"), || true),
+        ))
+        .into_element()
+}
+
+/// The collector's cadences and how many processes it keeps — keys
+/// `config.toml` bakes into the collector.
+fn collection_card(rows: Vec<settingspage::IntervalRow>, max: String) -> AnyElement {
+    let rows: Vec<AnyElement> = rows
+        .into_iter()
+        .map(|row| {
+            let chips: Vec<AnyElement> = row
+                .choices
+                .iter()
+                .map(|(label, value)| {
+                    let (key, value) = (row.key, *value);
+                    setting_chip(label.clone(), *label == row.shown, move || {
+                        apply(key, value)
+                    })
+                })
+                .collect();
+            view()
+                .px(px(ROW_PAD_X))
+                .py(px(7.))
+                .border_b(px(1.))
+                .border_color(theme::color(palette::border_subtle))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(
+                                    text(row.label.clone())
+                                        .text_size(px(11.))
+                                        .line_height(widgets::line(11.))
+                                        .text_color(theme::color(palette::ink)),
+                                )
+                                .child(widgets::info_icon(widgets::wrap_tooltip(row.tip.clone()))),
+                        )
+                        .child(
+                            text(row.shown.clone())
+                                .font_family(widgets::MONO)
+                                .text_size(px(10.))
+                                .line_height(widgets::line(10.))
+                                .text_color(theme::color(palette::text)),
+                        ),
+                )
+                .child(view().flex_row().mt(px(6.)).gap(px(4.)).children(chips))
+                .into_element()
+        })
+        .collect();
+    let max_chips: Vec<AnyElement> = settingspage::max_processes_choices()
+        .into_iter()
+        .map(|(label, value)| {
+            let on = label == max;
+            setting_chip(label, on, move || apply("max-processes", value))
+        })
+        .collect();
+    widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                i18n::tr("config.collection"),
+                i18n::tr("config.collection_note"),
+            ),
+            Some(file_note("config.toml")),
+        ))
+        .children(rows)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px(px(ROW_PAD_X))
+                .py(px(8.))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            text(i18n::tr("config.max_processes"))
+                                .text_size(px(11.))
+                                .line_height(widgets::line(11.))
+                                .text_color(theme::color(palette::ink)),
+                        )
+                        .child(widgets::info_icon(widgets::wrap_tooltip(i18n::tr(
+                            "config.max_processes_tip",
+                        )))),
+                )
+                .child(view().flex_row().gap(px(4.)).children(max_chips)),
+        )
+        .into_element()
+}
+
+/// The cards' button: the page's chip chrome; inert and dim while what it
+/// starts is running.
+fn card_chip(label: String, busy: bool, act: impl Fn() + 'static) -> AnyElement {
+    nsh_base::button()
+        .flex_none()
+        .rounded_full()
+        .border(px(1.))
+        .border_color(theme::color(palette::border))
+        .bg(theme::color(palette::inset))
+        .px(px(10.))
+        .py(px(3.))
+        .hover(move |s| {
+            if busy {
+                s
+            } else {
+                s.bg(theme::color(palette::surface_raised))
+            }
+        })
+        .on_press(move || {
+            if !busy {
+                act();
+            }
+        })
+        .child(
+            text(label)
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(move || {
+                    if busy {
+                        palette::text_dim()
+                    } else {
+                        palette::text()
+                    }
+                })),
+        )
+        .into_element()
+}
+
+/// A line under a card's buttons.
+fn card_line(words: String, pb: f32) -> AnyElement {
+    view()
+        .px(px(ROW_PAD_X))
+        .pb(px(pb))
+        .child(widgets::note(words))
+        .into_element()
+}
+
+/// What the alert table's card shows.
+#[derive(Clone, PartialEq)]
+struct TemplateCard {
+    source: String,
+    running: bool,
+    has_override: bool,
+    broken: Option<String>,
+    offer: bool,
+    outcome: Option<String>,
+}
+
+fn template_of(state: &ZStatsAppState) -> TemplateCard {
+    let loaded = alerttpl::info();
+    TemplateCard {
+        source: settingspage::template_source(&loaded),
+        running: matches!(state.template_sync(), Some(TemplateSync::Running)),
+        has_override: loaded.source.has_override(),
+        broken: settingspage::template_broken(&loaded),
+        offer: state.template_nudge(),
+        outcome: settingspage::template_outcome(state.template_sync()),
+    }
+}
+
+/// zstats' per-process threshold table: which one is live, and the two
+/// buttons that change that.
+fn template_card(live: Live) -> AnyElement {
+    let card = live.memo(template_of);
+    dynamic(move || {
+        let card = card.get();
+        let mut buttons = view()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap(px(8.))
+            .px(px(ROW_PAD_X))
+            .py(px(8.))
+            .child(card_chip(
+                i18n::tr(if card.running {
+                    "config.template_updating"
+                } else {
+                    "config.template_update"
+                }),
+                card.running,
+                || store::update(|state, fx| state.update_alert_template(fx)),
+            ));
+        if card.has_override {
+            buttons = buttons.child(card_chip(
+                i18n::tr("config.template_use_builtin"),
+                false,
+                || store::update(|state, fx| state.use_builtin_alert_template(fx)),
+            ));
+        }
+        let mut shell = widgets::list_shell()
+            .child(widgets::list_header(
+                titled(i18n::tr("config.template"), settingspage::template_tip()),
+                Some(widgets::note(card.source.clone()).into_element()),
+            ))
+            .child(buttons);
+        if let Some(broken) = card.broken.clone() {
+            shell = shell.child(card_line(broken, 10.));
+        }
+        if card.offer {
+            shell = shell.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .px(px(ROW_PAD_X))
+                    .pb(px(10.))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(widgets::note(i18n::tr("config.template_offer"))),
+                    )
+                    .child(card_chip(
+                        i18n::tr("config.template_offer_ignore"),
+                        false,
+                        || store::update(|state, fx| state.ignore_template_offer(fx)),
+                    )),
+            );
+        }
+        if let Some(outcome) = card.outcome.clone() {
+            shell = shell.child(card_line(outcome, 10.));
+        }
+        shell.into_element()
+    })
+    .into_element()
+}
+
+/// The two tables the disk-space window reads.
+#[derive(Clone, Copy, PartialEq)]
+enum Table {
+    /// What the analysis says about a directory (`cleanhints`)
+    Hints,
+    /// Where the Caches chip looks (`cachepreset`)
+    Caches,
+}
+
+/// A table's card as it stands: where it came from, whether a fetch is
+/// running, and what the last one did.
+#[derive(Clone, PartialEq)]
+struct TableCard {
+    source: String,
+    running: bool,
+    outcome: Option<String>,
+}
+
+/// The clean hints' or the cache roots' card: which list is live, a fetch
+/// from GitHub, and a reload of the user's file.
+fn table_card(live: Live, table: Table) -> AnyElement {
+    let card = live.memo(match table {
+        Table::Hints => |state: &ZStatsAppState| TableCard {
+            source: settingspage::hints_source(),
+            running: matches!(state.hints_sync(), Some(HintsSync::Running)),
+            outcome: settingspage::hints_outcome(state.hints_sync()),
+        },
+        Table::Caches => |state: &ZStatsAppState| TableCard {
+            source: settingspage::caches_source(),
+            running: matches!(state.caches_sync(), Some(CachesSync::Running)),
+            outcome: settingspage::caches_outcome(state.caches_sync()),
+        },
+    });
+    let (title, tip) = match table {
+        Table::Hints => (i18n::tr("config.hints"), settingspage::hints_tip()),
+        Table::Caches => (i18n::tr("config.caches_preset"), settingspage::caches_tip()),
+    };
+    dynamic(move || {
+        let card = card.get();
+        let mut shell = widgets::list_shell()
+            .child(widgets::list_header(
+                titled(title.clone(), tip.clone()),
+                Some(widgets::note(card.source.clone()).into_element()),
+            ))
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    .px(px(ROW_PAD_X))
+                    .py(px(8.))
+                    .child(card_chip(
+                        i18n::tr(if card.running {
+                            "config.hints_updating"
+                        } else {
+                            "config.hints_update"
+                        }),
+                        card.running,
+                        move || match table {
+                            Table::Hints => store::update(|state, fx| state.update_cleanhints(fx)),
+                            Table::Caches => {
+                                store::update(|state, fx| state.update_cachepreset(fx))
+                            }
+                        },
+                    ))
+                    .child(card_chip(
+                        i18n::tr("config.hints_reload"),
+                        false,
+                        move || {
+                            match table {
+                                Table::Hints => cleanhints::reload(),
+                                Table::Caches => cachepreset::reload(),
+                            }
+                            // The counts and tooltips read the table again.
+                            changed();
+                        },
+                    )),
+            );
+        if let Some(outcome) = card.outcome.clone() {
+            shell = shell.child(card_line(outcome, 9.));
+        }
+        shell.into_element()
+    })
+    .into_element()
+}
+
+/// Writes a default `config.toml` after asking; `app.toml` is untouched.
+fn reset_card() -> AnyElement {
+    widgets::list_shell()
+        .child(widgets::list_header(
+            titled(i18n::tr("config.reset"), i18n::tr("config.reset_note")),
+            Some(
+                nsh_base::button()
+                    .flex_none()
+                    .h(px(20.))
+                    .px(px(8.))
+                    .rounded(px(5.))
+                    .border(px(1.))
+                    .border_color(theme::color(|| palette::accent_wash(45)))
+                    .items_center()
+                    .justify_center()
+                    .hover(|s| s.bg(theme::color(|| palette::accent_wash(10))))
+                    .on_press(|| {
+                        widgets::confirm(
+                            i18n::tr("config.reset_title"),
+                            i18n::tr("config.reset_body"),
+                            i18n::tr("config.reset_ok"),
+                            || {
+                                store::update(|state, fx| {
+                                    if let Err(e) = state.reset_settings(fx) {
+                                        tracing::error!("reset settings: {e}");
+                                    }
+                                })
+                            },
+                        )
+                    })
+                    .child(
+                        text(i18n::tr("config.reset_ok"))
+                            .text_size(px(10.))
+                            .line_height(widgets::line(10.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::color(palette::accent_light)),
+                    )
+                    .into_element(),
+            ),
+        ))
         .into_element()
 }
