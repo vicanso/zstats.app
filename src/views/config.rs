@@ -17,6 +17,7 @@
 //! link), and About (version, commit, arch from `crate::about`).
 
 use super::widgets;
+use crate::about;
 use crate::alerttpl;
 // Only the Permissions nav icon rides `CustomIconName`, and that page is
 // macOS.
@@ -520,7 +521,7 @@ fn about_card(state: &ZStatsAppState, body_height: f32) -> AnyElement {
                 .border_t(px(1.))
                 .border_color(theme::border_subtle())
                 .hover(|d| d.bg(theme::surface_raised()))
-                .on_click(|_, _window, cx| cx.open_url(super::REPO_URL))
+                .on_click(|_, _window, cx| cx.open_url(about::REPO_URL))
                 .child(
                     div()
                         .text_size(px(11.))
@@ -536,7 +537,7 @@ fn about_card(state: &ZStatsAppState, body_height: f32) -> AnyElement {
                                 .font_family(font::MONO)
                                 .text_size(px(11.))
                                 .text_color(theme::text_muted())
-                                .child(super::REPO_URL.trim_start_matches("https://")),
+                                .child(about::REPO_URL.trim_start_matches("https://")),
                         )
                         .child(
                             Icon::new(IconName::ExternalLink)

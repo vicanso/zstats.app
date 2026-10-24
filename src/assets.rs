@@ -139,6 +139,9 @@ pub enum CustomIconName {
     /// The NSH settings window's Interface page in its nav: lucide
     /// `palette`, gpui-kit's `IconName::Palette`.
     Palette,
+    /// The About page's link out to the project (`nsh/settings.rs`):
+    /// lucide `external-link`, gpui-kit's `IconName::ExternalLink`.
+    ExternalLink,
 }
 
 impl CustomIconName {
@@ -169,6 +172,7 @@ impl CustomIconName {
             CustomIconName::Close => "icons/x.svg",
             CustomIconName::CircleX => "icons/circle-x.svg",
             CustomIconName::Palette => "icons/palette.svg",
+            CustomIconName::ExternalLink => "icons/external-link.svg",
         }
     }
 }
@@ -219,6 +223,7 @@ mod tests {
             CustomIconName::Close,
             CustomIconName::CircleX,
             CustomIconName::Palette,
+            CustomIconName::ExternalLink,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

@@ -15,7 +15,7 @@
 
 use crate::nsh::host;
 use crate::nsh::root::{self, AuxWindow};
-use crate::nsh::settings::Settings;
+use crate::nsh::settings::{self, Settings};
 use crate::nsh::storage::Storage;
 use crate::nsh::{store, theme};
 use crate::{autostart, i18n, palette, placement};
@@ -83,14 +83,12 @@ define_class!(
             closed(*self.ivars());
         }
 
-        /// Launch at login may have been approved or revoked in System
-        /// Settings → Login Items while this window was behind it.
+        /// Launch at login, or Full Disk Access, may have been changed in
+        /// System Settings while this window was behind it.
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
             if *self.ivars() == AuxWindow::Settings {
-                autostart::refresh();
-                // The page reads it, and nothing else would say so.
-                store::changed();
+                settings::became_key();
             }
         }
     }
@@ -119,7 +117,10 @@ pub fn open(aux: AuxWindow) {
     }
     match aux {
         // The moment launch at login can have moved without us.
-        AuxWindow::Settings => autostart::refresh(),
+        AuxWindow::Settings => {
+            settings::opening();
+            autostart::refresh();
+        }
         // A fresh window, not a raised one: yesterday's opened rows are
         // not what someone reopening it is asking about.
         AuxWindow::Storage => store::update(|state, fx| state.reset_storage_views(fx)),

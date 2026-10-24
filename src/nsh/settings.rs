@@ -2,9 +2,8 @@
 //! (`gpui_app.rs`) and `views/config.rs`, whose comments say why every
 //! page and row is the way it is — this file carries the same choices and
 //! does not repeat their reasons. The window's rules are shared
-//! (`settingspage.rs`). The pages arrive in phase 4j of
-//! docs/nsh-migration.md: Interface first; the others are a card that
-//! says so until theirs is ported.
+//! (`settingspage.rs`); the pages arrived in phase 4j of
+//! docs/nsh-migration.md.
 //!
 //! A nav down the left, the page on the right in a scroll view. The page
 //! on screen outlives a restyle — a change of theme or language loads
@@ -22,8 +21,11 @@ use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
 use crate::settingspage::{self, Autostart, Choices, SettingsSection, ThresholdRow};
+use crate::settingspage::{UpdateAction, UpdateView};
 use crate::state::{CachesSync, HintsSync, TemplateSync, WebhookTest, ZStatsAppState};
-use crate::{alerttpl, autostart, cachepreset, cleanhints, i18n, palette, proxy, watch, webhook};
+use crate::{about, alerttpl, appicon, autostart, cachepreset, cleanhints, color, i18n, opener};
+use crate::{palette, proxy, updater, watch, webhook};
+use nsh_base::{ButtonElement, TextViewLinkPressEvent, TextViewPart, TextViewParts};
 use nsh_core::ui::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -56,6 +58,25 @@ fn set_section(section: SettingsSection) {
     SECTION.store(at, Ordering::Relaxed);
 }
 
+/// A new settings window opens on the first page, as the gpui one does;
+/// only a restyle keeps the page.
+pub fn opening() {
+    SECTION.store(0, Ordering::Relaxed);
+}
+
+/// The window came to the front: what may have moved in System Settings
+/// while it was behind — launch at login, and Full Disk Access while its
+/// page is the one on screen.
+pub fn became_key() {
+    autostart::refresh();
+    #[cfg(target_os = "macos")]
+    if section() == SettingsSection::Permissions {
+        settingspage::refresh_full_disk_access();
+    }
+    // The pages read them, and nothing else would say so.
+    store::changed();
+}
+
 #[component]
 pub fn Settings() -> impl IntoElement {
     on_key("escape", |_| {
@@ -63,19 +84,26 @@ pub fn Settings() -> impl IntoElement {
     });
     let live = Live::follow(|_| true);
     let current = signal(section());
+    // The page's height on screen, for About's card, which fits it.
+    let body = signal(0.0_f32);
     view()
         .size_full()
         .flex_row()
         .bg(theme::color(palette::ground))
         .child(nav(live, current))
         .child(
-            scroll().flex_1().min_w(px(0.)).h_full().child(
-                view()
-                    .px(px(16.))
-                    .py(px(BODY_PAD))
-                    .gap(px(8.))
-                    .child(dynamic(move || page(live, current.get()))),
-            ),
+            scroll()
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .on_layout(move |b: &Bounds<Points>| body.set(b.size.height.0))
+                .child(
+                    view()
+                        .px(px(16.))
+                        .py(px(BODY_PAD))
+                        .gap(px(8.))
+                        .child(dynamic(move || page(live, current.get(), body.read_only()))),
+                ),
         )
 }
 
@@ -124,6 +152,7 @@ fn nav_items(current: Signal<SettingsSection>, nudge: Memo<bool>) -> AnyElement 
                             if current.get_untracked() != item {
                                 set_section(item);
                                 current.set(item);
+                                entered(item);
                             }
                         })
                         .child(
@@ -190,28 +219,32 @@ fn section_icon(section: SettingsSection) -> CustomIconName {
     }
 }
 
-fn page(live: Live, section: SettingsSection) -> AnyElement {
+/// What a page asks for as the reader opens it from the nav: Permissions
+/// probes Full Disk Access again, and About runs a real check where only
+/// the silent one has — that one keeps no release notes, and this is the
+/// one surface that shows them.
+fn entered(section: SettingsSection) {
+    match section {
+        #[cfg(target_os = "macos")]
+        SettingsSection::Permissions => {
+            settingspage::refresh_full_disk_access();
+            store::changed();
+        }
+        SettingsSection::About => store::update(|state, fx| state.refresh_update_for_about(fx)),
+        _ => {}
+    }
+}
+
+/// `body` is the height the page has on screen.
+fn page(live: Live, section: SettingsSection, body: ReadSignal<f32>) -> AnyElement {
     match section {
         SettingsSection::Interface => interface_card(live),
         SettingsSection::Alerts => alerts_page(live),
         SettingsSection::Advanced => advanced_page(live),
-        other => not_yet(other),
+        #[cfg(target_os = "macos")]
+        SettingsSection::Permissions => permissions_card(live),
+        SettingsSection::About => about_card(live, body),
     }
-}
-
-/// A page that has not reached this front end yet. Not translated — a
-/// development build's card, gone with the last page.
-fn not_yet(section: SettingsSection) -> AnyElement {
-    widgets::card()
-        .gap(px(6.))
-        .child(widgets::card_header(i18n::tr(section.label_key()), None))
-        .child(
-            text("Not on the NSH front end yet — phase 4j of docs/nsh-migration.md.")
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .text_color(theme::color(palette::text_muted)),
-        )
-        .into_element()
 }
 
 /// The preferences a setter just wrote are not the store's, but every
@@ -1459,5 +1492,430 @@ fn reset_card() -> AnyElement {
                     .into_element(),
             ),
         ))
+        .into_element()
+}
+
+/// Full Disk Access: whether it is granted, and the way to the pane that
+/// grants it while it is not. The app never touches the permission.
+#[cfg(target_os = "macos")]
+fn permissions_card(live: Live) -> AnyElement {
+    let granted = computed(move || {
+        live.track();
+        settingspage::full_disk_access_granted()
+    });
+    widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                i18n::tr("config.perm_fda"),
+                i18n::tr("config.perm_fda_note"),
+            ),
+            Some(
+                text(move || {
+                    i18n::tr(if granted.get() {
+                        "config.perm_granted"
+                    } else {
+                        "config.perm_missing"
+                    })
+                })
+                .flex_none()
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    theme::color(move || {
+                        if granted.get() {
+                            palette::text()
+                        } else {
+                            palette::ink()
+                        }
+                    })
+                })
+                .into_element(),
+            ),
+        ))
+        .child(when(
+            move || !granted.get(),
+            || {
+                view()
+                    .flex_row()
+                    .px(px(ROW_PAD_X))
+                    .pb(px(11.))
+                    .child(card_chip(
+                        i18n::tr("config.perm_open"),
+                        false,
+                        opener::full_disk_access_settings,
+                    ))
+            },
+        ))
+        .into_element()
+}
+
+/// Floor for the About card's height budget (`config::MIN_ABOUT_HEIGHT`):
+/// below it the page's own scroll is the honest answer.
+const MIN_ABOUT_HEIGHT: f32 = 360.;
+
+/// The About page, fitted to the page on screen: everything above the
+/// release notes keeps its height, and the notes take what is left and
+/// scroll inside it — a cap, so short notes keep their own height.
+fn about_card(live: Live, body: ReadSignal<f32>) -> AnyElement {
+    let rows = settingspage::about_rows();
+    let total = rows.len();
+    widgets::list_shell()
+        .max_h(move || px((body.get() - BODY_PAD * 2.).max(MIN_ABOUT_HEIGHT)))
+        .child(identity())
+        .children(
+            rows.into_iter()
+                .enumerate()
+                .map(|(i, (label, value))| about_row(label, value, i + 1 == total))
+                .collect::<Vec<_>>(),
+        )
+        .child(github_row())
+        .child(update_row(live))
+        .into_element()
+}
+
+/// The app's icon over its name, as a macOS About view leads.
+fn identity() -> AnyElement {
+    view()
+        .flex_none()
+        .items_center()
+        .gap(px(8.))
+        .pt(px(18.))
+        .pb(px(12.))
+        .border_b(px(1.))
+        .border_color(theme::color(palette::border_subtle))
+        .child(
+            image(SharedString::from(appicon::own_data_uri()))
+                .w(px(64.))
+                .h(px(64.)),
+        )
+        .child(
+            text(crate::APP_NAME)
+                .text_size(px(14.))
+                .line_height(widgets::line(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::color(palette::text)),
+        )
+        .into_element()
+}
+
+/// Version, commit, architecture.
+fn about_row(label: String, value: String, last: bool) -> AnyElement {
+    view()
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px(px(ROW_PAD_X))
+        .py(px(8.))
+        .border_b(px(if last { 0. } else { 1. }))
+        .border_color(theme::color(palette::border_subtle))
+        .child(
+            text(label)
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::ink)),
+        )
+        .child(
+            text(value)
+                .font_family(widgets::MONO)
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text)),
+        )
+        .into_element()
+}
+
+/// The project page — the one control that opens something outside the
+/// app, and the one that wears the hand.
+fn github_row() -> AnyElement {
+    nsh_base::button()
+        .flex_none()
+        .cursor_pointer()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px(px(ROW_PAD_X))
+        .py(px(8.))
+        .border_t(px(1.))
+        .border_color(theme::color(palette::border_subtle))
+        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .on_press(|| {
+            let _ = opener::open([about::REPO_URL]);
+        })
+        .child(
+            text(i18n::tr("common.github"))
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::ink)),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    text(about::REPO_URL.trim_start_matches("https://"))
+                        .font_family(widgets::MONO)
+                        .text_size(px(11.))
+                        .line_height(widgets::line(11.))
+                        .text_color(theme::color(palette::text_muted)),
+                )
+                .child(widgets::icon(
+                    CustomIconName::ExternalLink,
+                    11.,
+                    palette::text_dim,
+                )),
+        )
+        .into_element()
+}
+
+/// The update row: the sentence over the buttons, the buttons, and the
+/// notes of what an update brings. Three bindings rather than one card
+/// made again: a download moves its figures many times a second, and the
+/// notes someone is reading must keep their place meanwhile.
+fn update_row(live: Live) -> AnyElement {
+    let update = live.memo(settingspage::update_view);
+    let caption = computed(move || {
+        update.with(|u: &UpdateView| u.caption.clone().filter(|_| u.show_caption))
+    });
+    let action =
+        computed(move || update.with(|u: &UpdateView| (u.action.clone(), u.caption.clone())));
+    let notes = computed(move || update.with(|u: &UpdateView| u.notes.clone()));
+    view()
+        .flex_shrink(1.)
+        .min_h(px(0.))
+        .px(px(ROW_PAD_X))
+        .pt(px(10.))
+        .pb(px(12.))
+        .gap(px(8.))
+        .border_t(px(1.))
+        .border_color(theme::color(palette::border_subtle))
+        .child(when(
+            move || caption.with(Option::is_some),
+            move || {
+                text(move || caption.get().unwrap_or_default())
+                    .flex_none()
+                    .text_size(px(10.))
+                    .line_height(px(13.5))
+                    .text_color(theme::color(palette::text_dim))
+            },
+        ))
+        .child(view().flex_none().child(dynamic(move || {
+            let (action, caption) = action.get();
+            update_actions(action, caption.unwrap_or_default())
+        })))
+        .child(when(
+            move || notes.with(Option::is_some),
+            move || notes_box(notes),
+        ))
+        .into_element()
+}
+
+/// The About page's buttons (`config::update_btn`): 28 tall, the accent's
+/// wash on the one that moves the update on.
+fn update_button(label: String, accent: bool, act: impl Fn() + 'static) -> ButtonElement {
+    nsh_base::button()
+        .h(px(28.))
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .border(px(1.))
+        .border_color(theme::color(move || {
+            if accent {
+                palette::accent_wash(45)
+            } else {
+                palette::border()
+            }
+        }))
+        .bg(theme::color(move || {
+            if accent {
+                palette::accent_wash(10)
+            } else {
+                palette::inset()
+            }
+        }))
+        .px(px(10.))
+        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .on_press(act)
+        .child(
+            text(label)
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text)),
+        )
+}
+
+/// What the update row offers as it stands; `caption` is the busy
+/// button's own label.
+fn update_actions(action: UpdateAction, caption: String) -> AnyElement {
+    match action {
+        UpdateAction::Check { enabled: true } => {
+            update_button(i18n::tr("config.update_check"), false, || {
+                store::update(|state, fx| state.check_update(fx))
+            })
+            .w_full()
+            .into_element()
+        }
+        UpdateAction::Check { enabled: false } => {
+            inert_button(i18n::tr("config.update_checking"), None)
+        }
+        UpdateAction::Install { version } => {
+            let skip = version.clone();
+            view()
+                .flex_row()
+                .w_full()
+                .gap(px(8.))
+                .child(
+                    update_button(i18n::tr("config.update_download"), true, move || {
+                        let version = version.clone();
+                        store::update(|state, fx| state.download_update(version, fx));
+                    })
+                    .flex_1()
+                    .min_w(px(0.)),
+                )
+                .child(
+                    // Mutes the gear's dot for this version only.
+                    view()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .tooltip(widgets::wrap_tooltip(i18n::tr("config.update_skip_tip")))
+                        .child(
+                            update_button(i18n::tr("config.update_skip"), false, move || {
+                                let version = skip.clone();
+                                store::update(|state, fx| state.ignore_update(&version, fx));
+                            })
+                            .w_full(),
+                        ),
+                )
+                .into_element()
+        }
+        UpdateAction::Unskip => update_button(i18n::tr("config.update_unskip"), true, || {
+            store::update(|state, fx| state.unignore_update(fx))
+        })
+        .w_full()
+        .into_element(),
+        UpdateAction::Busy { progress } => inert_button(caption, progress),
+        UpdateAction::Restart => update_button(i18n::tr("config.update_restart"), true, || {
+            updater::relaunch();
+            root::ask(HostAction::Quit);
+        })
+        .w_full()
+        .into_element(),
+        UpdateAction::Quit => update_button(i18n::tr("config.update_quit"), true, || {
+            root::ask(HostAction::Quit)
+        })
+        .w_full()
+        .into_element(),
+    }
+}
+
+/// A button that does nothing while what it started runs: the check under
+/// way, or the download whose fill is its progress — a wash of the ink
+/// growing behind the figures it already carries, none while the server
+/// has not said how big the file is (`config::update_progress_btn`).
+fn inert_button(label: String, progress: Option<f32>) -> AnyElement {
+    let mut button = view()
+        .w_full()
+        .h(px(28.))
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .border(px(1.))
+        .border_color(theme::color(palette::border))
+        .bg(theme::color(palette::inset))
+        .overflow_hidden()
+        .px(px(10.));
+    if let Some(fraction) = progress {
+        button = button.child(
+            view()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .bottom(px(0.))
+                .w(relative(fraction.clamp(0., 1.)))
+                .bg(theme::color(|| color::Rgba {
+                    a: 0.16,
+                    ..palette::ink()
+                })),
+        );
+    }
+    button
+        .child(
+            text(label)
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text_dim)),
+        )
+        .into_element()
+}
+
+/// The notes of what an update brings, as the release wrote them
+/// (markdown), in an inset that scrolls once the card reaches its cap.
+fn notes_box(notes: Memo<Option<String>>) -> AnyElement {
+    // The notes in the page's sizes and inks rather than the text view's
+    // reading typography. The column's own size goes on the element:
+    // NSH 0.2.0 never applies a `TextViewParts` style to the root.
+    provide_context(
+        TextViewParts::new()
+            .part(TextViewPart::Heading2, |s| {
+                s.text_size(px(14.7)).line_height(px(20.))
+            })
+            .part(TextViewPart::Heading3, |s| {
+                s.text_size(px(12.)).line_height(px(13.))
+            })
+            .part(TextViewPart::List, |s| s.gap(px(2.5)))
+            .part(TextViewPart::ListItem, |s| s.ps(px(15.)))
+            .part(TextViewPart::Code, |s| {
+                s.font_family(widgets::MONO)
+                    .text_size(px(10.))
+                    .bg(theme::color(palette::chip))
+                    .rounded(px(3.))
+            })
+            // Its underline 3 under the line, NSH's, falls outside a
+            // 15-point line and is cut.
+            .part(TextViewPart::Link, |s| {
+                s.text_color(theme::color(palette::text))
+                    .underline_offset(px(1.5))
+            }),
+    );
+    view()
+        .w_full()
+        .flex_shrink(1.)
+        .min_h(px(0.))
+        .gap(px(4.))
+        .child(
+            text(i18n::tr("config.update_notes"))
+                .flex_none()
+                .text_size(px(10.))
+                .line_height(widgets::line(10.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::color(palette::ink)),
+        )
+        .child(
+            scroll()
+                .w_full()
+                .flex_shrink(1.)
+                .min_h(px(0.))
+                .rounded(px(7.))
+                .bg(theme::color(palette::inset))
+                .child(
+                    view().px(px(10.)).py(px(8.)).child(
+                        nsh_base::text_view()
+                            .gap(px(8.))
+                            .text_size(px(11.))
+                            .line_height(px(15.))
+                            .text_color(theme::color(palette::text_muted))
+                            .markdown(move || notes.get().map(SharedString::from))
+                            .on_link_press(|event: &TextViewLinkPressEvent| {
+                                // A release's links go to the browser; an
+                                // anchor in the notes has nowhere to go.
+                                if event.url.starts_with("https://") {
+                                    let _ = opener::open([event.url.as_ref()]);
+                                }
+                            }),
+                    ),
+                ),
+        )
         .into_element()
 }

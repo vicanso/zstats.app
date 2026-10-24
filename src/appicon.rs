@@ -43,9 +43,13 @@
 //! window's engine thread, and the drawing needs no particular thread —
 //! this module's test draws Finder's icon on a test runner's.
 
+#[cfg(feature = "nsh")]
+use crate::assets;
 #[cfg(feature = "gpui")]
 use gpui::Image;
 use std::sync::Arc;
+#[cfg(feature = "nsh")]
+use std::sync::OnceLock;
 
 /// An application's icon, drawn once as a small PNG and kept in the forms
 /// the front ends take it in.
@@ -153,6 +157,18 @@ fn cached(pid: u32, name: &str, recorded: bool) -> Option<Icon> {
         cache.icons.insert(bundle, icon.clone());
         icon
     }
+}
+
+/// This app's own icon — the bundle's artwork, embedded as
+/// `zstats-icon.png` — as a `data:` URI, for the NSH About page; made once.
+#[cfg(feature = "nsh")]
+pub fn own_data_uri() -> Arc<str> {
+    static URI: OnceLock<Arc<str>> = OnceLock::new();
+    URI.get_or_init(|| {
+        let png = assets::get("zstats-icon.png").unwrap_or_default();
+        Arc::from(format!("data:image/png;base64,{}", base64(&png)))
+    })
+    .clone()
 }
 
 /// Standard base64 with padding (RFC 4648 §4), for [`Icon::data_uri`].

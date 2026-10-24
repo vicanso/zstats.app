@@ -5,6 +5,9 @@
 //! machine it happens to be running on, which would disagree after
 //! Rosetta.
 
+/// The project page. The About page links it; the panel's footer used to.
+pub const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
+
 /// `Cargo.toml` `[package].version`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

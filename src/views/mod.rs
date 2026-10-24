@@ -319,9 +319,6 @@ fn content(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
-/// The project page. The About page links it; the footer used to.
-pub(super) const REPO_URL: &str = "https://github.com/vicanso/zstats.app";
-
 /// The footer's keep-awake control: a cup that opens a menu of lengths.
 ///
 /// A type of its own because gpui-kit's dropdown wants a trigger it can

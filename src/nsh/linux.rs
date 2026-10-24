@@ -24,7 +24,7 @@
 use crate::metrics::{self, CollectorPace};
 use crate::nsh::panel::Panel;
 use crate::nsh::root::{self, AuxWindow, HostAction};
-use crate::nsh::settings::Settings;
+use crate::nsh::settings::{self, Settings};
 use crate::nsh::storage::Storage;
 use crate::nsh::{store, theme};
 use crate::state::{self, Tab, ZStatsAppState};
@@ -511,7 +511,10 @@ fn open_aux(aux: AuxWindow) {
         return;
     }
     match aux {
-        AuxWindow::Settings => autostart::refresh(),
+        AuxWindow::Settings => {
+            settings::opening();
+            autostart::refresh();
+        }
         AuxWindow::Storage => store::update(|state, fx| state.reset_storage_views(fx)),
     }
     let (size, title, root) = aux_parts(aux);
@@ -533,7 +536,7 @@ fn open_aux(aux: AuxWindow) {
         // Launch at login may have changed while it was behind something.
         window.connect_is_active_notify(|window| {
             if window.is_active() {
-                autostart::refresh();
+                settings::became_key();
             }
         });
     }
