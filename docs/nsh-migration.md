@@ -150,7 +150,7 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 - 更新 `CLAUDE.md`、`README.md` / `README-zh.md`、`docs/design.md`、`.claude/skills/ui-polish`。
 - 删掉 gpui 前端、`patches/gpui-pre-linux`、`dock.rs` 和其他只为 gpui 存在的绕路代码。
 
-- **5a 删之前的核对（2026-10-25）。** 对着 `gpui_app.rs` 逐个函数看 NSH 宿主有没有接上。缺的一处：gpui 版每次打开面板会重读 Omarchy 的当前配色（`refresh_omarchy_palette`，换了桌面主题下次打开就跟上，不监视文件），NSH 宿主没有。补上：`nsh::theme::omarchy_moved`（偏好是 Omarchy、磁盘上的配色已不是正在画的那份），两个宿主在面板从隐藏到打开时检查，变了就走 `restyle()`。验证：隔离 HOME 里放一份 Tokyo Night 的 `colors.toml`，面板开着时把它改成一份浅色配色，`hide` 再 `show`，面板换成新配色、外观也翻成浅色。
+- **5a 删之前的核对（2026-10-25）。** 对着 `gpui_app.rs` 逐个函数看 NSH 宿主有没有接上。缺的一处：gpui 版每次打开面板会重读 Omarchy 的当前配色（`refresh_omarchy_palette`，换了桌面主题下次打开就跟上，不监视文件），NSH 宿主没有。补上：`nsh::theme::omarchy_moved`（偏好是 Omarchy、磁盘上的配色已不是正在画的那份），两个宿主在面板从隐藏到打开时检查，变了就走 `restyle()`。验证：隔离 HOME 里放一份 Tokyo Night 的 `colors.toml`，面板开着时把它改成一份浅色配色，`hide` 再 `show`，面板换成新配色、外观也翻成浅色。另一处：gpui 版在 Linux 上绑了 Ctrl+Q（任何窗口退出）和 Ctrl+W（关设置 / 磁盘空间窗口），macOS 上这两个键由宿主的菜单负责，而 Linux 宿主没有菜单——补上 `root::bind_window_keys`，三个根组件只在非 macOS 上绑定。其余（快捷键、托盘、横幅点击、钥匙串之外的启动顺序、Linux 的单实例、安装包残留清理、窗口记忆的尺寸、提示行的高度、保持唤醒、外观跟随）两个宿主都已经有了。
 
 ## 待你判断
 

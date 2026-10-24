@@ -76,6 +76,20 @@ pub fn connect(host: impl Fn(HostAction) + Send + Sync + 'static) {
     let _ = HOST.set(Box::new(host));
 }
 
+/// Quit (`mod+q`) and, in an ordinary window, close (`mod+w`) — the
+/// gpui front end's `Quit` and `CloseWindow` bindings. On macOS the host's
+/// own menu carries both, so a root binds them only elsewhere, where a
+/// window has no menu bar.
+pub fn bind_window_keys(window: Option<AuxWindow>) {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    on_key("mod+q", |_| ask(HostAction::Quit));
+    if let Some(aux) = window {
+        on_key("mod+w", move |_| ask(HostAction::Close(aux)));
+    }
+}
+
 /// Hands `action` to the host.
 pub fn ask(action: HostAction) {
     if let Some(host) = HOST.get() {

@@ -16,7 +16,7 @@
 //!
 //! Its keys are the gpui window's: `mod+1` and `mod+2` pick the tab,
 //! `mod+r` runs the tab's walk again, Escape closes (and `mod+w`, through
-//! the host's Window menu).
+//! the host's Window menu — bound by the root itself off macOS).
 
 use crate::assets::CustomIconName;
 use crate::cleanhints;
@@ -110,6 +110,7 @@ pub fn Storage() -> impl IntoElement {
     on_key("escape", |_| {
         root::ask(HostAction::Close(AuxWindow::Storage))
     });
+    root::bind_window_keys(Some(AuxWindow::Storage));
     let tab = live.memo(ZStatsAppState::storage_tab);
     let trashed =
         live.memo(|state: &ZStatsAppState| storagepage::trashed_note(state.trashed_this_session()));

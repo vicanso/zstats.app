@@ -13,7 +13,8 @@
 //! are not in the store, so a setter here says the store changed.
 //!
 //! Its keys are the gpui settings window's dismissals: Escape, and `mod+w`
-//! through the host's Window menu.
+//! through the host's Window menu (bound by the root itself off macOS,
+//! where a window has no menu bar).
 
 use crate::assets::CustomIconName;
 use crate::nsh::root::{self, AuxWindow, HostAction, Live};
@@ -82,6 +83,7 @@ pub fn Settings() -> impl IntoElement {
     on_key("escape", |_| {
         root::ask(HostAction::Close(AuxWindow::Settings))
     });
+    root::bind_window_keys(Some(AuxWindow::Settings));
     let live = Live::follow(|_| true);
     let current = signal(section());
     // The page's height on screen, for About's card, which fits it.

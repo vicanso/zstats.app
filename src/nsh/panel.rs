@@ -38,6 +38,7 @@ pub fn Panel() -> impl IntoElement {
         prefs::set_pinned(!prefs::pinned());
         store::changed();
     });
+    root::bind_window_keys(None);
     let tab = live.memo(ZStatsAppState::tab);
     // The page's height on screen, for the lists that end on a whole row
     // at the gap above the footer.
