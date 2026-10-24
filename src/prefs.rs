@@ -39,7 +39,7 @@ pub enum ThemePref {
     System,
     Light,
     Dark,
-    /// Notchclip's warm palette (`themes/golden.json`). Light or dark
+    /// The warm palette (`palette.rs`'s Golden pair). Light or dark
     /// still follows the Mac; this only swaps which pair is painted.
     Golden,
     /// The Omarchy desktop's current palette (`omarchy.rs`), light or

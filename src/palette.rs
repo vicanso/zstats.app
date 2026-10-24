@@ -1,28 +1,25 @@
-//! Design tokens for a macOS menu-bar panel, shared by both front ends
-//! (docs/nsh-migration.md, phase 1b). The gpui one reads them through
-//! `theme.rs`, which converts each to gpui's colour and also holds the
-//! theme files gpui-kit's own widgets are painted with.
+//! Design tokens for a macOS menu-bar panel. NSH reads them through
+//! `nsh::theme::color`, which asks for each in both halves of the pair on
+//! screen ([`in_mode`]); nothing else paints the interface.
 //!
 //! Fills are translucent so the Popover vibrancy shows through. The classic
-//! pair — dark (white washes) and light (black washes) — is what gpui-kit's
-//! default theme paints. Golden is a second pair, the warm bone / champagne
+//! pair — dark (white washes) and light (black washes) — is the neutral
+//! scale gpui-kit's default theme painted, which the panel was first drawn
+//! in (docs/nsh-migration.md). Golden is a second pair, the warm bone / champagne
 //! tokens published as CSS variables on <https://notchclip.buildmac.app/>
 //! (`--bone`, `--paper`, `--ink`, …). The gold is `#d9b98c`
 //! (`rgb(217 185 140)`), the dark half of `--accent`, on both variants.
 //! The site's light half `#8a5a2b` is the contrast colour for text on
 //! bone; painted as a checked switch it reads as brown, so the light
 //! variant uses the champagne too, with the dark `--on-accent`
-//! (`#14110e`) on that fill. The same hexes live in `theme::GOLDEN_JSON` for
-//! gpui-kit's own widgets (the window ground, switches, focus rings).
-//! These functions paint the panel's cards, which that file does not.
+//! (`#14110e`) on that fill.
 //!
 //! **Golden's dark half is no longer Notchclip's** (2026-10-12): it is
 //! the palette written down in `.claude/skills/ui-polish` — base
 //! `#1c1c1e`, card `#252528`, track `#36363a`, three inks `#f2f0eb` /
 //! `#a19d96` / `#8f8b85`, one accent `#d9ae7a`. (Its green, `#6ec48a`,
-//! is in the kit theme as `success` and has no function here since the
-//! "Nothing needs attention" row went: an ordinary day draws no row at
-//! all.) Three steps of lightness do the work
+//! has no token here since the "Nothing needs attention" row went: an
+//! ordinary day draws no row at all.) Three steps of lightness do the work
 //! the hairlines did, which only holds on an opaque ground: the weakest
 //! ink is 4.5:1 on the card and 2.2:1 on the glass. So this scheme is
 //! opaque by default ([`default_opacity`]), and its fills are written as
@@ -39,18 +36,16 @@
 //!
 //! Omarchy is the third, and the only one not written here: its tokens
 //! are derived from the desktop's current palette (`omarchy.rs`) by
-//! [`OmarchyTokens::from_palette`], and gpui-kit's widgets get a theme
-//! file generated from the same palette (`theme::omarchy_theme`). It
-//! has one light-or-dark, the palette's own, rather than following the
+//! [`OmarchyTokens::from_palette`]. It has one light-or-dark, the palette's own, rather than following the
 //! window appearance. Its alarm is the palette's red, not brand red: a
 //! pastel desktop with a saturated #ec3013 on it reads as a second brand
 //! beside the theme, and the palette's red still says "crossed a line".
 //!
-//! Selected by [`set_dark`] / [`set_golden`] / [`set_omarchy`] after
-//! every `Theme::change`. The NSH front end also asks for a token in the
-//! other half of the pair than the one on screen ([`in_mode`]): its
-//! colours carry both halves and its own engine picks one as the
-//! appearance turns.
+//! Selected by [`set_dark`] / [`set_golden`] / [`set_omarchy`] from the
+//! appearance NSH resolved (`nsh::theme::follow`). A colour handed to NSH
+//! still carries both halves of the pair ([`in_mode`]) and NSH's engine
+//! picks one as the appearance turns; the scheme says which pair, and
+//! which half the code outside an engine reads (the Linux tray's ink).
 
 use crate::color::{Rgba, rgb, rgba};
 use crate::i18n;
@@ -119,7 +114,7 @@ fn pinned_to<R>(scheme: Scheme, f: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Classic palette. Call after every `Theme::change`.
+/// Classic palette, the half NSH resolved (`nsh::theme::follow`).
 pub fn set_dark(dark: bool) {
     set_scheme(if dark {
         Scheme::ClassicDark
@@ -128,8 +123,8 @@ pub fn set_dark(dark: bool) {
     });
 }
 
-/// Golden palette, light or dark to match the appearance `Theme::change`
-/// just applied. Same call site as [`set_dark`].
+/// Golden palette, light or dark to match the appearance NSH resolved.
+/// Same call site as [`set_dark`].
 pub fn set_golden(dark: bool) {
     set_scheme(if dark {
         Scheme::GoldenDark
@@ -274,11 +269,9 @@ fn tone(
     }
 }
 
-/// The window's ground, under every card. gpui-kit's theme files paint it
-/// on the gpui front end (`background` — the default theme's
-/// `neutral-950` / white, `GOLDEN_JSON`'s two, the Omarchy palette's);
-/// these are the same values, held to them by a test in `theme.rs`, for
-/// the NSH front end, which has no theme file.
+/// The window's ground, under every card: `neutral-950` / white (the kit
+/// theme's `background`, which the gpui front end painted), Golden's base
+/// and paper, the Omarchy palette's background.
 #[inline]
 pub fn ground() -> Rgba {
     tone(0x0a0a0aff, 0xffffffff, 0x1c1c1eff, 0xf3eee6ff, |t| t.ground)
@@ -296,9 +289,8 @@ pub fn panel_ground() -> Rgba {
 
 /// A menu's or a tooltip's fill: opaque, since it floats over whatever
 /// is under it, where a card's lift would let the text beneath show
-/// through. gpui-kit's `popover.background` in each theme file — the
-/// default theme's `neutral-950` / white, `GOLDEN_JSON`'s card colour,
-/// the Omarchy palette's surface.
+/// through: `neutral-950` / white, Golden's card colour, the Omarchy
+/// palette's surface.
 #[inline]
 pub fn popover() -> Rgba {
     tone(0x0a0a0aff, 0xffffffff, 0x252528ff, 0xfbf8f3ff, |t| {
@@ -306,19 +298,19 @@ pub fn popover() -> Rgba {
     })
 }
 
-/// A menu item under the pointer, on [`popover`]: gpui-kit's
-/// `accent.background` — `neutral-800` / `neutral-100`, Golden's chip
-/// step (`#36363a` over `#252528`; the two had been equal, and a hovered
-/// item could not be seen), the Omarchy chip.
+/// A menu item under the pointer, on [`popover`]: `neutral-800` /
+/// `neutral-100`, Golden's chip step (`#36363a` over `#252528`), the
+/// Omarchy chip. Never the menu's own fill — the two were once equal in
+/// Golden Dark and in the Omarchy theme, and a hovered item was drawn
+/// and could not be seen (a test holds them apart in every scheme).
 #[inline]
 pub fn popover_hover() -> Rgba {
     tone(0x262626ff, 0xf5f5f5ff, 0x36363aff, 0xe8dfd2ff, |t| t.chip)
 }
 
-/// A switch's track while it is on — gpui-kit's `primary.background`:
-/// the default theme's `neutral-50` / `neutral-900`, `GOLDEN_JSON`'s two
-/// golds, the Omarchy palette's accent (its mark). The NSH front end's
-/// switches; gpui-kit paints its own.
+/// A switch's track while it is on: `neutral-50` / `neutral-900` (the kit
+/// theme's `primary.background`), Golden's two golds, the Omarchy
+/// palette's accent (its mark).
 #[inline]
 pub fn switch_on() -> Rgba {
     tone(0xfafafaff, 0x171717ff, 0xd9ae7aff, 0xd9b98cff, |t| t.mark)
@@ -326,7 +318,7 @@ pub fn switch_on() -> Rgba {
 
 /// A primary button's fill — the same `primary.background` as a switch
 /// that is on: the one filled button a disk-space tab shows before its
-/// first run (the NSH front end; gpui-kit paints its own).
+/// first run.
 #[inline]
 pub fn primary() -> Rgba {
     switch_on()
@@ -343,16 +335,14 @@ pub fn primary_ink() -> Rgba {
     }
 }
 
-/// A switch's track while it is off — `switch.background`: the default
-/// theme's `#404040` / `#d4d4d4`, `GOLDEN_JSON`'s chip step, the Omarchy
-/// border.
+/// A switch's track while it is off: `#404040` / `#d4d4d4`, Golden's chip
+/// step, the Omarchy border.
 #[inline]
 pub fn switch_off() -> Rgba {
     tone(0x404040ff, 0xd4d4d4ff, 0x36363aff, 0xe8dfd2ff, |t| t.border)
 }
 
-/// A switch's thumb — `switch.thumb.background`, the ground where a theme
-/// names none; `GOLDEN_JSON`'s light half is a near-black thumb.
+/// A switch's thumb: the ground, but for Golden Light's near-black thumb.
 #[inline]
 pub fn switch_thumb() -> Rgba {
     tone(0x0a0a0aff, 0xffffffff, 0x1c1c1eff, 0x14110eff, |t| t.ground)
@@ -363,8 +353,8 @@ pub fn switch_thumb() -> Rgba {
 /// groups do.
 ///
 /// The dark lift is safe to stay translucent because the ground under it
-/// is guaranteed: `use_popover_material` (gpui_app.rs) puts a stock
-/// popover-material `NSVisualEffectView` under the content, whose
+/// is guaranteed: the panel's content is a stock popover-material
+/// `NSVisualEffectView` (`nsh/host.rs`), whose
 /// luminosity clamp keeps the backdrop dark over any wallpaper — the
 /// same mechanism that keeps a system menu readable on a white desktop.
 /// A brief detour made these cards nearly solid instead; it fixed white
@@ -470,10 +460,10 @@ pub fn text_dim() -> Rgba {
 /// half of a line gets small-size stem thickening and the Chinese half
 /// does not; a Han glyph packs ~20 strokes into the box a Latin letter
 /// spends on three, so at 9px @2x single strokes antialias into grey;
-/// gpui rasterises grayscale-only on macOS (no subpixel sharpening); and
+/// macOS draws text grayscale-only (no subpixel sharpening); and
 /// the panel is glass, so those grey edges composite against wallpaper.
-/// Raising the *size* was tried and reverted — one point times gpui's
-/// 1.618 line box moved the whole panel's rhythm. Contrast is the lever
+/// Raising the *size* was tried and reverted (on gpui, whose line box was
+/// the size times 1.618) — one point moved the whole panel's rhythm. Contrast is the lever
 /// that costs no layout: muted grey Chinese at 9px is mush, full-ink
 /// Chinese at 9px is small but sharp. Latin keeps the designed hierarchy.
 ///
@@ -791,36 +781,27 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// The NSH front end paints its ground and its menus from these, the
-    /// gpui one from the theme file; a Golden value that drifted from the
-    /// file would be a seam between the two front ends.
+    /// A hovered menu item is a fill of its own: equal to the menu's, the
+    /// highlight is drawn and cannot be seen.
     #[test]
-    fn the_golden_ground_and_menus_are_the_theme_files() {
-        let file: serde_json::Value =
-            serde_json::from_str(include_str!("../themes/golden.json")).expect("golden.json");
-        for theme in file["themes"].as_array().expect("themes") {
-            let scheme = if theme["mode"] == "dark" {
-                Scheme::GoldenDark
-            } else {
-                Scheme::GoldenLight
-            };
-            let color = |key: &str| {
-                let hex = theme["colors"][key].as_str().expect(key);
-                rgb(u32::from_str_radix(&hex[1..], 16).expect("hex"))
-            };
-            let name = &theme["name"];
-            assert_eq!(pinned_to(scheme, ground), color("background"), "{name}");
-            assert_eq!(
-                pinned_to(scheme, popover),
-                color("popover.background"),
-                "{name}"
-            );
-            assert_eq!(
+    fn a_hovered_menu_item_stands_off_the_menu_in_every_scheme() {
+        let _scheme = SCHEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_omarchy(&Palette::tokyo_night());
+        for scheme in [
+            Scheme::ClassicDark,
+            Scheme::ClassicLight,
+            Scheme::GoldenDark,
+            Scheme::GoldenLight,
+            Scheme::Omarchy,
+        ] {
+            assert_ne!(
                 pinned_to(scheme, popover_hover),
-                color("accent.background"),
-                "{name}"
+                pinned_to(scheme, popover),
+                "scheme {}",
+                scheme as u8
             );
         }
+        set_dark(true);
     }
 
     /// A pin is this thread's and ends with the call: the scheme on

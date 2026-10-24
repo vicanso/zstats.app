@@ -162,11 +162,11 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 1. **NSH 上游 PR（canvas 的 `drawsAsynchronously`）。** 分支 `macos-canvas-draws-asynchronously` 在你 fork 的 `~/github/nsh` 里，nsh-compat 的配套改动在 `target/nsh-compat/nsh-compat` 的 `props-draws-asynchronously` 分支；推送、开 PR 由你来。合并发版后，`host::draw_canvases_in_place` 的遍历可以换成在 canvas 上设这个属性，Network 流量行“按位置复用、多余的位置折叠”的写法（4g）也可以退回按程序复用。
 2. **gpui 版 History 的行区域多减了一个过滤行。** `views/history.rs` 借用 Processes 的 `rows_height`，Processes 的过滤框开着时 History 的行区域也会矮 34pt（History 页没有过滤框）。NSH 版照样复刻了（`lists::rows_budget`）。要不要两边都改成不减？
 3. **英文下设置窗口“主题”那行太挤。** 五个 chip 贴到 ⓘ 旁边（gpui 版本来就这样）。要不要改排版（比如 chip 换到标签下面一行，像“不透明度”那样）？
-4. **NSH 上游：`TextView` 的两处小问题。** `TextViewParts` 里给 `TextViewPart::Root` 的样式从来不会被应用（`TextView` 组件建根视图时不经过 `parts`），只能把根的样式写在 `text_view()` 元素上；链接的下划线固定在行下 3pt（`underline_offset(px(3.0))`），行高小于约 1.5 倍字号时被裁掉。About 页的发行说明都已绕过。要不要给 NSH 提 issue / PR？
-5. **Linux 版从没在真机上跑过。** NSH 的 GTK 宿主（`src/nsh/linux.rs`）只在 `make linux-check` 和 CI 里编译、跑测试，没有在任何合成器上显示过；gpui 版的 Linux 构建至少在一台 Omarchy 上看过。现在下一次打 tag 就会把 Linux 用户换到这份没看过的代码上。要不要等你在 Omarchy 上看过一遍（面板位置、失焦收起、托盘、设置和磁盘空间窗口、选文件夹的系统面板）再发版？代码这边已按“切换”做完，发版时机由你定。
-6. **`docs/design.md` 里 gpui 时代的段落。** 开头已经说明界面换了、哪些段落是历史；三层毛玻璃、窗口复用、多屏下 gpui 的屏幕坐标、`dock.rs` 这些段落原样留着（“为什么”还有用）。要不要逐段改写成 NSH 的做法、或者挪进一个“历史”小节？
-7. **`install-linux.sh` 的包名只核对了 Debian / Arch。** 缺库时提示的 Fedora（`gtk4 gtk4-layer-shell`）和 openSUSE（`libgtk-4-1 libgtk4-layer-shell0`）包名是按命名惯例写的，没在那两个发行版上查过。
-8. **NSH 开发中有可能报给上游的几处行为**（都已在本仓库绕过）：拆掉中的元素还会触发 `on_layout`（写已释放的信号会让整个根组件失败——我们用 `try_set` / 根组件持有的信号绕开）；`theme::color` 之类的“值”参数看起来像能响应、其实只读一次。要不要整理成 issue？
+4. **NSH 上游：`TextView` 的两处小问题。** `TextViewParts` 里给 `TextViewPart::Root` 的样式从来不会被应用（`TextView` 组件建根视图时不经过 `parts`），只能把根的样式写在 `text_view()` 元素上；链接的下划线固定在行下 3pt（`underline_offset(px(3.0))`），行高小于约 1.5 倍字号时被裁掉。About 页的发行说明都已绕过。**已定：报给上游**——[longbridge/nsh#446](https://github.com/longbridge/nsh/issues/446)（Root 的样式）、[#447](https://github.com/longbridge/nsh/issues/447)（下划线被裁）。
+5. **Linux 版从没在真机上跑过。** NSH 的 GTK 宿主（`src/nsh/linux.rs`）只在 `make linux-check` 和 CI 里编译、跑测试，没有在任何合成器上显示过；gpui 版的 Linux 构建至少在一台 Omarchy 上看过。现在下一次打 tag 就会把 Linux 用户换到这份没看过的代码上。要不要等你在 Omarchy 上看过一遍（面板位置、失焦收起、托盘、设置和磁盘空间窗口、选文件夹的系统面板）再发版？代码这边已按“切换”做完，发版时机由你定。**已定：你之后在真机上测**；在那之前本文和 CLAUDE.md 都只说“能编译、测试能过”。
+6. **`docs/design.md` 里 gpui 时代的段落。** 开头已经说明界面换了、哪些段落是历史；三层毛玻璃、窗口复用、多屏下 gpui 的屏幕坐标、`dock.rs` 这些段落原样留着（“为什么”还有用）。要不要逐段改写成 NSH 的做法、或者挪进一个“历史”小节？**已定：改成 NSH 的做法**——模块名、令牌、字体、毛玻璃、窗口模型、多屏、Linux 几节都按现在的代码重写，做法因换框架而变了的地方写明当时是什么、现在是什么；性能表换成 NSH 版的实测（两次条件不同，只比量级）。随之删掉了只剩一条测试在读的 `themes/golden.json`，那条测试换成“每套配色里菜单的悬停底色不等于菜单底色”（design.md 的保温杯一节说的就是它）。
+7. **`install-linux.sh` 的包名只核对了 Debian / Arch。** 缺库时提示的 Fedora（`gtk4 gtk4-layer-shell`）和 openSUSE（`libgtk-4-1 libgtk4-layer-shell0`）包名是按命名惯例写的，没在那两个发行版上查过。**已定：不用核对。**
+8. **NSH 开发中有可能报给上游的几处行为**（都已在本仓库绕过）：拆掉中的元素还会触发 `on_layout`（写已释放的信号会让整个根组件失败——我们用 `try_set` / 根组件持有的信号绕开）；`theme::color` 之类的“值”参数看起来像能响应、其实只读一次。要不要整理成 issue？**已定：报给上游**——前一条是 [longbridge/nsh#448](https://github.com/longbridge/nsh/issues/448)；后一条不报：`theme::color` 是我们自己的函数，NSH 的样式参数收值也收闭包，写成值只读一次是我们的用法，CLAUDE.md 里写着规则。
 
 ## 进度
 
