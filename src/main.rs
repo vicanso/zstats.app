@@ -35,11 +35,13 @@ compile_error!(
 // Shared by both front ends: none of these knows which one is drawing.
 mod about;
 mod active;
+mod alertbars;
 mod alertlog;
 mod alerttpl;
 mod appicon;
 #[cfg(target_os = "macos")]
 mod appkit;
+mod applist;
 mod assetinfo;
 mod assets;
 mod autostart;
@@ -74,6 +76,7 @@ mod prefs;
 mod pressure;
 mod procscan;
 mod proxy;
+mod rows;
 mod series;
 mod spaceinfo;
 mod squarify;

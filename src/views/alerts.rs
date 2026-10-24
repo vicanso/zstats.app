@@ -16,8 +16,8 @@
 //! collector reloads `[alerts]` in place.
 
 use super::widgets::{self, card};
+use crate::alertbars::{self, BarSource, InForce, Resolved};
 use crate::alertlog::{self, DayLog};
-use crate::alerttpl;
 use crate::assets;
 use crate::confirm;
 use crate::diskwatch;
@@ -43,8 +43,7 @@ use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::component::{h_flex, v_flex};
 use rust_i18n::t;
 use std::time::Duration;
-use zstats::alerts::{ActiveThresholds, Template};
-use zstats::settings::{AlertsConfig, FileConfig, PressureAlert};
+use zstats::settings::{FileConfig, PressureAlert};
 use zstats::{AlertDetail, AlertEvent, AlertKind, AlertSubject, Severity};
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
@@ -1644,7 +1643,7 @@ fn threshold_editor(
             h_flex()
                 .mt(px(6.))
                 .gap(px(4.))
-                .children(presets(target.key).iter().map(|(label, value)| {
+                .children(alertbars::presets(target.key).iter().map(|(label, value)| {
                     let on = current.as_deref() == Some(*value);
                     let key = target.key;
                     let name = target.name.clone();
@@ -1683,171 +1682,6 @@ fn threshold_editor(
                 })),
         )
         .into_any_element()
-}
-
-/// Preset chips. Labels are already localised / unit-suffixed; values are
-/// what `apply_add` accepts (`0` disables a per-name rule).
-pub(super) fn presets(key: &str) -> Vec<(String, &'static str)> {
-    match key {
-        "alert-cpu" => vec![
-            ("50%".into(), "50"),
-            ("80%".into(), "80"),
-            ("100%".into(), "100"),
-            ("200%".into(), "200"),
-            (i18n::tr("alerts.off"), "0"),
-        ],
-        "alert-mem" => vec![
-            ("15%".into(), "15"),
-            ("25%".into(), "25"),
-            ("40%".into(), "40"),
-            ("60%".into(), "60"),
-            (i18n::tr("alerts.off"), "0"),
-        ],
-        "alert-app-cpu" => vec![
-            ("200%".into(), "200"),
-            ("400%".into(), "400"),
-            ("800%".into(), "800"),
-            (i18n::tr("alerts.off"), "0"),
-        ],
-        "alert-app-mem" => vec![
-            ("30%".into(), "30"),
-            ("40%".into(), "40"),
-            ("60%".into(), "60"),
-            (i18n::tr("alerts.off"), "0"),
-        ],
-        "alert-disk" => vec![
-            ("80%".into(), "80"),
-            ("90%".into(), "90"),
-            ("95%".into(), "95"),
-            (i18n::tr("alerts.off"), "0"),
-        ],
-        "alert-pressure" => vec![
-            (i18n::tr("alerts.warning"), "warning"),
-            (i18n::tr("alerts.critical"), "critical"),
-            (i18n::tr("alerts.off"), "off"),
-        ],
-        _ => Vec::new(),
-    }
-}
-
-/// Which layer zstats took one subject's alert bar from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BarSource {
-    /// An entry of the user's own under `[alerts.*_overrides]`.
-    Yours,
-    /// A row of the alert table (compiled in, or `template.toml`).
-    Table,
-    /// No per-name entry: the global value.
-    Base,
-}
-
-/// One subject's bar the way zstats resolved it: the preset chip that
-/// stands for it, when one does, and the layer that decided it.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct InForce {
-    pub(super) lit: Option<String>,
-    pub(super) source: BarSource,
-}
-
-/// zstats' resolution of the per-name bars, held for one paint.
-///
-/// The chips under a bar used to light [`configured_value`] — the
-/// user's entry, else the global value, else the default — which leaves
-/// the alert table out, while the bar above them is `ActiveThresholds`
-/// with the table in. For every program the table names the two
-/// disagreed: "CPU alert off" over a lit 200%. And a lit global memory
-/// share was not the bar either — that is the lower of the share and
-/// the ceiling — so clicking the lit 25% moved the bar from 4 GB to
-/// 6 GB.
-///
-/// Both read this now. zstats is asked twice: as the engine armed
-/// itself, and against an empty table, which leaves only the user's
-/// entries. The layer is then zstats' own answer — a name the second
-/// matches was decided by the user (its doc: "a user override always
-/// beats a matching template entry"), one only the first matches by the
-/// table — and nothing here matches a name itself. A user key may be a
-/// pattern (`name*`), which a `contains_key` on the file would miss.
-pub(super) struct Resolved {
-    eff: ActiveThresholds,
-    own: ActiveThresholds,
-}
-
-impl Resolved {
-    pub(super) fn of(settings: &FileConfig) -> Self {
-        Self::against(&settings.alerts, &alerttpl::info().template)
-    }
-
-    fn against(alerts: &AlertsConfig, table: &Template) -> Self {
-        Self {
-            eff: ActiveThresholds::from_config_with_template(alerts, table),
-            own: ActiveThresholds::from_config_with_template(alerts, &Template::default()),
-        }
-    }
-
-    /// The bars the engine is running with.
-    pub(super) fn eff(&self) -> &ActiveThresholds {
-        &self.eff
-    }
-
-    /// `None` for a key with no per-name table layer (disk, pressure).
-    pub(super) fn in_force(&self, key: &str, name: &str) -> Option<InForce> {
-        // The bar as a percent, whether an entry of the user's set it,
-        // and the global value where a chip can stand for it.
-        let (matched, yours, base) = match key {
-            "alert-cpu" => (
-                self.eff.cpu.override_for(name).map(|v| v.map(f64::from)),
-                self.own.cpu.override_for(name).is_some(),
-                Some(self.eff.cpu.base().map(f64::from)),
-            ),
-            "alert-app-cpu" => (
-                self.eff
-                    .app_cpu
-                    .override_for(name)
-                    .map(|v| v.map(f64::from)),
-                self.own.app_cpu.override_for(name).is_some(),
-                Some(self.eff.app_cpu.base().map(f64::from)),
-            ),
-            // A global memory bar is the lower of the share and the
-            // ceiling: no chip is that figure, unless the rule is off.
-            "alert-mem" => (
-                self.eff
-                    .memory
-                    .override_for(name)
-                    .map(|v| v.map(|share| share * 100.0)),
-                self.own.memory.override_for(name).is_some(),
-                self.eff.memory.base().is_none().then_some(None),
-            ),
-            "alert-app-mem" => (
-                self.eff
-                    .app_memory
-                    .override_for(name)
-                    .map(|v| v.map(|share| share * 100.0)),
-                self.own.app_memory.override_for(name).is_some(),
-                self.eff.app_memory.base().is_none().then_some(None),
-            ),
-            _ => return None,
-        };
-        let source = match (yours, matched.is_some()) {
-            (true, _) => BarSource::Yours,
-            (false, true) => BarSource::Table,
-            (false, false) => BarSource::Base,
-        };
-        Some(InForce {
-            lit: lit_value(matched, base),
-            source,
-        })
-    }
-}
-
-/// The preset value (`apply_add`'s spelling, `0` for off) a bar reads
-/// as. `matched` is zstats' per-name answer; `base` is the global value
-/// when a chip may stand for it, absent when none can.
-fn lit_value(matched: Option<Option<f64>>, base: Option<Option<f64>>) -> Option<String> {
-    let spell = |bar: Option<f64>| bar.map_or_else(|| "0".to_string(), fmt_pct_f64);
-    match matched {
-        Some(bar) => Some(spell(bar)),
-        None => base.map(spell),
-    }
 }
 
 /// What one target's chips light and which layer its caption names.
@@ -2147,89 +1981,5 @@ mod tests {
         let t = override_target(&event).expect("target");
         assert_eq!(t.key, "alert-pressure");
         assert!(t.name.is_empty());
-    }
-
-    fn held(lit: Option<&str>, source: BarSource) -> Option<InForce> {
-        Some(InForce {
-            lit: lit.map(str::to_string),
-            source,
-        })
-    }
-
-    /// The chips light what the bar reads, and the word beside the bar
-    /// names the layer — both from the one resolution. The table's
-    /// "off" over a lit 200% was the bug this replaced.
-    #[test]
-    fn the_chips_light_the_bar_zstats_resolved() {
-        let mut table = Template::default();
-        table.app_cpu.insert("claude".into(), 0.0);
-        table.mem.insert("Xcode".into(), 60.0);
-        let mut alerts = AlertsConfig {
-            app_cpu: Some(200.0),
-            ..Default::default()
-        };
-
-        let bars = Resolved::against(&alerts, &table);
-        // The table switched it off: the Off chip, and not the user's.
-        assert_eq!(
-            bars.in_force("alert-app-cpu", "claude"),
-            held(Some("0"), BarSource::Table)
-        );
-        assert_eq!(
-            bars.in_force("alert-mem", "Xcode"),
-            held(Some("60"), BarSource::Table)
-        );
-        // No entry: a CPU bar is the global value, which is a chip.
-        assert_eq!(
-            bars.in_force("alert-app-cpu", "Finder"),
-            held(Some("200"), BarSource::Base)
-        );
-        // A global memory bar is the lower of the share and the ceiling,
-        // so no chip is it — lighting the share made a click on the lit
-        // chip move the bar.
-        assert_eq!(
-            bars.in_force("alert-mem", "Finder"),
-            held(None, BarSource::Base)
-        );
-        assert_eq!(
-            bars.in_force("alert-app-mem", "Finder"),
-            held(None, BarSource::Base)
-        );
-
-        // The user's entry wins over the table's — a pattern included,
-        // which is why the file's keys are not searched for the name.
-        alerts.app_cpu_overrides.insert("clau*".into(), 800.0);
-        alerts.mem_overrides.insert("Finder".into(), 40.0);
-        let bars = Resolved::against(&alerts, &table);
-        assert_eq!(
-            bars.in_force("alert-app-cpu", "claude"),
-            held(Some("800"), BarSource::Yours)
-        );
-        assert_eq!(
-            bars.in_force("alert-mem", "Finder"),
-            held(Some("40"), BarSource::Yours)
-        );
-        // Disk and pressure have no table layer to resolve.
-        assert_eq!(bars.in_force("alert-disk", "/"), None);
-    }
-
-    /// With the global rule off the bar reads "off" for every name, and
-    /// the chip that says so is the one lit.
-    #[test]
-    fn a_disabled_rule_lights_off() {
-        let alerts = AlertsConfig {
-            cpu: Some(0.0),
-            mem: Some(0.0),
-            ..Default::default()
-        };
-        let bars = Resolved::against(&alerts, &Template::default());
-        assert_eq!(
-            bars.in_force("alert-cpu", "Finder"),
-            held(Some("0"), BarSource::Base)
-        );
-        assert_eq!(
-            bars.in_force("alert-mem", "Finder"),
-            held(Some("0"), BarSource::Base)
-        );
     }
 }

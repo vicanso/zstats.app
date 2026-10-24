@@ -13,6 +13,7 @@ use crate::format;
 use crate::gpui_ui;
 use crate::history::{self, HistoryShape};
 use crate::i18n;
+use crate::rows;
 use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
@@ -95,7 +96,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     // Today draws each row's band on a shared 00:00 → now axis; the
     // other ranges draw a share meter and have no clock to label.
     let today = rows.iter().any(|s| s.band.is_some());
-    let fit = processes::fit_rows(
+    let fit = rows::fit_rows(
         rows_height(state, today),
         if today { BAND_ROW } else { METER_ROW },
         ROW_PAD,
@@ -432,7 +433,7 @@ fn more_chip(hidden: usize, showing: bool) -> AnyElement {
 const AXIS_ROW: f32 = 16.;
 
 /// What stands above and below a row's lines, before
-/// [`processes::fit_rows`] gives the row its share of the leftover.
+/// [`rows::fit_rows`] gives the row its share of the leftover.
 const ROW_PAD: f32 = 9.;
 
 /// A row with Today's band, hairline included: the padding twice, the
@@ -767,7 +768,7 @@ mod tests {
     /// eleven over its own height.
     #[test]
     fn the_short_panel_holds_six_rows_under_the_wider_ranges() {
-        let fit = processes::fit_rows(385.5, METER_ROW, ROW_PAD);
+        let fit = rows::fit_rows(385.5, METER_ROW, ROW_PAD);
         assert_eq!(fit.viewport, 385.5);
         let reach: f32 = (0..6).map(|i| fit.height(i)).sum();
         assert_eq!(reach, 386.);

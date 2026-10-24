@@ -6,8 +6,8 @@
 //! set. The row shape is the original one: name + CPU, pid + memory,
 //! then a meter — the trough is what keeps each row from floating.
 
-use super::alerts::{BarSource, InForce, Resolved};
 use super::widgets;
+use crate::alertbars::{self, BarDisplay, Resolved, mem_bar_text, pct_bar_text};
 use crate::confirm;
 use crate::diskwatch::Hold;
 use crate::font;
@@ -17,6 +17,7 @@ use crate::hot;
 use crate::i18n;
 use crate::procscan;
 use crate::procscan::ProcState;
+use crate::rows::{self, BAR_FLOOR_PERCENT, RowSlot};
 use crate::state::{FullScan, FullScanData, ProcSort, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
@@ -33,12 +34,6 @@ use std::collections::HashMap;
 use std::process;
 use zstats::Tick;
 use zstats::snapshot::{Capabilities, ProcessSnapshot};
-
-/// Floor for the per-row CPU bar. The original scale was 800% (eight
-/// cores), which left every normal row looking empty. One core is the
-/// unit the number is already in; the page max wins if something is
-/// hotter, so the trough still fills on a busy machine.
-pub(super) const BAR_FLOOR_PERCENT: f32 = 100.0;
 
 /// What a row's meter is drawn from, and what a full track means.
 ///
@@ -126,91 +121,18 @@ const FILTER_ROW_HEIGHT: f32 = 34.;
 pub(super) const LIST_HEADER: f32 = 11. + 19.5 + 9.;
 
 /// What stands above and below a collapsed row's lines, before
-/// [`fit_rows`] gives the row its share of the leftover.
+/// [`rows::fit_rows`] gives the row its share of the leftover.
 pub(super) const ROW_PAD: f32 = 7.;
 
 /// Collapsed process row, hairline included.
 ///
 /// At 2× the 12px name snaps to 19.5 and the 10px meta line to 16.
 /// The padding twice, the 2px gap, the 4px gap, a 3px meter, the 1px
-/// hairline. [`fit_rows`] divides the rows region by this to decide how
+/// hairline. [`rows::fit_rows`] divides the rows region by this to decide how
 /// many rows it holds, and then gives each row its exact share — so
 /// this has to be near, not right: a display that snaps a line half a
 /// point differently moves no row.
 pub(super) const COLLAPSED_ROW: f32 = ROW_PAD + ROW_PAD + 19.5 + 2. + 16. + 4. + 3. + 1.;
-
-/// How far under its natural height a row may go to let one more in: a
-/// point and a quarter off each padding. More, and the rows read as a
-/// denser list than the one on the next tab. It was 2, and History's
-/// wider ranges then held five rows on the short panel, each eleven
-/// over its own height, for want of a sixth at 2.2 under.
-const ROW_SQUEEZE: f32 = 2.5;
-
-/// How far over it. Past this the rows would be another list's rows, so
-/// the region keeps natural ones and the leftover stays under the card.
-/// Only a panel dragged shorter than the short form gets there: with six
-/// rows or more the largest share is `(row − ROW_SQUEEZE) ÷ 6`, about 10.
-const ROW_STRETCH: f32 = 12.;
-
-/// The rows run this far past the region's edge, so the boundary under
-/// the last whole row is never a pixel short of the clip — where the row
-/// after it would show its hairline as a line across the card's bottom
-/// edge. What is cut is half a point of the last row's padding. It is
-/// also what makes the standard regions come out even: they end in a
-/// half ([`LIST_HEADER`] is 39.5), and the rows are whole points.
-const ROW_SEAM: f32 = 0.5;
-
-/// A rows region divided among whole rows ([`fit_rows`]).
-///
-/// The rows are whole points tall, the first few a point taller than the
-/// rest, because gpui rounds each row's height to the pixel by itself: an
-/// equal fractional share came out three pixels short over nine History
-/// rows, and the tenth row's hairline stood in the gap.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct RowFit {
-    /// The scrolling region's height.
-    pub viewport: f32,
-    /// One collapsed row, hairline included.
-    row: f32,
-    /// How many rows from the top are a point taller than `row`.
-    taller: usize,
-    /// The row's height before the fit, and its padding at that height.
-    natural: f32,
-    pad: f32,
-}
-
-impl RowFit {
-    /// The collapsed row at `index`, hairline included.
-    pub(super) fn height(self, index: usize) -> f32 {
-        self.row + if index < self.taller { 1. } else { 0. }
-    }
-
-    /// What stands above and below that row's lines.
-    pub(super) fn pad(self, index: usize) -> f32 {
-        self.pad + (self.height(index) - self.natural) / 2.
-    }
-}
-
-/// Where a row stands in its list, and the fit the list made — `None`
-/// in the full listings, whose rows keep their own height.
-#[derive(Clone, Copy)]
-pub(super) struct RowSlot {
-    pub index: usize,
-    pub fit: Option<RowFit>,
-}
-
-impl RowSlot {
-    /// What stands above and below the row's lines: `own` where the list
-    /// made no fit.
-    pub(super) fn pad(self, own: f32) -> f32 {
-        self.fit.map_or(own, |fit| fit.pad(self.index))
-    }
-
-    /// The collapsed row's height, where the list gave it one.
-    pub(super) fn height(self) -> Option<f32> {
-        self.fit.map(|fit| fit.height(self.index))
-    }
-}
 
 /// Used for the frame or two before a window size has been reported. Roughly
 /// one panel's worth; the next frame corrects it.
@@ -240,7 +162,7 @@ fn shown_memory(p: &ProcessSnapshot) -> u64 {
 /// body, minus the pinned header and the filter row when open. Shared
 /// with the Apps card, whose chrome is identical. History subtracts its
 /// axis from this; all three then divide it among whole rows
-/// ([`fit_rows`]).
+/// ([`rows::fit_rows`]).
 pub(super) fn rows_height(state: &ZStatsAppState) -> f32 {
     let chrome = LIST_HEADER
         + if state.proc_filter_open() {
@@ -249,57 +171,6 @@ pub(super) fn rows_height(state: &ZStatsAppState) -> f32 {
             0.
         };
     (super::body_height(state).unwrap_or(FULL_LIST_FALLBACK) - chrome).max(FULL_LIST_MIN)
-}
-
-/// Divide `budget` among whole rows of about `natural`, `pad` of which
-/// stands above and below each row's lines.
-///
-/// A region that is not a multiple of the row slices the next one, and
-/// on the short panel that slice sat on the footer's hairline. The
-/// first answer cut the region back to a whole number of natural rows
-/// and left the rest under the card. That was 23.5 of empty panel under
-/// Apps on the short form, 38.5 under Processes and 64.5 under Apps on
-/// the long one: a card that stopped short of where every other page's
-/// last card stops, with the sixth row's hairline standing clear of its
-/// rounded corners. So the rows take the leftover instead. Each is given
-/// a share of the region, in its padding; the card ends on the gap above
-/// the footer as Overview's does, and the region still ends on a row.
-///
-/// One more row goes in when that costs each at most [`ROW_SQUEEZE`];
-/// otherwise the rows that fit are stretched, by at most
-/// [`ROW_STRETCH`]. A window too short for one row keeps the budget, so
-/// the card still cannot run under the footer.
-pub(super) fn fit_rows(budget: f32, natural: f32, pad: f32) -> RowFit {
-    let plain = |viewport: f32, row: f32| RowFit {
-        viewport,
-        row,
-        taller: 0,
-        natural,
-        pad,
-    };
-    if natural <= 1.0 || budget < natural {
-        return plain(budget, natural);
-    }
-    // Whole points to share out: the region and the seam past it.
-    let whole = (budget + ROW_SEAM).floor();
-    let more = (whole / natural).ceil();
-    let n = if whole / more >= natural - ROW_SQUEEZE {
-        more
-    } else {
-        (more - 1.0).max(1.0)
-    };
-    let row = (whole / n).floor();
-    if row - natural > ROW_STRETCH {
-        let row = natural.ceil();
-        return plain(n * row - ROW_SEAM, row);
-    }
-    RowFit {
-        viewport: whole - ROW_SEAM,
-        row,
-        taller: (whole - n * row) as usize,
-        natural,
-        pad,
-    }
 }
 
 /// Ranked by the 60s rolling average so the order is stable enough to read.
@@ -407,7 +278,7 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         t!("processes.count_of", shown = rows.len(), total = total).to_string()
     };
 
-    let fit = fit_rows(rows_height(state), COLLAPSED_ROW, ROW_PAD);
+    let fit = rows::fit_rows(rows_height(state), COLLAPSED_ROW, ROW_PAD);
     let list_el = widgets::list_shell()
         .child(widgets::list_header(
             h_flex()
@@ -893,84 +764,6 @@ fn full_scan_chip(state: &ZStatsAppState) -> AnyElement {
         .into_any_element()
 }
 
-/// The figure an alert-bar row paints, and whether a per-name entry
-/// decided it. Surface is the number (or "off"); `overridden` is the
-/// word and ⓘ beside the label — putting "override" in the figure
-/// itself is what used to truncate "CPU alert" to "CPU…" at 320px.
-/// `yours` picks the word: the user's own entry, or the alert table's.
-pub(super) struct BarDisplay {
-    text: String,
-    overridden: bool,
-    yours: bool,
-}
-
-impl BarDisplay {
-    pub(super) fn plain(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            overridden: false,
-            yours: false,
-        }
-    }
-
-    fn of(text: impl Into<String>, overridden: bool) -> Self {
-        Self {
-            text: text.into(),
-            overridden,
-            yours: false,
-        }
-    }
-
-    /// Name the layer that decided the bar ([`Resolved::in_force`]).
-    pub(super) fn decided_by(mut self, held: Option<InForce>) -> Self {
-        self.yours = held.is_some_and(|h| h.source == BarSource::Yours);
-        self
-    }
-}
-
-/// A percent-style alert bar (CPU here, app CPU on the Apps
-/// expansion), resolved from what zstats' own `Thresholds` said about
-/// this name. Both pages and the tests share this vocabulary.
-/// `overridden` means a per-name entry matched — the user's own or the
-/// template table's. Which of the two is [`BarDisplay::decided_by`]'s
-/// to say, from zstats' own second answer: re-matching the name here
-/// would be a second implementation of its precedence.
-pub(super) fn pct_bar_text(matched: Option<Option<f32>>, base: Option<f32>) -> BarDisplay {
-    match matched {
-        Some(Some(v)) => BarDisplay::of(format!("{v:.0}%"), true),
-        Some(None) => BarDisplay::of(i18n::tr("processes.bar_rule_off"), true),
-        None => match base {
-            Some(v) => BarDisplay::plain(format!("{v:.0}%")),
-            None => BarDisplay::plain(i18n::tr("processes.bar_rule_off")),
-        },
-    }
-}
-
-/// Same vocabulary for the memory bar, whose effective figure is bytes
-/// (zstats resolves share-vs-ceiling itself — `bytes` is its answer for
-/// this name). `base_share` is the fallback wording for the frame or
-/// two before a tick has reported a total to resolve against.
-pub(super) fn mem_bar_text(
-    matched: Option<Option<f64>>,
-    bytes: Option<u64>,
-    base_share: Option<f64>,
-) -> BarDisplay {
-    match matched {
-        Some(Some(_)) => match bytes {
-            Some(b) => BarDisplay::of(format::memory(b), true),
-            None => BarDisplay::plain(i18n::tr("processes.bar_rule_off")),
-        },
-        Some(None) => BarDisplay::of(i18n::tr("processes.bar_rule_off"), true),
-        None => match bytes {
-            Some(b) => BarDisplay::plain(format::memory(b)),
-            None => match base_share {
-                Some(f) => BarDisplay::plain(format!("{:.0}%", f * 100.0)),
-                None => BarDisplay::plain(i18n::tr("processes.bar_rule_off")),
-            },
-        },
-    }
-}
-
 /// Full-width alert-bar row shared by the Processes and Apps
 /// expansions. ⓘ sits on the label so the figure stays right-aligned
 /// whether this name has an override or not.
@@ -1143,8 +936,10 @@ fn threshold_row(
         )
         .child(
             h_flex().flex_1().min_w_0().gap(px(3.)).children(
-                super::alerts::presets(key).into_iter().enumerate().map(
-                    |(i, (chip_label, value))| {
+                alertbars::presets(key)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (chip_label, value))| {
                         let on = current.as_deref() == Some(value);
                         let name = name.to_string();
                         div()
@@ -1176,8 +971,7 @@ fn threshold_row(
                                     });
                             })
                             .child(chip_label)
-                    },
-                ),
+                    }),
             ),
         )
         .into_any_element()
@@ -1725,16 +1519,6 @@ fn current_user_id() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// How many whole rows a fit shows, and how far they reach.
-    fn whole_rows(fit: RowFit) -> (usize, f32) {
-        let (mut rows, mut reach) = (0, 0.);
-        while reach + fit.height(rows) <= fit.viewport + ROW_SEAM {
-            reach += fit.height(rows);
-            rows += 1;
-        }
-        (rows, reach)
-    }
-
     /// The rows region is the body less a 39.5 header: 385.5 on the short
     /// panel (539 − 60 − 44 − 10 − 39.5), 431.5 with its notice row,
     /// 674.5 on the long one. Each must reach the gap above the footer
@@ -1743,74 +1527,22 @@ mod tests {
     #[test]
     fn a_list_fills_its_region_with_whole_rows() {
         for (budget, expected) in [(385.5, 6), (431.5, 7), (674.5, 11)] {
-            let fit = fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
+            let fit = rows::fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
             assert_eq!(fit.viewport, budget, "the card stops short at {budget}");
-            let (rows, reach) = whole_rows(fit);
-            assert_eq!(rows, expected, "at {budget}");
+            let (count, reach) = rows::tests::whole_rows(fit);
+            assert_eq!(count, expected, "at {budget}");
             // The rows end a seam past the region, never short of it.
-            assert_eq!(reach, budget + ROW_SEAM);
-            for i in 0..rows {
+            assert_eq!(reach, budget + rows::ROW_SEAM);
+            for i in 0..count {
                 let h = fit.height(i);
                 assert_eq!(h, h.round(), "row {i} is not on the pixel grid");
                 let over = h - COLLAPSED_ROW;
-                assert!((-ROW_SQUEEZE..=6.).contains(&over), "{over} at {budget}");
+                assert!(
+                    (-rows::ROW_SQUEEZE..=6.).contains(&over),
+                    "{over} at {budget}"
+                );
                 assert_eq!(fit.pad(i), ROW_PAD + over / 2.);
             }
-        }
-    }
-
-    /// One more row goes in only while that costs each at most
-    /// `ROW_SQUEEZE`; a region that is a whole number of rows keeps them
-    /// within a quarter point of their own padding.
-    #[test]
-    fn a_row_is_squeezed_a_little_or_not_at_all() {
-        let exact = fit_rows(6. * COLLAPSED_ROW, COLLAPSED_ROW, ROW_PAD);
-        assert_eq!(whole_rows(exact).0, 6);
-        assert!((exact.pad(0) - ROW_PAD).abs() <= 0.25);
-
-        // Seven rows at a point and a half under: seven.
-        let near = fit_rows(7. * (COLLAPSED_ROW - 1.5), COLLAPSED_ROW, ROW_PAD);
-        assert_eq!(whole_rows(near).0, 7);
-        assert!(near.pad(0) < ROW_PAD);
-        // At three under: six, stretched.
-        let far = fit_rows(7. * (COLLAPSED_ROW - 3.), COLLAPSED_ROW, ROW_PAD);
-        assert_eq!(whole_rows(far).0, 6);
-        assert!(far.pad(0) > ROW_PAD);
-    }
-
-    /// A panel dragged down to a couple of rows keeps rows of its own
-    /// height and the leftover under the card, rather than two rows of
-    /// three times the padding; one too short for a single row keeps the
-    /// budget.
-    #[test]
-    fn a_region_of_few_rows_keeps_natural_ones() {
-        let budget = 2.7 * COLLAPSED_ROW;
-        let fit = fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
-        assert_eq!(fit.height(0), COLLAPSED_ROW.ceil());
-        assert_eq!(whole_rows(fit), (2, 2. * COLLAPSED_ROW.ceil()));
-        assert!(fit.viewport < budget - COLLAPSED_ROW / 2.);
-
-        let none = fit_rows(40., COLLAPSED_ROW, ROW_PAD);
-        assert_eq!((none.viewport, none.height(0)), (40., COLLAPSED_ROW));
-        assert_eq!(none.pad(0), ROW_PAD);
-    }
-
-    /// The two pages edit two different pairs of rules, and mixing them
-    /// up would write a process bar onto an app tree — 200% is
-    /// unremarkable for a tree and absurd for one process. The editor
-    /// takes the keys from its caller precisely so this stays a fact
-    /// about the call sites rather than a guess inside the widget.
-    #[test]
-    fn each_page_edits_its_own_pair_of_rules() {
-        for key in ["alert-cpu", "alert-mem", "alert-app-cpu", "alert-app-mem"] {
-            let presets = super::super::alerts::presets(key);
-            assert!(!presets.is_empty(), "{key} has no chips to offer");
-            // Every rule can be turned off for one subject, and that is
-            // what `0` means to `apply_add` — not "unset".
-            assert!(
-                presets.iter().any(|(_, v)| *v == "0"),
-                "{key} must offer an off chip"
-            );
         }
     }
 
@@ -1981,64 +1713,5 @@ mod tests {
         b.write_bytes_per_sec = Some(5);
         assert_eq!(disk_io_bytes(&a), 0);
         assert_eq!(disk_io_bytes(&b), 15);
-    }
-
-    /// The expansion's alert-bar rows answer "why is this at 300% and
-    /// quiet" — so a matched per-name entry (user's or the template's)
-    /// must be distinguishable from the base rule, and a disabled rule
-    /// from one that simply sits high. The figure is just the number;
-    /// `overridden` is what lights the ⓘ.
-    #[test]
-    fn a_bar_says_whether_a_per_name_entry_decided_it() {
-        let base = pct_bar_text(None, Some(80.0));
-        assert_eq!(base.text, "80%");
-        assert!(!base.overridden);
-        // kernel_task: a matched entry, the row the question is about.
-        let over = pct_bar_text(Some(Some(300.0)), Some(80.0));
-        assert_eq!(over.text, "300%");
-        assert!(over.overridden);
-        let off = pct_bar_text(Some(None), Some(80.0));
-        assert_eq!(off.text, "off");
-        assert!(off.overridden);
-        let rule_off = pct_bar_text(None, None);
-        assert_eq!(rule_off.text, "off");
-        assert!(!rule_off.overridden);
-    }
-
-    #[test]
-    fn the_memory_bar_prefers_zstats_resolved_bytes() {
-        // zstats resolves share-vs-ceiling itself; the row shows its
-        // answer, never a locally derived one.
-        let base = mem_bar_text(None, Some(4 * 1024 * 1024 * 1024), Some(0.25));
-        assert_eq!(base.text, "4.0 GB");
-        assert!(!base.overridden);
-        let over = mem_bar_text(Some(Some(0.7)), Some(45 * 1024 * 1024 * 1024), Some(0.25));
-        assert_eq!(over.text, "45.0 GB");
-        assert!(over.overridden);
-        let off = mem_bar_text(Some(None), None, Some(0.25));
-        assert_eq!(off.text, "off");
-        assert!(off.overridden);
-        // Before the first tick there is no total to resolve against —
-        // the share is all that can be said honestly.
-        let share = mem_bar_text(None, None, Some(0.25));
-        assert_eq!(share.text, "25%");
-        assert!(!share.overridden);
-        let rule_off = mem_bar_text(None, None, None);
-        assert_eq!(rule_off.text, "off");
-        assert!(!rule_off.overridden);
-    }
-
-    /// The word beside a matched bar is "yours" only for the user's own
-    /// entry; the alert table's, and a key with no layers to tell apart,
-    /// stay the other word.
-    #[test]
-    fn the_word_beside_a_bar_names_the_layer() {
-        let bar = |source| {
-            pct_bar_text(Some(Some(300.0)), Some(80.0))
-                .decided_by(Some(InForce { lit: None, source }))
-        };
-        assert!(bar(BarSource::Yours).yours);
-        assert!(!bar(BarSource::Table).yours);
-        assert!(!pct_bar_text(Some(None), Some(80.0)).decided_by(None).yours);
     }
 }
