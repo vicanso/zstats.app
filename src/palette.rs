@@ -315,6 +315,30 @@ pub fn popover_hover() -> Rgba {
     tone(0x262626ff, 0xf5f5f5ff, 0x36363aff, 0xe8dfd2ff, |t| t.chip)
 }
 
+/// A switch's track while it is on — gpui-kit's `primary.background`:
+/// the default theme's `neutral-50` / `neutral-900`, `GOLDEN_JSON`'s two
+/// golds, the Omarchy palette's accent (its mark). The NSH front end's
+/// switches; gpui-kit paints its own.
+#[inline]
+pub fn switch_on() -> Rgba {
+    tone(0xfafafaff, 0x171717ff, 0xd9ae7aff, 0xd9b98cff, |t| t.mark)
+}
+
+/// A switch's track while it is off — `switch.background`: the default
+/// theme's `#404040` / `#d4d4d4`, `GOLDEN_JSON`'s chip step, the Omarchy
+/// border.
+#[inline]
+pub fn switch_off() -> Rgba {
+    tone(0x404040ff, 0xd4d4d4ff, 0x36363aff, 0xe8dfd2ff, |t| t.border)
+}
+
+/// A switch's thumb — `switch.thumb.background`, the ground where a theme
+/// names none; `GOLDEN_JSON`'s light half is a near-black thumb.
+#[inline]
+pub fn switch_thumb() -> Rgba {
+    tone(0x0a0a0aff, 0xffffffff, 0x1c1c1eff, 0x14110eff, |t| t.ground)
+}
+
 /// Card / grouped fill. Dark: faint white lift over the glass. Light:
 /// nearly solid white, so cards sit on the grey panel the way Settings
 /// groups do.

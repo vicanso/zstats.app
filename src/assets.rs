@@ -136,6 +136,9 @@ pub enum CustomIconName {
     /// The NSH volume card's eject badge (`nsh/hardware.rs`): lucide
     /// `circle-x`, gpui's `IconName::CircleX`.
     CircleX,
+    /// The NSH settings window's Interface page in its nav: lucide
+    /// `palette`, gpui-kit's `IconName::Palette`.
+    Palette,
 }
 
 impl CustomIconName {
@@ -165,6 +168,7 @@ impl CustomIconName {
             CustomIconName::Search => "icons/search.svg",
             CustomIconName::Close => "icons/x.svg",
             CustomIconName::CircleX => "icons/circle-x.svg",
+            CustomIconName::Palette => "icons/palette.svg",
         }
     }
 }
@@ -214,6 +218,7 @@ mod tests {
             CustomIconName::Search,
             CustomIconName::Close,
             CustomIconName::CircleX,
+            CustomIconName::Palette,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

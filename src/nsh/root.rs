@@ -41,6 +41,10 @@ pub enum HostAction {
     /// ejected, and the next snapshot should stop listing it
     /// (`CollectorPace::wake`).
     Wake,
+    /// A preference every root was made with changed — the theme, the
+    /// language, the panel's opacity: every window's root is made again
+    /// ([`make`]), and the menus and the tray follow.
+    Restyle,
 }
 
 /// The two ordinary windows beside the panel.

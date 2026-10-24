@@ -65,8 +65,8 @@ struct PanelHost {
     window: gtk::Window,
     /// Where the pointer is, as far as the panel knows.
     motion: gtk::EventControllerMotion,
-    /// Kept for the engine it runs.
-    _view: Rc<AppView>,
+    /// Kept for the engine it runs, and loaded again on a restyle.
+    view: Rc<AppView>,
     /// When it was last mapped: inside [`state::REVEAL_GRACE`] neither
     /// dismissal is believed.
     opened_at: Cell<Instant>,
@@ -150,6 +150,7 @@ pub fn run() {
                     pace.wake();
                 }
             }
+            HostAction::Restyle => restyle(),
         }));
     });
 
@@ -225,8 +226,32 @@ fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
 /// (`theme::follow`), and so does the tray, whose glyph is inked from it
 /// here (`tray::ink` — SNI has no template images).
 fn follow_appearance(dark: bool) {
+    LAST_DARK.store(dark, Ordering::Relaxed);
     theme::follow(dark);
     store::read(tray::sync);
+}
+
+/// The appearance the panel's engine last resolved (`host::LAST_DARK`).
+static LAST_DARK: AtomicBool = AtomicBool::new(true);
+
+/// A preference every root was made with changed (`host::restyle`): the
+/// locale, the palette's family and the tray follow, and every window's
+/// root is loaded again.
+fn restyle() {
+    i18n::init();
+    theme::follow(LAST_DARK.load(Ordering::Relaxed));
+    tray::rebuild_menu();
+    store::read(tray::sync);
+    with_panel(|panel| panel.view.load(root::make::<Panel>().into()));
+    AUX.with_borrow(|open| {
+        for aux in [AuxWindow::Settings, AuxWindow::Storage] {
+            if let Some(open) = &open[slot(aux)] {
+                let (_, title, root) = aux_parts(aux);
+                open.window.set_title(Some(&title));
+                open.view.load(root.into());
+            }
+        }
+    });
 }
 
 /// The store's way onto the main loop (`store::Host::main`), and every
@@ -333,7 +358,7 @@ fn build_panel() -> Rc<PanelHost> {
     Rc::new(PanelHost {
         window,
         motion,
-        _view: view,
+        view,
         opened_at: Cell::new(Instant::now()),
         pointer_was_inside: Cell::new(false),
         leave_pending: Cell::new(false),
@@ -489,18 +514,7 @@ fn open_aux(aux: AuxWindow) {
         AuxWindow::Settings => autostart::refresh(),
         AuxWindow::Storage => store::update(|state, fx| state.reset_storage_views(fx)),
     }
-    let (size, title, root) = match aux {
-        AuxWindow::Settings => (
-            placement::SETTINGS_WINDOW_SIZE,
-            i18n::tr("tabs.settings"),
-            root::make::<Settings>(),
-        ),
-        AuxWindow::Storage => (
-            placement::STORAGE_WINDOW_SIZE,
-            i18n::tr("disk.storage_title"),
-            root::make::<Storage>(),
-        ),
-    };
+    let (size, title, root) = aux_parts(aux);
     let window = gtk::Window::new();
     window.set_title(Some(&title));
     window.set_default_size(size.0 as i32, size.1 as i32);
@@ -534,6 +548,22 @@ fn open_aux(aux: AuxWindow) {
     }
     window.present();
     AUX.with_borrow_mut(|open| open[slot(aux)] = Some(Aux { window, view }));
+}
+
+/// `aux`'s size, title and root, made in the theme and words in force.
+fn aux_parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::ui::Root) {
+    match aux {
+        AuxWindow::Settings => (
+            placement::SETTINGS_WINDOW_SIZE,
+            i18n::tr("tabs.settings"),
+            root::make::<Settings>(),
+        ),
+        AuxWindow::Storage => (
+            placement::STORAGE_WINDOW_SIZE,
+            i18n::tr("disk.storage_title"),
+            root::make::<Storage>(),
+        ),
+    }
 }
 
 fn close_aux(aux: AuxWindow) {

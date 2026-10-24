@@ -741,6 +741,7 @@ pub fn option_chip(
         .child(
             text(label.into())
                 .text_size(px(10.))
+                .line_height(line(10.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || theme::color(|| palette::choice_ink(on()))),
         )

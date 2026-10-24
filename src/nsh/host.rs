@@ -190,7 +190,9 @@ pub fn run() {
     appkit::pin_appearance();
     // Dark until the panel's engine says which (`follow_appearance`) —
     // unless the preference already does.
-    theme::follow(theme::appearance() != Appearance::Light);
+    let dark = theme::appearance() != Appearance::Light;
+    LAST_DARK.store(dark, Ordering::Relaxed);
+    theme::follow(dark);
     tracing::info!("NSH front end starting (docs/nsh-migration.md, phase 3)");
 
     let mut state = ZStatsAppState::new();
@@ -221,6 +223,7 @@ pub fn run() {
                     pace.wake();
                 }
             }
+            HostAction::Restyle => restyle(),
         })
     });
     install_menu(mtm);
@@ -301,9 +304,36 @@ fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
 /// (`theme::follow`), and so does the ground AppKit paints under a window
 /// before its root's first frame.
 fn follow_appearance(dark: bool) {
+    LAST_DARK.store(dark, Ordering::Relaxed);
     theme::follow(dark);
     // NSH has just walled the glass off again for the new appearance.
     with_host(clear_surface_ground);
+}
+
+/// The appearance the panel's engine last resolved, for a change of theme
+/// that has to set the palette's family before any root reports again.
+static LAST_DARK: AtomicBool = AtomicBool::new(true);
+
+/// A preference every root was made with changed — the theme, the
+/// language, the panel's opacity (`HostAction::Restyle`). The locale and
+/// AppKit's appearance follow it, the palette takes the theme's family,
+/// the menus are made again in the new words and the tray re-faces, and
+/// every window's root is loaded again: a root reads its colours and its
+/// words as it is made.
+fn restyle() {
+    i18n::init();
+    appkit::pin_appearance();
+    theme::follow(LAST_DARK.load(Ordering::Relaxed));
+    if let Some(mtm) = MainThreadMarker::new() {
+        install_menu(mtm);
+    }
+    tray::rebuild_menu();
+    store::read(tray::sync);
+    with_host(|host| {
+        host.view.load(root::make::<panel::Panel>().into());
+        clear_surface_ground(host);
+    });
+    windows::reload();
 }
 
 /// NSH fills the view that holds a root with an opaque colour — the

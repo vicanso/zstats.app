@@ -36,8 +36,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// One open window and what keeps it running.
 struct Open {
     window: Retained<NSWindow>,
-    /// Kept for the engine it runs: dropping the view stops it.
-    _view: Rc<AppView>,
+    /// Kept for the engine it runs (dropping the view stops it), and
+    /// loaded again on a restyle.
+    view: Rc<AppView>,
     delegate: Retained<AuxDelegate>,
 }
 
@@ -88,6 +89,8 @@ define_class!(
         fn window_did_become_key(&self, _notification: &NSNotification) {
             if *self.ivars() == AuxWindow::Settings {
                 autostart::refresh();
+                // The page reads it, and nothing else would say so.
+                store::changed();
             }
         }
     }
@@ -121,18 +124,7 @@ pub fn open(aux: AuxWindow) {
         // not what someone reopening it is asking about.
         AuxWindow::Storage => store::update(|state, fx| state.reset_storage_views(fx)),
     }
-    let (size, title, root) = match aux {
-        AuxWindow::Settings => (
-            placement::SETTINGS_WINDOW_SIZE,
-            i18n::tr("tabs.settings"),
-            root::make::<Settings>(),
-        ),
-        AuxWindow::Storage => (
-            placement::STORAGE_WINDOW_SIZE,
-            i18n::tr("disk.storage_title"),
-            root::make::<Storage>(),
-        ),
-    };
+    let (size, title, root) = parts(aux);
     let window = build(mtm, size, &title);
     let view = AppView::new(
         mtm,
@@ -158,9 +150,41 @@ pub fn open(aux: AuxWindow) {
     OPEN.with_borrow_mut(|open| {
         open[slot(aux)] = Some(Open {
             window,
-            _view: view,
+            view,
             delegate,
         });
+    });
+}
+
+/// `aux`'s size, title and root, made in the theme and words in force.
+fn parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::ui::Root) {
+    match aux {
+        AuxWindow::Settings => (
+            placement::SETTINGS_WINDOW_SIZE,
+            i18n::tr("tabs.settings"),
+            root::make::<Settings>(),
+        ),
+        AuxWindow::Storage => (
+            placement::STORAGE_WINDOW_SIZE,
+            i18n::tr("disk.storage_title"),
+            root::make::<Storage>(),
+        ),
+    }
+}
+
+/// Loads every open window's root again, in the theme and the words now
+/// in force, and titles it again (`host::restyle`).
+pub fn reload() {
+    OPEN.with_borrow(|open| {
+        for aux in [AuxWindow::Settings, AuxWindow::Storage] {
+            if let Some(open) = &open[slot(aux)] {
+                let (_, title, root) = parts(aux);
+                open.window.setTitle(&NSString::from_str(&title));
+                open.window
+                    .setBackgroundColor(Some(&host::ns_color(palette::ground())));
+                open.view.load(root.into());
+            }
+        }
     });
 }
 
