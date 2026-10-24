@@ -53,6 +53,7 @@ mod i18n;
 mod i18n_loader;
 mod logger;
 mod metrics;
+mod notify;
 mod omarchy;
 mod opener;
 mod palette;
@@ -66,6 +67,7 @@ mod squarify;
 mod state;
 mod terminate;
 mod traffic;
+mod tray;
 mod trend;
 mod updater;
 mod volflag;
@@ -90,11 +92,7 @@ mod gpui_ui;
 #[cfg(all(feature = "gpui", target_os = "linux"))]
 mod ipc;
 #[cfg(feature = "gpui")]
-mod notify;
-#[cfg(feature = "gpui")]
 mod theme;
-#[cfg(feature = "gpui")]
-mod tray;
 #[cfg(feature = "gpui")]
 mod views;
 #[cfg(all(feature = "gpui", target_os = "macos"))]
@@ -126,8 +124,7 @@ pub(crate) use gpui_app::{
     open_settings_window, open_storage_window, reset_panel_size_pref, set_autostart_pref,
     set_disk_watch_pref, set_keep_awake, set_language_pref, set_notifications_pref,
     set_opacity_pref, set_overview_detail_pref, set_sustained_after_pref,
-    set_sustained_divisor_pref, set_theme_pref, set_tray_pref, show_alerts_window,
-    show_main_window, sync_panel_notice, theme_in_force, toggle_main_window,
+    set_sustained_divisor_pref, set_theme_pref, set_tray_pref, sync_panel_notice, theme_in_force,
 };
 
 fn main() {

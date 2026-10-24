@@ -13,14 +13,18 @@
 //! anchor X Y W H                  shown as a click on a status item at that
 //!                                 rect would show it (physical pixels, top left)
 //! click X Y | move X Y            a left click / a pointer move
+//! tray                            a left click on the status item, handed
+//!                                 to the item's own window
 //! type TEXT                       key events for each character
 //! info                            window number, frame, key and first responder
 //! quit
 //! ```
 
 use crate::nsh::host::{self, Host};
+use crate::placement::TrayAnchor;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
+use objc2::rc::Retained;
+use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow};
 use objc2_foundation::{NSPoint, NSProcessInfo, NSString};
 use std::env;
 use std::fs;
@@ -75,9 +79,11 @@ fn run(line: &str) {
         // would move the user's pointer.
         "anchor" => host::show(
             h,
-            Some(tray_icon::Rect {
-                position: tray_icon::dpi::PhysicalPosition::new(num(0), num(1)),
-                size: tray_icon::dpi::PhysicalSize::new(num(2) as u32, num(3) as u32),
+            Some(TrayAnchor {
+                x: num(0),
+                y: num(1),
+                width: num(2),
+                height: num(3),
             }),
             false,
         ),
@@ -86,6 +92,7 @@ fn run(line: &str) {
             mouse(h, NSEventType::LeftMouseDown, num(0), num(1));
             mouse(h, NSEventType::LeftMouseUp, num(0), num(1));
         }
+        "tray" => click_status_item(MainThreadMarker::from(&*h.panel)),
         "move" => {
             // A real pointer reaches NSH through its tracking areas; a
             // synthesised move is dispatched by the window, which only
@@ -139,20 +146,67 @@ fn uptime() -> f64 {
 }
 
 fn mouse(h: &Host, kind: NSEventType, x: f64, y: f64) {
+    mouse_in(&h.panel, kind, location(h, x, y));
+}
+
+/// `at` in `window`'s base coordinates.
+fn mouse_in(window: &NSWindow, kind: NSEventType, at: NSPoint) {
     let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
         kind,
-        location(h, x, y),
+        at,
         NSEventModifierFlags::empty(),
         uptime(),
-        h.panel.windowNumber(),
+        window.windowNumber(),
         None,
         0,
         1,
         1.0,
     );
     if let Some(event) = event {
-        h.panel.sendEvent(&event);
+        window.sendEvent(&event);
     }
+}
+
+/// A status item is a window of the app's own (`NSStatusBarWindow`), so a
+/// click on it can be handed over like one on the panel. Not every such
+/// window takes clicks: with more than one display, macOS draws a copy of
+/// the item on each other menu bar (a "replicant" image), so the one
+/// clicked is the window whose view under the centre is tray-icon's own
+/// (`TaoTrayTarget`) — the rightmost such, the primary, since Both mode
+/// inserts its second item to the left.
+fn click_status_item(mtm: MainThreadMarker) {
+    let mut items: Vec<(Retained<NSWindow>, NSPoint)> = Vec::new();
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        if window.class().name().to_bytes() != b"NSStatusBarWindow" {
+            continue;
+        }
+        let frame = window.frame();
+        let centre = NSPoint::new(frame.size.width / 2.0, frame.size.height / 2.0);
+        let takes_clicks = window
+            .contentView()
+            .and_then(|view| view.hitTest(centre))
+            .is_some_and(|view| view.class().name().to_bytes() == b"TaoTrayTarget");
+        if takes_clicks {
+            items.push((window, centre));
+        }
+    }
+    let Some((item, centre)) = items
+        .into_iter()
+        .max_by(|(a, _), (b, _)| a.frame().origin.x.total_cmp(&b.frame().origin.x))
+    else {
+        tracing::warn!("probe: no status item to click");
+        return;
+    };
+    let frame = item.frame();
+    tracing::info!(
+        "probe: clicking the status item at ({:.0}, {:.0}) {:.0}×{:.0}",
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+    );
+    mouse_in(&item, NSEventType::LeftMouseDown, centre);
+    mouse_in(&item, NSEventType::LeftMouseUp, centre);
 }
 
 fn key(h: &Host, kind: NSEventType, ch: char) {

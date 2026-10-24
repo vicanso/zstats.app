@@ -11,19 +11,23 @@
 //! (`window_ext.rs`), and show and hide are plain AppKit calls with no App
 //! borrow to step around (`after_app_borrow`).
 //!
+//! The status item is `tray.rs`'s, shared with the gpui front end: the
+//! same faces, menu and click handling, with what it asks for handed to
+//! [`on_tray`] here.
+//!
 //! Where the panel goes is `placement.rs`'s, shared with the gpui front
 //! end: the same sizes, and the same hang under the icon with its
 //! multi-display, mixed-DPI scale picking. This side only lists AppKit's
 //! screens in the space that module works in, and turns its answer back
 //! into AppKit's bottom-left one.
 
-use crate::assets::CustomIconName;
 use crate::geom::{Rect, point, size};
 use crate::nsh::panel::{self, HostAction};
 #[cfg(debug_assertions)]
 use crate::nsh::probe;
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
-use crate::{APP_NAME, glyph, i18n, logger, palette, prefs};
+use crate::tray::{self, TrayAction};
+use crate::{i18n, logger, palette, prefs};
 use nsh_platform_macos::{AppOptions, AppView, Appearance, Root};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -36,15 +40,10 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use std::cell::{Cell, OnceCell};
 use std::rc::Rc;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 /// `NSPopUpMenuWindowLevel` (`kCGPopUpMenuWindowLevel`): above ordinary
 /// windows, as a status-item popover sits.
 const POPUP_LEVEL: isize = 101;
-
-const MENU_ID_SHOW: &str = "show";
-const MENU_ID_QUIT: &str = "quit";
 
 /// What the main thread holds. AppKit objects are main-thread only, so
 /// they live here rather than in a static.
@@ -53,7 +52,6 @@ pub struct Host {
     /// Kept for the engine it runs: dropping the view stops it.
     _view: Rc<AppView>,
     _delegate: Retained<PanelDelegate>,
-    _tray: Option<TrayIcon>,
 }
 
 thread_local! {
@@ -135,11 +133,12 @@ pub fn run() {
         panel,
         _view: view,
         _delegate: delegate,
-        _tray: build_tray(),
     });
     HOST.with(|h| {
         let _ = h.set(host.clone());
     });
+    // Without a tray the debug build still opens the panel by itself.
+    tray::start(on_tray);
 
     // Release builds start with no window, in the menu bar until the icon
     // is clicked; debug builds open the panel at once, as the gpui front
@@ -227,21 +226,16 @@ fn panel_size() -> (f32, f32) {
     placement::window_size(false, false, Dragged::default())
 }
 
-/// Shows the panel, under the status item's `anchor` (tray-icon's rect,
-/// physical pixels from the top left of the primary screen) or in the main
-/// screen's top-right corner.
-pub fn show(host: &Host, anchor: Option<tray_icon::Rect>, make_key: bool) {
+/// Shows the panel, under the status item's `anchor` (physical pixels from
+/// the top left of the primary screen) or in the main screen's top-right
+/// corner.
+pub fn show(host: &Host, anchor: Option<TrayAnchor>, make_key: bool) {
     let mtm = MainThreadMarker::from(&*host.panel);
     let (width, height) = panel_size();
     let screens = Screens::list(mtm);
     let rect = match anchor {
-        Some(rect) => Some(placement::below_tray(
-            TrayAnchor {
-                x: rect.position.x,
-                y: rect.position.y,
-                width: f64::from(rect.size.width),
-                height: f64::from(rect.size.height),
-            },
+        Some(anchor) => Some(placement::below_tray(
+            anchor,
             size(width, height),
             &screens.geoms,
             screens.main_scale,
@@ -262,16 +256,33 @@ pub fn hide(host: &Host) {
     host.panel.orderOut(None);
 }
 
-fn toggle(rect: Option<tray_icon::Rect>) {
+fn toggle(anchor: Option<TrayAnchor>) {
     TOGGLING.with(|t| t.set(true));
     with_host(|host| {
         if host.panel.isVisible() {
             hide(host);
         } else {
-            show(host, rect, true);
+            show(host, anchor, true);
         }
     });
     TOGGLING.with(|t| t.set(false));
+}
+
+/// What the status item asks for. tray-icon reports both of its events
+/// from AppKit's own action, on the main thread, so they reach the host
+/// directly — the gpui front end queues them for a task to pick up.
+fn on_tray(action: TrayAction) {
+    match action {
+        TrayAction::Toggle(anchor) => toggle(anchor),
+        // Under the icon, as a click would put it (`show_main_window`).
+        TrayAction::Show => {
+            with_host(|host| show(host, tray::anchor(), true));
+        }
+        TrayAction::Storage => {
+            tracing::info!("the disk-space window is not in the NSH front end yet");
+        }
+        TrayAction::Quit => quit(),
+    }
 }
 
 fn quit() {
@@ -339,65 +350,5 @@ impl Screens {
             ),
             NSSize::new(f64::from(r.size.width), f64::from(r.size.height)),
         )
-    }
-}
-
-/// The status item: the processor glyph as a template, the panel on a left
-/// click, Show and Quit on a right click. tray-icon calls both handlers on
-/// the main thread (the status item's own action), so they reach the host
-/// directly — the gpui front end hops through two threads and a task to
-/// get the same click to `toggle_main_window`.
-fn build_tray() -> Option<TrayIcon> {
-    let menu = Menu::new();
-    let _ = menu.append(&MenuItem::with_id(
-        MENU_ID_SHOW,
-        i18n::tr("common.show_window"),
-        true,
-        None,
-    ));
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&MenuItem::with_id(
-        MENU_ID_QUIT,
-        i18n::tr("common.quit"),
-        true,
-        None,
-    ));
-    MenuEvent::set_event_handler(Some(|event: MenuEvent| match event.id().0.as_str() {
-        MENU_ID_SHOW => {
-            with_host(|host| show(host, None, true));
-        }
-        MENU_ID_QUIT => quit(),
-        _ => {}
-    }));
-    TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
-        // macOS emits Click on both mouseDown and mouseUp — keying off Up
-        // means a press-and-hold does not fire until the button is released.
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            rect,
-            ..
-        } = event
-        {
-            toggle(Some(rect));
-        }
-    }));
-    // The template keeps alpha and throws the ink away, so any ink will do.
-    let icon = glyph::rasterise(CustomIconName::Cpu, [0, 0, 0])
-        .and_then(|rgba| Icon::from_rgba(rgba, glyph::ICON_SIZE, glyph::ICON_SIZE).ok())?;
-    match TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_menu_on_left_click(false)
-        .with_tooltip(APP_NAME)
-        .with_icon(icon)
-        .with_icon_as_template(true)
-        .build()
-    {
-        Ok(tray) => Some(tray),
-        Err(e) => {
-            // Not fatal: the debug build still opens the panel by itself.
-            tracing::error!("failed to create tray icon: {e}");
-            None
-        }
     }
 }

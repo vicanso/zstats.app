@@ -36,6 +36,7 @@ use crate::history;
 use crate::history::Spender;
 use crate::i18n;
 use crate::metrics;
+use crate::notify;
 use crate::prefs;
 use crate::procscan;
 use crate::series;
@@ -58,6 +59,7 @@ use std::mem;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zstats::settings::FileConfig;
 use zstats::snapshot::{ProcessGroupSnapshot, ProcessSnapshot};
@@ -999,6 +1001,120 @@ impl ZStatsAppState {
     fn prune_ejected(&mut self, listed: &[String], now: Instant) {
         self.ejected.retain(|mount, at| {
             listed.iter().any(|m| m == mount) && now.duration_since(*at) < EJECT_HIDE_MAX
+        });
+    }
+
+    /// One tick from the collector, folded in and delivered: the store
+    /// takes it (`ingest`), each alert it reported passes the three banner
+    /// gates and is posted or logged as held back, the watchers' notices
+    /// go out the same way, and the tray and the panel's height follow.
+    /// Both front ends hand every tick here, on whatever thread they keep
+    /// the store.
+    pub fn on_tick(&mut self, tick: Tick, fx: &mut dyn Effects) {
+        let now = Instant::now();
+        // The user's master switch, ahead of the per-episode gates: while
+        // banners are off nothing interrupts, so neither the snooze clock
+        // nor the auto-quiet window should record a delivery that never
+        // happened.
+        let muted = !prefs::notifications();
+        for event in self.ingest(tick, fx) {
+            // Quiet subjects still land in the Alerts list above — only the
+            // banner stays quiet. Three gates: the global switch, the
+            // snooze the user asked for, and the auto-quiet for a subject
+            // that has already interrupted twice this hour.
+            //
+            // Each verdict is logged: a banner that silently stayed away is
+            // indistinguishable from a rule that stopped firing (the same
+            // reason the card wears a pill), and the log is where that
+            // question gets answered a day later.
+            let snoozed = !muted && self.banner_snoozed(&event);
+            let damped = !muted && !snoozed && self.banner_damped(&event, now);
+            tracing::info!(
+                kind = ?event.kind(),
+                subject = ?event.subject,
+                banner = if muted {
+                    "muted"
+                } else if snoozed {
+                    "snoozed"
+                } else if damped {
+                    "auto-quieted"
+                } else {
+                    "delivered"
+                },
+                "alert reported"
+            );
+            if muted || snoozed || damped {
+                continue;
+            }
+            notify::post(&event);
+        }
+        for notice in self.take_sustained_notices() {
+            tracing::info!(
+                pid = notice.pid,
+                name = %notice.name,
+                banner = if muted { "muted" } else { "delivered" },
+                "sustained-load notice"
+            );
+            if !muted {
+                notify::post_sustained(&notice);
+            }
+        }
+        for notice in self.take_disk_growth_notices() {
+            tracing::info!(
+                path = %notice.growth.path.display(),
+                grew = notice.growth.grew,
+                now = notice.growth.now,
+                banner = if muted { "muted" } else { "delivered" },
+                "disk growth notice"
+            );
+            if !muted {
+                notify::post_disk_growth(&notice);
+            }
+        }
+        for creep in self.take_memory_creep_notices() {
+            tracing::info!(
+                name = %creep.name,
+                climb_bytes = creep.climb_bytes,
+                now_bytes = creep.now_bytes,
+                banner = if muted { "muted" } else { "delivered" },
+                "memory creep notice"
+            );
+            if !muted {
+                notify::post_memory_creep(&creep);
+            }
+        }
+        // After ingest, not before: the tray's auto mode reads the episode
+        // list this tick just merged into, and a memory alert should turn
+        // the face on the sample that reported it.
+        fx.sync_tray(self);
+        // Last: it resizes the panel, which reads the store.
+        fx.fit_panel();
+    }
+
+    /// Sweep for zombie and stopped processes on their own cadence, for
+    /// the life of the process.
+    ///
+    /// Separate from the metrics collector on purpose: zstats keeps only
+    /// the top N processes by CPU then memory, and an abnormal process
+    /// scores near zero on both — on this machine they ranked 435th and
+    /// below, so they can never appear in the panel's process table.
+    pub fn start_abnormal_scan(&mut self, fx: &mut dyn Effects) {
+        /// Far cheaper than a metrics sample — one `sysctl` on macOS, one
+        /// `/proc` walk on Linux, no per-process CPU/memory accounting —
+        /// and what it looks for changes on the scale of minutes or days,
+        /// not seconds.
+        const ABNORMAL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+        effects::background(fx, |reply| {
+            loop {
+                // A failed scan is not "no zombies": skip the replace so
+                // observation clocks keep running.
+                if let Some(found) = procscan::scan()
+                    && !reply.apply(move |state, fx| state.set_abnormal(found, fx))
+                {
+                    return;
+                }
+                thread::sleep(ABNORMAL_SCAN_INTERVAL);
+            }
         });
     }
 

@@ -241,6 +241,10 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNNotificationRequest",
     "UNNotificationResponse",
     "UNNotificationSound",
+    # `UNNotificationRequest::requestWithIdentifier_content_trigger`
+    # needs it beside the content one. gpui's own notification code turned
+    # it on for us until a build without gpui showed nothing here asked.
+    "UNNotificationTrigger",
     "block2",
     "std",
 ] }

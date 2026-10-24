@@ -292,7 +292,7 @@ impl Effects for Context<'_, ZStatsAppState> {
     }
 
     fn sync_tray(&mut self, state: &ZStatsAppState) {
-        tray::sync(self, state);
+        tray::sync(state);
     }
 
     fn fit_panel(&mut self) {

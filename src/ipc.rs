@@ -26,6 +26,7 @@
 //! and always has a menu bar item to click, so there is nothing here it
 //! needs and nothing here that could change how it behaves.
 
+use crate::gpui_app;
 use gpui::App;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -267,8 +268,8 @@ pub fn serve(listener: UnixListener, cx: &mut App) {
                 "received from a second launch"
             );
             cx.update(|cx| match invocation {
-                Invocation::Toggle => crate::toggle_main_window(cx, None),
-                Invocation::Launch => crate::show_main_window(cx),
+                Invocation::Toggle => gpui_app::toggle_main_window(cx, None),
+                Invocation::Launch => gpui_app::show_main_window(cx),
             });
         }
     })

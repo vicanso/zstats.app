@@ -10,7 +10,7 @@
 //! - **No icon rect.** `TrayIcon::rect` is hard-coded `None` on SNI and
 //!   click events carry `Rect::default()`, so nothing can hang the panel
 //!   off the item — the compositor anchors it instead (`panel_kind` in
-//!   main.rs). Every anchor on this path is `None`, which is the same
+//!   gpui_app.rs). Every anchor on this path is `None`, which is the same
 //!   fallback macOS already takes before AppKit has laid the item out.
 //! - **No right-click event.** SNI maps `secondary_activate` to
 //!   `MouseButton::Middle` and never sends a right click: the context
@@ -21,7 +21,14 @@
 //!   told; SNI paints exactly the pixels it is given. The glyph therefore
 //!   has to choose a colour, and nothing in the protocol says what is
 //!   behind it — see [`ink`].
+//!
+//! Both front ends share it since phase 1d of docs/nsh-migration.md. The
+//! tray is kept on the thread that built it, the main thread, rather than
+//! in a gpui `Global`; [`sync`] reads the store alone; and what a click or
+//! the menu asks for goes, as a [`TrayAction`], to the handler [`start`]
+//! was given — what showing the panel means is the front end's.
 
+use crate::APP_NAME;
 use crate::assets::CustomIconName;
 use crate::format;
 use crate::glyph;
@@ -31,11 +38,9 @@ use crate::i18n;
 use crate::palette;
 use crate::prefs::{self, TrayPref};
 use crate::state::{TrayAnchor, ZStatsAppState};
-use crate::{APP_NAME, show_main_window, toggle_main_window};
-use gpui::{App, Global};
 use rust_i18n::t;
-use std::cell::{Cell, RefCell};
-use std::thread;
+use std::cell::{Cell, OnceCell, RefCell};
+use std::sync::Arc;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -137,7 +142,18 @@ struct TrayHandle {
     ink: Cell<[u8; 3]>,
 }
 
-impl Global for TrayHandle {}
+thread_local! {
+    /// The tray, on the thread that built it — the main thread, where
+    /// macOS makes and changes an `NSStatusItem`. Set once: by [`start`],
+    /// or on Linux by the first build after a tray host appeared.
+    static TRAY: OnceCell<TrayHandle> = const { OnceCell::new() };
+}
+
+/// `f` on the tray; `None` when it was never built, or when called from a
+/// thread other than the one that keeps it.
+fn with_tray<R>(f: impl FnOnce(&TrayHandle) -> R) -> Option<R> {
+    TRAY.with(|tray| tray.get().map(f))
+}
 
 impl TrayHandle {
     /// Grow or shed the second item. A no-op when it already matches.
@@ -310,8 +326,8 @@ impl Figure {
 /// with whatever items it has.
 ///
 /// Must be called on the main thread (macOS creates an `NSStatusItem`):
-/// true for `init_tray` and for `sync`, which only ever runs inside
-/// `cx.update`.
+/// true for [`start`] and for [`sync`], which run on the thread that
+/// keeps the tray.
 fn build_item(label: &'static str, face: TrayFace, faces: &Faces) -> Option<Item> {
     let mut builder = TrayIconBuilder::new()
         .with_menu(Box::new(build_menu()))
@@ -384,10 +400,11 @@ pub fn face_for(
 /// out immediately rather than on the next tick. Before the first
 /// sample there is a face but no figure. A no-op if the tray failed to
 /// build.
-pub fn sync(cx: &App, state: &ZStatsAppState) {
-    let Some(handle) = cx.try_global::<TrayHandle>() else {
-        return;
-    };
+pub fn sync(state: &ZStatsAppState) {
+    with_tray(|handle| wear_state(handle, state));
+}
+
+fn wear_state(handle: &TrayHandle, state: &ZStatsAppState) {
     // Before anything is worn: a theme switch has to reach the bar on
     // this pass, not on the one after it.
     handle.ensure_ink();
@@ -425,7 +442,9 @@ pub fn sync(cx: &App, state: &ZStatsAppState) {
     }
 }
 
-enum TrayAction {
+/// What the tray asks of the front end, through the handler [`start`] was
+/// given.
+pub enum TrayAction {
     /// Left-clicking the icon; carries the icon's screen rect to hang the
     /// window off, or `None` where the platform reports none. Toggles.
     Toggle(Option<TrayAnchor>),
@@ -434,7 +453,15 @@ enum TrayAction {
     /// The menu's way into the disk-space window.
     Storage,
     Quit,
+    /// A tray host appeared on the session bus after the first build
+    /// failed: call [`host_appeared`] on the thread that keeps the tray.
+    #[cfg(target_os = "linux")]
+    HostAppeared,
 }
+
+/// The handler [`start`] was given. Called on whichever thread the
+/// platform reports an event on.
+type Deliver = Arc<dyn Fn(TrayAction) + Send + Sync>;
 
 /// A menu bar face, rasterised from the bundled SVG (`glyph.rs`).
 ///
@@ -514,9 +541,8 @@ fn tray_icon_hot(face: CustomIconName) -> Option<Icon> {
 /// `TrayIcon::rect` is hard-coded `None` there — and equally without a
 /// tray, or when AppKit has not laid the item out yet. Every caller then
 /// falls back to the last position, which is what they all did before.
-pub fn anchor(cx: &App) -> Option<TrayAnchor> {
-    let handle = cx.try_global::<TrayHandle>()?;
-    let rect = handle.primary.icon.rect()?;
+pub fn anchor() -> Option<TrayAnchor> {
+    let rect = with_tray(|handle| handle.primary.icon.rect())??;
     Some(TrayAnchor {
         x: rect.position.x,
         y: rect.position.y,
@@ -528,13 +554,13 @@ pub fn anchor(cx: &App) -> Option<TrayAnchor> {
 /// Swap in a menu rebuilt in the active locale. The menu snapshots its item
 /// titles when built, so a language switch has to hand the tray a fresh one —
 /// the icon, tooltip and event threads stay put. A no-op without a tray.
-pub fn rebuild_menu(cx: &App) {
-    if let Some(handle) = cx.try_global::<TrayHandle>() {
+pub fn rebuild_menu() {
+    with_tray(|handle| {
         handle.primary.icon.set_menu(Some(Box::new(build_menu())));
         if let Some(second) = handle.second.borrow().as_ref() {
             second.icon.set_menu(Some(Box::new(build_menu())));
         }
-    }
+    });
 }
 
 fn build_menu() -> Menu {
@@ -564,8 +590,14 @@ fn build_menu() -> Menu {
     menu
 }
 
-/// Must be called on the main thread (macOS creates an `NSStatusItem`), which
-/// is where `Application::run`'s callback already runs.
+/// Build the tray and hand what it asks for to `deliver`.
+///
+/// Must be called on the main thread (macOS creates an `NSStatusItem`),
+/// and [`sync`], [`anchor`] and [`rebuild_menu`] then run on that same
+/// thread, where the tray is kept. `deliver` is called on whichever
+/// thread the platform reports an event on — the main thread on macOS,
+/// inside the status item's own action; ksni's own on Linux — and takes
+/// the action to wherever the front end handles it.
 ///
 /// Without a tray host — no SNI host on the session bus — `build_item`
 /// logs and returns `None`. That is not an error path: the panel still
@@ -573,22 +605,37 @@ fn build_menu() -> Menu {
 /// keybinding (`docs/omarchy-port.md` 阶段 2). On Linux it is also often
 /// not the final answer: a login launch can beat the bar that hosts the
 /// tray, so the tray is built again when a host appears ([`sni`]).
-pub fn init_tray(cx: &mut App) {
-    let built = try_build_tray(cx);
+pub fn start(deliver: impl Fn(TrayAction) + Send + Sync + 'static) {
+    let deliver: Deliver = Arc::new(deliver);
+    route_events(deliver.clone());
+    let built = try_build();
     // Elsewhere a failed build is the answer: an `NSStatusItem` has no
     // host to wait for.
     #[cfg(target_os = "linux")]
     if !built {
-        sni::build_when_a_host_appears(cx);
+        sni::build_when_a_host_appears(deliver);
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = built;
+    let _ = (built, deliver);
 }
 
-/// Build the tray and wire its events; `false` when the primary item could
-/// not be created, having changed nothing — so it can simply be called
-/// again.
-fn try_build_tray(cx: &mut App) -> bool {
+/// [`TrayAction::HostAppeared`]: build the tray now, unless an earlier
+/// appearance already did.
+#[cfg(target_os = "linux")]
+pub fn host_appeared() {
+    if with_tray(|_| ()).is_some() {
+        return;
+    }
+    if try_build() {
+        tracing::info!("tray built after a tray host appeared");
+    } else {
+        tracing::warn!("a tray host is on the bus but the tray still failed");
+    }
+}
+
+/// Build the tray; `false` when the primary item could not be created,
+/// having changed nothing — so it can simply be called again.
+fn try_build() -> bool {
     // Rasterised up front so a later swap is cheap.
     let faces = build_faces();
     // The store is empty here, so the face is the preference's resting
@@ -604,104 +651,81 @@ fn try_build_tray(cx: &mut App) -> bool {
     let second = (pref == TrayPref::Both)
         .then(|| build_item("second", TrayFace::Cpu, &faces))
         .flatten();
-    cx.set_global(TrayHandle {
+    let handle = TrayHandle {
         primary,
         second: RefCell::new(second),
         faces: RefCell::new(faces),
         ink: Cell::new(ink()),
+    };
+    TRAY.with(|tray| {
+        let _ = tray.set(handle);
     });
-
-    // Both receivers only block, so park a dedicated thread on each (zero CPU
-    // while idle) and funnel their events onto the main-thread executor.
-    // Two threads rather than a `select!` keeps crossbeam out of our deps.
-    let (action_tx, action_rx) = smol::channel::unbounded::<TrayAction>();
-
-    let menu_tx = action_tx.clone();
-    thread::spawn(move || {
-        let receiver = MenuEvent::receiver();
-        while let Ok(event) = receiver.recv() {
-            let action = match event.id().0.as_str() {
-                MENU_ID_SHOW => TrayAction::Show,
-                MENU_ID_STORAGE => TrayAction::Storage,
-                MENU_ID_QUIT => TrayAction::Quit,
-                _ => continue,
-            };
-            if menu_tx.send_blocking(action).is_err() {
-                return;
-            }
-        }
-    });
-
-    thread::spawn(move || {
-        let receiver = TrayIconEvent::receiver();
-        while let Ok(event) = receiver.recv() {
-            // macOS emits Click on both mouseDown and mouseUp — keying off Up
-            // means a press-and-hold doesn't fire until the button is
-            // released. SNI's `activate` is a single event that already
-            // arrives as Up, so the same filter passes it through.
-            //
-            // Left only, and on SNI that is the only button there is: the
-            // host opens the context menu itself, and `secondary_activate`
-            // (a *middle* click, not a right one) is not a control this
-            // app offers anywhere else either.
-            let rect = match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    rect,
-                    ..
-                } => rect,
-                _ => continue,
-            };
-            // The icon's screen rect, which is what the window gets anchored
-            // to. SNI reports none (`Rect::default()` — every field zero),
-            // and a fabricated origin would put the panel in the corner of
-            // the screen rather than leave the compositor to place it, so
-            // the honest answer there is no answer.
-            #[cfg(not(target_os = "linux"))]
-            let anchor = Some(TrayAnchor {
-                x: rect.position.x,
-                y: rect.position.y,
-                width: f64::from(rect.size.width),
-                height: f64::from(rect.size.height),
-            });
-            #[cfg(target_os = "linux")]
-            let anchor = {
-                let _ = rect;
-                None
-            };
-            // Every click the host delivers, before anything is done with
-            // it. A tray host is free to turn one activation into two
-            // events, and from the panel's side that is indistinguishable
-            // from an auto-hide: it opens and is gone. Two of these lines
-            // milliseconds apart is the whole diagnosis.
-            tracing::info!("tray click received");
-            if action_tx.send_blocking(TrayAction::Toggle(anchor)).is_err() {
-                return;
-            }
-        }
-    });
-
-    cx.spawn(async move |cx| {
-        // Ends on its own: once the app shuts down this task stops being
-        // polled, and the sender thread exits when the channel drops.
-        while let Ok(action) = action_rx.recv().await {
-            cx.update(|cx| match action {
-                TrayAction::Toggle(anchor) => toggle_main_window(cx, anchor),
-                TrayAction::Show => show_main_window(cx),
-                TrayAction::Storage => {
-                    // A menu click does not make a menu-bar app active,
-                    // and a window opened behind the one in use is not
-                    // an answer to the click.
-                    cx.activate(true);
-                    crate::open_storage_window(cx);
-                }
-                TrayAction::Quit => cx.quit(),
-            });
-        }
-    })
-    .detach();
+    #[cfg(target_os = "linux")]
+    sni::BUILT.store(true, std::sync::atomic::Ordering::Release);
     true
+}
+
+/// tray-icon's two handlers, set once whether or not an item gets built —
+/// without one they never fire — and before the first build: each is a
+/// set-once cell that the first event fixes for good, to the receiver if
+/// nothing is set by then. A handler rather than the crate's receivers,
+/// which only block: the gpui front end used to park a thread on each to
+/// forward its events, and the NSH one has no need to.
+fn route_events(deliver: Deliver) {
+    let menu = deliver.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let action = match event.id().0.as_str() {
+            MENU_ID_SHOW => TrayAction::Show,
+            MENU_ID_STORAGE => TrayAction::Storage,
+            MENU_ID_QUIT => TrayAction::Quit,
+            _ => return,
+        };
+        menu(action);
+    }));
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        // macOS emits Click on both mouseDown and mouseUp — keying off Up
+        // means a press-and-hold doesn't fire until the button is
+        // released. SNI's `activate` is a single event that already
+        // arrives as Up, so the same filter passes it through.
+        //
+        // Left only, and on SNI that is the only button there is: the
+        // host opens the context menu itself, and `secondary_activate`
+        // (a *middle* click, not a right one) is not a control this
+        // app offers anywhere else either.
+        let rect = match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                rect,
+                ..
+            } => rect,
+            _ => return,
+        };
+        // The icon's screen rect, which is what the window gets anchored
+        // to. SNI reports none (`Rect::default()` — every field zero),
+        // and a fabricated origin would put the panel in the corner of
+        // the screen rather than leave the compositor to place it, so
+        // the honest answer there is no answer.
+        #[cfg(not(target_os = "linux"))]
+        let anchor = Some(TrayAnchor {
+            x: rect.position.x,
+            y: rect.position.y,
+            width: f64::from(rect.size.width),
+            height: f64::from(rect.size.height),
+        });
+        #[cfg(target_os = "linux")]
+        let anchor = {
+            let _ = rect;
+            None
+        };
+        // Every click the host delivers, before anything is done with
+        // it. A tray host is free to turn one activation into two
+        // events, and from the panel's side that is indistinguishable
+        // from an auto-hide: it opens and is gone. Two of these lines
+        // milliseconds apart is the whole diagnosis.
+        tracing::info!("tray click received");
+        deliver(TrayAction::Toggle(anchor));
+    }));
 }
 
 /// Building the tray once a StatusNotifier host is on the session bus.
@@ -727,65 +751,74 @@ fn try_build_tray(cx: &mut App) -> bool {
 /// and a desktop that never grows a tray host just keeps one idle thread.
 #[cfg(target_os = "linux")]
 mod sni {
-    use super::try_build_tray;
-    use gpui::App;
+    use super::{Deliver, TrayAction};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
 
     const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 
-    /// Tries after each appearance of a host: at once, then twice more in
-    /// case the host took its name a moment before it took calls. Past
-    /// that the tray waits for the host's next appearance (a bar restart)
-    /// rather than spinning against one that keeps refusing.
+    /// Asks for a build after each appearance of a host: at once, then
+    /// twice more in case the host took its name a moment before it took
+    /// calls. Past that the tray waits for the host's next appearance (a
+    /// bar restart) rather than spinning against one that keeps refusing.
     const RETRY_AFTER: [Duration; 3] = [
         Duration::ZERO,
         Duration::from_secs(2),
         Duration::from_secs(10),
     ];
 
-    pub(super) fn build_when_a_host_appears(cx: &mut App) {
-        let (tx, rx) = smol::channel::unbounded::<()>();
+    /// Whether the tray is built, for the watcher thread: the tray itself
+    /// is kept on a thread this one cannot see.
+    pub(super) static BUILT: AtomicBool = AtomicBool::new(false);
+
+    fn built() -> bool {
+        BUILT.load(Ordering::Acquire)
+    }
+
+    pub(super) fn build_when_a_host_appears(deliver: Deliver) {
         thread::spawn(move || {
-            if let Err(e) = watch(&tx) {
+            if let Err(e) = watch(&deliver) {
                 tracing::warn!(error = %e, "cannot watch the session bus for a tray host");
             }
         });
         tracing::info!("no tray host yet; the tray is built when one appears");
-        cx.spawn(async move |cx| {
-            while rx.recv().await.is_ok() {
-                for delay in RETRY_AFTER {
-                    if !delay.is_zero() {
-                        cx.background_executor().timer(delay).await;
-                    }
-                    if cx.update(try_build_tray) {
-                        tracing::info!("tray built after a tray host appeared");
-                        // Dropping `rx` ends the watcher thread at the
-                        // next name change it sees.
-                        return;
-                    }
-                }
-                tracing::warn!("a tray host is on the bus but the tray still failed");
-            }
-        })
-        .detach();
     }
 
-    /// One message per appearance of a watcher: now, if one is already
-    /// there, then on every new owner. Subscribes before it asks, or a
-    /// host that took the name between the failed build and this call
-    /// would never be heard of. Blocks for as long as the bus lives.
-    fn watch(tx: &smol::channel::Sender<()>) -> zbus::Result<()> {
+    /// One round of [`RETRY_AFTER`] for one appearance of a host. True
+    /// once the tray is built — each build happens on the thread that
+    /// keeps the tray, so this only asks and then looks.
+    fn ask(deliver: &Deliver) -> bool {
+        for delay in RETRY_AFTER {
+            thread::sleep(delay);
+            if built() {
+                return true;
+            }
+            deliver(TrayAction::HostAppeared);
+        }
+        built()
+    }
+
+    /// A round of asking per appearance of a watcher: now, if one is
+    /// already there, then on every new owner, until the tray is built.
+    /// Subscribes before it asks, or a host that took the name between the
+    /// failed build and this call would never be heard of. Blocks for as
+    /// long as the bus lives or the tray is missing.
+    fn watch(deliver: &Deliver) -> zbus::Result<()> {
         let conn = zbus::blocking::Connection::session()?;
         let dbus = zbus::blocking::fdo::DBusProxy::new(&conn)?;
         let changes = dbus.receive_name_owner_changed_with_args(&[(0, WATCHER)])?;
         let name = zbus::names::BusName::try_from(WATCHER)?;
-        if dbus.name_has_owner(name)? && tx.send_blocking(()).is_err() {
+        if dbus.name_has_owner(name)? && ask(deliver) {
             return Ok(());
         }
         for change in changes {
+            // The last round's last build may have held after it looked.
+            if built() {
+                return Ok(());
+            }
             let args = change.args()?;
-            if args.new_owner.is_some() && tx.send_blocking(()).is_err() {
+            if args.new_owner.is_some() && ask(deliver) {
                 return Ok(());
             }
         }

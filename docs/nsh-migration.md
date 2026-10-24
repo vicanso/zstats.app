@@ -50,9 +50,11 @@
 - **1a 纯计算移出视图（**已完成**，2026-10-24）。** 跨页面共用的图表几何（`overview.rs` 的分桶、坐标轴规则、参考线与刻度的时机、柱槽、单调三次曲线）连同 13 个测试移到共享的 `chart.rs`。**范围调整**：各页自己的纯逻辑（`processes::fit_rows`、`overview::notice` 等）不在这一步搬，而是在阶段 4 移植那一页时一起搬——现在就把每页都拆一遍，等于提前改动全部 gpui 页面，风险大而没有收益。
 - **1b 颜色与几何（**已完成**，2026-10-24）。** 共享的 `color.rs`（自有 `Rgba`，字段和 `rgb`/`rgba` 构造函数与 gpui、NSH 的同名同义）和 `palette.rs`（配色方案的选择、全部 token 的取值、Omarchy 的派生，以及原来写在 `theme.rs` 里的设计理由）；`theme.rs` 留在 gpui 前端，变成一层转换（函数名与返回类型不变，视图零改动），外加为 gpui-kit 生成的主题 JSON。共享的 `geom.rs`（点、尺寸、矩形，坐标约定与 gpui 相同，`contains` 的边界规则也一样）；`placement.rs` 改用它并整体共享，屏幕列表和兜底值改为参数（`below_tray`），gpui 的取法留在原地的 `bounds_below_tray`；`TrayAnchor` 随之搬进 `placement.rs`，`state` 重新导出。`omarchy.rs` 随颜色类型一起共享。NSH 宿主已改用 `placement::below_tray` 和 `palette`，删掉了原型时期的单屏定位和手写色值。
 - **1c 状态（**已完成**，2026-10-24）。** 分两步。**1c-1**：gpui 的界面句柄（每页的滚动句柄、行区域的滚动句柄、两个搜索输入框、完整列表的 `ListState`、三个窗口句柄）搬出状态，放进 gpui 前端的 `gpui_ui.rs`——一个主线程上的 thread-local，因为视图是只接收状态的纯函数，手里没有 `App`；视图签名一个没改。状态里留下两个前端都要知道的：搜索开没开、写了什么（`open_/close_/set_*_filter_text`），完整列表显示的是哪一组行（`FullScanData::rows`，gpui 的列表只在它变了时回到顶部），窗口位置改用 `geom::Rect`。**1c-2**：状态方法从 `Context<Self>` 改接 `&mut dyn Effects`（`state/effects.rs`：`changed`、`background`、`sync_tray`、`fit_panel`、`storage_window_open`）；gpui 前端为 `Context<ZStatsAppState>` 实现它，所以视图里几百处 `state.foo(.., cx)` 一处没改。19 处 `cx.spawn` 改成后台线程加 `Reply`：16 处一次性任务，4 处边做边汇报（磁盘分析三处、重复文件一处），下载更新改成一个任务里依次汇报进度、失败、开始安装、装完。采集节奏交给状态自己持有，不再读 gpui 全局。状态模块整体共享，只开 `nsh` 也能编译；一条编译期断言保证 `ZStatsAppState` 是 `Send`。
-- **1d 采集、托盘、通知。** `metrics.rs` 把 tick 交给与前端无关的 channel；`tray.rs` 里决定托盘外观的逻辑（`face_for`）与 gpui 分开；`notify.rs` 的横幅点击改成回调。
+- **1d 采集、托盘、通知（**已完成**，2026-10-24）。** `metrics::spawn` 起采集线程，返回 `Collector`（采集节奏、tick 的 channel、启动时读到的 `config.toml`）；每个 tick 对状态做的事——`ingest`、三道横幅闸门和它们的日志、几类观察者的提示、托盘、面板高度——收进共享的 `ZStatsAppState::on_tick`，异常进程的扫描收进 `start_abnormal_scan`（后台线程加 `Reply`）。gpui 的 `metrics::start` 只剩接线。`notify::start` 不再接 `App`，返回横幅点击的 channel，点了打开什么由前端决定。`tray.rs` 整体共享：托盘句柄从 gpui 的 `Global` 改成主线程上的 thread-local，`sync`、`anchor`、`rebuild_menu` 不再要 `cx`；点击和菜单通过 `tray::start(deliver)` 交来的处理函数变成 `TrayAction` 交给前端。事件改用 tray-icon 的 `set_event_handler`（一次性设定，第一次事件之前必须设好），原来两条阻塞在接收端上转发事件的线程没了。Linux 上等托盘宿主出现的那条线程不能碰主线程上的托盘，改成发 `TrayAction::HostAppeared` 请前端在主线程重建，重试节奏照旧（0 / 2 / 10 秒），靠一个原子标志知道建没建成。NSH 宿主删掉了自己手写的托盘，改用共享的：同样的脸、菜单和点击处理，菜单里的“磁盘空间”在 NSH 里暂时只记一行日志（阶段 4）。
 
 **验收**：gpui 版行为不变（测试全过，关键页面截图与改动前一致）；`nsh` 构建能用上完整的核心。
+
+**1d 结果**：默认构建 438 个测试、只开 `nsh` 的构建 344 个（托盘的测试现在不带 gpui 也在跑）；`make lint` 两种配置都过。`tray.rs` 只在 Linux 上编译的部分（等托盘宿主的线程、`host_appeared`、墨色），用对调条件编译的办法在 Mac 上过了 clippy 和测试（zbus 临时加进副本的 macOS 依赖）；直接对 Linux 目标交叉检查不可行，`ring` 要 Linux 的 C 编译器。运行时两个前端都实测过，点击都是进程内把鼠标事件交给状态项自己的窗口，不动用户光标——NSH 的 probe 为此加了 `tray` 命令。顺带发现：接着外接显示器时，每块屏的菜单栏上都有一个状态项窗口，只有一个是真的（命中 `TaoTrayTarget`），其余是系统画的副本（`NSStatusItemReplicantImageView`），点副本什么也不会发生。NSH：第一次点击隐藏面板，第二次把它挂在图标正下方（状态项 x=1357、宽 34，面板 x=1195），并成为 key 窗口。gpui（临时钩子、隔离 HOME、`config.toml` 里 `disk = 1.0`）：第一个 tick 就报了启动盘告警（日志来源变成 `zstats::state`，横幅判定 delivered），托盘自动换成磁盘脸，标题 “88G”；两次托盘点击分别隐藏、显示面板，没有 `RefCell already borrowed`。
 
 **1c 结果**：默认构建 438 个测试、只开 `nsh` 的构建 340 个（状态模块的测试现在不带 gpui 也在跑）。运行时用带测试钩子的 gpui 版（临时 worktree、隔离 HOME、不抢焦点）逐项验证：搜索框打开后模拟键盘输入，经输入框的订阅写回状态；完整列表的后台扫描落地并按搜索过滤（806 个进程留下 6 个），截图里输入框和虚拟列表都在；重置清掉搜索和列表；硬件页的空间探测、网络页的监听（裸二进制按预期是“需要安装版”）和流量、历史读取、静默更新检查都走新的后台路径完成；磁盘分析（6 个目录）和重复文件（1 组）两种边做边汇报的任务都正常收尾；切到告警页同步托盘无误。
 
@@ -60,7 +62,7 @@
 
 ## 阶段 2：NSH 宿主
 
-- **macOS**：托盘（复用 `tray.rs` 的外观逻辑）、面板（挂在托盘下、自动隐藏、Pin、拖动改大小、高度随 Overview 形态和提示行变化）、设置窗口、磁盘空间窗口、外观跟随、横幅点击落到告警页、键盘快捷键。
+- **macOS**：托盘（`tray.rs` 已共享；NSH 的状态不在主线程上，`sync_tray` 要拆成两步——持锁算出该显示什么，再交回主线程去换图标和标题）、面板（挂在托盘下、自动隐藏、Pin、拖动改大小、高度随 Overview 形态和提示行变化）、设置窗口、磁盘空间窗口、外观跟随、横幅点击落到告警页、键盘快捷键。
 - **Linux**：GTK 4 面板加 `gtk4-layer-shell` 锚在右上角，ksni 托盘，`ipc.rs` 的单实例和 `--toggle`。CI 装 GTK 4 开发包编译；Omarchy 真机验收。
 - **多窗口共享状态**：`Arc<Mutex<_>>` 加每个引擎一个订阅任务。
 
@@ -85,7 +87,7 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 | 阶段 | 状态 |
 |---|---|
 | 0 双前端骨架 | 完成（2026-10-24） |
-| 1 核心 | 1a、1b、1c 完成；1d 未开始 |
+| 1 核心 | 完成（2026-10-24） |
 | 2 宿主 | 未开始 |
 | 3 基础件 | 未开始 |
 | 4 逐页 | 未开始 |

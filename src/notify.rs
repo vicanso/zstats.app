@@ -399,15 +399,16 @@ fn deliver(banner: &Banner) {
     }
 }
 
-/// Listen for banner clicks. Call once from `main`, on the UI thread,
-/// before the first tick.
+/// Listen for banner clicks. Call once at startup, on the UI thread,
+/// before the first tick. A click arrives on the returned channel; what it
+/// opens is the front end's business (the Alerts tab, in both).
 ///
 /// No identity claim any more: `UNUserNotificationCenter` attributes
 /// banners to the process's real bundle, so the old
 /// `notify_rust::set_application` swizzle (and the `BUNDLE_ID` constant
 /// it had to keep in step with Cargo.toml) retired with the
 /// `NSUserNotification` path.
-pub fn start(cx: &mut gpui::App) {
+pub fn start() -> smol::channel::Receiver<()> {
     let (tx, rx) = smol::channel::unbounded();
     let _ = CLICK.set(tx);
 
@@ -427,15 +428,7 @@ pub fn start(cx: &mut gpui::App) {
             }
         });
     }
-
-    cx.spawn(async move |cx| {
-        while rx.recv().await.is_ok() {
-            // `update` is `()` in this gpui pin — a dropped app just
-            // stops polling this task.
-            cx.update(crate::show_alerts_window);
-        }
-    })
-    .detach();
+    rx
 }
 
 /// Show one system notification for a freshly fired alert.

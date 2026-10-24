@@ -10,6 +10,7 @@ use crate::assets::Assets;
 use crate::ipc;
 use crate::placement::{MIN_WINDOW_SIZE, bounds_below_tray};
 use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
+use crate::tray::TrayAction;
 use crate::{
     active, autostart, awake, font, gpui_ui, i18n, logger, metrics, notify, omarchy, placement,
     prefs, proxy, state, theme, tray, updater, views, watch, webhook,
@@ -567,8 +568,7 @@ pub fn refresh_omarchy_palette(cx: &mut App) {
     apply_ns_appearance();
     // The tray glyph is inked from `palette::is_dark` off macOS, and the
     // new theme may have flipped it.
-    let store = cx.global::<ZStatsGlobalStore>().clone();
-    store.update(cx, |state, cx| tray::sync(cx, state));
+    tray::sync(cx.global::<ZStatsGlobalStore>().read(cx));
 }
 
 /// Point gpui-kit at one pair of theme files, then repaint our own tokens
@@ -895,8 +895,7 @@ pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
     // own appearance flips through `observe_window_appearance` instead
     // and do ride the next tick: they are rare, and that observer only
     // exists while the panel does.
-    let store = cx.global::<ZStatsGlobalStore>().clone();
-    store.update(cx, |state, cx| tray::sync(cx, state));
+    tray::sync(cx.global::<ZStatsGlobalStore>().read(cx));
     repaint(cx);
 }
 
@@ -905,8 +904,7 @@ pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
 /// cadence that is five seconds of a chip that looks ignored.
 pub fn set_tray_pref(pref: prefs::TrayPref, cx: &mut App) {
     prefs::set_tray(pref);
-    let store = cx.global::<ZStatsGlobalStore>().clone();
-    store.update(cx, |state, cx| tray::sync(cx, state));
+    tray::sync(cx.global::<ZStatsGlobalStore>().read(cx));
     repaint(cx);
 }
 
@@ -934,7 +932,7 @@ pub fn set_language_pref(pref: prefs::LanguagePref, cx: &mut App) {
     prefs::set_language(pref);
     i18n::init();
     install_menus(cx);
-    tray::rebuild_menu(cx);
+    tray::rebuild_menu();
     repaint(cx);
 }
 
@@ -2070,6 +2068,24 @@ pub fn show_alerts_window(cx: &mut App) {
 }
 
 /// The tray menu's "Show Window": always shows, never toggles.
+/// What a click on the status item or its menu asks for.
+fn on_tray(action: TrayAction, cx: &mut App) {
+    match action {
+        TrayAction::Toggle(anchor) => toggle_main_window(cx, anchor),
+        TrayAction::Show => show_main_window(cx),
+        TrayAction::Storage => {
+            // A menu click does not make a menu-bar app active, and a
+            // window opened behind the one in use is not an answer to the
+            // click.
+            cx.activate(true);
+            open_storage_window(cx);
+        }
+        TrayAction::Quit => cx.quit(),
+        #[cfg(target_os = "linux")]
+        TrayAction::HostAppeared => tray::host_appeared(),
+    }
+}
+
 pub fn show_main_window(cx: &mut App) {
     // Drop any pending auto-hide mark so an explicit "show" is never swallowed
     // by the toggle grace period.
@@ -2086,7 +2102,7 @@ pub fn show_main_window(cx: &mut App) {
     // re-lays out whenever anything beside us appears or leaves).
     // `None` on the SNI path, which reports no rect at all — the panel is
     // anchored by the compositor there (`panel_kind`).
-    let anchor = tray::anchor(cx);
+    let anchor = tray::anchor();
     match live_panel_handle(cx) {
         #[cfg(target_os = "macos")]
         Some(handle) => reveal_main_window(cx, handle, anchor),
@@ -2244,8 +2260,28 @@ pub fn run() {
         ]);
         install_menus(cx);
 
-        tray::init_tray(cx);
-        notify::start(cx);
+        let (tray_tx, tray_rx) = smol::channel::unbounded::<TrayAction>();
+        // Unbounded, so the status item's own action never waits on it.
+        tray::start(move |action| {
+            let _ = tray_tx.try_send(action);
+        });
+        cx.spawn(async move |cx| {
+            // Ends on its own: once the app shuts down this task stops
+            // being polled.
+            while let Ok(action) = tray_rx.recv().await {
+                cx.update(|cx| on_tray(action, cx));
+            }
+        })
+        .detach();
+        let clicks = notify::start();
+        cx.spawn(async move |cx| {
+            while clicks.recv().await.is_ok() {
+                // `update` is `()` in this gpui pin — a dropped app just
+                // stops polling this task.
+                cx.update(show_alerts_window);
+            }
+        })
+        .detach();
         // Before the collector, so the first slow-burn banner of the
         // session can already say whether its subject is in use.
         // One sample at launch, before anything can open the settings
