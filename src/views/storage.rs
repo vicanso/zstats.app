@@ -43,6 +43,7 @@ use crate::finder;
 use crate::font;
 use crate::format;
 use crate::i18n;
+use crate::opener;
 use crate::prefs;
 use crate::state::{
     DiskAnalysis, DupeProgress, DupeSearch, Expansion, StorageTab, ZStatsAppState,
@@ -1409,7 +1410,7 @@ fn fda_hint(state: &ZStatsAppState) -> Option<AnyElement> {
                     .ghost()
                     .xsmall()
                     .label(i18n::tr("disk.ana_fda_open"))
-                    .on_click(|_, _window, _cx| super::disk::open_full_disk_access()),
+                    .on_click(|_, _window, _cx| opener::full_disk_access_settings()),
             )
             .into_any_element(),
     )

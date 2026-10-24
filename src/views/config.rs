@@ -17,7 +17,6 @@
 //! link), and About (version, commit, arch from `crate::about`).
 
 use super::widgets;
-use crate::about;
 use crate::alerttpl;
 // Only the Permissions nav icon rides `CustomIconName`, and that page is
 // macOS.
@@ -28,14 +27,12 @@ use crate::cachepreset;
 use crate::cleanhints;
 use crate::confirm;
 use crate::font;
-use crate::format;
 use crate::i18n;
+use crate::opener;
 use crate::prefs;
 pub use crate::settingspage::SettingsSection;
-use crate::settingspage::{self, Autostart};
-use crate::state::{
-    CachesSync, HintsSync, TemplateSync, UpdateStatus, ZStatsAppState, ZStatsGlobalStore,
-};
+use crate::settingspage::{self, Autostart, UpdateAction};
+use crate::state::{CachesSync, HintsSync, TemplateSync, ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use crate::updater;
 use gpui::Entity;
@@ -48,17 +45,6 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Icon, IconName, Sizable, h_flex, v_flex};
-use rust_i18n::t;
-// The next four serve the Full Disk Access probe alone, which is a
-// TCC question and does not exist off macOS.
-#[cfg(target_os = "macos")]
-use std::env;
-#[cfg(target_os = "macos")]
-use std::fs;
-#[cfg(target_os = "macos")]
-use std::path::Path;
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicU8, Ordering};
 use zstats::CollectorConfig;
 
 /// The nav row's icon. Settings2 on Advanced is where config.toml's own
@@ -110,7 +96,7 @@ pub fn render(
 /// the app never touches the permission itself.
 #[cfg(target_os = "macos")]
 fn permissions_card() -> AnyElement {
-    let granted = full_disk_access_granted();
+    let granted = settingspage::full_disk_access_granted();
     let status = div()
         .text_size(px(11.))
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -149,56 +135,12 @@ fn permissions_card() -> AnyElement {
                         .text_size(px(11.))
                         .text_color(theme::text())
                         .hover(|d| d.bg(theme::surface_raised()))
-                        .on_click(|_, _window, _cx| super::disk::open_full_disk_access())
+                        .on_click(|_, _window, _cx| opener::full_disk_access_settings())
                         .child(i18n::tr("config.perm_open")),
                 ),
             )
         })
         .into_any_element()
-}
-
-/// Last Full Disk Access probe. Distinct from the real 0/1 so the first
-/// Permissions paint before [`refresh_full_disk_access`] still asks once
-/// rather than drawing "not granted" as a guess.
-#[cfg(target_os = "macos")]
-const FDA_UNREAD: u8 = u8::MAX;
-#[cfg(target_os = "macos")]
-static FDA: AtomicU8 = AtomicU8::new(FDA_UNREAD);
-
-/// Re-read Full Disk Access. Called when Permissions is selected and
-/// when the settings window becomes key while that page is showing —
-/// coming back from the system pane. Not per frame: `open(TCC.db)` is
-/// a permission check, and the settings window must not follow the
-/// collector tick.
-#[cfg(target_os = "macos")]
-pub fn refresh_full_disk_access() {
-    let granted = probe_full_disk_access();
-    FDA.store(u8::from(granted), Ordering::Relaxed);
-}
-
-#[cfg(target_os = "macos")]
-fn full_disk_access_granted() -> bool {
-    match FDA.load(Ordering::Relaxed) {
-        FDA_UNREAD => {
-            refresh_full_disk_access();
-            FDA.load(Ordering::Relaxed) == 1
-        }
-        n => n == 1,
-    }
-}
-
-/// Opening the TCC database itself requires Full Disk Access and —
-/// unlike probing user data — never shows a prompt. The failed attempt
-/// has a side effect we want: macOS registers this app in the Full Disk
-/// Access list, so the Settings pane offers a ready-made toggle instead
-/// of demanding a manual "+".
-#[cfg(target_os = "macos")]
-fn probe_full_disk_access() -> bool {
-    let Ok(home) = env::var("HOME") else {
-        return false;
-    };
-    fs::File::open(Path::new(&home).join("Library/Application Support/com.apple.TCC/TCC.db"))
-        .is_ok()
 }
 
 /// The thresholds, and the per-subject rules written from alert cards.
@@ -264,13 +206,6 @@ fn update_btn(id: &'static str, accent: bool) -> Stateful<Div> {
         .px(px(10.))
         .text_size(px(11.))
         .text_color(theme::text())
-}
-
-/// How full the download button's bar is. `None` when the server never
-/// sent a length — the label then reads "3.2 MB" with no total, and a
-/// bar with no denominator would have to invent one.
-fn download_fraction(received: u64, total: u64) -> Option<f32> {
-    (total > 0).then(|| received as f32 / total as f32)
 }
 
 /// The download button, whose fill *is* the progress bar: the same
@@ -437,135 +372,22 @@ fn update_notes_box(notes: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn nonempty_notes(notes: &str) -> Option<&str> {
-    let trimmed = notes.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
-}
-
 /// "Check for updates" — one query of the latest (non-prerelease)
 /// release, a version compare, and a link. The check button is full
 /// width; finding a newer tag *replaces* it with download / release-page
 /// so the actions never share a row with the caption. Installing stays
 /// a user act on the signed DMG.
 fn update_row(state: &ZStatsAppState) -> AnyElement {
-    enum Action {
-        Check {
-            enabled: bool,
-        },
-        Install {
-            version: String,
-        },
-        Unskip,
-        Busy {
-            /// `None` while the server has not said how big the file is —
-            /// no bar rather than a made-up one.
-            progress: Option<f32>,
-        },
-        /// The in-place install landed: quit and reopen the bundle.
-        Restart,
-        /// The fallback landed a drag window instead: quitting is the
-        /// most this app can contribute to the manual install.
-        Quit,
-    }
-
-    let (caption, action, notes): (Option<String>, Action, Option<&str>) =
-        match state.update_status() {
-            // No check ran this session, but the silent one has a
-            // finding on file: surface it ready to act on — the gear's
-            // dot led here, so the door must not play dumb and demand a
-            // re-check. Notes are not retained by the silent check;
-            // entering About triggers a real one that fills them in.
-            None => match (state.update_nudge(), state.update_ignored()) {
-                (Some(v), _) => (
-                    Some(t!("config.update_newer", v = v).to_string()),
-                    Action::Install {
-                        version: v.to_string(),
-                    },
-                    None,
-                ),
-                // Skipped, and it still applies: say so and offer the
-                // way back, rather than going blank and leaving the
-                // click that got here looking inert.
-                (None, Some(v)) => (
-                    Some(t!("config.update_ignored", v = v).to_string()),
-                    Action::Unskip,
-                    None,
-                ),
-                (None, None) => (None, Action::Check { enabled: true }, None),
-            },
-            Some(UpdateStatus::Checking) => (None, Action::Check { enabled: false }, None),
-            Some(UpdateStatus::Done(updater::UpdateCheck::UpToDate)) => (
-                Some(i18n::tr("config.update_latest")),
-                Action::Check { enabled: true },
-                None,
-            ),
-            Some(UpdateStatus::Done(updater::UpdateCheck::Failed(e))) => (
-                Some(t!("config.update_failed", e = e.as_str()).to_string()),
-                Action::Check { enabled: true },
-                None,
-            ),
-            Some(UpdateStatus::Done(updater::UpdateCheck::Newer { version, notes })) => (
-                Some(t!("config.update_newer", v = version.as_str()).to_string()),
-                Action::Install {
-                    version: version.clone(),
-                },
-                nonempty_notes(notes),
-            ),
-            Some(UpdateStatus::Downloading {
-                received,
-                total,
-                notes,
-                ..
-            }) => (
-                Some(if *total > 0 {
-                    t!(
-                        "config.update_downloading",
-                        got = format::memory(*received),
-                        total = format::memory(*total)
-                    )
-                    .to_string()
-                } else {
-                    t!(
-                        "config.update_downloading_plain",
-                        got = format::memory(*received)
-                    )
-                    .to_string()
-                }),
-                Action::Busy {
-                    progress: download_fraction(*received, *total),
-                },
-                nonempty_notes(notes),
-            ),
-            Some(UpdateStatus::Installing { notes }) => (
-                Some(i18n::tr("config.update_installing")),
-                Action::Busy { progress: None },
-                nonempty_notes(notes),
-            ),
-            Some(UpdateStatus::Installed { manual: false }) => {
-                (Some(i18n::tr("config.update_ready")), Action::Restart, None)
-            }
-            Some(UpdateStatus::Installed { manual: true }) => (
-                Some(i18n::tr("config.update_installed")),
-                Action::Quit,
-                None,
-            ),
-            Some(UpdateStatus::DownloadFailed {
-                version,
-                error,
-                notes,
-            }) => (
-                Some(t!("config.update_dl_failed", e = error.as_str()).to_string()),
-                Action::Install {
-                    version: version.clone(),
-                },
-                nonempty_notes(notes),
-            ),
-        };
-
+    let settingspage::UpdateView {
+        caption,
+        show_caption,
+        action,
+        notes,
+    } = settingspage::update_view(state);
     let actions = match action {
-        Action::Check { enabled } => update_check_btn(enabled),
-        Action::Install { version } => update_install_btns(version),
-        Action::Unskip => update_btn("about-update-unskip", true)
+        UpdateAction::Check { enabled } => update_check_btn(enabled),
+        UpdateAction::Install { version } => update_install_btns(version),
+        UpdateAction::Unskip => update_btn("about-update-unskip", true)
             .child(i18n::tr("config.update_unskip"))
             .w_full()
             .hover(|d| d.bg(theme::surface_raised()))
@@ -575,10 +397,10 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
                     .update(cx, |state, cx| state.unignore_update(cx));
             })
             .into_any_element(),
-        Action::Busy { progress } => {
+        UpdateAction::Busy { progress } => {
             update_progress_btn(caption.clone().unwrap_or_default(), progress)
         }
-        Action::Restart => update_btn("about-update-restart", true)
+        UpdateAction::Restart => update_btn("about-update-restart", true)
             .child(i18n::tr("config.update_restart"))
             .w_full()
             .hover(|d| d.bg(theme::surface_raised()))
@@ -587,20 +409,13 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
                 cx.quit();
             })
             .into_any_element(),
-        Action::Quit => update_btn("about-update-quit", true)
+        UpdateAction::Quit => update_btn("about-update-quit", true)
             .child(i18n::tr("config.update_quit"))
             .w_full()
             .hover(|d| d.bg(theme::surface_raised()))
             .on_click(|_, _window, cx| cx.quit())
             .into_any_element(),
     };
-
-    // During download and install the caption is the button label
-    // itself — don't repeat it above.
-    let show_caption = !matches!(
-        state.update_status(),
-        Some(UpdateStatus::Downloading { .. }) | Some(UpdateStatus::Installing { .. })
-    );
 
     v_flex()
         .w_full()
@@ -618,7 +433,7 @@ fn update_row(state: &ZStatsAppState) -> AnyElement {
             col.children(caption.map(|text| div().flex_none().child(update_caption(text))))
         })
         .child(div().flex_none().child(actions))
-        .children(notes.map(update_notes_box))
+        .children(notes.as_deref().map(update_notes_box))
         .into_any_element()
 }
 
@@ -633,14 +448,7 @@ const MIN_ABOUT_HEIGHT: f32 = 360.;
 /// notes keep their natural size instead of stretching an empty inset
 /// box to the window's bottom edge.
 fn about_card(state: &ZStatsAppState, body_height: f32) -> AnyElement {
-    let rows = [
-        (
-            i18n::tr("config.about_version"),
-            about::version().to_string(),
-        ),
-        (i18n::tr("config.about_commit"), about::commit().to_string()),
-        (i18n::tr("config.about_arch"), about::architecture()),
-    ];
+    let rows = settingspage::about_rows();
     widgets::list_shell()
         .max_h(px(body_height.max(MIN_ABOUT_HEIGHT)))
         // The identity block a macOS About view leads with: the app icon
@@ -2095,21 +1903,4 @@ fn setting_chips(
                 .child(label)
         }))
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The bar is the download's only quantitative claim, so it has to
-    /// come from the same two numbers the label already shows — and a
-    /// server that sent no length must produce no bar rather than a
-    /// guess.
-    #[test]
-    fn download_fraction_tracks_the_bytes_and_declines_to_guess() {
-        assert_eq!(download_fraction(0, 6_600_000), Some(0.0));
-        assert_eq!(download_fraction(3_300_000, 6_600_000), Some(0.5));
-        assert_eq!(download_fraction(6_600_000, 6_600_000), Some(1.0));
-        assert_eq!(download_fraction(1_000, 0), None, "no length, no bar");
-    }
 }

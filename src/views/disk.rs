@@ -12,8 +12,6 @@ use crate::format;
 use crate::hardware;
 use crate::hot;
 use crate::i18n;
-#[cfg(target_os = "macos")]
-use crate::opener;
 use crate::state::{ZStatsAppState, ZStatsGlobalStore};
 use crate::theme;
 use gpui::prelude::FluentBuilder;
@@ -209,14 +207,6 @@ fn space_line(state: &ZStatsAppState) -> Option<AnyElement> {
             .child(line)
             .into_any_element(),
     )
-}
-
-/// Deep-link into System Settings → Privacy & Security → Full Disk
-/// Access. Navigation only — granting stays a user act in the system UI.
-#[cfg(target_os = "macos")]
-pub(super) fn open_full_disk_access() {
-    let _ =
-        opener::open(["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]);
 }
 
 /// Eject, on a removable volume — the header's one control there. A

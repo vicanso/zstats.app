@@ -13,7 +13,7 @@ use crate::state::{TrayAnchor, ZStatsAppState, ZStatsGlobalStore};
 use crate::tray::TrayAction;
 use crate::{
     active, autostart, awake, font, gpui_ui, i18n, logger, metrics, notice, notify, omarchy,
-    placement, prefs, proxy, state, theme, tray, updater, views, watch, webhook,
+    placement, prefs, proxy, settingspage, state, theme, tray, updater, views, watch, webhook,
 };
 #[cfg(target_os = "macos")]
 use crate::{appkit, dock, window_ext};
@@ -960,7 +960,7 @@ impl SettingsWindow {
     #[cfg(target_os = "macos")]
     fn refresh_permissions_probe(&self) {
         if self.section == views::config::SettingsSection::Permissions {
-            views::config::refresh_full_disk_access();
+            settingspage::refresh_full_disk_access();
         }
     }
 
@@ -1162,7 +1162,7 @@ fn settings_nav(
                                 this.scroll = ScrollHandle::new();
                                 #[cfg(target_os = "macos")]
                                 if item == views::config::SettingsSection::Permissions {
-                                    views::config::refresh_full_disk_access();
+                                    settingspage::refresh_full_disk_access();
                                 }
                                 // Entering About with a silent finding on
                                 // file: run a real check — the silent one

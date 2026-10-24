@@ -5,11 +5,22 @@
 //! too, and says why each row is the way it is.
 
 use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
-use crate::state::{CachesSync, HintsSync, TemplateSync, WebhookTest};
-use crate::{alerttpl, autostart, cachepreset, cleanhints, finder, format, i18n, omarchy, opener};
+use crate::state::{
+    CachesSync, HintsSync, TemplateSync, UpdateStatus, WebhookTest, ZStatsAppState,
+};
+use crate::{
+    about, alerttpl, autostart, cachepreset, cleanhints, finder, format, i18n, omarchy, opener,
+    updater,
+};
 use rust_i18n::t;
 use std::collections::BTreeMap;
+#[cfg(target_os = "macos")]
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::{env, fs};
 use zstats::CollectorConfig;
 use zstats::alerts::ActiveThresholds;
 use zstats::settings::{AlertsConfig, FileConfig, PressureAlert};
@@ -767,6 +778,210 @@ pub fn webhook_can_test(valid: bool, test: Option<&WebhookTest>) -> bool {
     valid && !matches!(test, Some(WebhookTest::Sending)) && !prefs::webhook().is_empty()
 }
 
+// --- Permissions ------------------------------------------------------------------
+
+/// Last Full Disk Access probe. Distinct from the real 0/1 so the first
+/// Permissions paint before [`refresh_full_disk_access`] still asks once
+/// rather than drawing "not granted" as a guess.
+#[cfg(target_os = "macos")]
+const FDA_UNREAD: u8 = u8::MAX;
+#[cfg(target_os = "macos")]
+static FDA: AtomicU8 = AtomicU8::new(FDA_UNREAD);
+
+/// Re-read Full Disk Access. Called when Permissions is selected and
+/// when the settings window becomes key while that page is showing —
+/// coming back from the system pane. Not per frame: `open(TCC.db)` is
+/// a permission check, and the settings window must not follow the
+/// collector tick.
+#[cfg(target_os = "macos")]
+pub fn refresh_full_disk_access() {
+    let granted = probe_full_disk_access();
+    FDA.store(u8::from(granted), Ordering::Relaxed);
+}
+
+/// Whether Full Disk Access is granted, as last probed.
+#[cfg(target_os = "macos")]
+pub fn full_disk_access_granted() -> bool {
+    match FDA.load(Ordering::Relaxed) {
+        FDA_UNREAD => {
+            refresh_full_disk_access();
+            FDA.load(Ordering::Relaxed) == 1
+        }
+        n => n == 1,
+    }
+}
+
+/// Opening the TCC database itself requires Full Disk Access and —
+/// unlike probing user data — never shows a prompt. The failed attempt
+/// has a side effect we want: macOS registers this app in the Full Disk
+/// Access list, so the Settings pane offers a ready-made toggle instead
+/// of demanding a manual "+".
+#[cfg(target_os = "macos")]
+fn probe_full_disk_access() -> bool {
+    let Ok(home) = env::var("HOME") else {
+        return false;
+    };
+    fs::File::open(Path::new(&home).join("Library/Application Support/com.apple.TCC/TCC.db"))
+        .is_ok()
+}
+
+// --- About ---------------------------------------------------------------------------
+
+/// The About page's facts: version, commit, architecture.
+pub fn about_rows() -> Vec<(String, String)> {
+    vec![
+        (
+            i18n::tr("config.about_version"),
+            about::version().to_string(),
+        ),
+        (i18n::tr("config.about_commit"), about::commit().to_string()),
+        (i18n::tr("config.about_arch"), about::architecture()),
+    ]
+}
+
+/// What the update row offers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateAction {
+    /// "Check for updates", inert while a check runs
+    Check { enabled: bool },
+    /// Download (accent) and Skip, for this version
+    Install { version: String },
+    /// The skipped version still applies: the way back
+    Unskip,
+    /// Downloading or installing: the button is the progress bar, `None`
+    /// while the server has not said how big the file is — no bar rather
+    /// than a made-up one
+    Busy { progress: Option<f32> },
+    /// The in-place install landed: quit and reopen the bundle
+    Restart,
+    /// The fallback landed a drag window instead: quitting is the most
+    /// this app can contribute to the manual install
+    Quit,
+}
+
+/// The update row as it stands: the sentence over the buttons (the
+/// buttons' own label while downloading or installing, so not shown
+/// twice), the action, and the release notes while there are any.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateView {
+    pub caption: Option<String>,
+    pub show_caption: bool,
+    pub action: UpdateAction,
+    pub notes: Option<String>,
+}
+
+/// The update row for the store's `update_status`. With no check this
+/// session but a silent finding on file, it is shown ready to act on —
+/// the gear's dot led here, so the door must not play dumb and demand a
+/// re-check (notes come with the real check that entering About starts);
+/// a skipped release that still applies says so and offers the way back.
+pub fn update_view(state: &ZStatsAppState) -> UpdateView {
+    let notes = |n: &str| nonempty_notes(n).map(str::to_owned);
+    let (caption, action, notes) = match state.update_status() {
+        None => match (state.update_nudge(), state.update_ignored()) {
+            (Some(v), _) => (
+                Some(t!("config.update_newer", v = v).to_string()),
+                UpdateAction::Install {
+                    version: v.to_string(),
+                },
+                None,
+            ),
+            (None, Some(v)) => (
+                Some(t!("config.update_ignored", v = v).to_string()),
+                UpdateAction::Unskip,
+                None,
+            ),
+            (None, None) => (None, UpdateAction::Check { enabled: true }, None),
+        },
+        Some(UpdateStatus::Checking) => (None, UpdateAction::Check { enabled: false }, None),
+        Some(UpdateStatus::Done(updater::UpdateCheck::UpToDate)) => (
+            Some(i18n::tr("config.update_latest")),
+            UpdateAction::Check { enabled: true },
+            None,
+        ),
+        Some(UpdateStatus::Done(updater::UpdateCheck::Failed(e))) => (
+            Some(t!("config.update_failed", e = e.as_str()).to_string()),
+            UpdateAction::Check { enabled: true },
+            None,
+        ),
+        Some(UpdateStatus::Done(updater::UpdateCheck::Newer { version, notes: n })) => (
+            Some(t!("config.update_newer", v = version.as_str()).to_string()),
+            UpdateAction::Install {
+                version: version.clone(),
+            },
+            notes(n),
+        ),
+        Some(UpdateStatus::Downloading {
+            received,
+            total,
+            notes: n,
+        }) => (
+            Some(if *total > 0 {
+                t!(
+                    "config.update_downloading",
+                    got = format::memory(*received),
+                    total = format::memory(*total)
+                )
+                .to_string()
+            } else {
+                t!(
+                    "config.update_downloading_plain",
+                    got = format::memory(*received)
+                )
+                .to_string()
+            }),
+            UpdateAction::Busy {
+                progress: download_fraction(*received, *total),
+            },
+            notes(n),
+        ),
+        Some(UpdateStatus::Installing { notes: n }) => (
+            Some(i18n::tr("config.update_installing")),
+            UpdateAction::Busy { progress: None },
+            notes(n),
+        ),
+        Some(UpdateStatus::Installed { manual: false }) => (
+            Some(i18n::tr("config.update_ready")),
+            UpdateAction::Restart,
+            None,
+        ),
+        Some(UpdateStatus::Installed { manual: true }) => (
+            Some(i18n::tr("config.update_installed")),
+            UpdateAction::Quit,
+            None,
+        ),
+        Some(UpdateStatus::DownloadFailed {
+            version,
+            error,
+            notes: n,
+        }) => (
+            Some(t!("config.update_dl_failed", e = error.as_str()).to_string()),
+            UpdateAction::Install {
+                version: version.clone(),
+            },
+            notes(n),
+        ),
+    };
+    UpdateView {
+        show_caption: !matches!(action, UpdateAction::Busy { .. }),
+        caption,
+        action,
+        notes,
+    }
+}
+
+/// How full the download button's bar is. `None` when the server never
+/// sent a length — the label then reads "3.2 MB" with no total, and a
+/// bar with no denominator would have to invent one.
+pub fn download_fraction(received: u64, total: u64) -> Option<f32> {
+    (total > 0).then(|| received as f32 / total as f32)
+}
+
+fn nonempty_notes(notes: &str) -> Option<&str> {
+    let trimmed = notes.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,6 +1034,18 @@ mod tests {
                 .iter()
                 .any(|(label, _)| *label == cpu.setting.lit)
         );
+    }
+
+    /// The bar is the download's only quantitative claim, so it has to
+    /// come from the same two numbers the label already shows — and a
+    /// server that sent no length must produce no bar rather than a
+    /// guess.
+    #[test]
+    fn download_fraction_tracks_the_bytes_and_declines_to_guess() {
+        assert_eq!(download_fraction(0, 6_600_000), Some(0.0));
+        assert_eq!(download_fraction(3_300_000, 6_600_000), Some(0.5));
+        assert_eq!(download_fraction(6_600_000, 6_600_000), Some(1.0));
+        assert_eq!(download_fraction(1_000, 0), None, "no length, no bar");
     }
 
     #[test]

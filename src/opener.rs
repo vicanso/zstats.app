@@ -30,6 +30,12 @@ use std::io;
 use std::process::Command;
 use std::thread;
 
+/// System Settings' Full Disk Access pane: the settings window's
+/// Permissions page and the disk-space window's skipped-folders note.
+pub fn full_disk_access_settings() {
+    let _ = open(["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]);
+}
+
 /// Spawn the platform's launcher with `args` and reap the child
 /// off-thread. The error is the spawn's own (binary missing, fork
 /// failure); the launcher's exit status is deliberately not consulted —
