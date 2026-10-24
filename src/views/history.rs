@@ -9,9 +9,9 @@ use super::processes;
 use super::widgets;
 use crate::assets::CustomIconName;
 use crate::font;
-use crate::format;
 use crate::gpui_ui;
-use crate::history::{self, HistoryShape};
+use crate::history;
+use crate::historylist;
 use crate::i18n;
 use crate::rows;
 use crate::state::{HistoryRange, HistorySort, ZStatsAppState, ZStatsGlobalStore};
@@ -24,12 +24,6 @@ use gpui::{
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{Icon, IconName, Sizable, Size, h_flex, v_flex};
 use rust_i18n::t;
-use std::cmp::Reverse;
-use std::collections::HashMap;
-use std::time::Duration;
-
-/// How many rows to name. Beyond this the tail is all daemons doing their job.
-const TOP_N: usize = 12;
 
 pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
     let range = state.history_range();
@@ -59,40 +53,9 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ];
     }
 
-    // Re-ordered in the view: rank() ships CPU-time order, and the
-    // memory order is a lens over the same rows, not a second dataset.
-    let mut ordered: Vec<_> = rows.iter().collect();
-    match sort {
-        HistorySort::CpuTime => {}
-        HistorySort::PeakMemory => ordered.sort_by_key(|s| Reverse(s.peak_memory_bytes)),
-        // Signed: a process that freed memory sinks below the ones that
-        // held steady, which is the order the question implies.
-        HistorySort::MemoryGrowth => ordered.sort_by_key(|s| Reverse(s.memory_growth_bytes)),
-    }
-    // The bar is relative to the period's biggest — an absolute scale
-    // would be meaningless (a day has 86 400 core-seconds per core).
-    let top = ordered
-        .first()
-        .map_or(1, |s| match sort {
-            HistorySort::CpuTime => s.cpu_time_ms,
-            HistorySort::PeakMemory => s.peak_memory_bytes,
-            HistorySort::MemoryGrowth => s.memory_growth_bytes.max(0) as u64,
-        })
-        .max(1);
-    let hidden = rows.len().saturating_sub(TOP_N);
     let show_all = state.show_all_history();
-    let shown: Vec<_> = ordered
-        .into_iter()
-        .take(if show_all { rows.len() } else { TOP_N })
-        .collect();
-    // Names that more than one shown row carries. Only those rows say
-    // their pid — elsewhere it was a number beside every name on a page
-    // about whole days, where the pid is history; between two "Google
-    // Chrome Helper" rows it is the one thing that tells them apart.
-    let mut name_counts: HashMap<&str, usize> = HashMap::new();
-    for s in &shown {
-        *name_counts.entry(shown_name(s)).or_default() += 1;
-    }
+    let ranked = historylist::ranked(rows, sort, show_all);
+    let (hidden, top) = (ranked.hidden, ranked.top);
     // Today draws each row's band on a shared 00:00 → now axis; the
     // other ranges draw a share meter and have no clock to label.
     let today = rows.iter().any(|s| s.band.is_some());
@@ -102,43 +65,42 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
         ROW_PAD,
     );
 
-    let list =
-        widgets::list_shell()
-            .child(widgets::list_header(
-                // The note this carries used to be a card of its own under
-                // the list. It is a read-once fact about how the ranking
-                // works, which is what an ⓘ beside the title is for (the
-                // Processes header does the same with its CPU basis) — and
-                // moving it out is what lets the list card be exactly one
-                // screen tall, so the header can stay put for real.
-                h_flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .min_w_0()
-                    .child(lens_title(sort, title, state.panel_visit()))
-                    .child(widgets::info_icon(
-                        "history-basis",
-                        i18n::tr("history.about_body"),
-                    )),
-                Some(header_controls(range)),
-            ))
-            .when(today, |list| list.child(band_axis()))
-            .child(
-                // The rows scroll under the header rather than taking the
-                // whole card past the top of the panel — the same pinned
-                // model as the Processes and Apps lists, and the reason is
-                // the same: the range and sort controls live in that header,
-                // and a control you have to scroll back up to reach is a
-                // control you stop using.
-                v_flex()
-                    .id("history-rows")
-                    .track_scroll(&gpui_ui::history_rows_scroll())
-                    .overflow_y_scroll()
-                    .max_h(px(fit.viewport))
-                    .children(shown.into_iter().enumerate().map(|(i, s)| {
-                        let pid = s.pid;
-                        let name = s.name.clone();
-                        v_flex()
+    let list = widgets::list_shell()
+        .child(widgets::list_header(
+            // The note this carries used to be a card of its own under
+            // the list. It is a read-once fact about how the ranking
+            // works, which is what an ⓘ beside the title is for (the
+            // Processes header does the same with its CPU basis) — and
+            // moving it out is what lets the list card be exactly one
+            // screen tall, so the header can stay put for real.
+            h_flex()
+                .items_center()
+                .gap(px(4.))
+                .min_w_0()
+                .child(lens_title(sort, title, state.panel_visit()))
+                .child(widgets::info_icon(
+                    "history-basis",
+                    i18n::tr("history.about_body"),
+                )),
+            Some(header_controls(range)),
+        ))
+        .when(today, |list| list.child(band_axis()))
+        .child(
+            // The rows scroll under the header rather than taking the
+            // whole card past the top of the panel — the same pinned
+            // model as the Processes and Apps lists, and the reason is
+            // the same: the range and sort controls live in that header,
+            // and a control you have to scroll back up to reach is a
+            // control you stop using.
+            v_flex()
+                .id("history-rows")
+                .track_scroll(&gpui_ui::history_rows_scroll())
+                .overflow_y_scroll()
+                .max_h(px(fit.viewport))
+                .children(ranked.shown.iter().copied().enumerate().map(|(i, s)| {
+                    let pid = s.pid;
+                    let name = s.name.clone();
+                    v_flex()
                         .id(row_id(pid, &name))
                         .px(px(widgets::CARD_PAD))
                         // Its share of the region, and the hairline over
@@ -168,157 +130,139 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             h_flex()
                                 .items_start()
                                 .gap(px(10.))
-                                .child(widgets::record_mark(s.pid, &s.name, shown_name(s)))
+                                .child(widgets::record_mark(
+                                    s.pid,
+                                    &s.name,
+                                    historylist::shown_name(s),
+                                ))
                                 .child(
-                                    v_flex().flex_1().min_w_0().child(
-                            h_flex()
-                                .items_baseline()
-                                .justify_between()
-                                .gap(px(8.))
-                                .child(
-                                    h_flex()
+                                    v_flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .items_baseline()
-                                        .gap(px(5.))
-                                        .child(widgets::truncating_name(
-                                            ("hist-name", s.pid as usize),
-                                            shown_name(s).to_string(),
-                                            12.,
-                                            gpui::FontWeight::MEDIUM,
-                                            Hsla::from(theme::text()),
-                                        ))
-                                        // The pid beside the name, only
-                                        // where the name repeats (above).
-                                        // At the title, not in the caption,
-                                        // so the caption stays pure figures;
-                                        // the name truncates and the pid
-                                        // does not — a cut pid is a
-                                        // different number.
-                                        .when(name_counts[shown_name(s)] > 1, |title| {
-                                            title.child(
-                                                div()
-                                                    .flex_none()
-                                                    .text_size(px(9.5))
-                                                    .text_color(theme::text_faint())
-                                                    .child(
-                                                        t!("processes.pid_only", pid = s.pid)
-                                                            .to_string(),
-                                                    ),
-                                            )
-                                        }),
-                                )
-                                // The headline figure is core-time, which shares a
-                                // unit *shape* with the wall-clock minutes below —
-                                // the CPU tag is what keeps "30m" from reading as a
-                                // duration of day.
-                                .child(
-                                    h_flex()
-                                        .flex_none()
-                                        .items_baseline()
-                                        .gap(px(3.))
                                         .child(
-                                            div()
-                                                .font_features(font::tnum())
-                                                .text_size(px(12.))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .text_color(theme::text())
-                                                .child(match sort {
-                                                    HistorySort::CpuTime => {
-                                                        format::core_time(s.cpu_time_ms)
-                                                    }
-                                                    HistorySort::PeakMemory => {
-                                                        format::memory(s.peak_memory_bytes)
-                                                    }
-                                                    HistorySort::MemoryGrowth => {
-                                                        format::memory_signed(s.memory_growth_bytes)
-                                                    }
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(8.5))
-                                                .text_color(theme::tiny_label(theme::text_dim()))
-                                                .child(i18n::tr(match sort {
-                                                    HistorySort::CpuTime => "alerts.kind_cpu",
-                                                    HistorySort::PeakMemory => "history.peak_tag",
-                                                    HistorySort::MemoryGrowth => {
-                                                        "history.growth_tag"
-                                                    }
-                                                })),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .gap(px(8.))
-                                .mt(px(2.))
-                                .text_size(px(10.))
-                                .text_color(theme::text_dim())
-                                .child(
-                                    h_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .items_center()
-                                        .gap(px(6.))
-                                        // Steady is most rows on most days,
-                                        // and a word every row wears says
-                                        // nothing; only the exceptions do.
-                                        .children(
-                                            s.shape
-                                                .filter(|shape| *shape != HistoryShape::Sustained)
-                                                .map(|shape| {
-                                                    shape_pill(
-                                                        ("hist-shape", s.pid as usize),
-                                                        shape,
-                                                        s.peak_cpu_percent,
-                                                        s.span,
-                                                        s.minutes,
-                                                    )
-                                                }),
-                                        )
-                                        .child(
-                                            // Pure figure: the pid lives
-                                            // beside the name now, so the
-                                            // caption carries only the
-                                            // metric the sort is not
-                                            // already headlining.
-                                            div().min_w_0().truncate().child(match sort {
-                                                // Under the growth order the peak is
-                                                // the figure that puts the climb in
-                                                // proportion, same as under CPU time.
-                                                HistorySort::CpuTime
-                                                | HistorySort::MemoryGrowth => t!(
-                                                    "history.mem_only",
-                                                    mem = format::memory(s.peak_memory_bytes)
+                                            h_flex()
+                                                .items_baseline()
+                                                .justify_between()
+                                                .gap(px(8.))
+                                                .child(
+                                                    h_flex()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .items_baseline()
+                                                        .gap(px(5.))
+                                                        .child(widgets::truncating_name(
+                                                            ("hist-name", s.pid as usize),
+                                                            historylist::shown_name(s).to_string(),
+                                                            12.,
+                                                            gpui::FontWeight::MEDIUM,
+                                                            Hsla::from(theme::text()),
+                                                        ))
+                                                        // The pid beside the name, only
+                                                        // where the name repeats (above).
+                                                        // At the title, not in the caption,
+                                                        // so the caption stays pure figures;
+                                                        // the name truncates and the pid
+                                                        // does not — a cut pid is a
+                                                        // different number.
+                                                        .when(ranked.says_pid(s), |title| {
+                                                            title.child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .text_size(px(9.5))
+                                                                    .text_color(theme::text_faint())
+                                                                    .child(
+                                                                        t!(
+                                                                            "processes.pid_only",
+                                                                            pid = s.pid
+                                                                        )
+                                                                        .to_string(),
+                                                                    ),
+                                                            )
+                                                        }),
                                                 )
-                                                .to_string(),
-                                                HistorySort::PeakMemory => t!(
-                                                    "history.cpu_only",
-                                                    cpu = format::core_time(s.cpu_time_ms)
-                                                )
-                                                .to_string(),
-                                            }),
-                                        ),
-                                )
-                                // Peak beside total on purpose: a small peak next to a
-                                // large total is exactly the process this view exists
-                                // to find, and the pairing is what makes that legible.
-                                .child(
-                                    // A sentence with two figures in
-                                    // it, neither of which moves while
-                                    // it is read: the page's face.
-                                    font::tabular(div()).flex_none().min_w_0().truncate().child(
-                                        t!(
-                                            "history.peak",
-                                            cpu = format::pct(s.peak_cpu_percent),
-                                            minutes = s.minutes
+                                                // The headline figure is core-time, which shares a
+                                                // unit *shape* with the wall-clock minutes below —
+                                                // the CPU tag is what keeps "30m" from reading as a
+                                                // duration of day.
+                                                .child(
+                                                    h_flex()
+                                                        .flex_none()
+                                                        .items_baseline()
+                                                        .gap(px(3.))
+                                                        .child(
+                                                            div()
+                                                                .font_features(font::tnum())
+                                                                .text_size(px(12.))
+                                                                .font_weight(
+                                                                    gpui::FontWeight::SEMIBOLD,
+                                                                )
+                                                                .text_color(theme::text())
+                                                                .child(historylist::headline(
+                                                                    s, sort,
+                                                                )),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(8.5))
+                                                                .text_color(theme::tiny_label(
+                                                                    theme::text_dim(),
+                                                                ))
+                                                                .child(historylist::headline_tag(
+                                                                    sort,
+                                                                )),
+                                                        ),
+                                                ),
                                         )
-                                        .to_string(),
-                                    ),
-                                ),
-                        ),
+                                        .child(
+                                            h_flex()
+                                                .justify_between()
+                                                .gap(px(8.))
+                                                .mt(px(2.))
+                                                .text_size(px(10.))
+                                                .text_color(theme::text_dim())
+                                                .child(
+                                                    h_flex()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .items_center()
+                                                        .gap(px(6.))
+                                                        // Steady is most rows on most days,
+                                                        // and a word every row wears says
+                                                        // nothing; only the exceptions do.
+                                                        .children(historylist::shape(s).map(
+                                                            |(label, tip)| {
+                                                                shape_pill(
+                                                                    ("hist-shape", s.pid as usize),
+                                                                    label,
+                                                                    tip,
+                                                                )
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            // Pure figure: the pid lives
+                                                            // beside the name now, so the
+                                                            // caption carries only the
+                                                            // metric the sort is not
+                                                            // already headlining.
+                                                            div().min_w_0().truncate().child(
+                                                                historylist::caption(s, sort),
+                                                            ),
+                                                        ),
+                                                )
+                                                // Peak beside total on purpose: a small peak next to a
+                                                // large total is exactly the process this view exists
+                                                // to find, and the pairing is what makes that legible.
+                                                .child(
+                                                    // A sentence with two figures in
+                                                    // it, neither of which moves while
+                                                    // it is read: the page's face.
+                                                    font::tabular(div())
+                                                        .flex_none()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .child(historylist::peak_line(s)),
+                                                ),
+                                        ),
                                 ),
                         )
                         .child(div().mt(px(6.)).child(match &s.band {
@@ -334,32 +278,26 @@ pub fn render(state: &ZStatsAppState) -> Vec<AnyElement> {
                             // Wider windows: no single day to draw, the
                             // share meter stays.
                             None => widgets::meter(
-                                match sort {
-                                    HistorySort::CpuTime => s.cpu_time_ms as f32,
-                                    HistorySort::PeakMemory => s.peak_memory_bytes as f32,
-                                    HistorySort::MemoryGrowth => {
-                                        s.memory_growth_bytes.max(0) as f32
-                                    }
-                                } / top as f32,
+                                historylist::meter_fraction(s, sort, top),
                                 Hsla::from(theme::ink()),
                                 4.,
                             ),
                         }))
                         .into_any_element()
-                    }))
-                    // Inside the card, at the end of the rows — the same chip
-                    // as every other "show more". It was a sentence under the
-                    // card that only said the rows existed.
-                    .when(hidden > 0, |rows| {
-                        rows.child(
-                            h_flex()
-                                .flex_none()
-                                .px(px(widgets::CARD_PAD))
-                                .py(px(8.))
-                                .child(more_chip(hidden, show_all)),
-                        )
-                    }),
-            );
+                }))
+                // Inside the card, at the end of the rows — the same chip
+                // as every other "show more". It was a sentence under the
+                // card that only said the rows existed.
+                .when(hidden > 0, |rows| {
+                    rows.child(
+                        h_flex()
+                            .flex_none()
+                            .px(px(widgets::CARD_PAD))
+                            .py(px(8.))
+                            .child(more_chip(hidden, show_all)),
+                    )
+                }),
+        );
 
     vec![list.into_any_element()]
 }
@@ -453,9 +391,7 @@ const METER_ROW: f32 = BAND_ROW - 8. + 4.;
 /// bands had no axis at all — a lit cell could be placed only by
 /// hovering it. Same width and same lived-day scale as [`band`].
 fn band_axis() -> AnyElement {
-    let now = jiff::Zoned::now();
-    let lived_minutes = now.hour().max(0) as usize * 60 + now.minute().max(0) as usize;
-    let lived = (lived_minutes / history::BAND_BUCKET_MINUTES + 1).min(history::BAND_BUCKETS);
+    let lived = historylist::lived(&jiff::Zoned::now());
     let label = |text: String| {
         div()
             .font_features(font::tnum())
@@ -463,11 +399,6 @@ fn band_axis() -> AnyElement {
             .text_color(theme::text_dim())
             .child(text)
     };
-    // A mark too near either end would collide with its label.
-    let marks = [6usize, 12, 18].into_iter().filter_map(|hour| {
-        let at = (hour * 60 / history::BAND_BUCKET_MINUTES) as f32 / lived as f32;
-        (0.15..0.8).contains(&at).then_some((hour, at))
-    });
     div()
         .mx(px(13.))
         .h(px(AXIS_ROW))
@@ -478,12 +409,11 @@ fn band_axis() -> AnyElement {
                 .left_0()
                 .top_0(),
         )
-        .children(marks.map(|(hour, at)| {
-            label(format!("{hour}:00"))
-                .absolute()
-                .left(relative(at))
-                .top_0()
-        }))
+        .children(
+            historylist::axis_marks(lived)
+                .into_iter()
+                .map(|(mark, at)| label(mark).absolute().left(relative(at)).top_0()),
+        )
         .child(
             label(i18n::tr("history.axis_now"))
                 .absolute()
@@ -491,15 +421,6 @@ fn band_axis() -> AnyElement {
                 .top_0(),
         )
         .into_any_element()
-}
-
-/// What a row is titled: the record's display name where it carries one
-/// (zstats 0.5.3 — "a history that cannot be read against the
-/// notifications it explains is a worse history"), the matched name
-/// otherwise. The ambiguity pids key on this too: ambiguity is about
-/// what is on screen.
-fn shown_name(s: &crate::history::Spender) -> &str {
-    s.display_name.as_deref().unwrap_or(&s.name)
 }
 
 /// One day of a process's recorded half-hours: 00:00 at the left edge,
@@ -514,12 +435,8 @@ fn shown_name(s: &crate::history::Spender) -> &str {
 /// zero (records are conditional — see `history::Band`) and therefore
 /// must not be painted as a value.
 fn band(id: impl Into<ElementId>, cells: &history::Band) -> AnyElement {
-    // Only the lived part of the day: at nine in the morning a fixed
-    // 24-hour axis would read as fifteen hours of mysterious quiet, and
-    // squeeze the real morning into a quarter of the width.
     let now = jiff::Zoned::now();
-    let lived_minutes = now.hour().max(0) as usize * 60 + now.minute().max(0) as usize;
-    let lived = (lived_minutes / history::BAND_BUCKET_MINUTES + 1).min(history::BAND_BUCKETS);
+    let lived = historylist::lived(&now);
     let strip = h_flex()
         .h(px(8.))
         .rounded(px(2.))
@@ -534,122 +451,27 @@ fn band(id: impl Into<ElementId>, cells: &history::Band) -> AnyElement {
         // nearly coincide there), where the white ground was never
         // ambiguous to begin with.
         .bg(theme::trough())
-        .children((0..lived).map(|i| {
-            div()
-                .flex_1()
-                .h_full()
-                .when_some(cells[i], |d, cell: history::BandCell| {
-                    d.bg(Hsla::from(theme::ink()).opacity(band_alpha(cell.peak)))
-                })
-        }));
-    // Hovering spells the lit cells out in clock time — a ~6px cell can
-    // place "around three" but never answer 14:30, and axis labels for
-    // a 320px strip could not either. Any shade counts (the tooltip
-    // explains the picture; see `history::stretches`); a band with
-    // nothing lit has nothing to spell out, and stays a plain strip.
-    let runs = history::stretches(cells, lived);
-    if runs.is_empty() {
-        return strip.into_any_element();
-    }
+        .children(
+            historylist::band_cells(cells, lived)
+                .into_iter()
+                .map(|alpha| {
+                    div().flex_1().h_full().when_some(alpha, |d, alpha| {
+                        d.bg(Hsla::from(theme::ink()).opacity(alpha))
+                    })
+                }),
+        );
     // The same clock `lived` was cut at, so the readout and the strip
     // agree on where "so far" ends within this one frame.
-    let now_clock = format!("{:02}:{:02}", now.hour(), now.minute());
+    let tip = historylist::band_tip(cells, lived, &historylist::now_clock(&now));
+    if tip.is_empty() {
+        return strip.into_any_element();
+    }
     strip
         .id(id)
-        .tooltip(widgets::wrap_tooltip_lines(band_tip(
-            &runs, lived, &now_clock,
-        )))
+        .tooltip(widgets::wrap_tooltip_lines(
+            tip.into_iter().map(SharedString::from).collect(),
+        ))
         .into_any_element()
-}
-
-/// How many stretches the readout names before folding the rest into a
-/// count: enough for a real day's rhythm, short of a tooltip taller
-/// than the panel for a process that flickered all day.
-const TIP_STRETCHES: usize = 8;
-
-/// Which stretches the readout names when a day has more than
-/// [`TIP_STRETCHES`]: the longest, shown in day order. A bursty day is
-/// a pile of single cells around a few real stretches, and taking the
-/// first N by clock spent the whole budget on the morning's noise while
-/// hiding the afternoon's two-hour block — the one the reader hovered
-/// to find. Ties keep the earlier stretch, and what "+N" folds away is
-/// then never longer than anything shown.
-fn tip_stretches(runs: &[history::Stretch]) -> Vec<history::Stretch> {
-    if runs.len() <= TIP_STRETCHES {
-        return runs.to_vec();
-    }
-    let mut by_length = runs.to_vec();
-    by_length.sort_by_key(|run| (Reverse(run.end - run.start), run.start));
-    let mut chosen = by_length[..TIP_STRETCHES].to_vec();
-    chosen.sort_by_key(|run| run.start);
-    chosen
-}
-
-/// One line per stretch: "09:00–11:30 · 42 min". Half-hour precision
-/// on the clock, because that is the resolution the band actually has
-/// — a tooltip more precise than its picture would claim minutes the
-/// cells cannot show. The one minute-precise clock figure is the live
-/// edge: a run still going ends at the wall clock itself, because its
-/// cell's nominal end is in the future and a placeholder word would be
-/// the one entry the reader cannot put on a clock.
-///
-/// The minute count is the half that makes the range mean anything. At
-/// this resolution a laptop waking once every thirty minutes lights
-/// the same cells as one that never stopped (measured overnight: 25
-/// maintenance wakes, every cell from midnight to morning lit, 48
-/// recorded minutes out of 440) — "00:30–07:00 · 22 min" says which of
-/// the two happened and the range alone never could.
-///
-/// One line per stretch rather than a separator-joined sentence: three
-/// ranges in a row read as one run of digits.
-fn band_tip(runs: &[history::Stretch], lived: usize, now_clock: &str) -> Vec<SharedString> {
-    let shown = tip_stretches(runs);
-    let mut lines: Vec<SharedString> = shown
-        .iter()
-        .map(|run| {
-            let end = if run.end == lived {
-                now_clock.to_string()
-            } else {
-                bucket_clock(run.end)
-            };
-            t!(
-                "history.band_line",
-                start = bucket_clock(run.start),
-                end = end,
-                minutes = run.minutes
-            )
-            .to_string()
-            .into()
-        })
-        .collect();
-    if runs.len() > shown.len() {
-        lines.push(
-            t!("history.band_more", count = runs.len() - shown.len())
-                .to_string()
-                .into(),
-        );
-    }
-    lines
-}
-
-/// A bucket boundary as wall clock — bucket 19 is "09:30".
-fn bucket_clock(bucket: usize) -> String {
-    let minutes = bucket * history::BAND_BUCKET_MINUTES;
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
-/// Four intensity steps for a cell's loudest minute. Quantized rather
-/// than continuous so adjacent cells read as "same-ish" or "different"
-/// instead of a smear; the breakpoints are a quarter of a core, one
-/// core, three cores — the same one-core unit every CPU figure in the
-/// app speaks. Display only, like every threshold in `views/`.
-fn band_alpha(peak: f32) -> f32 {
-    match peak {
-        p if p < 25.0 => 0.30,
-        p if p < 100.0 => 0.55,
-        p if p < 300.0 => 0.80,
-        _ => 1.0,
-    }
 }
 
 /// The rows region's height — the same budget the Processes list gets,
@@ -693,25 +515,7 @@ fn header_controls(current: HistoryRange) -> AnyElement {
         .into_any_element()
 }
 
-fn shape_pill(
-    id: impl Into<gpui::ElementId>,
-    shape: HistoryShape,
-    peak: f32,
-    span: Duration,
-    minutes: usize,
-) -> AnyElement {
-    let label = i18n::tr(match shape {
-        HistoryShape::Spike => "history.shape_spike",
-        HistoryShape::Sustained => "history.shape_sustained",
-        HistoryShape::Intermittent => "history.shape_intermittent",
-    });
-    let tip = t!(
-        "history.shape_tip",
-        peak = format::pct(peak),
-        span = format::span(span),
-        minutes = minutes
-    )
-    .to_string();
+fn shape_pill(id: impl Into<gpui::ElementId>, label: String, tip: String) -> AnyElement {
     div()
         .id(id)
         .flex_none()
@@ -779,67 +583,5 @@ mod tests {
     fn rows_sharing_a_pid_keep_distinct_ids() {
         assert_ne!(row_id(400, "WindowServer"), row_id(400, "mds"));
         assert_eq!(row_id(400, "mds"), row_id(400, "mds"));
-    }
-
-    #[test]
-    fn bucket_boundaries_read_as_wall_clock() {
-        assert_eq!(bucket_clock(0), "00:00");
-        assert_eq!(bucket_clock(19), "09:30");
-        assert_eq!(bucket_clock(history::BAND_BUCKETS), "24:00");
-    }
-
-    /// A bursty day: a pile of single cells around two real stretches.
-    /// The budget goes to the longest, in day order — first-N-by-clock
-    /// would have spent it all on the morning's noise and hidden the
-    /// afternoon block entirely.
-    #[test]
-    fn the_longest_stretches_survive_the_cap_in_day_order() {
-        let run = |start: usize, end: usize| history::Stretch {
-            start,
-            end,
-            minutes: (end - start) as u32,
-        };
-        // Nine singles (00:00 onward, every other cell)…
-        let mut runs: Vec<history::Stretch> = (0..9).map(|i| run(i * 2, i * 2 + 1)).collect();
-        // …then a four-cell block in the afternoon.
-        runs.push(run(28, 32));
-        let shown = tip_stretches(&runs);
-        assert_eq!(shown.len(), TIP_STRETCHES);
-        assert!(
-            shown.contains(&run(28, 32)),
-            "the block must not be dropped"
-        );
-        // Day order kept: the block is last because it is latest.
-        assert_eq!(shown.last(), Some(&run(28, 32)));
-        // Ties (the singles) keep the earlier ones.
-        assert_eq!(shown[0], run(0, 1));
-        // At or under the cap, nothing is reordered or dropped.
-        let few = vec![run(4, 5), run(10, 12)];
-        assert_eq!(tip_stretches(&few), few);
-    }
-
-    /// The readout is a list, one line per stretch — and the live edge
-    /// takes the wall clock rather than its cell's nominal end.
-    #[test]
-    fn the_readout_is_one_line_per_stretch() {
-        let runs = [
-            history::Stretch {
-                start: 0,
-                end: 1,
-                minutes: 28,
-            },
-            history::Stretch {
-                start: 1,
-                end: 15,
-                minutes: 22,
-            },
-        ];
-        let lines = band_tip(&runs, 15, "07:22");
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("00:00") && lines[0].contains("00:30"));
-        assert!(lines[0].contains("28"));
-        // Ends at the clock, not at 07:30 — that half hour is not over.
-        assert!(lines[1].contains("07:22"), "{}", lines[1]);
-        assert!(lines[1].contains("22"));
     }
 }

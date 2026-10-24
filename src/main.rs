@@ -61,6 +61,7 @@ mod geom;
 mod glyph;
 mod hardware;
 mod history;
+mod historylist;
 mod hot;
 mod i18n;
 mod i18n_loader;
