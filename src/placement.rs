@@ -194,6 +194,44 @@ pub fn min_height(notice: bool) -> f32 {
 /// the screen's own height would leave the footer hanging off it. Under
 /// this a screen is not one the panel can be right on.
 const CUT_FLOOR: f32 = 320.;
+/// Gap between the panel's right edge and the screen edge on Wayland.
+/// A surface flush against the bezel reads as clipped rather than
+/// placed, and macOS never puts one there either — `placement.rs`
+/// centres the window under its tray icon, which leaves the menu bar's
+/// own inset. 8 was reported as no gap at all on Omarchy next to a
+/// 358pt-wide panel; this is the value to move if the panel should sit
+/// on the same rhythm as the compositor's own window gaps (`gaps_out`
+/// in hyprland.conf), which is a per-desktop number nothing reports.
+#[cfg(target_os = "linux")]
+pub const PANEL_MARGIN_RIGHT: f32 = 10.;
+
+/// Gap between the panel's top edge and the bar above it. Matches
+/// [`PANEL_MARGIN_RIGHT`]: a popover with the same inset on both edges
+/// it hangs off reads as placed, and the right edge is the one that
+/// already looks right.
+///
+/// This was 0 for a while, and the reason is worth keeping because it
+/// was a measurement taken through a bug. gpui-component's client-side
+/// frame was inflating the surface by 20px a side (`build_panel` says
+/// how that ended, twice), so the
+/// first pixel of content sat 20px below the bar and the panel looked
+/// over-gapped; 0 was the value that made *that* look right. With the
+/// inflation gone, 0 is what it says — flush against the bar, and too
+/// tight. The lesson is not about the number: a geometry constant tuned
+/// against a build with a layout bug in it encodes the bug.
+///
+/// Measured from what the bar left free, **not** from the top of the
+/// screen: an exclusive zone of 0 — which is what `exclusive_zone: None`
+/// means — asks the compositor to move the surface clear of every bar
+/// that reserves space, and it has already done that before this margin
+/// applies. A bar that reserves more than it paints therefore still
+/// leaves a visible gap here, and closing *that* one means opting out of
+/// the reservation entirely (`exclusive_zone: Some(px(-1.))`) and
+/// subtracting the bar's height by hand — a number no protocol reports,
+/// so it would have to be configured rather than measured.
+#[cfg(target_os = "linux")]
+pub const PANEL_MARGIN_TOP: f32 = 10.;
+
 /// Where the settings window opens. Disk space shared it until its
 /// paths needed the width ([`STORAGE_WINDOW_SIZE`]); the two are now
 /// different shapes, which reads as a decision, where two nearly-equal

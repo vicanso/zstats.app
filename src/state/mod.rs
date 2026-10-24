@@ -684,6 +684,42 @@ fn member_table_next(table: &MemberTable, now: Instant, interval: Duration) -> M
 /// ask [`ZStatsAppState::took_recent_auto_hide`] with it.
 pub const TOGGLE_GRACE: Duration = Duration::from_millis(300);
 
+/// How long a freshly mapped layer surface is immune to both auto-hide
+/// paths.
+///
+/// A panel that has been on screen for a tenth of a second has not been
+/// looked away from, whatever the compositor just said. It exists
+/// because Wayland offers two dismissal signals and neither is
+/// trustworthy in the frames right after a map: keyboard focus can
+/// arrive and leave again on its own under focus-follows-mouse, and the
+/// pointer's first enter/leave pair can land before the user has moved
+/// at all. macOS needs none of it — an `NSWindow` that
+/// `activate_window` brought up stays active until something takes it.
+///
+/// Deliberately short: a floor under "the panel just opened", not a
+/// window in which it refuses to close. A real click away is produced
+/// by a human hand and arrives later than this at the very earliest.
+#[cfg(target_os = "linux")]
+pub const REVEAL_GRACE: Duration = Duration::from_millis(150);
+
+/// How long the pointer has to stay outside before that counts as a
+/// dismissal.
+///
+/// The panel maps flush under the bar, so a tray click whose cursor sat
+/// a few pixels above the panel's top edge puts the new surface *under*
+/// the pointer. Wayland then sends `wl_pointer.enter` for a panel the
+/// user has not reached, and the next small movement back into the bar
+/// is a `leave` — which used to close it on the spot. Whether that
+/// happened at all depended on where in the bar the click landed, which
+/// is exactly why it looked intermittent rather than broken.
+///
+/// Re-checking on the next frame, which this replaces, is microseconds
+/// and settles nothing. 400ms is longer than the gap between an
+/// accidental enter and the deliberate move that follows it, and short
+/// enough that a real look-away still reads as immediate.
+#[cfg(target_os = "linux")]
+pub const POINTER_LEAVE_GRACE: Duration = Duration::from_millis(400);
+
 pub struct ZStatsAppState {
     window_bounds: Option<Rect>,
     scale_factor: f32,

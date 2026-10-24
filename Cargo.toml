@@ -30,7 +30,14 @@ short_description = "A menu bar metrics panel written in Rust and GPUI."
 [features]
 default = ["gpui"]
 gpui = ["dep:gpui", "dep:gpui_platform", "dep:gpui_macros", "dep:gpui-kit"]
-nsh = ["dep:nsh-core", "dep:nsh-base", "dep:nsh-platform-macos", "dep:dispatch2"]
+nsh = [
+    "dep:nsh-core",
+    "dep:nsh-base",
+    "dep:nsh-platform-macos",
+    "dep:dispatch2",
+    "dep:nsh-platform-linux",
+    "dep:gtk4-layer-shell",
+]
 
 [dependencies]
 
@@ -194,6 +201,15 @@ tray-icon = { version = "0.25.1", default-features = false, features = [
 # The blocking API is the right one for two calls made from the UI
 # thread when a switch is flipped.
 zbus = "5.19"
+# The NSH front end's Linux backend (GTK 4 widgets, Pango text), without
+# its JS engine, as on macOS. It asks for GTK 4.14 (`gtk4`'s `v4_14`):
+# Ubuntu 24.04 and Arch have it, Debian bookworm does not.
+nsh-platform-linux = { version = "0.2.0", optional = true, default-features = false }
+# The panel as a wlr-layer-shell surface on the NSH front end, as gpui's
+# Wayland backend makes it (`panel_kind`): anchored top-right by the
+# compositor, which is the only one that may place it. On the `gtk4` NSH
+# itself is built with, so the tree keeps one GTK binding.
+gtk4-layer-shell = { version = "0.8.1", optional = true }
 
 # Only for the menu bar's scale factor: the tray reports physical pixels and
 # gpui's `PlatformDisplay` doesn't expose a scale factor. Same versions gpui

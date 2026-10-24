@@ -22,7 +22,7 @@ use std::fs;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "linux")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{
     App, Bounds, Context, KeyBinding, Menu, MenuItem, QuitMode, ScrollHandle, SharedString,
@@ -68,79 +68,6 @@ const BACKGROUND_OPACITY_DARK: f32 = if cfg!(target_os = "macos") { 0.35 } else 
 /// bleeds through and fights the dark text. Legibility wins; the effect is
 /// conceded. Dark mode keeps it, where the contrast actually carries.
 const BACKGROUND_OPACITY_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
-/// Gap between the panel's right edge and the screen edge on Wayland.
-/// A surface flush against the bezel reads as clipped rather than
-/// placed, and macOS never puts one there either — `placement.rs`
-/// centres the window under its tray icon, which leaves the menu bar's
-/// own inset. 8 was reported as no gap at all on Omarchy next to a
-/// 358pt-wide panel; this is the value to move if the panel should sit
-/// on the same rhythm as the compositor's own window gaps (`gaps_out`
-/// in hyprland.conf), which is a per-desktop number nothing reports.
-#[cfg(target_os = "linux")]
-const PANEL_MARGIN_RIGHT: f32 = 10.;
-
-/// Gap between the panel's top edge and the bar above it. Matches
-/// [`PANEL_MARGIN_RIGHT`]: a popover with the same inset on both edges
-/// it hangs off reads as placed, and the right edge is the one that
-/// already looks right.
-///
-/// This was 0 for a while, and the reason is worth keeping because it
-/// was a measurement taken through a bug. gpui-component's client-side
-/// frame was inflating the surface by 20px a side (`build_panel` says
-/// how that ended, twice), so the
-/// first pixel of content sat 20px below the bar and the panel looked
-/// over-gapped; 0 was the value that made *that* look right. With the
-/// inflation gone, 0 is what it says — flush against the bar, and too
-/// tight. The lesson is not about the number: a geometry constant tuned
-/// against a build with a layout bug in it encodes the bug.
-///
-/// Measured from what the bar left free, **not** from the top of the
-/// screen: an exclusive zone of 0 — which is what `exclusive_zone: None`
-/// means — asks the compositor to move the surface clear of every bar
-/// that reserves space, and it has already done that before this margin
-/// applies. A bar that reserves more than it paints therefore still
-/// leaves a visible gap here, and closing *that* one means opting out of
-/// the reservation entirely (`exclusive_zone: Some(px(-1.))`) and
-/// subtracting the bar's height by hand — a number no protocol reports,
-/// so it would have to be configured rather than measured.
-#[cfg(target_os = "linux")]
-const PANEL_MARGIN_TOP: f32 = 10.;
-
-/// How long a freshly mapped layer surface is immune to both auto-hide
-/// paths.
-///
-/// A panel that has been on screen for a tenth of a second has not been
-/// looked away from, whatever the compositor just said. It exists
-/// because Wayland offers two dismissal signals and neither is
-/// trustworthy in the frames right after a map: keyboard focus can
-/// arrive and leave again on its own under focus-follows-mouse, and the
-/// pointer's first enter/leave pair can land before the user has moved
-/// at all. macOS needs none of it — an `NSWindow` that
-/// `activate_window` brought up stays active until something takes it.
-///
-/// Deliberately short: a floor under "the panel just opened", not a
-/// window in which it refuses to close. A real click away is produced
-/// by a human hand and arrives later than this at the very earliest.
-#[cfg(target_os = "linux")]
-const REVEAL_GRACE: Duration = Duration::from_millis(150);
-
-/// How long the pointer has to stay outside before that counts as a
-/// dismissal.
-///
-/// The panel maps flush under the bar, so a tray click whose cursor sat
-/// a few pixels above the panel's top edge puts the new surface *under*
-/// the pointer. Wayland then sends `wl_pointer.enter` for a panel the
-/// user has not reached, and the next small movement back into the bar
-/// is a `leave` — which used to close it on the spot. Whether that
-/// happened at all depended on where in the bar the click landed, which
-/// is exactly why it looked intermittent rather than broken.
-///
-/// Re-checking on the next frame, which this replaces, is microseconds
-/// and settles nothing. 400ms is longer than the gap between an
-/// accidental enter and the deliberate move that follows it, and short
-/// enough that a real look-away still reads as immediate.
-#[cfg(target_os = "linux")]
-const POINTER_LEAVE_GRACE: Duration = Duration::from_millis(400);
 
 /// Vertical padding inside an auxiliary window's scrolling body (both
 /// settings and disk-space use it). Named because `about_card`'s height
@@ -195,11 +122,11 @@ struct ZStatsApp {
     /// vanish on the first frame.
     #[cfg(target_os = "linux")]
     pointer_was_inside: bool,
-    /// Linux only. When this window mapped — see [`REVEAL_GRACE`].
+    /// Linux only. When this window mapped — see [`state::REVEAL_GRACE`].
     #[cfg(target_os = "linux")]
     opened_at: Instant,
     /// Linux only. A pointer-leave re-check is already waiting out
-    /// [`POINTER_LEAVE_GRACE`]; a second one would just race it.
+    /// [`state::POINTER_LEAVE_GRACE`]; a second one would just race it.
     #[cfg(target_os = "linux")]
     leave_pending: bool,
 }
@@ -231,7 +158,7 @@ impl ZStatsApp {
             // dismisses once they have actually been inside, and it does
             // not eat the click.
             #[cfg(target_os = "linux")]
-            if this.opened_at.elapsed() < REVEAL_GRACE || !this.pointer_was_inside {
+            if this.opened_at.elapsed() < state::REVEAL_GRACE || !this.pointer_was_inside {
                 return;
             }
             // Which path took the panel down, and on what evidence.
@@ -349,12 +276,14 @@ impl ZStatsApp {
         // arriving — and latching on it is what armed a dismissal the
         // user never asked for.
         if window.is_window_hovered() {
-            if self.opened_at.elapsed() >= REVEAL_GRACE {
+            if self.opened_at.elapsed() >= state::REVEAL_GRACE {
                 self.pointer_was_inside = true;
             }
             return;
         }
-        if !self.pointer_was_inside || self.opened_at.elapsed() < REVEAL_GRACE || self.leave_pending
+        if !self.pointer_was_inside
+            || self.opened_at.elapsed() < state::REVEAL_GRACE
+            || self.leave_pending
         {
             return;
         }
@@ -364,7 +293,9 @@ impl ZStatsApp {
         // a cadence that has nothing to do with this question.
         self.leave_pending = true;
         cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(POINTER_LEAVE_GRACE).await;
+            cx.background_executor()
+                .timer(state::POINTER_LEAVE_GRACE)
+                .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.leave_pending = false;
                 if prefs::pinned() || window.is_window_hovered() {
@@ -1652,7 +1583,12 @@ fn panel_kind() -> gpui::WindowKind {
         exclusive_zone: None,
         exclusive_edge: None,
         // CSS order: top, right, bottom, left.
-        margin: Some((px(PANEL_MARGIN_TOP), px(PANEL_MARGIN_RIGHT), px(0.), px(0.))),
+        margin: Some((
+            px(placement::PANEL_MARGIN_TOP),
+            px(placement::PANEL_MARGIN_RIGHT),
+            px(0.),
+            px(0.),
+        )),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
     })
 }
@@ -2297,7 +2233,21 @@ pub fn run() {
         #[cfg(target_os = "linux")]
         {
             if let Some(listener) = listener {
-                ipc::serve(listener, cx);
+                let (tx, rx) = smol::channel::unbounded::<ipc::Invocation>();
+                ipc::serve(listener, move |invocation| {
+                    let _ = tx.try_send(invocation);
+                });
+                cx.spawn(async move |cx| {
+                    // Ends on its own: once the app shuts down this task
+                    // stops being polled.
+                    while let Ok(invocation) = rx.recv().await {
+                        cx.update(|cx| match invocation {
+                            ipc::Invocation::Toggle => toggle_main_window(cx, None),
+                            ipc::Invocation::Launch => show_main_window(cx),
+                        });
+                    }
+                })
+                .detach();
             }
             // The first press of the keybinding has nothing to toggle —
             // the process it would have talked to is this one, starting.

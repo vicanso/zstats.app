@@ -53,6 +53,8 @@ mod glyph;
 mod history;
 mod i18n;
 mod i18n_loader;
+#[cfg(target_os = "linux")]
+mod ipc;
 mod logger;
 mod metrics;
 mod notice;
@@ -92,8 +94,6 @@ mod font;
 mod gpui_app;
 #[cfg(feature = "gpui")]
 mod gpui_ui;
-#[cfg(all(feature = "gpui", target_os = "linux"))]
-mod ipc;
 #[cfg(feature = "gpui")]
 mod theme;
 #[cfg(feature = "gpui")]

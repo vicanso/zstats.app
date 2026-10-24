@@ -75,12 +75,14 @@ jobs:
         # backend pulls `xkbcommon-x11` and `xcb` in with it — the link
         # step is where a missing one shows up, long after everything
         # has compiled. fontconfig backs font-kit. Wayland and Vulkan are
-        # dlopened at runtime, so they are not needed to build.
+        # dlopened at runtime, so they are not needed to build. GTK 4 and
+        # gtk4-layer-shell are the NSH front end's host (24.04 ships GTK
+        # 4.14, the version NSH's GTK backend asks for).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
-            libfontconfig1-dev
+            libfontconfig1-dev libgtk-4-dev libgtk4-layer-shell-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -92,9 +94,8 @@ jobs:
         run: cargo build --all-targets
       - name: test
         run: cargo test --workspace
-      # The NSH front end (docs/nsh-migration.md). Its Linux host arrives
-      # in phase 2; until then this proves the shared modules build and
-      # pass without gpui on Linux too.
+      # The NSH front end (docs/nsh-migration.md): its GTK host
+      # (`src/nsh/linux.rs`, phase 2d) and the shared modules without gpui.
       - name: build (nsh)
         run: cargo build --all-targets --no-default-features --features nsh
       - name: test (nsh)
