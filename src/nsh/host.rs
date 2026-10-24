@@ -224,6 +224,7 @@ pub fn run() {
                 }
             }
             HostAction::Restyle => restyle(),
+            HostAction::PickFolder(pick) => windows::pick_folder(pick),
         })
     });
     install_menu(mtm);

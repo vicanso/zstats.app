@@ -319,6 +319,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSEvent",
     "NSGraphics",
     "NSGraphicsContext",
+    # The disk-space window's folder pickers (`nsh/windows.rs`).
+    "NSOpenPanel",
+    "NSSavePanel",
     "NSPanel",
     "NSResponder",
     "NSView",

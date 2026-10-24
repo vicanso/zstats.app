@@ -47,7 +47,7 @@ fn tab_icon(tab: Tab) -> CustomIconName {
 
 /// How the tab shortcuts are spelled here: `mod` is ⌘ on macOS and Ctrl
 /// elsewhere (`views::shortcut_hint`).
-fn shortcut_hint() -> &'static str {
+pub(super) fn shortcut_hint() -> &'static str {
     if cfg!(target_os = "macos") {
         "⌘"
     } else {

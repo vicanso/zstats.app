@@ -324,6 +324,25 @@ pub fn switch_on() -> Rgba {
     tone(0xfafafaff, 0x171717ff, 0xd9ae7aff, 0xd9b98cff, |t| t.mark)
 }
 
+/// A primary button's fill — the same `primary.background` as a switch
+/// that is on: the one filled button a disk-space tab shows before its
+/// first run (the NSH front end; gpui-kit paints its own).
+#[inline]
+pub fn primary() -> Rgba {
+    switch_on()
+}
+
+/// A primary button's label — `primary.foreground`: the theme's own ink
+/// on its mark, the default theme's `neutral-900` / `neutral-50`.
+#[inline]
+pub fn primary_ink() -> Rgba {
+    match mark() {
+        Some((_, ink)) => ink,
+        None if is_dark() => rgb(0x171717),
+        None => rgb(0xfafafa),
+    }
+}
+
 /// A switch's track while it is off — `switch.background`: the default
 /// theme's `#404040` / `#d4d4d4`, `GOLDEN_JSON`'s chip step, the Omarchy
 /// border.

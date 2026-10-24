@@ -23,9 +23,9 @@
 
 use crate::metrics::{self, CollectorPace};
 use crate::nsh::panel::Panel;
-use crate::nsh::root::{self, AuxWindow, HostAction};
+use crate::nsh::root::{self, AuxWindow, FolderPick, HostAction};
 use crate::nsh::settings::{self, Settings};
-use crate::nsh::storage::Storage;
+use crate::nsh::storage::{self, Storage};
 use crate::nsh::{store, theme};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
@@ -151,6 +151,7 @@ pub fn run() {
                 }
             }
             HostAction::Restyle => restyle(),
+            HostAction::PickFolder(pick) => pick_folder(pick),
         }));
     });
 
@@ -567,6 +568,34 @@ fn aux_parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::ui::Root) {
             root::make::<Storage>(),
         ),
     }
+}
+
+/// The desktop's folder chooser for `pick` (`gtk::FileDialog`, through
+/// the portal where there is one): one folder, or several for the
+/// exclusions, over the disk-space window.
+fn pick_folder(pick: FolderPick) {
+    let parent = AUX.with_borrow(|open| {
+        open[slot(AuxWindow::Storage)]
+            .as_ref()
+            .map(|a| a.window.clone())
+    });
+    let prompt = storage::pick_prompt(pick);
+    let dialog = gtk::FileDialog::builder()
+        .title(prompt.as_str())
+        .accept_label(prompt.as_str())
+        .modal(true)
+        .build();
+    dialog.select_folder(
+        parent.as_ref(),
+        gtk::gio::Cancellable::NONE,
+        move |result| {
+            if let Ok(file) = result
+                && let Some(path) = file.path()
+            {
+                storage::picked(pick, vec![path]);
+            }
+        },
+    );
 }
 
 fn close_aux(aux: AuxWindow) {

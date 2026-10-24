@@ -142,6 +142,11 @@ pub enum CustomIconName {
     /// The About page's link out to the project (`nsh/settings.rs`):
     /// lucide `external-link`, gpui-kit's `IconName::ExternalLink`.
     ExternalLink,
+    /// The NSH disk-space window's reveal and folder-picking buttons:
+    /// lucide `folder` and `folder-open`, gpui-kit's `IconName::Folder`
+    /// and `FolderOpen`.
+    Folder,
+    FolderOpen,
 }
 
 impl CustomIconName {
@@ -173,6 +178,8 @@ impl CustomIconName {
             CustomIconName::CircleX => "icons/circle-x.svg",
             CustomIconName::Palette => "icons/palette.svg",
             CustomIconName::ExternalLink => "icons/external-link.svg",
+            CustomIconName::Folder => "icons/folder.svg",
+            CustomIconName::FolderOpen => "icons/folder-open.svg",
         }
     }
 }
@@ -224,6 +231,8 @@ mod tests {
             CustomIconName::CircleX,
             CustomIconName::Palette,
             CustomIconName::ExternalLink,
+            CustomIconName::Folder,
+            CustomIconName::FolderOpen,
         ] {
             let path = icon.path();
             assert!(get(path).is_some(), "{path} is not embedded");

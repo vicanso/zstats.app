@@ -14,9 +14,9 @@
 //! minutes-long walk can live on a surface you cannot look away from.
 
 use crate::nsh::host;
-use crate::nsh::root::{self, AuxWindow};
+use crate::nsh::root::{self, AuxWindow, FolderPick};
 use crate::nsh::settings::{self, Settings};
-use crate::nsh::storage::Storage;
+use crate::nsh::storage::{self, Storage};
 use crate::nsh::{store, theme};
 use crate::{autostart, i18n, palette, placement};
 use nsh_platform_macos::{AppOptions, AppView};
@@ -24,12 +24,14 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSModalResponseOK, NSOpenPanel, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -205,6 +207,29 @@ pub fn resize(aux: AuxWindow, width: f64, height: f64) {
             open.window.setContentSize(NSSize::new(width, height));
         }
     });
+}
+
+/// The system's folder panel, for `pick`: one folder, or several for the
+/// exclusions. Modal, as gpui's `prompt_for_paths`: the disk-space window
+/// is what asked, and stays put behind it. On the main thread.
+pub fn pick_folder(pick: FolderPick) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(false);
+    panel.setCanChooseDirectories(true);
+    panel.setAllowsMultipleSelection(false);
+    panel.setPrompt(Some(&NSString::from_str(&storage::pick_prompt(pick))));
+    if panel.runModal() != NSModalResponseOK {
+        return;
+    }
+    let paths: Vec<PathBuf> = panel
+        .URLs()
+        .iter()
+        .filter_map(|url| url.path().map(|p| PathBuf::from(p.to_string())))
+        .collect();
+    storage::picked(pick, paths);
 }
 
 /// Closes `aux` if it is open. On the main thread.

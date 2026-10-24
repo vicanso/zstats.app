@@ -45,6 +45,17 @@ pub enum HostAction {
     /// language, the panel's opacity: every window's root is made again
     /// ([`make`]), and the menus and the tray follow.
     Restyle,
+    /// The system's folder panel, for what [`FolderPick`] says; NSH has
+    /// none of its own.
+    PickFolder(FolderPick),
+}
+
+/// What a folder picked in the system's panel is for (the disk-space
+/// window).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderPick {
+    /// Where to look for duplicates: picking is the ask, the search runs.
+    Dupes,
 }
 
 /// The two ordinary windows beside the panel.
