@@ -1352,6 +1352,13 @@ mod tests {
     #[test]
     fn an_unwritable_target_fails_before_anything_moves() {
         use std::os::unix::fs::PermissionsExt;
+        // Root writes through 0o555, so there is no unwritable directory
+        // to make — the case a container runs its tests in
+        // (`make linux-check`), never the one an install meets.
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
         let dir = env::temp_dir().join(format!("zstats-linux-ro-{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         let bin = dir.join("bin");
