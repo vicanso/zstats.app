@@ -569,7 +569,7 @@ pub fn refresh_omarchy_palette(cx: &mut App) {
     install_omarchy(palette, cx);
     #[cfg(target_os = "macos")]
     apply_ns_appearance();
-    // The tray glyph is inked from `theme::is_dark` off macOS, and the
+    // The tray glyph is inked from `palette::is_dark` off macOS, and the
     // new theme may have flipped it.
     let store = cx.global::<ZStatsGlobalStore>().clone();
     store.update(cx, |state, cx| tray::sync(cx, state));
@@ -891,7 +891,7 @@ pub fn set_theme_pref(pref: prefs::ThemePref, cx: &mut App) {
     #[cfg(target_os = "macos")]
     apply_ns_appearance();
     apply_appearance(cx.window_appearance(), cx);
-    // After `apply_appearance`, which is what moves `theme::is_dark()`.
+    // After `apply_appearance`, which is what moves `palette::is_dark()`.
     // Off macOS the tray glyph is inked from that (macOS templates ink
     // themselves, so there is nothing to redo there) and the next tick
     // would be up to five seconds of an icon in the wrong colour — or of

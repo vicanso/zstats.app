@@ -23,7 +23,7 @@
 //! rebuilt on every open anyway. A theme switch shows up the next time
 //! the panel does, which is the only time anyone is looking.
 
-use gpui::{Rgba, rgb};
+use crate::color::{Rgba, rgb};
 use std::env;
 use std::fs;
 use std::io;

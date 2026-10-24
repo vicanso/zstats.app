@@ -3195,18 +3195,11 @@ fn setting_rebuilds_collector(key: &str) -> bool {
     )
 }
 
-/// Screen rectangle of the tray icon, in **physical** pixels with a top-left
-/// origin — that's what `tray_icon` reports. It multiplied the AppKit
-/// logical frame by *that status item's* `backingScaleFactor`, so converting
-/// back has to pick the matching screen (see `placement::resolve_icon`),
-/// not the window's last-known [`ZStatsAppState::scale_factor`].
-#[derive(Clone, Copy, Debug)]
-pub struct TrayAnchor {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
+/// The tray icon's rect, defined with the geometry that reads it
+/// (`placement.rs`, shared by both front ends since phase 1b of
+/// docs/nsh-migration.md) and re-exported where the gpui front end has
+/// always imported it from.
+pub use crate::placement::TrayAnchor;
 
 #[cfg(test)]
 mod tests {

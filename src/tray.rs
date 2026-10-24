@@ -26,11 +26,11 @@ use crate::assets::CustomIconName;
 use crate::format;
 use crate::glyph;
 use crate::i18n;
-use crate::prefs::{self, TrayPref};
-use crate::state::{TrayAnchor, ZStatsAppState};
 /// Only the ink reads it, and only where there is no template image.
 #[cfg(not(target_os = "macos"))]
-use crate::theme;
+use crate::palette;
+use crate::prefs::{self, TrayPref};
+use crate::state::{TrayAnchor, ZStatsAppState};
 use crate::{APP_NAME, show_main_window, toggle_main_window};
 use gpui::{App, Global};
 use rust_i18n::t;
@@ -477,7 +477,7 @@ fn ink() -> [u8; 3] {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        ink_for(theme::is_dark())
+        ink_for(palette::is_dark())
     }
 }
 

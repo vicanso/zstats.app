@@ -11,15 +11,19 @@
 //! (`window_ext.rs`), and show and hide are plain AppKit calls with no App
 //! borrow to step around (`after_app_borrow`).
 //!
-//! Phase 0 of docs/nsh-migration.md: positioning is the prototype's
-//! one-screen version of `placement::anchored_origin`, until phase 1b
-//! makes that module's geometry shared.
+//! Where the panel goes is `placement.rs`'s, shared with the gpui front
+//! end: the same sizes, and the same hang under the icon with its
+//! multi-display, mixed-DPI scale picking. This side only lists AppKit's
+//! screens in the space that module works in, and turns its answer back
+//! into AppKit's bottom-left one.
 
 use crate::assets::CustomIconName;
+use crate::geom::{Rect, point, size};
 use crate::nsh::panel::{self, HostAction};
 #[cfg(debug_assertions)]
 use crate::nsh::probe;
-use crate::{APP_NAME, glyph, i18n, logger, prefs};
+use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
+use crate::{APP_NAME, glyph, i18n, logger, palette, prefs};
 use nsh_platform_macos::{AppOptions, AppView, Appearance, Root};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -34,13 +38,6 @@ use std::cell::{Cell, OnceCell};
 use std::rc::Rc;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-
-/// The short Overview's size (`placement::DEFAULT_WINDOW_SIZE`'s width,
-/// `placement::SIMPLE_WINDOW_HEIGHT`).
-pub const PANEL_SIZE: (f64, f64) = (358.0, 539.0);
-
-/// `placement::TRAY_GAP`.
-const TRAY_GAP: f64 = 6.0;
 
 /// `NSPopUpMenuWindowLevel` (`kCGPopUpMenuWindowLevel`): above ordinary
 /// windows, as a status-item popover sits.
@@ -119,6 +116,9 @@ pub fn run() {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     prefs::load();
     i18n::init();
+    // Golden Dark until the NSH front end follows the theme preference
+    // and the appearance (phase 3 of docs/nsh-migration.md).
+    palette::set_golden(true);
     tracing::info!("NSH front end starting (docs/nsh-migration.md, phase 0)");
 
     panel::connect(|action| {
@@ -157,9 +157,10 @@ pub fn run() {
 /// field in it takes keystrokes), non-activating so it can do that without
 /// pulling the app in front of the one being used.
 fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
+    let (width, height) = panel_size();
     let frame = NSRect::new(
         NSPoint::new(0.0, 0.0),
-        NSSize::new(PANEL_SIZE.0, PANEL_SIZE.1),
+        NSSize::new(f64::from(width), f64::from(height)),
     );
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::FullSizeContentView
@@ -211,7 +212,7 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
         mtm,
         AppOptions {
             app_id: "com.github.vicanso.zstats".to_owned(),
-            size: (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32),
+            size: (width as i32, height as i32),
             appearance: Appearance::Dark,
             ..AppOptions::default()
         },
@@ -221,16 +222,35 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
     (panel, view)
 }
 
+/// The short Overview's size, the design's (`placement::window_size`).
+fn panel_size() -> (f32, f32) {
+    placement::window_size(false, false, Dragged::default())
+}
+
 /// Shows the panel, under the status item's `anchor` (tray-icon's rect,
 /// physical pixels from the top left of the primary screen) or in the main
 /// screen's top-right corner.
 pub fn show(host: &Host, anchor: Option<tray_icon::Rect>, make_key: bool) {
     let mtm = MainThreadMarker::from(&*host.panel);
-    let origin = anchor
-        .and_then(|rect| origin_under(mtm, rect))
-        .or_else(|| corner_origin(mtm));
-    if let Some(origin) = origin {
-        host.panel.setFrameOrigin(origin);
+    let (width, height) = panel_size();
+    let screens = Screens::list(mtm);
+    let rect = match anchor {
+        Some(rect) => Some(placement::below_tray(
+            TrayAnchor {
+                x: rect.position.x,
+                y: rect.position.y,
+                width: f64::from(rect.size.width),
+                height: f64::from(rect.size.height),
+            },
+            size(width, height),
+            &screens.geoms,
+            screens.main_scale,
+            |_| None,
+        )),
+        None => screens.corner(width, height),
+    };
+    if let Some(rect) = rect {
+        host.panel.setFrame_display(screens.to_appkit(rect), true);
     }
     host.panel.orderFrontRegardless();
     if make_key {
@@ -260,45 +280,66 @@ fn quit() {
     }
 }
 
-/// `placement::anchored_origin` for one screen: centred under the icon,
-/// `TRAY_GAP` below it, kept inside the visible frame.
-fn origin_under(mtm: MainThreadMarker, rect: tray_icon::Rect) -> Option<NSPoint> {
-    let screens = NSScreen::screens(mtm);
-    let primary_h = screens.firstObject()?.frame().size.height;
-    for screen in screens.iter() {
-        let scale = screen.backingScaleFactor();
-        let (x, y) = (rect.position.x / scale, rect.position.y / scale);
-        let (w, h) = (
-            f64::from(rect.size.width) / scale,
-            f64::from(rect.size.height) / scale,
-        );
-        let frame = screen.frame();
-        // AppKit's y grows upwards from the primary screen's bottom.
-        let top = primary_h - (y + h);
-        let inside = x >= frame.origin.x
-            && x <= frame.origin.x + frame.size.width
-            && top <= frame.origin.y + frame.size.height
-            && top >= frame.origin.y;
-        if !inside {
-            continue;
-        }
-        let visible = screen.visibleFrame();
-        let left = (x + w / 2.0 - PANEL_SIZE.0 / 2.0).clamp(
-            visible.origin.x,
-            (visible.origin.x + visible.size.width - PANEL_SIZE.0).max(visible.origin.x),
-        );
-        let panel_top = (top - TRAY_GAP).min(visible.origin.y + visible.size.height);
-        return Some(NSPoint::new(left, panel_top - PANEL_SIZE.1));
-    }
-    None
+/// AppKit's screens in `placement.rs`'s space: top-left origin, y growing
+/// down from the primary screen's top edge (AppKit's grows up from its
+/// bottom). The same conversion `window_ext::screens` makes for gpui.
+struct Screens {
+    geoms: Vec<ScreenGeom>,
+    primary_height: f64,
+    main_scale: f32,
+    main_visible: Option<Rect>,
 }
 
-fn corner_origin(mtm: MainThreadMarker) -> Option<NSPoint> {
-    let visible = NSScreen::mainScreen(mtm)?.visibleFrame();
-    Some(NSPoint::new(
-        visible.origin.x + visible.size.width - PANEL_SIZE.0 - 8.0,
-        visible.origin.y + visible.size.height - PANEL_SIZE.1 - TRAY_GAP,
-    ))
+impl Screens {
+    fn list(mtm: MainThreadMarker) -> Screens {
+        let screens = NSScreen::screens(mtm);
+        let primary_height = screens.firstObject().map_or(0.0, |s| s.frame().size.height);
+        let flip = |r: NSRect| Rect {
+            origin: point(
+                r.origin.x as f32,
+                (primary_height - (r.origin.y + r.size.height)) as f32,
+            ),
+            size: size(r.size.width as f32, r.size.height as f32),
+        };
+        let geoms = screens
+            .iter()
+            .map(|s| ScreenGeom {
+                frame: flip(s.frame()),
+                visible: flip(s.visibleFrame()),
+                scale: s.backingScaleFactor() as f32,
+            })
+            .collect();
+        let main = NSScreen::mainScreen(mtm);
+        Screens {
+            geoms,
+            primary_height,
+            main_scale: main.as_ref().map_or(2.0, |s| s.backingScaleFactor() as f32),
+            main_visible: main.map(|s| flip(s.visibleFrame())),
+        }
+    }
+
+    /// The main screen's top-right corner, under the menu bar: where a
+    /// panel opened without a tray click goes.
+    fn corner(&self, width: f32, height: f32) -> Option<Rect> {
+        let visible = self.main_visible?;
+        Some(Rect {
+            origin: point(
+                visible.origin.x + visible.size.width - width - 8.,
+                visible.origin.y + placement::TRAY_GAP,
+            ),
+            size: size(width, height),
+        })
+    }
+
+    fn to_appkit(&self, r: Rect) -> NSRect {
+        NSRect::new(
+            NSPoint::new(
+                f64::from(r.origin.x),
+                self.primary_height - f64::from(r.origin.y) - f64::from(r.size.height),
+            ),
+            NSSize::new(f64::from(r.size.width), f64::from(r.size.height)),
+        )
+    }
 }
 
 /// The status item: the processor glyph as a template, the panel on a left

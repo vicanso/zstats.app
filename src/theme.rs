@@ -1,587 +1,125 @@
-//! Design tokens for a macOS menu-bar panel.
+//! The palette (`palette.rs`) as gpui colours, and the theme files
+//! gpui-kit's own widgets are painted with.
 //!
-//! Fills are translucent so the Popover vibrancy shows through. The classic
-//! pair — dark (white washes) and light (black washes) — is what gpui-kit's
-//! default theme paints. Golden is a second pair, the warm bone / champagne
-//! tokens published as CSS variables on <https://notchclip.buildmac.app/>
-//! (`--bone`, `--paper`, `--ink`, …). The gold is `#d9b98c`
-//! (`rgb(217 185 140)`), the dark half of `--accent`, on both variants.
-//! The site's light half `#8a5a2b` is the contrast colour for text on
-//! bone; painted as a checked switch it reads as brown, so the light
-//! variant uses the champagne too, with the dark `--on-accent`
-//! (`#14110e`) on that fill. The same hexes live in [`GOLDEN_JSON`] for
-//! gpui-kit's own widgets (the window ground, switches, focus rings).
-//! These functions paint the panel's cards, which that file does not.
-//!
-//! **Golden's dark half is no longer Notchclip's** (2026-10-12): it is
-//! the palette written down in `.claude/skills/ui-polish` — base
-//! `#1c1c1e`, card `#252528`, track `#36363a`, three inks `#f2f0eb` /
-//! `#a19d96` / `#8f8b85`, one accent `#d9ae7a`. (Its green, `#6ec48a`,
-//! is in the kit theme as `success` and has no function here since the
-//! "Nothing needs attention" row went: an ordinary day draws no row at
-//! all.) Three steps of lightness do the work
-//! the hairlines did, which only holds on an opaque ground: the weakest
-//! ink is 4.5:1 on the card and 2.2:1 on the glass. So this scheme is
-//! opaque by default ([`default_opacity`]), and its fills are written as
-//! white lifts that composite to exactly those hexes over that ground —
-//! someone who lowers the opacity still gets three steps over whatever
-//! shows through. The light half keeps the Notchclip tokens.
-//!
-//! Brand red stays the over-threshold colour in every scheme, golden
-//! included. Champagne is the theme's own mark — a checked switch, a
-//! selected chip, the active tab — and since 2026-10-12 the colour of a
-//! reading that is in order ([`gauge`]): a bar that says how much, the
-//! line of a chart. It is never the colour of a crossed line; a hot bar
-//! that turned gold would read as the theme's brand.
-//!
-//! Omarchy is the third, and the only one not written here: its tokens
-//! are derived from the desktop's current palette (`omarchy.rs`) by
-//! [`OmarchyTokens::from_palette`], and gpui-kit's widgets get a theme
-//! file generated from the same palette ([`omarchy_theme_json`]). It
-//! has one light-or-dark, the palette's own, rather than following the
-//! window appearance. Its alarm is the palette's red, not brand red: a
-//! pastel desktop with a saturated #ec3013 on it reads as a second brand
-//! beside the theme, and the palette's red still says "crossed a line".
-//!
-//! Selected by [`set_dark`] / [`set_golden`] / [`set_omarchy`] after
-//! every `Theme::change`.
+//! The tokens — which scheme is on screen and what every role is in each,
+//! with the reasoning behind them — are shared with the NSH front end and
+//! live in `palette.rs` (docs/nsh-migration.md, phase 1b). This module is
+//! the gpui front end's edge: each token converted to gpui's `Rgba`,
+//! [`GOLDEN_JSON`], and the Omarchy theme generated for gpui-kit
+//! ([`omarchy_theme`]).
 
-use crate::i18n;
-use crate::omarchy::{self, Palette};
-use gpui::{Rgba, rgb, rgba};
-use std::sync::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+use crate::color;
+use crate::omarchy::Palette;
+use crate::palette::{self, OmarchyTokens};
+use gpui::Rgba;
+
+pub use crate::palette::{default_opacity, omarchy_palette_is, set_dark, set_golden, set_omarchy};
 
 /// gpui-kit theme file for the golden pair. Loaded into `ThemeRegistry`
 /// when the preference is Golden; the names `Golden Light` / `Golden Dark`
 /// are what [`crate::gpui_app::apply_appearance`] looks up.
 pub const GOLDEN_JSON: &str = include_str!("../themes/golden.json");
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Scheme {
-    ClassicDark = 0,
-    ClassicLight = 1,
-    GoldenDark = 2,
-    GoldenLight = 3,
-    /// Light or dark is the palette's, in [`OmarchyTokens::dark`].
-    Omarchy = 4,
-}
-
-// Classic dark is the untouched default, matching the old `DARK = true`
-// before the first `apply_appearance`.
-static SCHEME: AtomicU8 = AtomicU8::new(0);
-
-fn scheme() -> Scheme {
-    match SCHEME.load(Ordering::Relaxed) {
-        1 => Scheme::ClassicLight,
-        2 => Scheme::GoldenDark,
-        3 => Scheme::GoldenLight,
-        4 => Scheme::Omarchy,
-        _ => Scheme::ClassicDark,
-    }
-}
-
-fn set_scheme(scheme: Scheme) {
-    SCHEME.store(scheme as u8, Ordering::Relaxed);
-}
-
-/// Classic palette. Call after every `Theme::change`.
-pub fn set_dark(dark: bool) {
-    set_scheme(if dark {
-        Scheme::ClassicDark
-    } else {
-        Scheme::ClassicLight
-    });
-}
-
-/// Golden palette, light or dark to match the appearance `Theme::change`
-/// just applied. Same call site as [`set_dark`].
-pub fn set_golden(dark: bool) {
-    set_scheme(if dark {
-        Scheme::GoldenDark
-    } else {
-        Scheme::GoldenLight
-    });
-}
-
-/// Omarchy palette, derived into tokens. Same call site as [`set_dark`];
-/// light or dark is the palette's own.
-pub fn set_omarchy(palette: &Palette) {
-    let tokens = OmarchyTokens::from_palette(palette);
-    *OMARCHY.write().unwrap_or_else(|e| e.into_inner()) = Some((palette.clone(), tokens));
-    set_scheme(Scheme::Omarchy);
-}
-
-/// Whether `palette` is the one already painted — the panel re-reads it
-/// on every open, and only a change is worth a restyle.
-pub fn omarchy_palette_is(palette: &Palette) -> bool {
-    scheme() == Scheme::Omarchy
-        && OMARCHY
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .is_some_and(|(painted, _)| painted == palette)
-}
-
-pub fn is_dark() -> bool {
-    match scheme() {
-        Scheme::ClassicDark | Scheme::GoldenDark => true,
-        Scheme::ClassicLight | Scheme::GoldenLight => false,
-        Scheme::Omarchy => omarchy_tokens().is_none_or(|t| t.dark),
-    }
-}
-
-/// The last palette [`set_omarchy`] painted, with its tokens.
-static OMARCHY: RwLock<Option<(Palette, OmarchyTokens)>> = RwLock::new(None);
-
-/// The Omarchy tokens, when that scheme is on screen.
-fn omarchy_tokens() -> Option<OmarchyTokens> {
-    if scheme() != Scheme::Omarchy {
-        return None;
-    }
-    OMARCHY
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(|(_, tokens)| *tokens)
-}
-
-/// Every token, from one Omarchy palette. The neutral layers are steps
-/// from the theme's background toward its foreground, so each one keeps
-/// the theme's hue; nothing is borrowed from another scheme.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct OmarchyTokens {
-    dark: bool,
-    surface: Rgba,
-    trough: Rgba,
-    chip: Rgba,
-    surface_raised: Rgba,
-    inset: Rgba,
-    border: Rgba,
-    border_subtle: Rgba,
-    text: Rgba,
-    text_muted: Rgba,
-    text_dim: Rgba,
-    text_faint: Rgba,
-    ink: Rgba,
-    accent: Rgba,
-    accent_light: Rgba,
-    mark: Rgba,
-    on_mark: Rgba,
-    map_hues: [Rgba; 3],
-    map_rest: Rgba,
-}
-
-impl OmarchyTokens {
-    fn from_palette(p: &Palette) -> Self {
-        let toward_ink = |amount: f32| omarchy::mix(p.surface, p.foreground, amount);
-        let text_step = |amount: f32| omarchy::mix(p.background, p.foreground, amount);
-        // Black or white on the accent, whichever reads.
-        let black = rgb(0x000000);
-        let white = rgb(0xffffff);
-        let on_mark = if contrast(p.accent, black) > contrast(p.accent, white) {
-            black
-        } else {
-            white
-        };
-        OmarchyTokens {
-            dark: p.dark,
-            surface: p.surface,
-            // Same language as a card, as the classic dark trough is.
-            trough: p.surface,
-            chip: toward_ink(0.12),
-            surface_raised: toward_ink(0.07),
-            inset: p.inset,
-            border: toward_ink(0.16),
-            border_subtle: toward_ink(0.09),
-            text: p.foreground,
-            text_muted: text_step(0.72),
-            text_dim: text_step(0.58),
-            text_faint: text_step(0.42),
-            ink: p.foreground,
-            accent: p.red,
-            accent_light: if p.dark { p.bright_red } else { p.red },
-            mark: p.accent,
-            on_mark,
-            // The theme's own non-alarm hues. Not validated the way the
-            // fixed schemes' are — a palette whose accent is its green
-            // gives two of them one colour, and the labels still tell
-            // the tiles apart.
-            map_hues: [p.accent, p.yellow, p.green],
-            map_rest: toward_ink(0.12),
+/// Tokens with nothing to choose: `palette.rs` documents each.
+macro_rules! tokens {
+    ($($name:ident),* $(,)?) => {$(
+        #[inline]
+        pub fn $name() -> Rgba {
+            palette::$name().into()
         }
-    }
+    )*};
 }
 
-fn contrast(a: Rgba, b: Rgba) -> f32 {
-    let (a, b) = (omarchy::luminance(a), omarchy::luminance(b));
-    (a.max(b) + 0.05) / (a.min(b) + 0.05)
-}
+tokens!(
+    surface,
+    trough,
+    chip,
+    surface_raised,
+    inset,
+    border,
+    border_subtle,
+    text,
+    text_muted,
+    text_dim,
+    text_faint,
+    ink,
+    accent,
+    accent_light,
+    gauge,
+    track,
+    card_line,
+    map_rest,
+);
 
-/// `classic_dark`, `classic_light`, `golden_dark`, `golden_light`, each
-/// `0xRRGGBBAA`, and which Omarchy token stands in that role.
-fn tone(
-    classic_dark: u32,
-    classic_light: u32,
-    golden_dark: u32,
-    golden_light: u32,
-    omarchy: fn(&OmarchyTokens) -> Rgba,
-) -> Rgba {
-    match scheme() {
-        Scheme::ClassicDark => rgba(classic_dark),
-        Scheme::ClassicLight => rgba(classic_light),
-        Scheme::GoldenDark => rgba(golden_dark),
-        Scheme::GoldenLight => rgba(golden_light),
-        // Unset only if the scheme was switched without a palette, which
-        // `set_omarchy` never does; classic dark is the safe paint.
-        Scheme::Omarchy => omarchy_tokens().map_or(rgba(classic_dark), |t| omarchy(&t)),
-    }
-}
-
-/// Card / grouped fill. Dark: faint white lift over the glass. Light:
-/// nearly solid white, so cards sit on the grey panel the way Settings
-/// groups do.
-///
-/// The dark lift is safe to stay translucent because the ground under it
-/// is guaranteed: `use_popover_material` (main.rs) puts a stock
-/// popover-material `NSVisualEffectView` under the content, whose
-/// luminosity clamp keeps the backdrop dark over any wallpaper — the
-/// same mechanism that keeps a system menu readable on a white desktop.
-/// A brief detour made these cards nearly solid instead; it fixed white
-/// wallpapers by killing the glass everywhere else, which is the wrong
-/// trade when the OS offers the right one.
-#[inline]
-pub fn surface() -> Rgba {
-    // Golden light is `--paper` at the same near-solid alpha the classic
-    // light card uses. Golden dark is `--wash` (`#f5efe612`), the warm
-    // equivalent of the white lift — still translucent, so the glass stays.
-    // Golden dark: `#252528` over the `#1c1c1e` ground, as a lift.
-    tone(0xffffff12, 0xfffffff2, 0xffffff0a, 0xfbf8f3f2, |t| {
-        t.surface
-    })
-}
-
-/// Tab-strip well. Dark: same language as a card. Light: a grey trough so
-/// the selected chip can be white.
-#[inline]
-pub fn trough() -> Rgba {
-    // Golden light: `--bone-deep`, the well a paper chip sits in.
-    tone(0xffffff12, 0x0000000a, 0xffffff0a, 0xe8dfd2ff, |t| t.trough)
-}
-
-/// Selected tab chip.
-#[inline]
-pub fn chip() -> Rgba {
-    // Golden dark chip is `--line` (`#f5efe61f`). Golden light is `--paper`.
-    tone(0xffffff1f, 0xffffffff, 0xffffff14, 0xfbf8f3ff, |t| t.chip)
-}
-
-/// Hover / expanded rows. Dark: lift. Light: a grey wash on the white card.
-#[inline]
-pub fn surface_raised() -> Rgba {
-    // Golden: `--wash-strong` on dark (`#ffffff1a`), `--wash` on light.
-    tone(0xffffff1f, 0x0000000e, 0xffffff14, 0x1a17140f, |t| {
-        t.surface_raised
-    })
-}
-
-/// Recessed fill: nested detail blocks, meter tracks.
-#[inline]
-pub fn inset() -> Rgba {
-    // Golden light recess is `--bone-deep`. Golden dark keeps the classic
-    // black wash: the site's dark bone-deep (`#0e0c0a`) is a solid, and a
-    // solid recess would turn every meter track into a black bar.
-    tone(0x00000040, 0x0000000c, 0x00000040, 0xe8dfd2ff, |t| t.inset)
-}
-
-/// Hairline outlines and meter tracks.
-#[inline]
-pub fn border() -> Rgba {
-    // Golden dark hairline is `--line`. Golden light is `--line-solid`,
-    // the site's card edge, which is a real warm line rather than a
-    // faint black wash.
-    tone(0xffffff22, 0x00000012, 0xffffff17, 0xe2d8c9ff, |t| t.border)
-}
-
-/// Row separators — dimmer than [`border`].
-#[inline]
-pub fn border_subtle() -> Rgba {
-    // `--line-soft` on dark, `--line` on light.
-    tone(0xffffff14, 0x00000014, 0xffffff0f, 0x1a171424, |t| {
-        t.border_subtle
-    })
-}
-
-/// Primary text.
-#[inline]
-pub fn text() -> Rgba {
-    // Golden is `--ink`.
-    tone(0xfafafaff, 0x1d1d1fff, 0xf2f0ebff, 0x1a1714ff, |t| t.text)
-}
-
-/// Secondary text: units, captions, inactive tabs.
-#[inline]
-pub fn text_muted() -> Rgba {
-    // Golden is `--ink-soft`.
-    tone(0xa1a1aaff, 0x6e6e73ff, 0xa19d96ff, 0x5a534bff, |t| {
-        t.text_muted
-    })
-}
-
-/// Tertiary text: field labels, footnotes.
-#[inline]
-pub fn text_dim() -> Rgba {
-    // Classic dark keeps the system grey. Classic light is a step darker
-    // than it: `#8e8e93` on the near-white card measured 3.26:1, under the
-    // 4.5:1 that 10pt captions and path prefixes need, while every other
-    // scheme cleared 4.9; `#747479` reads 4.65:1. Golden steps down to
-    // `--ink-faint`, the site's last published ink.
-    tone(0x8e8e93ff, 0x747479ff, 0x8f8b85ff, 0x645d54ff, |t| {
-        t.text_dim
-    })
-}
-
-/// Ink for a tiny fixed label — the ≤9.5px pills, tags and footnote
-/// sentences: `base` in a Latin locale, full [`text`] in a CJK one.
-///
-/// The concession exists because small Han glyphs lose on four fronts at
-/// once: the UI family (SF Pro) has no Han glyphs, so Chinese renders in
-/// PingFang — a fallback with no optical-size axis, meaning the English
-/// half of a line gets small-size stem thickening and the Chinese half
-/// does not; a Han glyph packs ~20 strokes into the box a Latin letter
-/// spends on three, so at 9px @2x single strokes antialias into grey;
-/// gpui rasterises grayscale-only on macOS (no subpixel sharpening); and
-/// the panel is glass, so those grey edges composite against wallpaper.
-/// Raising the *size* was tried and reverted — one point times gpui's
-/// 1.618 line box moved the whole panel's rhythm. Contrast is the lever
-/// that costs no layout: muted grey Chinese at 9px is mush, full-ink
-/// Chinese at 9px is small but sharp. Latin keeps the designed hierarchy.
-///
-/// **Labels only, never controls.** A toggle's resting colour is its
-/// state (`showing ? text() : muted`), a sort chip's muted resting tone
-/// is what its hover lifts from — routing those through here would lie
-/// about state, so they stay on their own colours in every locale.
+/// `palette::tiny_label`.
 #[inline]
 pub fn tiny_label(base: Rgba) -> Rgba {
-    if i18n::is_cjk() { text() } else { base }
+    palette::tiny_label(base.into()).into()
 }
 
-/// Quaternary text: limits, tick marks.
-#[inline]
-pub fn text_faint() -> Rgba {
-    // Golden has no ink past `--ink-faint`, so faint and dim share it.
-    tone(0x636366ff, 0xa1a1a6ff, 0x8f8b85ff, 0x645d54ff, |t| {
-        t.text_faint
-    })
-}
-
-/// Neutral fill for bars and meters — the "nothing is wrong" state.
-#[inline]
-pub fn ink() -> Rgba {
-    // Golden meters use `--ink`, the same role as the classic near-black
-    // / near-white neutral.
-    tone(0xe4e4e7ff, 0x1d1d1fff, 0xf2f0ebff, 0x1a1714ff, |t| t.ink)
-}
-
-/// Brand red. Reserved for over-threshold states and the primary action.
-/// Omarchy's is the palette's red (see the module doc).
-#[inline]
-pub fn accent() -> Rgba {
-    omarchy_tokens().map_or(rgb(0xec3013), |t| t.accent)
-}
-
-/// Accent *text*: lighter on dark surfaces, darker on light so contrast holds.
-#[inline]
-pub fn accent_light() -> Rgba {
-    if let Some(t) = omarchy_tokens() {
-        t.accent_light
-    } else if is_dark() {
-        rgb(0xff9783)
-    } else {
-        rgb(0xc41e0a)
-    }
-}
-
-/// Accent washes used behind warning pills and alert rows.
+/// `palette::accent_wash`.
 #[inline]
 pub fn accent_wash(alpha_percent: u32) -> Rgba {
-    let alpha = alpha_percent.clamp(0, 100) * 255 / 100;
-    Rgba {
-        a: alpha as f32 / 255.0,
-        ..accent()
-    }
+    palette::accent_wash(alpha_percent).into()
 }
 
-/// The theme's own mark and the ink that sits on it: Golden's champagne,
-/// Omarchy's accent. `None` for the classic pair, whose selected chips
-/// keep the faint brand wash. A selected tab, a selected option chip and
-/// a checked switch wear it.
+/// `palette::mark`.
 #[inline]
 pub fn mark() -> Option<(Rgba, Rgba)> {
-    if let Some(t) = omarchy_tokens() {
-        Some((t.mark, t.on_mark))
-    } else if is_golden() {
-        Some((gold(), on_gold()))
-    } else {
-        None
-    }
+    palette::mark().map(|(fill, ink)| (fill.into(), ink.into()))
 }
 
-/// Whether the golden pair is the one on screen.
-#[inline]
-pub fn is_golden() -> bool {
-    matches!(scheme(), Scheme::GoldenDark | Scheme::GoldenLight)
-}
-
-/// Notchclip's champagne, `rgb(217 185 140)`.
-///
-/// The site publishes it as the dark half of `--accent`. Both golden
-/// variants use it as the theme's mark: a wash of it would colour-pick
-/// as a blend, and the light-mode bronze reads as brown.
-///
-/// That is the light half's. The dark half's accent is `#d9ae7a`, the
-/// one the ui-polish palette names.
-#[inline]
-pub fn gold() -> Rgba {
-    if scheme() == Scheme::GoldenDark {
-        rgb(0xd9ae7a)
-    } else {
-        rgb(0xd9b98c)
-    }
-}
-
-/// The ink on a gold fill: dark `--on-accent`, or the dark half's own
-/// ground. Cream on champagne has no contrast.
-#[inline]
-pub fn on_gold() -> Rgba {
-    if scheme() == Scheme::GoldenDark {
-        rgb(0x1c1c1e)
-    } else {
-        rgb(0x14110e)
-    }
-}
-
-/// A selected thing's fill and ink in golden dark: the mark at 16%
-/// under the mark itself. The tab on screen, a chosen option chip. They
-/// used to be the mark as a solid block with dark ink on it — the
-/// loudest shape on any page was whichever chip happened to be selected.
-/// `None` elsewhere: golden light's mark has no contrast as text on
-/// bone, an Omarchy palette's accent is not promised to have any on its
-/// own ground (only its ink *on* the accent is checked), and the classic
-/// pair has no mark.
+/// `palette::selected`.
 #[inline]
 pub fn selected() -> Option<(Rgba, Rgba)> {
-    (scheme() == Scheme::GoldenDark).then(|| {
-        let mark = gold();
-        (Rgba { a: 0.16, ..mark }, mark)
-    })
+    palette::selected().map(|(fill, ink)| (fill.into(), ink.into()))
 }
 
-/// The paint of a reading where nothing is wrong: the scheme's mark if
-/// it has one that shows, the neutral ink if not. For the readings that
-/// are a card's subject — Overview's bars and charts in both forms, a
-/// volume's fullness, the GPU — and not for the fifty share bars down a
-/// list, which stay [`ink`]: there the bar ranks a row against its
-/// neighbours, and fifty marks are no mark. The short Overview had it
-/// first, which left the same two figures (memory, the startup disk)
-/// champagne on one page and bone on the long form and on Hardware.
-///
-/// Golden light is the scheme with a mark that does not show: its
-/// champagne is 1.4:1 on the bar's own track and worse as a link's ink
-/// on paper, where the ink is 13.5:1. It keeps [`ink`], as the classic
-/// pair does for want of a mark.
-#[inline]
-pub fn gauge() -> Rgba {
-    if scheme() == Scheme::GoldenLight {
-        return ink();
-    }
-    mark().map_or_else(ink, |(mark, _)| mark)
-}
-
-/// [`fill_for`] for a reading that is its card's subject: [`gauge`]
-/// until over the line, the alarm after.
+/// `palette::gauge_for`.
 #[inline]
 pub fn gauge_for(over: bool) -> Rgba {
-    if over { accent() } else { gauge() }
+    palette::gauge_for(over).into()
 }
 
-/// The track a bar fills. Golden dark's is a step *lighter* than the
-/// card (`#36363a`), the third of its three steps; every other scheme
-/// keeps the recess a track has always been ([`inset`]).
-#[inline]
-pub fn track() -> Rgba {
-    tone(0x00000040, 0x0000000c, 0xffffff14, 0xe8dfd2ff, |t| t.inset)
-}
-
-/// The hairline round a card. None in golden dark, where the card is a
-/// step lighter than an opaque ground and needs no line to be seen;
-/// [`border`] everywhere else, where the ground is glass.
-#[inline]
-pub fn card_line() -> Rgba {
-    if scheme() == Scheme::GoldenDark {
-        rgba(0x00000000)
-    } else {
-        border()
-    }
-}
-
-/// How solid the panel's ground is when the reader has not said.
-/// Golden dark is opaque (the module doc says why); the classic dark
-/// keeps the glass, and light concedes it.
-#[inline]
-pub fn default_opacity(glass_dark: f32, glass_light: f32) -> f32 {
-    match scheme() {
-        Scheme::GoldenDark => 1.0,
-        _ if is_dark() => glass_dark,
-        _ => glass_light,
-    }
-}
-
-/// Fill of a selected option chip. Classic keeps the faint brand wash.
-/// A scheme with a [`mark`] fills it solid.
+/// `palette::choice_fill`.
 #[inline]
 pub fn choice_fill(on: bool) -> Rgba {
-    match (on, selected(), mark()) {
-        (false, _, _) => inset(),
-        (true, Some((fill, _)), _) => fill,
-        (true, None, Some((fill, _))) => fill,
-        (true, None, None) => accent_wash(10),
-    }
+    palette::choice_fill(on).into()
 }
 
-/// Border of a selected option chip. Same split as [`choice_fill`].
+/// `palette::choice_line`.
 #[inline]
 pub fn choice_line(on: bool) -> Rgba {
-    match (on, selected(), mark()) {
-        (false, _, _) => border(),
-        (true, Some((fill, _)), _) => fill,
-        (true, None, Some((fill, _))) => fill,
-        (true, None, None) => accent_wash(45),
-    }
+    palette::choice_line(on).into()
 }
 
-/// Label on a selected option chip. With a [`mark`] it is the mark's own
-/// ink, because the fill is the mark itself.
+/// `palette::choice_ink`.
 #[inline]
 pub fn choice_ink(on: bool) -> Rgba {
-    match (on, selected(), mark()) {
-        (false, _, _) => text(),
-        (true, Some((_, ink)), _) => ink,
-        (true, None, Some((_, ink))) => ink,
-        (true, None, None) => accent_light(),
-    }
+    palette::choice_ink(on).into()
 }
 
-/// Hover fill for an option chip. A selected chip on a [`mark`] stays the
-/// mark: its label is the mark's ink, and the usual raised wash would put
-/// that ink on a card.
+/// `palette::choice_hover`.
 #[inline]
 pub fn choice_hover(on: bool) -> Rgba {
-    match (on, selected(), mark()) {
-        (true, Some((fill, _)), _) => fill,
-        (true, None, Some((fill, _))) => fill,
-        _ => surface_raised(),
-    }
+    palette::choice_hover(on).into()
+}
+
+/// `palette::map_hues`.
+pub fn map_hues() -> Vec<Rgba> {
+    palette::map_hues().into_iter().map(Into::into).collect()
+}
+
+/// `palette::fill_for`.
+#[inline]
+pub fn fill_for(over: bool) -> Rgba {
+    palette::fill_for(over).into()
+}
+
+/// `palette::text_for`.
+#[inline]
+pub fn text_for(over: bool) -> Rgba {
+    palette::text_for(over).into()
 }
 
 /// gpui-kit's own widgets — the window ground, switches, inputs, focus
@@ -597,14 +135,16 @@ pub fn choice_hover(on: bool) -> Rgba {
 /// read again is the same name and loads nothing.
 pub fn omarchy_theme(p: &Palette) -> (String, String) {
     let t = OmarchyTokens::from_palette(p);
-    let on = |fill: Rgba| {
-        if contrast(fill, rgb(0x000000)) > contrast(fill, rgb(0xffffff)) {
-            rgb(0x000000)
+    let on = |fill: color::Rgba| {
+        if palette::contrast(fill, color::rgb(0x000000))
+            > palette::contrast(fill, color::rgb(0xffffff))
+        {
+            color::rgb(0x000000)
         } else {
-            rgb(0xffffff)
+            color::rgb(0xffffff)
         }
     };
-    let active_wash = Rgba {
+    let active_wash = color::Rgba {
         a: 0x15 as f32 / 255.0,
         ..p.accent
     };
@@ -652,7 +192,7 @@ pub fn omarchy_theme(p: &Palette) -> (String, String) {
         ("title_bar.background", p.inset),
         ("title_bar.border", t.border),
         ("status_bar.background", p.inset),
-        ("scrollbar.background", rgba(0x00000000)),
+        ("scrollbar.background", color::rgba(0x00000000)),
         ("scrollbar.thumb.background", t.text_dim),
         ("base.red", p.red),
         ("base.green", p.green),
@@ -681,7 +221,7 @@ pub fn omarchy_theme(p: &Palette) -> (String, String) {
 }
 
 /// `#rrggbb`, or `#rrggbbaa` when not opaque.
-fn hex(color: Rgba) -> String {
+fn hex(color: color::Rgba) -> String {
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     let (r, g, b, a) = (byte(color.r), byte(color.g), byte(color.b), byte(color.a));
     if a == 0xff {
@@ -691,73 +231,9 @@ fn hex(color: Rgba) -> String {
     }
 }
 
-/// The directory map's hues. Every folder tile wears one, and no two
-/// tiles sharing an edge wear the same (`squarify::colour`); the largest
-/// takes the first.
-///
-/// The names on the tiles say which folder, so a hue only has to keep
-/// neighbours apart — but any two of these can end up neighbours, so
-/// every pair is checked against the dataviz rules on the scheme's own
-/// surface: ΔE ≥ 15 for normal vision and ≥ 8 under protan, deutan and
-/// tritan simulation. Five, because five always colour a map and the
-/// stock fourth and fifth (violet, magenta) failed beside blue and teal
-/// — 1.9 and 1.6 ΔE to a colour-blind eye — so each scheme's last two
-/// were searched for in OKLCH, which put them off the usual lightness
-/// band: a lighter pink and lavender on dark, a deeper berry and indigo
-/// on light. Labels pick their ink per tile, so that costs nothing. No
-/// red or orange: the alarm is red, and an orange tile (6.1 ΔE from it)
-/// would read as one; the berries clear it by 16 and more. It replaced
-/// the chart ramp (five steps of one blue, two of them 5.8 ΔE apart, and
-/// a darker step read as a bigger folder) and then a three-hue version
-/// that greyed every other folder, which read as unfinished. Omarchy
-/// lends its palette's accent, yellow and green, unvalidated; a map three
-/// cannot colour falls back to the fewest same-hue neighbours.
-pub fn map_hues() -> Vec<Rgba> {
-    let hex = |codes: [u32; 5]| codes.into_iter().map(rgb).collect();
-    match scheme() {
-        Scheme::ClassicDark => hex([0x3987e5, 0xc98500, 0x199e70, 0xe97ab2, 0xb0aff5]),
-        Scheme::ClassicLight => hex([0x2a78d6, 0xeda100, 0x1baf7a, 0x841c58, 0x483e90]),
-        Scheme::GoldenDark => hex([0xb07a20, 0x5279c1, 0x36a980, 0xa53c75, 0xc49bf3]),
-        Scheme::GoldenLight => hex([0xb07a20, 0x4c73ba, 0x16b09b, 0x841c58, 0xc49bf3]),
-        Scheme::Omarchy => omarchy_tokens().map_or_else(
-            || hex([0x3987e5, 0xc98500, 0x199e70, 0xe97ab2, 0xb0aff5]),
-            |t| t.map_hues.to_vec(),
-        ),
-    }
-}
-
-/// The map's "files and small folders": an opaque grey, the one tile with
-/// no hue, for the part of a level no folder of its own accounts for.
-/// Opaque so its label can pick black or white from it — a translucent
-/// lift gave the luminance of white over a dark card, and black text on
-/// what painted as dark grey.
-pub fn map_rest() -> Rgba {
-    tone(0x323237ff, 0xdcdce0ff, 0x36312bff, 0xe0d7c9ff, |t| {
-        t.map_rest
-    })
-}
-
-/// The single rule the design applies everywhere: a bar, meter or number is
-/// neutral until it crosses its threshold, and only then turns accent.
-#[inline]
-pub fn fill_for(over: bool) -> Rgba {
-    if over { accent() } else { ink() }
-}
-
-/// Same rule for text, which needs the lighter/darker accent to stay readable.
-#[inline]
-pub fn text_for(over: bool) -> Rgba {
-    if over { accent_light() } else { text() }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// The scheme is one global. Tests that switch it hold this, so two
-    /// of them running in parallel cannot repaint each other mid-assert.
-    static SCHEME_LOCK: Mutex<()> = Mutex::new(());
 
     /// Every hex in the theme file is a Notchclip `:root` token (or
     /// transparent black). An alpha suffix is allowed — macos-classic
@@ -833,48 +309,6 @@ mod tests {
         assert!(light && dark, "the file is a pair, like macos-classic");
     }
 
-    /// Golden dark is three steps of lightness over an opaque ground,
-    /// and its fills are lifts that land on the published hexes there.
-    #[test]
-    fn golden_dark_is_three_steps_over_an_opaque_ground() {
-        let _scheme = SCHEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_golden(true);
-        assert_eq!(default_opacity(0.35, 0.8), 1.0);
-        // White at `alpha` over `under`, one channel.
-        let over = |under: u32, alpha: f32| (under as f32 + alpha * (255.0 - under as f32)).round();
-        // Card over the ground's #1c, then track over the card's #25.
-        assert_eq!(over(0x1c, surface().a), 0x25 as f32);
-        assert_eq!(over(0x25, track().a), 0x36 as f32);
-        // No line round a card, and the three inks as written.
-        assert_eq!(card_line().a, 0.0);
-        assert_eq!(text(), rgb(0xf2f0eb));
-        assert_eq!(text_muted(), rgb(0xa19d96));
-        assert_eq!(text_dim(), rgb(0x8f8b85));
-        // Selected is the accent at 16% under the accent, not a block.
-        let (fill, label) = selected().expect("golden dark has a selected state");
-        assert_eq!(label, rgb(0xd9ae7a));
-        assert!((fill.a - 0.16).abs() < 1e-6);
-        assert_eq!(choice_fill(true), fill);
-        assert_eq!(choice_ink(true), label);
-        assert_eq!(gauge(), rgb(0xd9ae7a));
-
-        // The light half is still the site's, and still a solid mark.
-        set_golden(false);
-        assert_eq!(gold(), rgb(0xd9b98c));
-        assert!(selected().is_none());
-        assert_eq!(choice_fill(true), gold());
-        assert!(default_opacity(0.35, 0.8) < 1.0);
-        // Its champagne does not show on its own track: bars take the ink.
-        assert_eq!(gauge(), ink());
-        assert_eq!(gauge_for(true), accent());
-        // The classic dark keeps its glass and its recessed track.
-        set_dark(true);
-        assert_eq!(default_opacity(0.35, 0.8), 0.35);
-        assert_eq!(track(), inset());
-        assert_eq!(card_line(), border());
-        assert_eq!(gauge(), ink());
-    }
-
     /// gpui-kit paints a menu's hovered item in `accent.background`, on
     /// `popover.background`. Golden Dark had both at `#1c1814` and the
     /// generated Omarchy theme had both at the palette's surface, so the
@@ -891,66 +325,6 @@ mod tests {
             assert!(hover.is_some() && menu.is_some(), "{name} sets both");
             assert_ne!(hover, menu, "{name}: the highlight is the menu's fill");
         }
-    }
-
-    #[test]
-    fn golden_light_paints_paper_and_keeps_the_alarm_red() {
-        let _scheme = SCHEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_golden(false);
-        assert!(!is_dark());
-        assert_eq!(surface(), rgba(0xfbf8f3f2));
-        assert_eq!(text(), rgba(0x1a1714ff));
-        // The threshold colour stays brand red. The selected chip is the
-        // champagne, solid, with the dark on-accent for its label.
-        assert_eq!(accent(), rgb(0xec3013));
-        assert_eq!(choice_fill(true), gold());
-        assert_eq!(choice_ink(true), on_gold());
-        assert_eq!(choice_hover(true), gold());
-        assert_eq!(gold(), rgb(0xd9b98c));
-        set_dark(false);
-        assert!(!is_golden());
-        assert_eq!(choice_fill(true), accent_wash(10));
-        set_dark(true);
-        assert!(is_dark());
-        assert_eq!(surface(), rgba(0xffffff12));
-    }
-
-    #[test]
-    fn omarchy_paints_every_token_from_the_palette() {
-        let _scheme = SCHEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let palette = Palette::tokyo_night();
-        set_omarchy(&palette);
-        assert!(is_dark());
-        assert!(omarchy_palette_is(&palette));
-        assert_eq!(surface(), palette.surface);
-        assert_eq!(inset(), palette.inset);
-        assert_eq!(text(), palette.foreground);
-        assert_eq!(ink(), palette.foreground);
-        // The alarm is the palette's red; its washes keep that hue.
-        assert_eq!(accent(), palette.red);
-        assert_eq!(accent_light(), palette.bright_red);
-        let wash = accent_wash(10);
-        assert_eq!(
-            (wash.r, wash.g, wash.b),
-            (palette.red.r, palette.red.g, palette.red.b)
-        );
-        assert!((wash.a - 25.0 / 255.0).abs() < 1e-6);
-        // The theme's mark is its accent, solid, with legible ink on it.
-        let (fill, on) = mark().expect("Omarchy has a mark");
-        assert_eq!(fill, palette.accent);
-        assert!(contrast(fill, on) >= 4.5, "ink on the mark must read");
-        assert_eq!(choice_fill(true), fill);
-        assert_eq!(choice_ink(true), on);
-        // Neutral steps keep the theme's hue: muted text sits between
-        // the ground and the ink.
-        let muted = omarchy::luminance(text_muted());
-        assert!(muted > omarchy::luminance(palette.background));
-        assert!(muted < omarchy::luminance(palette.foreground));
-
-        set_dark(true);
-        assert!(mark().is_none());
-        assert_eq!(accent(), rgb(0xec3013));
-        assert!(!omarchy_palette_is(&palette), "classic is on screen now");
     }
 
     #[test]
@@ -975,8 +349,8 @@ mod tests {
         assert_eq!(omarchy_theme(&dark).0, name);
         let light = Palette {
             dark: false,
-            background: rgb(0xfffcf0),
-            foreground: rgb(0x100f0f),
+            background: color::rgb(0xfffcf0),
+            foreground: color::rgb(0x100f0f),
             ..dark.clone()
         };
         let (light_name, light_json) = omarchy_theme(&light);
@@ -987,7 +361,7 @@ mod tests {
 
     #[test]
     fn hex_writes_alpha_only_when_translucent() {
-        assert_eq!(hex(rgb(0x1a1b26)), "#1a1b26");
-        assert_eq!(hex(rgba(0x7aa2f715)), "#7aa2f715");
+        assert_eq!(hex(color::rgb(0x1a1b26)), "#1a1b26");
+        assert_eq!(hex(color::rgba(0x7aa2f715)), "#7aa2f715");
     }
 }

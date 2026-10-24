@@ -11,7 +11,9 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 | `main.rs` | 模块声明、按 feature 选择前端（gpui / NSH，见 `nsh-migration.md`） |
 | `gpui_app.rs` | gpui 前端：启动、窗口生命周期、显隐与定位的调度 |
 | `nsh/` | NSH 前端（迁移中，见 `nsh-migration.md`） |
-| `placement.rs` | 窗口尺寸与「挂在托盘图标下方」的纯几何（可单测） |
+| `placement.rs` | 窗口尺寸与「挂在托盘图标下方」的纯几何（可单测，两个前端共享，基于 `geom.rs`） |
+| `palette.rs` / `color.rs` | 配色方案与全部颜色 token（两个前端共享）；`theme.rs` 是 gpui 前端的转换层 |
+| `chart.rs` | Overview 三张图的分桶、坐标轴与曲线几何（两个前端共享） |
 | `window_ext.rs` | 通过 AppKit 直接显示 / 隐藏 / 移动 `NSWindow` |
 | `dock.rs` | 两条独立路径的 Dock 图标抑制 |
 | `metrics.rs` | 常驻采集线程、自适应节奏、异常进程扫描调度 |

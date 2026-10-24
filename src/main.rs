@@ -38,19 +38,24 @@ mod awake;
 mod cachepreset;
 mod chart;
 mod cleanhints;
+mod color;
 mod diskscan;
 mod diskwatch;
 mod dupes;
 mod finder;
 mod format;
 mod fullscan;
+mod geom;
 mod glyph;
 mod history;
 mod i18n;
 mod i18n_loader;
 mod logger;
 mod metrics;
+mod omarchy;
 mod opener;
+mod palette;
+mod placement;
 mod prefs;
 mod procscan;
 mod proxy;
@@ -82,10 +87,6 @@ mod gpui_app;
 mod ipc;
 #[cfg(feature = "gpui")]
 mod notify;
-#[cfg(feature = "gpui")]
-mod omarchy;
-#[cfg(feature = "gpui")]
-mod placement;
 #[cfg(feature = "gpui")]
 mod state;
 #[cfg(feature = "gpui")]

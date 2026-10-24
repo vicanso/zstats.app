@@ -10,6 +10,8 @@
 //!
 //! ```text
 //! show | show key | hide          on screen (optionally as the key window)
+//! anchor X Y W H                  shown as a click on a status item at that
+//!                                 rect would show it (physical pixels, top left)
 //! click X Y | move X Y            a left click / a pointer move
 //! type TEXT                       key events for each character
 //! info                            window number, frame, key and first responder
@@ -69,6 +71,16 @@ fn run(line: &str) {
     tracing::info!("probe: {line}");
     host::with_host(|h| match cmd {
         "show" => host::show(h, None, rest.first() == Some(&"key")),
+        // Placement under the icon without a click on the real one, which
+        // would move the user's pointer.
+        "anchor" => host::show(
+            h,
+            Some(tray_icon::Rect {
+                position: tray_icon::dpi::PhysicalPosition::new(num(0), num(1)),
+                size: tray_icon::dpi::PhysicalSize::new(num(2) as u32, num(3) as u32),
+            }),
+            false,
+        ),
         "hide" => host::hide(h),
         "click" => {
             mouse(h, NSEventType::LeftMouseDown, num(0), num(1));
@@ -117,10 +129,7 @@ fn info(h: &Host) {
 }
 
 fn location(h: &Host, x: f64, y: f64) -> NSPoint {
-    let height = h
-        .panel
-        .contentView()
-        .map_or(host::PANEL_SIZE.1, |v| v.frame().size.height);
+    let height = h.panel.contentView().map_or(0.0, |v| v.frame().size.height);
     // The window's base coordinates grow upwards from its bottom edge.
     NSPoint::new(x, height - y)
 }

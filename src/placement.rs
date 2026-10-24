@@ -6,12 +6,34 @@
 //! picking (`resolve_icon`) lives here for the same reason: it is a
 //! function of the tray's physical rect and a list of (frame, scale),
 //! not of AppKit.
+//!
+//! Shared by both front ends (docs/nsh-migration.md, phase 1b): the
+//! arithmetic is on `geom.rs`'s rectangles, and [`below_tray`] takes the
+//! screens and the fallbacks as arguments. Asking AppKit or gpui for those
+//! is each front end's own business — the gpui one's is
+//! [`bounds_below_tray`], gated at the end of this file.
 
-use crate::state::{TrayAnchor, ZStatsGlobalStore};
-#[cfg(target_os = "macos")]
+use crate::geom::{Point, Rect, Size, point, size};
+#[cfg(feature = "gpui")]
+use crate::state::ZStatsGlobalStore;
+#[cfg(all(feature = "gpui", target_os = "macos"))]
 use crate::window_ext;
-use gpui::{App, Bounds, Pixels, Point, Size, point, px, size};
+#[cfg(feature = "gpui")]
+use gpui::{App, Bounds, Pixels};
 use std::env;
+
+/// Screen rectangle of the tray icon, in **physical** pixels with a top-left
+/// origin — that's what `tray_icon` reports. It multiplied the AppKit
+/// logical frame by *that status item's* `backingScaleFactor`, so converting
+/// back has to pick the matching screen ([`resolve_icon`]), not the
+/// window's last-known scale factor.
+#[derive(Clone, Copy, Debug)]
+pub struct TrayAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
 
 /// Menu-bar panel: 320px matches Control Center / Stats combined popovers
 /// and lets the icon tab strip breathe. Height covers the icon strip,
@@ -179,14 +201,10 @@ pub const TRAY_GAP: f32 = 6.;
 /// would run past a screen edge, in which case it sits flush against that edge.
 ///
 /// Pure geometry, all in logical pixels, so it's testable without an `App`.
-fn anchored_origin(
-    icon: Bounds<Pixels>,
-    window_size: Size<Pixels>,
-    screen: Bounds<Pixels>,
-) -> Point<Pixels> {
+fn anchored_origin(icon: Rect, window_size: Size, screen: Rect) -> Point {
     let mut origin = point(
         icon.origin.x + icon.size.width / 2. - window_size.width / 2.,
-        icon.origin.y + icon.size.height + px(TRAY_GAP),
+        icon.origin.y + icon.size.height + TRAY_GAP,
     );
     // `.max(origin)` guards the degenerate case of a window wider than the
     // screen, where the upper clamp bound would fall below the lower one.
@@ -202,10 +220,10 @@ fn anchored_origin(
 /// `frame` is the full screen (menu bar included) so a status item sitting
 /// in the menu bar still `contains`s; `visible` is what the panel clamps to.
 #[derive(Clone, Copy, Debug)]
-struct ScreenGeom {
-    frame: Bounds<Pixels>,
-    visible: Bounds<Pixels>,
-    scale: f32,
+pub struct ScreenGeom {
+    pub frame: Rect,
+    pub visible: Rect,
+    pub scale: f32,
 }
 
 /// Status-item windows are the menu-bar strip: ~22–24pt tall. tray-icon
@@ -216,19 +234,19 @@ struct ScreenGeom {
 /// the item arbitrarily wide, the height does not change.
 const EXPECTED_ICON_HEIGHT: f32 = 24.0;
 
-/// tray-icon's physical rect → gpui logical, under one screen's scale.
-fn logical_icon(anchor: TrayAnchor, scale: f32) -> Bounds<Pixels> {
+/// tray-icon's physical rect → logical points, under one screen's scale.
+fn logical_icon(anchor: TrayAnchor, scale: f32) -> Rect {
     let scale = if scale > 0. { scale } else { 1. };
-    let to_px = |v: f64| px(v as f32 / scale);
-    Bounds {
-        origin: point(to_px(anchor.x), to_px(anchor.y)),
-        size: size(to_px(anchor.width), to_px(anchor.height)),
+    let to_points = |v: f64| v as f32 / scale;
+    Rect {
+        origin: point(to_points(anchor.x), to_points(anchor.y)),
+        size: size(to_points(anchor.width), to_points(anchor.height)),
     }
 }
 
 struct ResolvedIcon {
-    icon: Bounds<Pixels>,
-    visible: Option<Bounds<Pixels>>,
+    icon: Rect,
+    visible: Option<Rect>,
     scale: f32,
 }
 
@@ -247,7 +265,7 @@ fn resolve_icon(anchor: TrayAnchor, screens: &[ScreenGeom]) -> ResolvedIcon {
         if !screen.frame.contains(&icon.center()) {
             continue;
         }
-        let score = (f32::from(icon.size.height) - EXPECTED_ICON_HEIGHT).abs();
+        let score = (icon.size.height - EXPECTED_ICON_HEIGHT).abs();
         match best {
             Some((s, _)) if score >= s => {}
             _ => best = Some((score, i)),
@@ -262,28 +280,11 @@ fn resolve_icon(anchor: TrayAnchor, screens: &[ScreenGeom]) -> ResolvedIcon {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn load_screens() -> Vec<ScreenGeom> {
-    window_ext::screens()
-        .into_iter()
-        .map(|(frame, visible, scale)| ScreenGeom {
-            frame,
-            visible,
-            scale,
-        })
-        .collect()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn load_screens() -> Vec<ScreenGeom> {
-    Vec::new()
-}
-
 /// The panel's height on a screen with `visible` of height to give:
 /// what it asks for, or what fits under the tray gap. Never under
 /// [`CUT_FLOOR`].
-fn fitted_height(wanted: Pixels, visible: Pixels) -> Pixels {
-    wanted.min(visible - px(TRAY_GAP)).max(px(CUT_FLOOR))
+fn fitted_height(wanted: f32, visible: f32) -> f32 {
+    wanted.min(visible - TRAY_GAP).max(CUT_FLOOR)
 }
 
 /// Where a panel's top edge and height land when it is given a new
@@ -311,43 +312,37 @@ pub fn resized(top: f64, height: f64, floor: f64, ceiling: f64) -> (f64, f64) {
     (top, height.min(top - floor))
 }
 
-/// [`anchored_origin`] plus the two things that need an `App`: converting the
-/// tray's physical pixels to logical ones, and finding the icon's display.
-pub fn bounds_below_tray(
+/// [`anchored_origin`] for a tray icon: its physical rect converted to
+/// logical points under the right screen's scale (`screens`, from the
+/// platform; with none, `fallback_scale` — the window's last-known one),
+/// the screen to clamp against (that screen's visible area, or whatever
+/// `visible_containing` says contains the icon), and the height cut to
+/// what that screen has room for.
+pub fn below_tray(
     anchor: TrayAnchor,
-    window_size: Size<Pixels>,
-    cx: &App,
-) -> Bounds<Pixels> {
-    let screens = load_screens();
+    window_size: Size,
+    screens: &[ScreenGeom],
+    fallback_scale: f32,
+    visible_containing: impl FnOnce(Point) -> Option<Rect>,
+) -> Rect {
     let resolved = if screens.is_empty() {
-        // No AppKit list (off the main thread, or not macOS): whatever
-        // the main window last reported, which is the pre-fix fallback.
-        let scale = cx.global::<ZStatsGlobalStore>().read(cx).scale_factor();
+        // No list (off the main thread, or not macOS): whatever the main
+        // window last reported, which is the pre-fix fallback.
         ResolvedIcon {
-            icon: logical_icon(anchor, scale),
+            icon: logical_icon(anchor, fallback_scale),
             visible: None,
-            scale: if scale > 0. { scale } else { 1. },
+            scale: if fallback_scale > 0. {
+                fallback_scale
+            } else {
+                1.
+            },
         }
     } else {
-        resolve_icon(anchor, &screens)
+        resolve_icon(anchor, screens)
     };
     let icon = resolved.icon;
     let scale = resolved.scale;
-
-    // Resolved through AppKit rather than `cx.displays()`, which reports
-    // every screen at the same origin — see `window_ext`.
-    #[cfg(target_os = "macos")]
-    let screen = resolved
-        .visible
-        .or_else(|| window_ext::visible_bounds_containing(icon.origin));
-    #[cfg(not(target_os = "macos"))]
-    let screen = resolved.visible.or_else(|| {
-        cx.displays()
-            .into_iter()
-            .find(|d| d.bounds().contains(&icon.origin))
-            .or_else(|| cx.primary_display())
-            .map(|d| d.visible_bounds())
-    });
+    let screen = resolved.visible.or_else(|| visible_containing(icon.origin));
     // A panel the reader dragged taller, or a screen shorter than the
     // long Overview's 828: the body scrolls, the footer must not hang
     // off the screen.
@@ -363,11 +358,11 @@ pub fn bounds_below_tray(
         // No display info to clamp against — centre and hope for the best.
         None => point(
             icon.origin.x + icon.size.width / 2. - window_size.width / 2.,
-            icon.origin.y + icon.size.height + px(TRAY_GAP),
+            icon.origin.y + icon.size.height + TRAY_GAP,
         ),
     };
 
-    let bounds = Bounds {
+    let bounds = Rect {
         origin,
         size: window_size,
     };
@@ -383,10 +378,10 @@ pub fn bounds_below_tray(
                 format!(
                     "{:.0}@({:.0},{:.0} {:.0}x{:.0})",
                     s.scale,
-                    f32::from(s.frame.origin.x),
-                    f32::from(s.frame.origin.y),
-                    f32::from(s.frame.size.width),
-                    f32::from(s.frame.size.height)
+                    s.frame.origin.x,
+                    s.frame.origin.y,
+                    s.frame.size.width,
+                    s.frame.size.height
                 )
             })
             .collect::<Vec<_>>()
@@ -399,40 +394,90 @@ pub fn bounds_below_tray(
             anchor.y,
             anchor.width,
             anchor.height,
-            f32::from(icon.origin.x),
-            f32::from(icon.origin.y),
-            f32::from(icon.size.width),
-            f32::from(icon.size.height),
+            icon.origin.x,
+            icon.origin.y,
+            icon.size.width,
+            icon.size.height,
             match screen {
                 Some(s) => format!(
                     "({:.0},{:.0} {:.0}x{:.0})",
-                    f32::from(s.origin.x),
-                    f32::from(s.origin.y),
-                    f32::from(s.size.width),
-                    f32::from(s.size.height)
+                    s.origin.x, s.origin.y, s.size.width, s.size.height
                 ),
                 None => "none".to_string(),
             },
-            f32::from(bounds.origin.x),
-            f32::from(bounds.origin.y),
-            f32::from(bounds.size.width),
-            f32::from(bounds.size.height),
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
         );
-        for candidate in &screens {
+        for candidate in screens {
             let try_icon = logical_icon(anchor, candidate.scale);
             let on = candidate.frame.contains(&try_icon.center());
-            let score = (f32::from(try_icon.size.height) - EXPECTED_ICON_HEIGHT).abs();
+            let score = (try_icon.size.height - EXPECTED_ICON_HEIGHT).abs();
             eprintln!(
                 "POS try scale={} icon=({:.0},{:.0} {:.0}x{:.0}) on_screen={on} score={score:.0}",
                 candidate.scale,
-                f32::from(try_icon.origin.x),
-                f32::from(try_icon.origin.y),
-                f32::from(try_icon.size.width),
-                f32::from(try_icon.size.height),
+                try_icon.origin.x,
+                try_icon.origin.y,
+                try_icon.size.width,
+                try_icon.size.height,
             );
         }
     }
     bounds
+}
+
+/// The screens as AppKit lists them, for [`below_tray`].
+#[cfg(all(feature = "gpui", target_os = "macos"))]
+fn load_screens() -> Vec<ScreenGeom> {
+    window_ext::screens()
+        .into_iter()
+        .map(|(frame, visible, scale)| ScreenGeom {
+            frame: frame.into(),
+            visible: visible.into(),
+            scale,
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "gpui", not(target_os = "macos")))]
+fn load_screens() -> Vec<ScreenGeom> {
+    Vec::new()
+}
+
+/// [`below_tray`] with the two things that need an `App`: the window's
+/// last-known scale, and finding the icon's display.
+#[cfg(feature = "gpui")]
+pub fn bounds_below_tray(
+    anchor: TrayAnchor,
+    window_size: gpui::Size<Pixels>,
+    cx: &App,
+) -> Bounds<Pixels> {
+    let scale = cx.global::<ZStatsGlobalStore>().read(cx).scale_factor();
+    below_tray(
+        anchor,
+        window_size.into(),
+        &load_screens(),
+        scale,
+        |origin| {
+            // Resolved through AppKit rather than `cx.displays()`, which
+            // reports every screen at the same origin — see `window_ext`.
+            #[cfg(target_os = "macos")]
+            {
+                window_ext::visible_bounds_containing(origin.into()).map(Rect::from)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let origin: gpui::Point<Pixels> = origin.into();
+                cx.displays()
+                    .into_iter()
+                    .find(|d| d.bounds().contains(&origin))
+                    .or_else(|| cx.primary_display())
+                    .map(|d| d.visible_bounds().into())
+            }
+        },
+    )
+    .into()
 }
 
 #[cfg(test)]
@@ -441,24 +486,24 @@ mod tests {
 
     /// A 1440×900 display with the 38px menu bar taken off the top, i.e. what
     /// `visible_bounds()` reports on macOS.
-    fn screen() -> Bounds<Pixels> {
-        Bounds {
-            origin: point(px(0.), px(38.)),
-            size: size(px(1440.), px(862.)),
+    fn screen() -> Rect {
+        Rect {
+            origin: point(0., 38.),
+            size: size(1440., 862.),
         }
     }
 
     /// A 24×24 menu bar icon with its left edge at `x`.
-    fn icon_at(x: f32) -> Bounds<Pixels> {
-        Bounds {
-            origin: point(px(x), px(0.)),
-            size: size(px(24.), px(24.)),
+    fn icon_at(x: f32) -> Rect {
+        Rect {
+            origin: point(x, 0.),
+            size: size(24., 24.),
         }
     }
 
-    fn window() -> Size<Pixels> {
+    fn window() -> Size {
         let (w, h) = DEFAULT_WINDOW_SIZE;
-        size(px(w), px(h))
+        size(w, h)
     }
 
     /// Given a new height, the panel keeps its top edge while that
@@ -486,9 +531,9 @@ mod tests {
     /// tray gap; one that fits is left alone.
     #[test]
     fn a_panel_taller_than_the_screen_is_cut_to_fit() {
-        assert_eq!(fitted_height(px(828.), px(1080.)), px(828.));
-        assert_eq!(fitted_height(px(1000.), px(876.)), px(876. - TRAY_GAP));
-        assert_eq!(fitted_height(px(828.), px(200.)), px(CUT_FLOOR));
+        assert_eq!(fitted_height(828., 1080.), 828.);
+        assert_eq!(fitted_height(1000., 876.), 876. - TRAY_GAP);
+        assert_eq!(fitted_height(828., 200.), CUT_FLOOR);
     }
 
     /// One width for both forms — the layout does not reflow — and the
@@ -586,9 +631,9 @@ mod tests {
         let icon = icon_at(700.);
         let origin = anchored_origin(icon, window(), screen());
         // Icon centre 712, window 358 wide → 712 - 179.
-        assert_eq!(origin.x, px(533.));
+        assert_eq!(origin.x, 533.);
         // Icon bottom 24 + 6px gap, which clears the 38px menu bar.
-        assert_eq!(origin.y, px(38.));
+        assert_eq!(origin.y, 38.);
     }
 
     #[test]
@@ -596,22 +641,22 @@ mod tests {
         // Centring would put the window at 1416 - 179 = 1237, whose right
         // edge (1595) overflows the 1440 screen.
         let origin = anchored_origin(icon_at(1404.), window(), screen());
-        assert_eq!(origin.x, px(1082.)); // 1440 - 358
+        assert_eq!(origin.x, 1082.); // 1440 - 358
     }
 
     #[test]
     fn sticks_to_the_left_edge_when_the_icon_is_near_it() {
         let origin = anchored_origin(icon_at(4.), window(), screen());
-        assert_eq!(origin.x, px(0.));
+        assert_eq!(origin.x, 0.);
     }
 
     #[test]
     fn never_overflows_the_bottom() {
-        let tall = size(px(320.), px(2000.));
+        let tall = size(320., 2000.);
         let origin = anchored_origin(icon_at(700.), tall, screen());
         // Taller than the screen: pinned to the top of the visible area rather
         // than to a negative coordinate.
-        assert_eq!(origin.y, px(38.));
+        assert_eq!(origin.y, 38.);
     }
 
     /// Primary 1440×900 @2x, secondary 1920×1080 @1x to its right — the
@@ -619,24 +664,24 @@ mod tests {
     fn mixed_dpi() -> Vec<ScreenGeom> {
         vec![
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(px(1440.), px(900.)),
+                frame: Rect {
+                    origin: point(0., 0.),
+                    size: size(1440., 900.),
                 },
-                visible: Bounds {
-                    origin: point(px(0.), px(24.)),
-                    size: size(px(1440.), px(876.)),
+                visible: Rect {
+                    origin: point(0., 24.),
+                    size: size(1440., 876.),
                 },
                 scale: 2.0,
             },
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(1440.), px(0.)),
-                    size: size(px(1920.), px(1080.)),
+                frame: Rect {
+                    origin: point(1440., 0.),
+                    size: size(1920., 1080.),
                 },
-                visible: Bounds {
-                    origin: point(px(1440.), px(24.)),
-                    size: size(px(1920.), px(1056.)),
+                visible: Rect {
+                    origin: point(1440., 24.),
+                    size: size(1920., 1056.),
                 },
                 scale: 1.0,
             },
@@ -666,11 +711,11 @@ mod tests {
         );
         let resolved = resolve_icon(physical, &mixed_dpi());
         assert_eq!(resolved.scale, 1.0);
-        assert_eq!(resolved.icon.origin, point(px(1600.), px(0.)));
-        assert_eq!(resolved.icon.size, size(px(24.), px(24.)));
+        assert_eq!(resolved.icon.origin, point(1600., 0.));
+        assert_eq!(resolved.icon.size, size(24., 24.));
         assert_eq!(
             resolved.visible.map(|v| v.origin.x),
-            Some(px(1440.)),
+            Some(1440.),
             "clamp against the screen the icon is actually on"
         );
     }
@@ -680,32 +725,32 @@ mod tests {
         // Logical (700, 0) 24×24 on the 2x display → physical 1400, 48×48.
         let resolved = resolve_icon(anchor(1400., 0., 48., 48.), &mixed_dpi());
         assert_eq!(resolved.scale, 2.0);
-        assert_eq!(resolved.icon.origin, point(px(700.), px(0.)));
-        assert_eq!(resolved.icon.size.height, px(24.));
+        assert_eq!(resolved.icon.origin, point(700., 0.));
+        assert_eq!(resolved.icon.size.height, 24.);
     }
 
     #[test]
     fn same_dpi_two_screens_picks_the_one_that_contains_the_icon() {
         let screens = vec![
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(px(1440.), px(900.)),
+                frame: Rect {
+                    origin: point(0., 0.),
+                    size: size(1440., 900.),
                 },
-                visible: Bounds {
-                    origin: point(px(0.), px(24.)),
-                    size: size(px(1440.), px(876.)),
+                visible: Rect {
+                    origin: point(0., 24.),
+                    size: size(1440., 876.),
                 },
                 scale: 2.0,
             },
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(1440.), px(0.)),
-                    size: size(px(1920.), px(1080.)),
+                frame: Rect {
+                    origin: point(1440., 0.),
+                    size: size(1920., 1080.),
                 },
-                visible: Bounds {
-                    origin: point(px(1440.), px(24.)),
-                    size: size(px(1920.), px(1056.)),
+                visible: Rect {
+                    origin: point(1440., 24.),
+                    size: size(1920., 1056.),
                 },
                 scale: 2.0,
             },
@@ -713,8 +758,8 @@ mod tests {
         // Logical (1600, 0) 24×24 on the secondary, both @2x.
         let resolved = resolve_icon(anchor(3200., 0., 48., 48.), &screens);
         assert_eq!(resolved.scale, 2.0);
-        assert_eq!(resolved.icon.origin.x, px(1600.));
-        assert_eq!(resolved.visible.map(|v| v.origin.x), Some(px(1440.)));
+        assert_eq!(resolved.icon.origin.x, 1600.);
+        assert_eq!(resolved.visible.map(|v| v.origin.x), Some(1440.));
     }
 
     #[test]
@@ -723,31 +768,31 @@ mod tests {
         // secondary. Logical (2000, 0) 24×24 on the laptop → physical ×2.
         let screens = vec![
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(px(1920.), px(1080.)),
+                frame: Rect {
+                    origin: point(0., 0.),
+                    size: size(1920., 1080.),
                 },
-                visible: Bounds {
-                    origin: point(px(0.), px(24.)),
-                    size: size(px(1920.), px(1056.)),
+                visible: Rect {
+                    origin: point(0., 24.),
+                    size: size(1920., 1056.),
                 },
                 scale: 1.0,
             },
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(1920.), px(0.)),
-                    size: size(px(1440.), px(900.)),
+                frame: Rect {
+                    origin: point(1920., 0.),
+                    size: size(1440., 900.),
                 },
-                visible: Bounds {
-                    origin: point(px(1920.), px(24.)),
-                    size: size(px(1440.), px(876.)),
+                visible: Rect {
+                    origin: point(1920., 24.),
+                    size: size(1440., 876.),
                 },
                 scale: 2.0,
             },
         ];
         let resolved = resolve_icon(anchor(4000., 0., 48., 48.), &screens);
         assert_eq!(resolved.scale, 2.0);
-        assert_eq!(resolved.icon.origin, point(px(2000.), px(0.)));
+        assert_eq!(resolved.icon.origin, point(2000., 0.));
     }
 
     #[test]
@@ -756,30 +801,30 @@ mod tests {
         // logical (700, 1080) — physical y is doubled too.
         let screens = vec![
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(px(1920.), px(1080.)),
+                frame: Rect {
+                    origin: point(0., 0.),
+                    size: size(1920., 1080.),
                 },
-                visible: Bounds {
-                    origin: point(px(0.), px(24.)),
-                    size: size(px(1920.), px(1056.)),
+                visible: Rect {
+                    origin: point(0., 24.),
+                    size: size(1920., 1056.),
                 },
                 scale: 1.0,
             },
             ScreenGeom {
-                frame: Bounds {
-                    origin: point(px(0.), px(1080.)),
-                    size: size(px(1440.), px(900.)),
+                frame: Rect {
+                    origin: point(0., 1080.),
+                    size: size(1440., 900.),
                 },
-                visible: Bounds {
-                    origin: point(px(0.), px(1104.)),
-                    size: size(px(1440.), px(876.)),
+                visible: Rect {
+                    origin: point(0., 1104.),
+                    size: size(1440., 876.),
                 },
                 scale: 2.0,
             },
         ];
         let resolved = resolve_icon(anchor(1400., 2160., 48., 48.), &screens);
         assert_eq!(resolved.scale, 2.0);
-        assert_eq!(resolved.icon.origin, point(px(700.), px(1080.)));
+        assert_eq!(resolved.icon.origin, point(700., 1080.));
     }
 }

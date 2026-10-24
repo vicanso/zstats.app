@@ -7,7 +7,8 @@
 //! it needs of the window or the process goes to the host as a
 //! [`HostAction`], which `host.rs` carries to the main queue.
 
-use crate::{APP_NAME, i18n};
+use crate::color;
+use crate::{APP_NAME, i18n, palette};
 use nsh_base::button;
 use nsh_core::ui::prelude::*;
 use std::sync::OnceLock;
@@ -32,16 +33,15 @@ fn host(action: HostAction) {
     }
 }
 
-/// Golden Dark's tokens (`theme.rs`, `.claude/skills/ui-polish`), until
-/// phase 1b makes the theme shared.
-mod ink {
-    pub const GROUND: u32 = 0x1c1c1eff;
-    /// `theme::surface()`: a white lift that composites to `#252528`.
-    pub const CARD: u32 = 0xffffff0a;
-    pub const TEXT: u32 = 0xf2f0ebff;
-    pub const MUTED: u32 = 0xa19d96ff;
-    pub const DIM: u32 = 0x8f8b85ff;
-    pub const CHIP: u32 = 0xffffff14;
+/// Golden Dark's ground, `#1c1c1e`. The gpui front end takes it from the
+/// kit's theme file (`themes/golden.json`) rather than from the palette,
+/// so there is no token for it yet; phase 3 of docs/nsh-migration.md gives
+/// the panel its themes and this a place in `palette.rs`.
+const GROUND: u32 = 0x1c1c1eff;
+
+/// A palette token as NSH's colour.
+fn paint(c: color::Rgba) -> Rgba {
+    c.into()
 }
 
 /// `views::GUTTER` and `widgets::CARD_PAD`.
@@ -52,20 +52,20 @@ const CARD_PAD: f32 = 12.;
 pub fn Panel() -> impl IntoElement {
     view()
         .size_full()
-        .bg(rgba(ink::GROUND))
+        .bg(rgba(GROUND))
         .p(px(GUTTER))
         .gap(px(10.))
         .child(
             view()
                 .rounded(px(12.))
-                .bg(rgba(ink::CARD))
+                .bg(paint(palette::surface()))
                 .p(px(CARD_PAD))
                 .gap(px(6.))
                 .child(
                     text(APP_NAME)
                         .text_size(px(13.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgba(ink::TEXT)),
+                        .text_color(paint(palette::text())),
                 )
                 // Not translated: a development build's placeholder, gone
                 // when Overview takes its place in phase 4.
@@ -73,12 +73,12 @@ pub fn Panel() -> impl IntoElement {
                     text("NSH front end — phase 0 of docs/nsh-migration.md")
                         .text_size(px(12.))
                         .line_height(px(16.))
-                        .text_color(rgba(ink::MUTED)),
+                        .text_color(paint(palette::text_muted())),
                 )
                 .child(
                     text(env!("CARGO_PKG_VERSION"))
                         .text_size(px(11.))
-                        .text_color(rgba(ink::DIM))
+                        .text_color(paint(palette::text_dim()))
                         .tabular_nums(),
                 ),
         )
@@ -89,12 +89,12 @@ pub fn Panel() -> impl IntoElement {
                     .h(px(24.))
                     .px(px(10.))
                     .rounded(px(6.))
-                    .hover(|s| s.bg(rgba(ink::CHIP)))
+                    .hover(|s| s.bg(paint(palette::chip())))
                     .on_press(|| host(HostAction::Quit))
                     .child(
                         text(i18n::tr("common.quit"))
                             .text_size(px(12.))
-                            .text_color(rgba(ink::MUTED)),
+                            .text_color(paint(palette::text_muted())),
                     ),
             ),
         )

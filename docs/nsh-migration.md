@@ -47,12 +47,14 @@
 
 ## 阶段 1：抽出与界面无关的核心
 
-- **1a 纯计算移出视图。** 图表几何（`overview.rs` 的分桶、坐标轴、单调三次曲线）、各页的纯函数（`processes::fit_rows`、`overview::notice` 等）和它们的测试，移到与界面无关的模块。
-- **1b 颜色与几何。** 主题 token 用自有颜色类型（gpui 前端在边界上转换）；`placement.rs` 用自有矩形类型；`omarchy.rs` 随之共享。
+- **1a 纯计算移出视图（**已完成**，2026-10-24）。** 跨页面共用的图表几何（`overview.rs` 的分桶、坐标轴规则、参考线与刻度的时机、柱槽、单调三次曲线）连同 13 个测试移到共享的 `chart.rs`。**范围调整**：各页自己的纯逻辑（`processes::fit_rows`、`overview::notice` 等）不在这一步搬，而是在阶段 4 移植那一页时一起搬——现在就把每页都拆一遍，等于提前改动全部 gpui 页面，风险大而没有收益。
+- **1b 颜色与几何（**已完成**，2026-10-24）。** 共享的 `color.rs`（自有 `Rgba`，字段和 `rgb`/`rgba` 构造函数与 gpui、NSH 的同名同义）和 `palette.rs`（配色方案的选择、全部 token 的取值、Omarchy 的派生，以及原来写在 `theme.rs` 里的设计理由）；`theme.rs` 留在 gpui 前端，变成一层转换（函数名与返回类型不变，视图零改动），外加为 gpui-kit 生成的主题 JSON。共享的 `geom.rs`（点、尺寸、矩形，坐标约定与 gpui 相同，`contains` 的边界规则也一样）；`placement.rs` 改用它并整体共享，屏幕列表和兜底值改为参数（`below_tray`），gpui 的取法留在原地的 `bounds_below_tray`；`TrayAnchor` 随之搬进 `placement.rs`，`state` 重新导出。`omarchy.rs` 随颜色类型一起共享。NSH 宿主已改用 `placement::below_tray` 和 `palette`，删掉了原型时期的单屏定位和手写色值。
 - **1c 状态。** `ZStatsAppState` 去掉 gpui：方法不再接 `Context<Self>`，改接一个副作用接口（通知变化、派发后台任务、窗口操作）；输入框实体、滚动句柄、窗口句柄移到 gpui 前端自己的结构里；状态变成 `Send`，可以放进 `Arc<Mutex<_>>` 给多个线程用。
 - **1d 采集、托盘、通知。** `metrics.rs` 把 tick 交给与前端无关的 channel；`tray.rs` 里决定托盘外观的逻辑（`face_for`）与 gpui 分开；`notify.rs` 的横幅点击改成回调。
 
 **验收**：gpui 版行为不变（测试全过，关键页面截图与改动前一致）；`nsh` 构建能用上完整的核心。
+
+**1a / 1b 结果**：默认构建 438 个测试（多出的是颜色、几何类型自身的测试，其中两条拿 gpui 自己的构造函数和 `Bounds` 逐一比对，保证换类型后颜色和位置一分不差），只开 `nsh` 的构建 288 个（图表、配色、Omarchy、`placement` 的测试现在不带 gpui 也在跑）。`placement.rs` 只在 Linux 上编译的那段 gpui 分支，用对调条件编译的办法在 Mac 上编译过。NSH 前端实测：没有图标位置时放在主屏右上角；用 probe 的 `anchor` 命令模拟一次托盘点击，面板落在算法给出的位置（这台机器当时接着外接显示器）；改用 `palette` 后截图与之前一致。
 
 ## 阶段 2：NSH 宿主
 
@@ -81,7 +83,7 @@ Overview（短、长两种形态）→ Apps → Processes → Hardware → Netwo
 | 阶段 | 状态 |
 |---|---|
 | 0 双前端骨架 | 完成（2026-10-24） |
-| 1 核心 | 未开始 |
+| 1 核心 | 1a、1b 完成；1c、1d 未开始 |
 | 2 宿主 | 未开始 |
 | 3 基础件 | 未开始 |
 | 4 逐页 | 未开始 |
