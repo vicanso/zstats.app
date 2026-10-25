@@ -368,7 +368,7 @@ fn keep_awake(live: Live) -> AnyElement {
     };
     let left = move || {
         hold.get().map_or_else(String::new, |hold| {
-            format::uptime(u64::from(hold.minutes_left(SystemTime::now())) * 60)
+            format::countdown(hold.minutes_left(SystemTime::now()))
         })
     };
     let item = move |label: String, minutes: u32| {

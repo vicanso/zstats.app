@@ -376,6 +376,22 @@ pub fn uptime_short(secs: u64) -> String {
     format!("{}m", secs / 60)
 }
 
+/// A keep-awake hold's time left beside the footer's cup, from its whole
+/// minutes (`awake::Hold::minutes_left`): "45m" under an hour, hours to
+/// one decimal from there ("1.5h", "8.0h"). One figure and one unit, so
+/// a glance reads a length without adding "7h 58m" up; the tenth is
+/// rounded up as the minutes are, so the eight hours just picked read
+/// "8.0h", never "7.9h", and the last minute of an hour is "1.0h" until
+/// it is "59m".
+pub fn countdown(minutes: u32) -> String {
+    if minutes < 60 {
+        format!("{minutes}m")
+    } else {
+        let tenths = minutes.div_ceil(6);
+        format!("{}.{}h", tenths / 10, tenths % 10)
+    }
+}
+
 /// Digit grouping for counts ("48213" → "48,213") — past four digits a
 /// bare run of digits stops being readable at a glance.
 pub fn thousands(n: usize) -> String {
@@ -720,6 +736,20 @@ mod tests {
         assert_eq!(uptime_short(9 * 60), "9m");
         assert_eq!(uptime_short(2 * 3_600), "2h");
         assert_eq!(uptime_short(0), "0m");
+    }
+
+    #[test]
+    fn countdown_is_minutes_under_an_hour_and_tenths_of_hours_over() {
+        assert_eq!(countdown(30), "30m");
+        assert_eq!(countdown(59), "59m");
+        assert_eq!(countdown(1), "1m");
+        assert_eq!(countdown(60), "1.0h");
+        assert_eq!(countdown(61), "1.1h");
+        assert_eq!(countdown(90), "1.5h");
+        assert_eq!(countdown(119), "2.0h");
+        assert_eq!(countdown(479), "8.0h");
+        assert_eq!(countdown(480), "8.0h");
+        assert_eq!(countdown(451), "7.6h");
     }
 
     #[test]
