@@ -44,7 +44,7 @@ zstats = { version = "0.7.2", default-features = false, features = ["frontend"] 
 # and whose `MetricRecord::timestamp` is a `jiff::Timestamp`. Same version
 # zstats already pins, so this resolves to the one copy it is already
 # building — confirm with `cargo tree -i jiff` after any bump.
-jiff = "0.2.37"
+jiff = "0.2.38"
 # The collector's tick channel and the banners' click channel
 # (`metrics::spawn`, `notify::start`), received on threads of their own.
 smol = "2.0.2"
@@ -52,7 +52,7 @@ smol = "2.0.2"
 # release. `default-features` off so debug builds embed too, instead of
 # reading the folder at runtime.
 # `include-exclude` powers the `#[include]` allowlist in `src/assets.rs`.
-rust-embed = { version = "8.12.0", default-features = false, features = [
+rust-embed = { version = "8.13.0", default-features = false, features = [
     "compression",
     "include-exclude",
 ] }
@@ -77,9 +77,9 @@ ureq = { version = "3", default-features = false, features = [
 # stop verifying. Already in the tree — rust-embed builds the same
 # version for its own hashing — so this costs no extra compilation.
 sha2 = "0.11"
-rust-i18n = "4.2.3"
+rust-i18n = "4.2.4"
 sys-locale = "0.3.2"
-toml = "1.1.6"
+toml = "1.1.8"
 # The alert webhook's JSON body (webhook.rs): strings a user's process
 # names and paths end up in, so escaping is not something to write by
 # hand. Already in the tree (zstats); `serde`
