@@ -366,11 +366,15 @@ fn keep_awake(live: Live) -> AnyElement {
             "common.keep_awake_linux"
         }),
     };
-    let left = move || {
-        hold.get().map_or_else(String::new, |hold| {
+    // Worked out again on every change of the store — a tick, while the
+    // panel is on screen — and heard of only when the figure moves. Off
+    // `hold` it never moved: a hold is the same value from the pick to its
+    // end, so "30m" stood for the whole half hour.
+    let left = live.watch(|| {
+        awake::held().map_or_else(String::new, |hold| {
             format::countdown(hold.minutes_left(SystemTime::now()))
         })
-    };
+    });
     let item = move |label: String, minutes: u32| {
         let on = move || hold.get().map_or(0, |hold| hold.minutes) == minutes;
         menu_item()
@@ -438,7 +442,7 @@ fn keep_awake(live: Live) -> AnyElement {
                     footer_ink(held())
                 }))
                 .child(when(held, move || {
-                    text(left)
+                    text(move || left.get())
                         .pr(px(2.))
                         .tabular_nums()
                         .text_size(px(10.))
