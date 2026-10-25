@@ -5762,7 +5762,7 @@ dependencies = [
 
 [[package]]
 name = "zstats-app"
-version = "0.4.12"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "block2",
