@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.2](https://github.com/vicanso/zstats.app/compare/v0.5.1..v0.5.2) - 2026-10-25
+
+### ⛰️  Features
+
+- The keep-awake countdown reads 45m under an hour and 1.5h from there - ([c8d8a34](https://github.com/vicanso/zstats.app/commit/c8d8a34bb429a497fb0778adcfd84ea0dbbe0263))
+
+### 🐛 Bug Fixes
+
+- The keep-awake countdown counts down - ([789cd25](https://github.com/vicanso/zstats.app/commit/789cd25aa61b4f257b77f1a6ef3549670b54756e))
+
+### ⚙️ Miscellaneous Tasks
+
+- Jiff 0.2.38, rust-embed 8.13, rust-i18n 4.2.4, toml 1.1.8 - ([656b141](https://github.com/vicanso/zstats.app/commit/656b1419db0c603785d33fa096eb99ab66d5e573))
+
 ## [0.5.1](https://github.com/vicanso/zstats.app/compare/v0.4.12..v0.5.1) - 2026-10-25
 
 ### ⛰️  Features
