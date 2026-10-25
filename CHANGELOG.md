@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.5.1](https://github.com/vicanso/zstats.app/compare/v0.4.12..v0.5.1) - 2026-10-25
+
+### ⛰️  Features
+
+- NSH is the interface; the gpui front end is gone (docs/nsh-migration.md, phase 5) - ([269a17b](https://github.com/vicanso/zstats.app/commit/269a17b07d9cd222f805f91e36bd1bd270fb9917))
+- Ctrl+Q and Ctrl+W on the NSH Linux host (docs/nsh-migration.md, phase 5) - ([956531a](https://github.com/vicanso/zstats.app/commit/956531a809728c9563e9d04af9e2a37186de0a7d))
+- The NSH panel reads the Omarchy palette again as it opens (docs/nsh-migration.md, phase 5) - ([fe60dd3](https://github.com/vicanso/zstats.app/commit/fe60dd3652e54ef1acfa2f84d2679d122cfc9350))
+- The disk-space window's directory map on NSH (docs/nsh-migration.md, phase 4k) - ([2685d45](https://github.com/vicanso/zstats.app/commit/2685d458f552b2891f7e57c3ba9852f2472f778a))
+- The disk-space window's analysis lists on NSH (docs/nsh-migration.md, phase 4k) - ([a2fe76b](https://github.com/vicanso/zstats.app/commit/a2fe76ba4bfb4b0c71f28b9286fa5e96202fccbf))
+- The disk-space window's frame and its Duplicates tab on NSH (docs/nsh-migration.md, phase 4k) - ([8b2bcd2](https://github.com/vicanso/zstats.app/commit/8b2bcd245834894b69c1ec7b9e00dca8f6e4f6e1))
+- The settings window's Permissions and About pages on NSH (docs/nsh-migration.md, phase 4j) - ([2f5db7c](https://github.com/vicanso/zstats.app/commit/2f5db7c24ee4a1501cbc0aca8a58d4b17be04ac4))
+- The settings window's Advanced page on NSH (docs/nsh-migration.md, phase 4j) - ([2f735bc](https://github.com/vicanso/zstats.app/commit/2f735bc2368294a6c0b13d4321c987e116225fa3))
+- The settings window's Alerts page on NSH (docs/nsh-migration.md, phase 4j) - ([b258900](https://github.com/vicanso/zstats.app/commit/b258900ca5fe3190946346adc4e3b9c610cc2bc2))
+- The settings window's shell and Interface page on NSH (docs/nsh-migration.md, phase 4j) - ([eeba128](https://github.com/vicanso/zstats.app/commit/eeba128825cd017bb661274a61ff149dd1ebdac4))
+- The History page on NSH (docs/nsh-migration.md, phase 4i) - ([eee3e17](https://github.com/vicanso/zstats.app/commit/eee3e17dc31384fafb26e60d9be4ac4dc5bfc48f))
+- The Alerts page on NSH (docs/nsh-migration.md, phase 4h) - ([854123b](https://github.com/vicanso/zstats.app/commit/854123b084185b1260fd068da1b7a21109d6d810))
+- The Network page on NSH (docs/nsh-migration.md, phase 4g) - ([be1bc2e](https://github.com/vicanso/zstats.app/commit/be1bc2e34fdf5c12fb46da97ae761f80d6d8604e))
+- The Hardware page on NSH (docs/nsh-migration.md, phase 4f) - ([75ff64f](https://github.com/vicanso/zstats.app/commit/75ff64ff78a4fdbe65e8e4c9191559cad2571050))
+- The Processes page on NSH (docs/nsh-migration.md, phase 4e) - ([57b800e](https://github.com/vicanso/zstats.app/commit/57b800e525a4ab8896adb45162f8f933dc6e4e56))
+- The Apps page on NSH (docs/nsh-migration.md, phase 4d) - ([3bfb53b](https://github.com/vicanso/zstats.app/commit/3bfb53b671c022472da46361ff798ce8cc1e7f21))
+- Overview's long form on NSH (docs/nsh-migration.md, phase 4c) - ([b5542bd](https://github.com/vicanso/zstats.app/commit/b5542bd44581b3bb177a8a1534fd3a035855ca0b))
+- Overview's short form on NSH (docs/nsh-migration.md, phase 4b) - ([599e409](https://github.com/vicanso/zstats.app/commit/599e4095f33a13b2ebd9d4fd8edc2d7c17013530))
+- The NSH panel's frame, tab strip and footer (docs/nsh-migration.md, phase 4a) - ([24c271d](https://github.com/vicanso/zstats.app/commit/24c271ddfbd00c8aa0e81e25019167280fb53e63))
+- App icons and the confirm on NSH (docs/nsh-migration.md, phase 3d) - ([1cdfcbf](https://github.com/vicanso/zstats.app/commit/1cdfcbf4557030dceb92bfca772792824f451456))
+- The NSH panel's glass (docs/nsh-migration.md, phase 3c) - ([4c80339](https://github.com/vicanso/zstats.app/commit/4c803396b2b0f4dd221f089a61eef773ecce7e32))
+- The building blocks on NSH (docs/nsh-migration.md, phase 3b) - ([d0a07ee](https://github.com/vicanso/zstats.app/commit/d0a07eeb346a01b1681e4df3a3e870a13396bbe8))
+- Themes on the NSH front end (docs/nsh-migration.md, phase 3a) - ([9b2d678](https://github.com/vicanso/zstats.app/commit/9b2d678835b38fd8d6aec3713fea790363c88c21))
+- The NSH front end's GTK host on Linux (docs/nsh-migration.md, phase 2d) - ([5810bc7](https://github.com/vicanso/zstats.app/commit/5810bc7c7924c250fc6624929beaef20920fff69))
+- Settings and disk-space windows and the shortcuts on NSH (docs/nsh-migration.md, phase 2c) - ([8c80381](https://github.com/vicanso/zstats.app/commit/8c80381bdd510c98dbbdabb23e47b63ab9d31c46))
+- The NSH panel takes Overview's sizes and keeps a drag (docs/nsh-migration.md, phase 2b) - ([6ae5f03](https://github.com/vicanso/zstats.app/commit/6ae5f03fe1ee90ce633d23508b61de443a7cbda8))
+- The NSH front end runs on the shared store (docs/nsh-migration.md, phase 2a) - ([32a6f1b](https://github.com/vicanso/zstats.app/commit/32a6f1b668c20f8840be19ed51af6b301689fbdb))
+- The NSH front end begins beside gpui (docs/nsh-migration.md, phase 0) - ([f592a3a](https://github.com/vicanso/zstats.app/commit/f592a3abbc2d3cc587e3b57990b04aafbc3862e0))
+
+### 🐛 Bug Fixes
+
+- AppKit calls off the main thread drain their own autorelease pool; the disk window held 110k NSRunningApplications - ([2deb1e8](https://github.com/vicanso/zstats.app/commit/2deb1e80614d2c1dc45534f578ae5713fcef2b1b))
+- CI builds gtk4-layer-shell from source, Ubuntu 24.04 having no package for it (docs/nsh-migration.md, phase 5) - ([5b6a58d](https://github.com/vicanso/zstats.app/commit/5b6a58d5a98113f5dc4ac5ac198736d1f478ac70))
+- The theme's chips stand under their label, and settings opens 527 wide (docs/nsh-migration.md, phase 5) - ([db18bfd](https://github.com/vicanso/zstats.app/commit/db18bfd434e7b2d93e358d38e34e93ff3ff2615f))
+- History's rows no longer give up the Processes filter's row (docs/nsh-migration.md, phase 5) - ([1a4ea14](https://github.com/vicanso/zstats.app/commit/1a4ea14520bac786f34af1e70be7dd67a78ef4db))
+- The panel's menus close as it hides (docs/nsh-migration.md, phase 5) - ([ae29659](https://github.com/vicanso/zstats.app/commit/ae296599e6e251a608d4b36a8183a45ed2b58e02))
+- Layout callbacks on NSH outlive the part that made them (docs/nsh-migration.md, phase 4k) - ([6ad2933](https://github.com/vicanso/zstats.app/commit/6ad2933177c03425b61aebb8ebd9c18e120515cd))
+
+### 🚜 Refactor
+
+- Share the disk-space window's rules and the directory map's layout (docs/nsh-migration.md, phase 4k) - ([ccc5bf7](https://github.com/vicanso/zstats.app/commit/ccc5bf7866978be85eb433059eb6845ed9c76653))
+- Share the settings Permissions and About pages' rules (docs/nsh-migration.md, phase 4j) - ([25ee76c](https://github.com/vicanso/zstats.app/commit/25ee76ca902edbca072326568ae873ae49daa3a2))
+- Share the settings Advanced page's tables, cadences and webhook test (docs/nsh-migration.md, phase 4j) - ([03745fc](https://github.com/vicanso/zstats.app/commit/03745fccb5dde42efb15712e2c143d623c532430))
+- Share the settings Alerts page's thresholds and overrides (docs/nsh-migration.md, phase 4j) - ([684a35f](https://github.com/vicanso/zstats.app/commit/684a35f3cecf3fcc6a73116a2e38d43aab6555d3))
+- Share the settings window's pages and pickers (docs/nsh-migration.md, phase 4j) - ([f31c971](https://github.com/vicanso/zstats.app/commit/f31c971475af486658c31d9a4f0d731655eac342))
+- Share the History page's rules (docs/nsh-migration.md, phase 4i) - ([be41cd9](https://github.com/vicanso/zstats.app/commit/be41cd9e968f8c14e7602ab75491feca12386435))
+- Share the Alerts page's rules (docs/nsh-migration.md, phase 4h) - ([0c75c53](https://github.com/vicanso/zstats.app/commit/0c75c53d05b6d4b2e9c05f9de971d2bdffd3ef70))
+- Share the Network page's rules (docs/nsh-migration.md, phase 4g) - ([b73e23a](https://github.com/vicanso/zstats.app/commit/b73e23a0937d27aa3ac24c4d70e3673e7187d81f))
+- Share the Hardware page's rules and colour lines (docs/nsh-migration.md, phase 4f) - ([7cdd472](https://github.com/vicanso/zstats.app/commit/7cdd472fd3993dc8b985102ea92396292d9ffc18))
+- Share the Processes page's rules and the NSH lists' pieces (docs/nsh-migration.md, phase 4e) - ([8ed41cc](https://github.com/vicanso/zstats.app/commit/8ed41cc9e8f3458dcb057f81e305a81079020035))
+- Share the Apps page's rules, alert bars and row fitting (docs/nsh-migration.md, phase 4d) - ([0265537](https://github.com/vicanso/zstats.app/commit/0265537b665f263846860ce69ecfb30fe4cdeba8))
+- Collection, the tray and the banners are shared (docs/nsh-migration.md, phase 1d) - ([f556bb5](https://github.com/vicanso/zstats.app/commit/f556bb51f30e6ceb1be1b27b2b9ea7eed02e48c4))
+- The store leaves gpui behind an Effects trait (docs/nsh-migration.md, phase 1c-2) - ([27995c2](https://github.com/vicanso/zstats.app/commit/27995c2de4539a6dcf157a6bc14af4fae7f14476))
+- Gpui's interface handles leave the store (docs/nsh-migration.md, phase 1c-1) - ([bab2b15](https://github.com/vicanso/zstats.app/commit/bab2b15736c03b189aa4159c275a873a3680dd74))
+- Colours and panel geometry get shared types (docs/nsh-migration.md, phase 1b) - ([aa49779](https://github.com/vicanso/zstats.app/commit/aa4977917f09825adb62167be00c991e0c81092a))
+- Overview's chart geometry moves to a shared chart.rs (docs/nsh-migration.md, phase 1a) - ([af15919](https://github.com/vicanso/zstats.app/commit/af1591905dc13a5029a5e92b99fc5dcc02792c9a))
+
+### 📚 Documentation
+
+- What nsh#448 really is, retested on NSH main (docs/nsh-migration.md, phase 5) - ([aaa7f93](https://github.com/vicanso/zstats.app/commit/aaa7f933d85f7a7142968a81bda34b332b52db31))
+- What a tab switch costs, in debug and in release (docs/nsh-migration.md, phase 5) - ([ebc96e6](https://github.com/vicanso/zstats.app/commit/ebc96e68f10bf4a2b8992a38906f0ddb270b1083))
+- Source comments describe NSH as the one interface; the gpui files they cite are 269a17b^'s (docs/nsh-migration.md, phase 5) - ([9e703c6](https://github.com/vicanso/zstats.app/commit/9e703c63322f254badb660c3edac67ca8f2d81cb))
+- Design.md describes the NSH interface; the menu-hover test replaces golden.json (docs/nsh-migration.md, phase 5) - ([951a7a5](https://github.com/vicanso/zstats.app/commit/951a7a554470c5bab79821f200d7568ee6f22f55))
+- CLAUDE.md describes the NSH interface (docs/nsh-migration.md, phase 5) - ([9dbe69c](https://github.com/vicanso/zstats.app/commit/9dbe69c0b7cdb3df4da5b98a83ece80c55bfe647))
+- Record phase 1c and the store's new rules (docs/nsh-migration.md) - ([d9250d4](https://github.com/vicanso/zstats.app/commit/d9250d48939829b88584b34ad304643a77e078a5))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.5.0 - ([34dc6b4](https://github.com/vicanso/zstats.app/commit/34dc6b41b676708d714cb370091cf81f4b7326f3))
+- Make linux-check build what it says, on trixie with GTK 4 - ([50cce63](https://github.com/vicanso/zstats.app/commit/50cce634142bd3b268ac62bcd825daae1bff6393))
+
 ## [0.5.0](https://github.com/vicanso/zstats.app/compare/v0.4.12..v0.5.0) - 2026-10-25
 
 ### ⛰️  Features
