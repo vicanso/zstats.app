@@ -38,17 +38,21 @@ pub fn trash(path: &Path) -> Result<(), String> {
     let Some(path) = path.to_str() else {
         return Err("path is not valid UTF-8".into());
     };
-    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
-    NSFileManager::defaultManager()
-        .trashItemAtURL_resultingItemURL_error(&url, None)
-        .map(|()| {
-            // The audit line for the app's other act on the system,
-            // at the one delivery point both confirm-gated callers
-            // share. Recoverable (it is Finder's own Trash), but a
-            // move a person may want to trace is a move worth a line.
-            tracing::info!(path, "moved to Trash");
-        })
-        .map_err(|e| e.to_string())
+    // Off the main thread (a window's engine): what the move autoreleases
+    // goes with this pool rather than staying for the thread's life.
+    objc2::rc::autoreleasepool(|_| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        NSFileManager::defaultManager()
+            .trashItemAtURL_resultingItemURL_error(&url, None)
+            .map_err(|e| e.to_string())
+    })
+    .map(|()| {
+        // The audit line for the app's other act on the system,
+        // at the one delivery point both confirm-gated callers
+        // share. Recoverable (it is Finder's own Trash), but a
+        // move a person may want to trace is a move worth a line.
+        tracing::info!(path, "moved to Trash");
+    })
 }
 
 /// Move a file to the Trash through `gio trash` — GLib's implementation

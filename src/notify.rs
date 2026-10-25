@@ -88,7 +88,7 @@ fn dispatch(banner: Banner) {
 #[cfg(target_os = "macos")]
 mod native {
     use block2::RcBlock;
-    use objc2::rc::Retained;
+    use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::{NSObject, ProtocolObject};
     use objc2::{AnyThread, define_class, msg_send};
     use objc2_foundation::{NSArray, NSBundle, NSError, NSObjectProtocol, NSString};
@@ -201,10 +201,18 @@ mod native {
     /// Post one banner and return. Whether and when it shows is the
     /// notification centre's business; a banner the user never touches
     /// costs nothing here.
+    ///
+    /// Posted from the collector's thread, which has no autorelease pool
+    /// that ever drains: the pool here lets go of what the posting
+    /// autoreleases.
     pub(super) fn deliver(banner: &super::Banner) {
         if !bundled() {
             return; // said once, at install
         }
+        autoreleasepool(|_| post(banner));
+    }
+
+    fn post(banner: &super::Banner) {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&banner.title));
         content.setSubtitle(&NSString::from_str(&banner.subtitle));

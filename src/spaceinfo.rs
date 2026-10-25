@@ -36,7 +36,8 @@ fn purgeable() -> Option<u64> {
         NSArray, NSNumber, NSString, NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey,
         NSURLVolumeAvailableCapacityKey,
     };
-    unsafe {
+    // A store job's thread: no autorelease pool drains there but this one.
+    objc2::rc::autoreleasepool(|_| unsafe {
         let url = NSURL::fileURLWithPath(&NSString::from_str("/"));
         let keys = NSArray::from_slice(&[
             NSURLVolumeAvailableCapacityForImportantUsageKey,
@@ -52,7 +53,7 @@ fn purgeable() -> Option<u64> {
         let important = read(NSURLVolumeAvailableCapacityForImportantUsageKey)?;
         let plain = read(NSURLVolumeAvailableCapacityKey)?;
         Some(important.saturating_sub(plain))
-    }
+    })
 }
 
 #[cfg(not(target_os = "macos"))]

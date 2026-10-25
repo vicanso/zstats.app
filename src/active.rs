@@ -174,15 +174,30 @@ pub fn start() {
 #[cfg(not(target_os = "macos"))]
 pub fn start() {}
 
-/// Bundle ids of every running application, asked at the moment a
-/// cleanup row is drawn — the disk-space window marks a cache whose app
-/// is running (`cleanhints::CleanHint::running_in`). One AppKit call
-/// over the application list, no polling: the window repaints on its
-/// own events, and a stale answer between them only delays a pill.
+/// Bundle ids of every running application — the disk-space window marks
+/// a cache whose app is running (`cleanhints::CleanHint::running_in`).
+/// The window's lists are worked out again on every change of the store,
+/// a collector tick included, and each fresh answer is one XPC round trip
+/// to LaunchServices per running application (25 ms of the window's
+/// engine thread, sampled on the installed app, 2026-10-25), so an answer
+/// is reused for [`RUNNING_FRESH`]: a stale one only delays a pill.
 #[cfg(target_os = "macos")]
 pub fn running_bundle_ids() -> Vec<String> {
-    native::running_bundle_ids()
+    static RUNNING: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+    let mut kept = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    match kept.as_ref() {
+        Some((at, ids)) if at.elapsed() < RUNNING_FRESH => ids.clone(),
+        _ => {
+            let ids = native::running_bundle_ids();
+            *kept = Some((Instant::now(), ids.clone()));
+            ids
+        }
+    }
 }
+
+/// How long one answer of [`running_bundle_ids`] stands.
+#[cfg(target_os = "macos")]
+const RUNNING_FRESH: Duration = Duration::from_secs(15);
 
 /// No application list to ask off macOS; no row says "running".
 #[cfg(not(target_os = "macos"))]
@@ -193,6 +208,7 @@ pub fn running_bundle_ids() -> Vec<String> {
 #[cfg(target_os = "macos")]
 mod native {
     use block2::RcBlock;
+    use objc2::rc::autoreleasepool;
     use objc2_app_kit::{
         NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
         NSWorkspaceDidActivateApplicationNotification,
@@ -202,20 +218,31 @@ mod native {
     use std::mem;
     use std::time::Instant;
 
+    /// Asked on the disk-space window's engine thread, which, like every
+    /// thread of ours but the main one, has no autorelease pool that
+    /// ever drains: without this one each answer's `NSRunningApplication`s
+    /// stayed for the life of the thread — 110 thousand of them, and the
+    /// app's footprint from 32 MB to 160, within the hour the window was
+    /// open on the installed app (2026-10-25).
     pub(super) fn running_bundle_ids() -> Vec<String> {
-        NSWorkspace::sharedWorkspace()
-            .runningApplications()
-            .iter()
-            .filter_map(|app| app.bundleIdentifier())
-            .map(|id| id.to_string())
-            .collect()
+        autoreleasepool(|_| {
+            NSWorkspace::sharedWorkspace()
+                .runningApplications()
+                .iter()
+                .filter_map(|app| app.bundleIdentifier())
+                .map(|id| id.to_string())
+                .collect()
+        })
     }
 
     /// Who is in front right now. Asked only while a banner is being
-    /// composed — the activation table answers everything else.
+    /// composed — the activation table answers everything else — on the
+    /// collector's thread, so in a pool of its own.
     pub(super) fn frontmost_pid() -> Option<u32> {
-        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-        u32::try_from(app.processIdentifier()).ok()
+        autoreleasepool(|_| {
+            let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+            u32::try_from(app.processIdentifier()).ok()
+        })
     }
 
     /// The activated app rides in `userInfo` under

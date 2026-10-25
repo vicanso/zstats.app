@@ -132,12 +132,18 @@ fn names_match(expected: &str, live: &str) -> bool {
         || (expected.len() == COMM_MAX && live.starts_with(expected))
 }
 
+/// In a pool of its own: the Apps page asks for every row on its engine
+/// thread, which has no autorelease pool that ever drains, and each
+/// answer would otherwise stay for the life of the thread (`active.rs`'s
+/// `running_bundle_ids` says what that came to).
 #[cfg(target_os = "macos")]
 fn running_application(pid: u32) -> Option<objc2::rc::Retained<NSRunningApplication>> {
     if pid == 0 {
         return None;
     }
-    NSRunningApplication::runningApplicationWithProcessIdentifier(pid as libc::pid_t)
+    objc2::rc::autoreleasepool(|_| {
+        NSRunningApplication::runningApplicationWithProcessIdentifier(pid as libc::pid_t)
+    })
 }
 
 /// Whether the Apps expansion should offer Quit for this tree root.
