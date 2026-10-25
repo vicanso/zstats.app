@@ -375,8 +375,9 @@ fn sparkline(runs: impl Fn() -> Vec<Vec<(f32, f32)>> + 'static) -> AnyElement {
     })
     .size_full()
     .on_layout(move |b: &Bounds<Points>| {
-        // A box being taken down still reports a layout after the
-        // part that made it is gone.
+        // A layout event already queued for the box a region's
+        // previous run made is still delivered after the re-run
+        // dropped that run's signals (longbridge/nsh#448).
         let _ = size.try_set((b.size.width.0, b.size.height.0));
     })
     .into_element()

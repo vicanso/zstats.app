@@ -2494,8 +2494,11 @@ fn map_of(state: &ZStatsAppState, (width, height): (f32, f32)) -> Option<MapView
 /// tiles, filling the height it is given beside the lists or
 /// [`NARROW_MAP_H`] above them. Tiles are laid out in points against the
 /// box's size as last measured, so a resize lays them out again; the size
-/// is the window root's (`size`), because a box being taken down still
-/// reports a layout after the part that made it has gone.
+/// is the window root's (`size`): a region re-runs under the same owner and
+/// drops the previous run's signals, and a layout event already queued for
+/// the previous run's box is still delivered to its listener — the card's
+/// frame re-run by the root's own `on_layout` crashed the window that way
+/// (longbridge/nsh#448).
 fn dir_map(live: Live, fill: bool, size: Signal<(f32, f32)>) -> AnyElement {
     let map = computed(move || {
         live.track();
