@@ -26,8 +26,10 @@ use crate::settingspage::{UpdateAction, UpdateView};
 use crate::state::{CachesSync, HintsSync, TemplateSync, WebhookTest, ZStatsAppState};
 use crate::{about, alerttpl, appicon, autostart, cachepreset, cleanhints, color, i18n, opener};
 use crate::{palette, proxy, updater, watch, webhook};
-use nsh_base::{ButtonElement, TextViewLinkPressEvent, TextViewPart, TextViewParts};
-use nsh_core::ui::prelude::*;
+use nsh_base::{
+    ButtonElement, TextViewLinkPressEvent, TextViewPart, TextViewParts, input, tab, tabs,
+};
+use nsh_core::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The nav's width (`gpui_app::settings_nav`).
@@ -120,7 +122,7 @@ fn nav(live: Live, current: Signal<SettingsSection>) -> AnyElement {
 
 fn nav_items(current: Signal<SettingsSection>, nudge: Memo<bool>) -> AnyElement {
     let shown = current.get();
-    view()
+    tabs()
         .flex_none()
         .w(px(NAV_W))
         .h_full()
@@ -135,11 +137,12 @@ fn nav_items(current: Signal<SettingsSection>, nudge: Memo<bool>) -> AnyElement 
                 .into_iter()
                 .map(|item| {
                     let on = move || shown == item;
-                    nsh_base::button()
+                    tab()
                         .w_full()
                         .rounded(px(6.))
                         .px(px(10.))
                         .py(px(6.))
+                        .selected(on)
                         .bg(move || {
                             theme::color(move || if on() { palette::surface() } else { CLEAR })
                         })
@@ -490,30 +493,32 @@ fn switch_row(
 /// gpui-kit's small switch: a 28 × 16 track, a 12 thumb inset by 2, in
 /// the theme's switch colours (`palette::switch_on` and its two siblings).
 fn switch(on: impl Fn() -> bool + Copy + 'static, set: impl Fn(bool) + 'static) -> AnyElement {
-    nsh_base::button()
+    nsh_base::switch()
         .flex_none()
-        .w(px(28.))
-        .h(px(16.))
-        .p(px(2.))
-        .rounded_full()
-        .bg(move || {
-            theme::color(move || {
-                if on() {
-                    palette::switch_on()
-                } else {
-                    palette::switch_off()
-                }
-            })
+        .checked(on)
+        .on_change(move |&next: &bool| set(next))
+        .track_style(move |s| {
+            s.w(px(28.))
+                .h(px(16.))
+                .p(px(2.))
+                .rounded_full()
+                .bg(move || {
+                    theme::color(move || {
+                        if on() {
+                            palette::switch_on()
+                        } else {
+                            palette::switch_off()
+                        }
+                    })
+                })
         })
-        .on_press(move || set(!on()))
-        .child(
-            view()
-                .w(px(12.))
+        .thumb_style(move |s| {
+            s.w(px(12.))
                 .h(px(12.))
                 .rounded_full()
                 .ml(move || px(if on() { 12. } else { 0. }))
-                .bg(theme::color(palette::switch_thumb)),
-        )
+                .bg(theme::color(palette::switch_thumb))
+        })
         .into_element()
 }
 

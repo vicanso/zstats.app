@@ -24,7 +24,7 @@ use crate::procscan::ProcState;
 use crate::rows::{self, RowFit};
 use crate::state::{FullScan, ProcSort, ZStatsAppState};
 use crate::{format, hot, i18n, palette, terminate};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::collections::HashMap;
 use std::process;

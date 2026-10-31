@@ -9,7 +9,7 @@ use crate::nsh::widgets::{self, Choice};
 use crate::nsh::{store, theme};
 use crate::state::ZStatsAppState;
 use crate::{APP_NAME, appicon, format, i18n, palette, prefs};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use std::cmp::Reverse;
 
 /// The processor's figure, for the headline.
@@ -118,7 +118,7 @@ pub fn page(live: Live) -> AnyElement {
                     "Processor",
                     Some(
                         widgets::outline_pill(live.text(span))
-                            .tooltip("Alert cards today")
+                            .tooltip(widgets::wrap_tooltip("Alert cards today"))
                             .into_element(),
                     ),
                 ))

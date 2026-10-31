@@ -17,7 +17,7 @@
 use crate::color::Rgba;
 use crate::prefs::{self, ThemePref};
 use crate::{omarchy, palette};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 
 /// The Omarchy theme follows the desktop's palette, read again as the
 /// panel opens rather than watched:

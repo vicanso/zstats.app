@@ -28,7 +28,7 @@ use crate::series::{Point, Series};
 use crate::state::{MemoryCreep, Tab, ZStatsAppState};
 use crate::{chart, format, hot, i18n, palette, placement, prefs, pressure, series, trend};
 use nsh_base::TooltipElement;
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::collections::HashSet;
 use std::time::Instant;

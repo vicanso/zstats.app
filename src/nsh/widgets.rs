@@ -24,8 +24,10 @@ use crate::color::{Rgba, rgba};
 use crate::nsh::root::{self, CARD_PAD};
 use crate::nsh::theme;
 use crate::{format, i18n, palette};
-use nsh_base::{MenuEvent, TooltipElement, alert_dialog, menu, menu_item, tooltip};
-use nsh_core::ui::prelude::*;
+use nsh_base::{
+    MenuEvent, ProgressElement, TooltipElement, alert_dialog, menu, menu_item, progress, tooltip,
+};
+use nsh_core::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -615,20 +617,18 @@ pub fn meter(
     fraction: impl Fn() -> f32 + 'static,
     fill: impl Fn() -> Rgba + 'static,
     height: f32,
-) -> View {
-    view()
-        .h(px(height))
+) -> ProgressElement {
+    progress()
         .w_full()
-        .rounded_full()
-        .bg(theme::color(palette::track))
-        .overflow_hidden()
-        .child(
-            view()
-                .h_full()
-                .w(move || relative(fraction().clamp(0., 1.)))
+        .value(move || fraction() * 100.)
+        .track_style(move |s| {
+            s.h(px(height))
+                .w_full()
                 .rounded_full()
-                .bg(move || theme::color(&fill)),
-        )
+                .bg(theme::color(palette::track))
+                .overflow_hidden()
+        })
+        .indicator_style(move |s| s.h_full().rounded_full().bg(move || theme::color(&fill)))
 }
 
 /// One segment of a [`stacked_meter`]: its share of the whole track, and

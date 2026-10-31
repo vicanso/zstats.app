@@ -21,7 +21,7 @@ use crate::nsh::{
 use crate::palette;
 use crate::prefs;
 use crate::state::{Tab, ZStatsAppState};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use std::env;
 
 #[component]

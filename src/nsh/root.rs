@@ -21,7 +21,7 @@ use crate::nsh::{store, theme, widgets};
 use crate::palette;
 use crate::state::ZStatsAppState;
 use nsh_base::button;
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use std::sync::OnceLock;
 
 /// What a root asks of the AppKit side, which owns the windows and the
@@ -202,13 +202,15 @@ pub const CARD_GAP: f32 = 10.;
 /// ([`theme::appearance`]) and with the bundled mono face. Every window's
 /// root is made here, so loading them again is how a change of theme
 /// reaches them.
-pub fn make<C: Component>() -> nsh_core::ui::Root
+pub fn make<C: Component>() -> nsh_core::element::Root
 where
     C::Props: Default,
 {
     widgets::fonts()
         .into_iter()
-        .fold(nsh_core::ui::Root::of::<C>(), |root, font| root.font(font))
+        .fold(nsh_core::element::Root::of::<C>(), |root, font| {
+            root.font(font)
+        })
         .appearance(theme::appearance())
 }
 

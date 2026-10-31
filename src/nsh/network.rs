@@ -6,15 +6,9 @@
 //!
 //! Who is moving bytes, then who is listening, then the interfaces. Each
 //! card binds to a plain value the page gathers from the store as a memo;
-//! the lists are kept by their keys (`each`: a listener by its owner, an
-//! interface by its name), so a tick changes figures, not elements. The
-//! traffic rows are kept by their place instead, and a place the list no
-//! longer reaches is folded rather than dropped: each row draws its line
-//! on a canvas, a new canvas is drawn asynchronously until the next tick
-//! turns that off (`host::draw_canvases_in_place`), and every such drawing
-//! held about 100 MB for a second. Keyed by program, the rows were new
-//! canvases whenever a program started or stopped moving bytes — every
-//! few seconds with the list expanded.
+//! the lists are kept by their keys (`each`: a program by its name, a
+//! listener by its owner, an interface by its name), so a tick changes
+//! figures, not elements.
 
 use crate::color::Rgba;
 use crate::listening::{self, Owner, Row};
@@ -26,9 +20,8 @@ use crate::nsh::{store, theme, widgets};
 use crate::state::{ListenerView, TrafficView, ZStatsAppState};
 use crate::traffic::{self, CurvePoint, ProgramRate};
 use crate::{format, i18n, palette, terminate};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use rust_i18n::t;
-use std::cell::Cell;
 use std::time::{Duration, Instant};
 use zstats::snapshot::Capabilities;
 
@@ -39,9 +32,6 @@ const WELL_PAD_X: f32 = 4.;
 const WELL_PAD_Y: f32 = 2.;
 const WELL_RADIUS: f32 = 5.;
 const CURVE_STROKE: f32 = 1.5;
-
-/// More than a traffic row is ever tall: the open place's bound.
-const FAR: f32 = 1000.;
 
 /// A listener's Quit, and so every row's second line
 /// (`listening::QUIT_HEIGHT`).
@@ -214,22 +204,12 @@ fn traffic_card(live: Live) -> AnyElement {
         ))
         .child(dynamic(move || match note.get() {
             Some(words) => note_line(words),
-            None => {
-                // As many places as the card has shown rows since it was
-                // made; the ones past today's list are folded.
-                let most = Cell::new(0);
-                let places = computed(move || {
-                    let n = card.with(|c| c.rows.len()).max(most.get());
-                    most.set(n);
-                    n
-                });
-                each(
-                    move || (0..places.get()).collect::<Vec<_>>(),
-                    |place: &usize| *place,
-                    move |place, _| program_row(card, place.get_untracked()),
-                )
-                .into_element()
-            }
+            None => each(
+                move || card.with(|c| c.rows.clone()),
+                |p: &Program| p.name.clone(),
+                |p, _| program_row(p),
+            )
+            .into_element(),
         }))
         .into_element()
 }
@@ -254,27 +234,16 @@ fn traffic_trailing(span: Option<String>, chip: Option<(String, bool)>) -> AnyEl
     row.into_element()
 }
 
-/// The row at `place`: who and how fast on one line, beside the app's
-/// mark, the curve under — folded to nothing while the list is shorter.
-fn program_row(card: Memo<TrafficCard>, place: usize) -> AnyElement {
-    let slot = computed(move || card.with(|c| c.rows.get(place).cloned()));
-    let shown = computed(move || slot.with(Option::is_some));
-    let p = computed(move || slot.get().unwrap_or_default());
+/// One program's row: who and how fast on one line, beside the app's
+/// mark, the curve under.
+fn program_row(p: ReadSignal<Program>) -> AnyElement {
     let mark = computed(move || p.with(|p| p.mark.clone()));
     let pid = computed(move || p.with(|p| p.pid.clone()));
     let pids_tip = computed(move || p.with(|p| p.pids_tip.clone()));
     view()
         .px(px(CARD_PAD))
-        .py(move || px(if shown.get() { 8. } else { 0. }))
-        .max_h(move || px(if shown.get() { FAR } else { 0. }))
-        .overflow_hidden()
-        .border_b(move || {
-            px(if !shown.get() || p.with(|p| p.last) {
-                0.
-            } else {
-                1.
-            })
-        })
+        .py(px(8.))
+        .border_b(move || px(if p.with(|p| p.last) { 0. } else { 1. }))
         .border_color(theme::color(palette::border_subtle))
         .child(
             view()

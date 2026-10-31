@@ -31,8 +31,8 @@ use crate::storagepage::{
     self, DUPE_FILES_SHOWN, HEAD_PT, META_PT, Preset, ROW_PT, SIDE_BY_SIDE_MIN_W, SIDE_W,
 };
 use crate::{active, color, finder, format, i18n, opener, palette, prefs};
-use nsh_base::TooltipElement;
-use nsh_core::ui::prelude::*;
+use nsh_base::{TooltipElement, checkbox, input, tab, tabs};
+use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -211,7 +211,8 @@ fn strip(shown: StorageTab, busy: Memo<(bool, bool)>) -> AnyElement {
             .group()
             .tooltip(widgets::wrap_tooltip(tip))
             .child(
-                nsh_base::button()
+                tab()
+                    .selected(on)
                     .on_press(move || store::update(|state, fx| state.set_storage_tab(this, fx)))
                     .child(
                         view()
@@ -248,7 +249,7 @@ fn strip(shown: StorageTab, busy: Memo<(bool, bool)>) -> AnyElement {
                 .bg(theme::color(palette::border_subtle)),
         )
         .child(
-            view()
+            tabs()
                 .flex_row()
                 .gap(px(18.))
                 .children(StorageTab::ALL.into_iter().map(cell).collect::<Vec<_>>()),
@@ -2274,31 +2275,52 @@ fn pick_sheet(sheet: Signal<Option<Sheet>>) -> AnyElement {
         .map(|(i, (label, bytes, caution))| {
             let on = move || ticks.with(|t: &Vec<bool>| t[i]);
             let mut row = view().py(px(3.)).child(
-                nsh_base::button()
-                    .on_press(move || ticks.update(|t: &mut Vec<bool>| t[i] = !t[i]))
-                    .child(
-                        view()
-                            .flex_row()
+                checkbox()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .checked(on)
+                    .on_change(move |&next: &bool| ticks.update(|t: &mut Vec<bool>| t[i] = next))
+                    .indicator_style(move |s| {
+                        s.flex_none()
+                            .w(px(14.))
+                            .h(px(14.))
+                            .rounded(px(4.))
+                            .border(px(1.))
+                            .border_color(move || {
+                                theme::color(move || {
+                                    if on() {
+                                        palette::primary()
+                                    } else {
+                                        palette::border()
+                                    }
+                                })
+                            })
+                            .bg(move || {
+                                theme::color(move || if on() { palette::primary() } else { CLEAR })
+                            })
                             .items_center()
-                            .gap(px(6.))
-                            .child(tick(on))
-                            .child(
-                                text(label.clone())
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .number_of_lines(1u32)
-                                    .text_size(px(11.))
-                                    .line_height(widgets::line(11.))
-                                    .text_color(theme::color(palette::text)),
-                            )
-                            .child(
-                                text(format::memory(*bytes))
-                                    .flex_none()
-                                    .font_family(widgets::MONO)
-                                    .text_size(px(10.5))
-                                    .line_height(widgets::line(10.5))
-                                    .text_color(theme::color(palette::text_muted)),
-                            ),
+                            .justify_center()
+                    })
+                    .indicator(when(on, || {
+                        widgets::icon(CustomIconName::Check, 10., palette::primary_ink)
+                    }))
+                    .child(
+                        text(label.clone())
+                            .flex_1()
+                            .min_w(px(0.))
+                            .number_of_lines(1u32)
+                            .text_size(px(11.))
+                            .line_height(widgets::line(11.))
+                            .text_color(theme::color(palette::text)),
+                    )
+                    .child(
+                        text(format::memory(*bytes))
+                            .flex_none()
+                            .font_family(widgets::MONO)
+                            .text_size(px(10.5))
+                            .line_height(widgets::line(10.5))
+                            .text_color(theme::color(palette::text_muted)),
                     ),
             );
             if let Some(caution) = caution.clone() {
@@ -2407,33 +2429,6 @@ fn pick_sheet(sheet: Signal<Option<Sheet>>) -> AnyElement {
                         ),
                 ),
         )
-        .into_element()
-}
-
-/// gpui-kit's smallest checkbox: a 14 box, filled with the theme's
-/// primary and its check while ticked.
-fn tick(on: impl Fn() -> bool + Copy + 'static) -> AnyElement {
-    view()
-        .flex_none()
-        .w(px(14.))
-        .h(px(14.))
-        .rounded(px(4.))
-        .border(px(1.))
-        .border_color(move || {
-            theme::color(move || {
-                if on() {
-                    palette::primary()
-                } else {
-                    palette::border()
-                }
-            })
-        })
-        .bg(move || theme::color(move || if on() { palette::primary() } else { CLEAR }))
-        .items_center()
-        .justify_center()
-        .child(when(on, || {
-            widgets::icon(CustomIconName::Check, 10., palette::primary_ink)
-        }))
         .into_element()
 }
 

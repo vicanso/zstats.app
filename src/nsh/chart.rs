@@ -5,9 +5,7 @@
 //!
 //! A canvas paints in plain colours, so the palette is read in the half
 //! NSH resolved (`palette::in_mode` over NSH's `dark()`), and the canvas
-//! draws again when that or the store changes. Its layer is drawn in place
-//! rather than asynchronously (`host::draw_canvases_in_place`, the
-//! prototype's finding 1).
+//! draws again when that or the store changes.
 
 use crate::chart::{
     self, AREA_ALPHA, CHART_BUCKETS, CHART_DIM, CHART_PAD, CHART_WELL_RADIUS, CURVE_STROKE,
@@ -18,7 +16,7 @@ use crate::nsh::theme;
 use crate::palette;
 use crate::series::{self, Point};
 use nsh_core::canvas::{CanvasGradient, LineJoin};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use std::time::{Duration, Instant};
 
 /// What one chart draws: a bucketed series per line, the lead first, how

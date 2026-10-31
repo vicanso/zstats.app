@@ -560,7 +560,7 @@ fn open_aux(aux: AuxWindow) {
 }
 
 /// `aux`'s size, title and root, made in the theme and words in force.
-fn aux_parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::ui::Root) {
+fn aux_parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::element::Root) {
     match aux {
         AuxWindow::Settings => (
             placement::SETTINGS_WINDOW_SIZE,

@@ -18,7 +18,7 @@ use crate::nsh::widgets;
 use crate::nsh::{store, theme};
 use crate::state::ZStatsAppState;
 use crate::{format, hardware, hot, i18n, palette};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::thread;
 

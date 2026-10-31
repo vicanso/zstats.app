@@ -64,7 +64,6 @@ use objc2_app_kit::{
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use objc2_quartz_core::CALayer;
 use std::cell::{Cell, OnceCell};
 use std::fs;
 use std::rc::Rc;
@@ -350,43 +349,6 @@ fn clear_surface_ground(host: &Host) {
     }
 }
 
-/// NSH draws every canvas with `drawsAsynchronously` (its `view.rs`, a
-/// main-thread saving measured on its Stocks demo). On macOS 27 that cost
-/// the prototype ~97 MB of GPU memory for a moment on every redraw,
-/// however little the canvas drew — the panel's footprint swung between
-/// 26 and 126 MB — and in place it drew for less CPU, not more
-/// (`~/github/nsh-panel-spike/FINDINGS.md`, finding 1). This walks the
-/// panel's layers and turns it off: on show, and after every tick (the
-/// store's `fit_panel`), so a chart that mounts later — a tab switched to,
-/// a page's first sample — draws in place by the next one. A walk of the
-/// panel's few dozen layers.
-///
-/// A canvas that mounts is still drawn once asynchronously first, and
-/// nothing out here can prevent it: NSH creates the layer while applying
-/// the engine's batch inside a Core Animation transaction of its own, and
-/// that commit draws it (`surface.rs`, `drain`). Measured on Overview's
-/// form switch, 2026-10-24: about 100 MB of "owned physical footprint
-/// (graphics)" for a second, until the next tick's walk. Walking when the
-/// canvas is first laid out was tried, from its `on_layout`: the walk runs
-/// before the batch is applied, or after it was drawn, never between.
-fn draw_canvases_in_place(host: &Host) {
-    fn walk(layer: &CALayer) {
-        if layer.drawsAsynchronously() {
-            layer.setDrawsAsynchronously(false);
-        }
-        // SAFETY: read on the main thread, where the layer tree is
-        // changed; the array is a snapshot of it.
-        if let Some(children) = unsafe { layer.sublayers() } {
-            for child in children.iter() {
-                walk(&child);
-            }
-        }
-    }
-    if let Some(layer) = host.view.view().layer() {
-        walk(&layer);
-    }
-}
-
 /// A palette colour as AppKit's.
 pub(super) fn ns_color(c: color::Rgba) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(
@@ -447,7 +409,6 @@ fn fit_form() {
 /// the height the panel has (`placement::notice_step`), so a panel dragged
 /// taller keeps what was added.
 fn fit_panel() {
-    with_host(draw_canvases_in_place);
     let notice = store::read(notice::row_shown);
     if NOTICE_FITTED.swap(notice, Ordering::Relaxed) == notice {
         return;
@@ -623,7 +584,6 @@ pub fn show(host: &Host, anchor: Option<TrayAnchor>, make_key: bool) {
         host.panel.makeKeyWindow();
     }
     clear_surface_ground(host);
-    draw_canvases_in_place(host);
     // A frame that did not change posts no notification.
     record_frame(host);
     mark_shown();

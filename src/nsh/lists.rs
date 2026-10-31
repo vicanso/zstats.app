@@ -13,8 +13,8 @@ use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::state::{Effects, ZStatsAppState};
 use crate::{format, i18n, palette};
-use nsh_base::TooltipElement;
-use nsh_core::ui::prelude::*;
+use nsh_base::{TooltipElement, input};
+use nsh_core::prelude::*;
 use rust_i18n::t;
 
 /// What stands above and below a collapsed row's lines, before the fit

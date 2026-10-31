@@ -18,8 +18,8 @@ use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::state::{Tab, ZStatsAppState};
 use crate::{awake, format, i18n, palette, prefs};
-use nsh_base::{MenuEvent, TooltipElement, button, menu, menu_item, menu_separator};
-use nsh_core::ui::prelude::*;
+use nsh_base::{MenuEvent, TooltipElement, button, menu, menu_item, menu_separator, tab, tabs};
+use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::time::SystemTime;
 
@@ -106,7 +106,7 @@ pub fn tab_strip(live: Live, active: Memo<Tab>) -> View {
         .pt(px(GUTTER))
         .pb(px(CARD_GAP))
         .child(
-            view()
+            tabs()
                 .flex_row()
                 .justify_between()
                 .p(px(4.))
@@ -116,28 +116,29 @@ pub fn tab_strip(live: Live, active: Memo<Tab>) -> View {
         )
 }
 
-fn tab_cell(tab: Tab, active: Memo<Tab>, alerting: Memo<bool>) -> AnyElement {
-    let alarm = move || tab == Tab::Alerts && alerting.get();
-    let ink = move || cell_paint(active.get() == tab, alarm()).1;
+fn tab_cell(this: Tab, active: Memo<Tab>, alerting: Memo<bool>) -> AnyElement {
+    let alarm = move || this == Tab::Alerts && alerting.get();
+    let ink = move || cell_paint(active.get() == this, alarm()).1;
     let tip = t!(
         "tabs.shortcut",
-        name = tab.title(),
+        name = this.title(),
         hint = shortcut_hint(),
-        n = tab.index() + 1
+        n = this.index() + 1
     )
     .to_string();
-    // The tooltip on a view around the button: `nsh_base`'s button element
+    // The tooltip on a view around the tab: `nsh_base`'s tab element
     // takes none of its own.
     view()
         .flex_none()
         .tooltip(widgets::wrap_tooltip(tip))
         .child(
-            button()
+            tab()
                 .flex_none()
-                .on_press(move || store::update(|state, fx| state.set_tab(tab, fx)))
+                .selected(move || active.get() == this)
+                .on_press(move || store::update(|state, fx| state.set_tab(this, fx)))
                 .child(
                     when(
-                        move || active.get() == tab,
+                        move || active.get() == this,
                         move || {
                             // A column, so the cell is as wide as the widest
                             // thing in it while its face stays centred.
@@ -153,8 +154,10 @@ fn tab_cell(tab: Tab, active: Memo<Tab>, alerting: Memo<bool>) -> AnyElement {
                                         .flex_row()
                                         .items_center()
                                         .gap(px(TAB_FACE_GAP))
-                                        .child(widgets::icon(tab_icon(tab), TAB_ICON_ON, ink))
-                                        .child(tab_name(tab).text_color(move || theme::color(ink))),
+                                        .child(widgets::icon(tab_icon(this), TAB_ICON_ON, ink))
+                                        .child(
+                                            tab_name(this).text_color(move || theme::color(ink)),
+                                        ),
                                 )
                                 .children(Tab::ALL.into_iter().map(tab_strut).collect::<Vec<_>>())
                         },
@@ -167,7 +170,7 @@ fn tab_cell(tab: Tab, active: Memo<Tab>, alerting: Memo<bool>) -> AnyElement {
                             .justify_center()
                             .rounded(px(7.))
                             .hover(|s| s.bg(theme::color(palette::chip)))
-                            .child(widgets::icon(tab_icon(tab), 16., ink))
+                            .child(widgets::icon(tab_icon(this), 16., ink))
                     }),
                 ),
         )

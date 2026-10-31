@@ -28,8 +28,8 @@ short_description = "A menu bar metrics panel written in Rust and NSH."
 # The interface: NSH (`src/nsh/`, docs/nsh-migration.md — gpui-kit until
 # 2026-10-25). No `js` on the platform crates: every root is Rust, and
 # QuickJS stays out of the binary.
-nsh-core = "0.2.0"
-nsh-base = "0.2.0"
+nsh-core = "0.3.0"
+nsh-base = "0.3.0"
 # tinyvec 1.13.0 (crates.io, 2026-09-03) does not compile on rustc 1.98:
 # `use alloc::vec::{self, Vec}` shadows the `vec!` macro (Lokathor/tinyvec#225).
 # 1.13.1 restored `vec!`; keep a floor so `cargo update` cannot pick 1.13.0.
@@ -159,7 +159,7 @@ zbus = "5.19"
 # The NSH front end's Linux backend (GTK 4 widgets, Pango text), without
 # its JS engine, as on macOS. It asks for GTK 4.14 (`gtk4`'s `v4_14`):
 # Ubuntu 24.04 and Arch have it, Debian bookworm does not.
-nsh-platform-linux = { version = "0.2.0", default-features = false }
+nsh-platform-linux = { version = "0.3.0", default-features = false }
 # The panel as a wlr-layer-shell surface: anchored top-right by the
 # compositor, which is the only one that may place it. On the `gtk4` NSH
 # itself is built with, so the tree keeps one GTK binding.
@@ -283,10 +283,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 # The NSH front end's macOS backend (AppKit views, CoreText text), and the
 # main queue its engine threads hand AppKit work to. Same versions NSH
 # itself is built on, so the tree keeps one objc2 of each.
-nsh-platform-macos = { version = "0.2.0", default-features = false }
+nsh-platform-macos = { version = "0.3.0", default-features = false }
 dispatch2 = "0.3.1"
-# A canvas's content layer, whose asynchronous drawing the NSH front end
-# turns off (src/nsh/host.rs, `draw_canvases_in_place`).
+# The NSH root's container layer, whose opaque background the macOS host
+# clears (`src/nsh/host.rs`, `clear_surface_ground`).
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
     "std",
     "CALayer",

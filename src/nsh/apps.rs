@@ -22,7 +22,7 @@ use crate::nsh::{store, theme};
 use crate::rows::{self, RowFit};
 use crate::state::{AppSort, FullAppScan, ZStatsAppState};
 use crate::{format, fullscan, hot, i18n, palette, terminate, trend};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};

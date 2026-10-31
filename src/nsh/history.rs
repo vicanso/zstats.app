@@ -19,7 +19,7 @@ use crate::nsh::{store, theme};
 use crate::rows;
 use crate::state::{HistoryRange, HistorySort, ZStatsAppState};
 use crate::{i18n, palette};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 use rust_i18n::t;
 
 /// Today's clock row, reserved out of the rows' budget
