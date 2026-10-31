@@ -15,7 +15,7 @@
 //! (`#14110e`) on that fill.
 //!
 //! **Golden's dark half is no longer Notchclip's** (2026-10-12): it is
-//! the palette written down in `.claude/skills/ui-polish` — base
+//! the palette written down in `.agents/skills/ui-polish` — base
 //! `#1c1c1e`, card `#252528`, track `#36363a`, three inks `#f2f0eb` /
 //! `#a19d96` / `#8f8b85`, one accent `#d9ae7a`. (Its green, `#6ec48a`,
 //! has no token here since the "Nothing needs attention" row went: an

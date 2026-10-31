@@ -35,7 +35,7 @@
 //! Non-macOS keeps the notify-rust transport (one delivery thread, bounded
 //! queue) unchanged — XDG banners auto-expire, so the wait there is
 //! bounded by the server, not the user. See "Platform reality" in
-//! CLAUDE.md for how much trust to put in that path.
+//! AGENTS.md for how much trust to put in that path.
 
 use crate::active;
 use crate::format;

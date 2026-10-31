@@ -13,7 +13,7 @@
 //! > inside a local metrics collector
 //!
 //! This app *is* an HTTP client, so it can be the other half. **It is
-//! still zstats that owns the alerts** (CLAUDE.md): writing this file is
+//! still zstats that owns the alerts** (AGENTS.md): writing this file is
 //! the same act as the Alerts tab writing `[alerts]` overrides through
 //! `apply_add` — bytes into zstats' own config, with every threshold
 //! still evaluated by zstats' rule engine. Nothing here decides when

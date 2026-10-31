@@ -5,7 +5,7 @@
 //! owns it and, when documented, that tool's own cleanup command. Rows
 //! that match get the facts appended to their tooltip; the app never
 //! runs a command or deletes anything on the strength of a hint — the
-//! only acting paths remain the two confirm-gated ones (CLAUDE.md).
+//! only acting paths remain the two confirm-gated ones (AGENTS.md).
 //!
 //! The embedded defaults ([`FILE`]) come only from each tool's own
 //! documentation. Third-party cleanup rule sets must not be collected or

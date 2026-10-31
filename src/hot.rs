@@ -51,7 +51,7 @@ pub const SWAP_HOT: f32 = 50.0;
 /// Deliberately not `mem.swap_used_percent`: that field *is* swap
 /// against its own allocation, the ratio [`SWAP_HOT`] explains is
 /// unusable here. Dividing those two bytes locally would also have been
-/// a second copy of a figure zstats already reports, which CLAUDE.md
+/// a second copy of a figure zstats already reports, which AGENTS.md
 /// forbids. This asks something zstats does not answer, and only ever
 /// to pick a colour. The `total_bytes > 0` is a guard against a
 /// collector reporting no memory at all, where any swap would otherwise

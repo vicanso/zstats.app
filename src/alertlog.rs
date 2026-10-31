@@ -12,7 +12,7 @@
 //!
 //! **Memory, not judgement.** Nothing here evaluates a condition or
 //! re-delivers a banner: a file holds episodes zstats' rule engine
-//! already decided on, exactly as `state.rs` merged them (CLAUDE.md's
+//! already decided on, exactly as `state.rs` merged them (AGENTS.md's
 //! hard rule). A restored episode is a card to read, and — because it
 //! keys on the same `(subject, kind)` — the episode a re-crossing
 //! merges into rather than opening a duplicate beside.

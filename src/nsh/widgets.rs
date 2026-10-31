@@ -1,6 +1,6 @@
 //! The building blocks every page is made of: the gpui front end's widgets
 //! (`views/widgets.rs`, `views::MenuTrigger`, the option chips), ported
-//! with their sizes, inks and rules — `.claude/skills/ui-polish`, and the
+//! with their sizes, inks and rules — `.agents/skills/ui-polish`, and the
 //! comments on the gpui originals, which say why each is the way it is
 //! and are not repeated here. What differs is how NSH draws, not what is
 //! drawn:
@@ -762,7 +762,7 @@ const TIP_DETAIL_OPACITY: f32 = 0.66;
 
 /// A tooltip that wraps inside the panel, in two tiers split by a blank
 /// line in the string: a sentence anyone can read, then the precise
-/// account, dimmer (CLAUDE.md, i18n). `nsh_base`'s `Tooltip`, which is the
+/// account, dimmer (AGENTS.md, i18n). `nsh_base`'s `Tooltip`, which is the
 /// hint overlay itself and so must be handed to `.tooltip(..)` as it is:
 /// turned into a plain element first, NSH wraps it in a second overlay
 /// that never shows. It can be `.disabled(..)` — under an open menu.
@@ -846,7 +846,7 @@ pub struct Choice {
 }
 
 /// A control with several states opens a menu rather than cycling on a
-/// click (CLAUDE.md, "A control says what it is"): `label` worn as a
+/// click (AGENTS.md, "A control says what it is"): `label` worn as a
 /// chip — the outline of the "All" chip beside it and a chevron after it,
 /// at its size (`MenuTrigger::chip`) — `tip` on hover while the menu is
 /// shut, and `choices` in the menu it opens, the one in force checked.

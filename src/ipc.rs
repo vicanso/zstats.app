@@ -9,7 +9,7 @@
 //! `zstats --toggle` has to reach the process already running instead of
 //! starting a second one. Two processes would mean two resident
 //! collectors sampling the same machine: the same double-collection
-//! CLAUDE.md warns about for `zstats serve`, except self-inflicted and
+//! AGENTS.md warns about for `zstats serve`, except self-inflicted and
 //! on every keypress.
 //!
 //! The rendezvous is a unix socket in `$XDG_RUNTIME_DIR` — a directory

@@ -569,7 +569,7 @@ fn build_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Rc<AppView>) {
         },
     );
     // The glass: the stock popover material behind the root, whose luminosity
-    // clamp keeps the ground dark over a white wallpaper (CLAUDE.md on the
+    // clamp keeps the ground dark over a white wallpaper (AGENTS.md on the
     // glass; the gpui front end's middle layer). The root paints the scheme's
     // ground over it at the panel's opacity (`palette::panel_ground`): all of
     // it on Golden Dark, a wash on the classic pair. gpui needed its own blur

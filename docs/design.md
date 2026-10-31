@@ -60,7 +60,7 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 
 ## 界面
 
-七个面板页面：Overview / Apps / Processes / Hardware / Network / Alerts / History，`src/nsh/` 一页一个文件，每页显示什么、怎么排、话怎么说放在不碰绘制的模块里（`applist.rs`、`proclist.rs`、`hardware.rs`……，有单测）。Hardware 一页是卷、物理磁盘、GPU、温度、电池几张卡片——它们同属机器的物理层，各占一个 tab 时后几项常年只有半屏内容。物理磁盘与 GPU 只在这一页可见时才采集，见 CLAUDE.md 的 Collection 段；温度与电池同为两栏数值、不画进度条，页面才不至于过高）。配置进独立的设置窗口（底栏齿轮与窗口标题叫 Settings；窗里那一页仍叫 Config，对应 `config.toml`）。传感器默认只显示 4 个，按**距各自上限的占比**排序（条子画的就是这个占比，所以列表天然是一段递减的阶梯）而不是按绝对温度——一刀切的 80 °C 线在满载的 Apple Silicon 上会把全部 pACC/eACC 通道染红（34 条红等于零条红），却让一颗离自身 60 °C 上限只差 5 度的电池传感器保持中性。着色同样按占比（≥90% 才红），排序键和着色键是同一个数，于是「贴近上限的永不被折叠」是结构性成立的——截断只吞安静的那些。头部的「显示更多」chip 展开全部（与 Network 的隐藏接口 chip 同一习语）。导航是单行图标 tab（Control Center / Stats 的做法），当前那一页带着名字（见「控件要自己说清楚」）。设计 token 在 `src/palette.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
+七个面板页面：Overview / Apps / Processes / Hardware / Network / Alerts / History，`src/nsh/` 一页一个文件，每页显示什么、怎么排、话怎么说放在不碰绘制的模块里（`applist.rs`、`proclist.rs`、`hardware.rs`……，有单测）。Hardware 一页是卷、物理磁盘、GPU、温度、电池几张卡片——它们同属机器的物理层，各占一个 tab 时后几项常年只有半屏内容。物理磁盘与 GPU 只在这一页可见时才采集，见 AGENTS.md 的 Collection 段；温度与电池同为两栏数值、不画进度条，页面才不至于过高）。配置进独立的设置窗口（底栏齿轮与窗口标题叫 Settings；窗里那一页仍叫 Config，对应 `config.toml`）。传感器默认只显示 4 个，按**距各自上限的占比**排序（条子画的就是这个占比，所以列表天然是一段递减的阶梯）而不是按绝对温度——一刀切的 80 °C 线在满载的 Apple Silicon 上会把全部 pACC/eACC 通道染红（34 条红等于零条红），却让一颗离自身 60 °C 上限只差 5 度的电池传感器保持中性。着色同样按占比（≥90% 才红），排序键和着色键是同一个数，于是「贴近上限的永不被折叠」是结构性成立的——截断只吞安静的那些。头部的「显示更多」chip 展开全部（与 Network 的隐藏接口 chip 同一习语）。导航是单行图标 tab（Control Center / Stats 的做法），当前那一页带着名字（见「控件要自己说清楚」）。设计 token 在 `src/palette.rs`，卡片用半透明 grouped fill 叠在原生 vibrancy 上，而不是 shadcn 实心描边。
 
 贯穿全部视图的一条规则：**进度条、柱状图和数字默认中性色（`ink`），只有越过阈值才变品牌红（`accent`）**，由 `palette::fill_for()` / `palette::text_for()` 固化。
 
@@ -80,7 +80,7 @@ macOS 菜单栏系统监控面板。界面实现自 Claude Design 项目 `Stats 
 
 僵尸进程**不保证**会被回收——父进程只要不 `wait()`，条目就一直在，直到父进程自己退出。开发机上有两个已经躺了 6 天和 15 天，父进程还活着，这正是值得报出来的那种泄漏。异常状态需要持续 5 分钟才展示：正常退出时子进程 exit 到父进程 reap 之间本来就会短暂产生僵尸。计时从**我们第一次观察到**算起（内核不记录状态转换的时刻），所以永远是个下界，UI 上写作「≥」。
 
-### 界面的样子以 `.claude/skills/ui-polish` 为准（2026-10-12）
+### 界面的样子以 `.agents/skills/ui-polish` 为准（2026-10-12）
 
 那次重设计（先在 Claude Design 里画了概览页，再把规则写成技能）留下的规则很少，每一条都替换掉了一样东西：
 

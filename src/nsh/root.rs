@@ -191,7 +191,7 @@ impl Live {
     }
 }
 
-/// The spacing scale's three (`.claude/skills/ui-polish`): the panel's
+/// The spacing scale's three (`.agents/skills/ui-polish`): the panel's
 /// side margin, a card's padding (and a list row's side margin), the gap
 /// between cards.
 pub const GUTTER: f32 = 12.;

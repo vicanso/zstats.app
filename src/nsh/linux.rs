@@ -18,7 +18,7 @@
 //! so it takes the design's size for Overview's form.
 //!
 //! **Compiled, never seen.** CI and `make linux-check` build it and there
-//! is no compositor in either (CLAUDE.md on Linux); Omarchy is where it
+//! is no compositor in either (AGENTS.md on Linux); Omarchy is where it
 //! gets looked at.
 
 use crate::metrics::{self, CollectorPace};
