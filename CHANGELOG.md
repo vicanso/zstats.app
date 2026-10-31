@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.3](https://github.com/vicanso/zstats.app/compare/v0.5.2..v0.5.3) - 2026-10-31
+
+### 📚 Documentation
+
+- Add CLI process icons TODO (docs/cli-icons-todo.md) - ([b6ba7e5](https://github.com/vicanso/zstats.app/commit/b6ba7e562e3d73b4cd61fc3f00ae6ec0a626248c))
+- Rename CLAUDE.md to AGENTS.md and move ui-polish skill to .agents - ([595a7e8](https://github.com/vicanso/zstats.app/commit/595a7e87a94c02fc3ff85020a38c7a755e113b3b))
+
+### ⚙️ Miscellaneous Tasks
+
+- Nsh 0.3.0 - ([1ddaf4c](https://github.com/vicanso/zstats.app/commit/1ddaf4cafc23dd7ac1998cd3b980eaf741d1f9c1))
+
 ## [0.5.2](https://github.com/vicanso/zstats.app/compare/v0.5.1..v0.5.2) - 2026-10-25
 
 ### ⛰️  Features
