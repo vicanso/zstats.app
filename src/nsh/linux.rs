@@ -271,6 +271,30 @@ fn quit() {
     });
 }
 
+/// Control+Q quits, on every window.
+///
+/// NSH's `on_key` refuses `mod+q` on Linux and panics
+/// ([`crate::nsh::root::bind_window_keys`]). The accelerator that refusal
+/// is protecting is installed by NSH's `gtk::Application` host, which this
+/// process does not run, so nothing else handles the key. The shortcut
+/// calls [`quit`] rather than closing the window: the panel's close
+/// request only hides it.
+fn bind_quit(window: &gtk::Window) {
+    let controller = gtk::ShortcutController::new();
+    controller.set_scope(gtk::ShortcutScope::Global);
+    // Capture, so a focused field does not take the key first. GTK also
+    // matches the Latin group, so the shortcut holds on a non-US layout.
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let trigger =
+        gtk::ShortcutTrigger::parse_string("<Control>q").expect("<Control>q is a GTK accelerator");
+    let action = gtk::CallbackAction::new(|_, _| {
+        quit();
+        glib::Propagation::Stop
+    });
+    controller.add_shortcut(gtk::Shortcut::new(Some(trigger), Some(action)));
+    window.add_controller(controller);
+}
+
 /// The size Overview's form wants now — the design's, since a layer
 /// surface is not dragged — noting whether the notice row is in it.
 fn panel_size() -> (i32, i32) {
@@ -350,6 +374,7 @@ fn build_panel() -> Rc<PanelHost> {
     motion.connect_enter(|_, _, _| pointer_entered());
     motion.connect_leave(|_| pointer_left());
     window.add_controller(motion.clone());
+    bind_quit(&window);
     // A close from the compositor (a keybinding that closes the focused
     // window) is a hide, as every other way out is.
     window.connect_close_request(|_| {
@@ -555,6 +580,7 @@ fn open_aux(aux: AuxWindow) {
         // A map is read by area.
         window.maximize();
     }
+    bind_quit(&window);
     window.present();
     AUX.with_borrow_mut(|open| open[slot(aux)] = Some(Aux { window, view }));
 }

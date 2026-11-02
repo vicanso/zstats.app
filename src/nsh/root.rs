@@ -76,14 +76,21 @@ pub fn connect(host: impl Fn(HostAction) + Send + Sync + 'static) {
     let _ = HOST.set(Box::new(host));
 }
 
-/// Quit (`mod+q`) and, in an ordinary window, close (`mod+w`). On macOS the
-/// host's own menu carries both, so a root binds them only elsewhere, where a
-/// window has no menu bar.
+/// Close (`mod+w`) in an ordinary window. On macOS the host's menu carries
+/// both quit and close, so a root binds nothing there.
+///
+/// Quit is not bound here. NSH 0.3's `on_key` panics on `mod+q`: on Linux
+/// that is Control+Q, which it reserves ("it quits the app") because its
+/// own `gtk::Application` host binds the accelerator. This process is a
+/// plain `gtk::Window`, so that accelerator is never installed, and binding
+/// the key from the root aborts the engine thread while the panel is built
+/// — before the main loop, so a login launch dies at "starting on GTK".
+/// The Linux host installs `<Control>q` on each window instead
+/// (`linux::bind_quit`).
 pub fn bind_window_keys(window: Option<AuxWindow>) {
     if cfg!(target_os = "macos") {
         return;
     }
-    on_key("mod+q", |_| ask(HostAction::Quit));
     if let Some(aux) = window {
         on_key("mod+w", move |_| ask(HostAction::Close(aux)));
     }
@@ -228,4 +235,21 @@ pub fn quiet_button(label: String, on_press: impl Fn() + 'static) -> impl IntoEl
                 .text_size(px(12.))
                 .text_color(theme::color(palette::text_muted)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_core::keymap::Keystroke;
+    use nsh_core::platform::Os;
+
+    /// Why [`super::bind_window_keys`] does not bind quit. NSH 0.3 panics
+    /// in `on_key` on a reserved keystroke, and Linux `mod` is Control.
+    /// Control+W is not reserved; the root still binds that.
+    #[test]
+    fn quit_is_reserved_on_linux_close_is_not() {
+        let quit = Keystroke::parse("mod+q", Os::Linux).unwrap();
+        assert_eq!(quit.reserved(Os::Linux), Some("it quits the app"));
+        let close = Keystroke::parse("mod+w", Os::Linux).unwrap();
+        assert!(close.reserved(Os::Linux).is_none());
+    }
 }
