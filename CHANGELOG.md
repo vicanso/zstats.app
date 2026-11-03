@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.5](https://github.com/vicanso/zstats.app/compare/v0.5.4..v0.5.5) - 2026-11-03
+
+### 🐛 Bug Fixes
+
+- Pin Linux x86_64 CI to ubuntu-24.04 and baseline x86-64 CFLAGS to avoid AVX2 SIGILL on older CPUs - ([9cad0e6](https://github.com/vicanso/zstats.app/commit/9cad0e6ccb4cd0338ec1aadefe0ce6db4c3c5208))
+
 ## [0.5.4](https://github.com/vicanso/zstats.app/compare/v0.5.2..v0.5.4) - 2026-11-02
 
 ### 🐛 Bug Fixes
