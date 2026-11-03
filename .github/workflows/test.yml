@@ -61,10 +61,13 @@ jobs:
   # and `--deny=warnings` would fail on a half-ported module rather than
   # on a real fault. The macOS job above keeps that gate.
   linux:
+    env:
+      CFLAGS_x86_64_unknown_linux_gnu: -march=x86-64 -mtune=generic
+      CXXFLAGS_x86_64_unknown_linux_gnu: -march=x86-64 -mtune=generic
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
