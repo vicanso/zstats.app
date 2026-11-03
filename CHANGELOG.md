@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.6](https://github.com/vicanso/zstats.app/compare/v0.5.5..v0.5.6) - 2026-11-03
+
+### ⛰️  Features
+
+- Default to Golden theme when unset in app.toml - ([43badca](https://github.com/vicanso/zstats.app/commit/43badcae5cc56678d87d03e8fe2b75ff4d9f7c14))
+
 ## [0.5.5](https://github.com/vicanso/zstats.app/compare/v0.5.4..v0.5.5) - 2026-11-03
 
 ### 🐛 Bug Fixes
