@@ -32,20 +32,22 @@ pub enum LanguagePref {
     Chinese,
 }
 
-/// The user's theme choice. `System` defers to the window appearance.
+/// The user's theme choice. `Golden` is the default when `app.toml`
+/// has no `theme` key; `System` defers to the window appearance with
+/// the classic pair.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ThemePref {
-    #[default]
     System,
     Light,
     Dark,
     /// The warm palette (`palette.rs`'s Golden pair). Light or dark
     /// still follows the Mac; this only swaps which pair is painted.
+    #[default]
     Golden,
     /// The Omarchy desktop's current palette (`omarchy.rs`), light or
     /// dark as that theme is. Offered only on Omarchy and in development
     /// builds (`omarchy::selectable`); stored anywhere, it reads as
-    /// `System` where it is not offered ([`theme_in_force`]).
+    /// `Golden` where it is not offered ([`theme_in_force`]).
     Omarchy,
 }
 
@@ -95,21 +97,22 @@ impl LanguagePref {
 impl ThemePref {
     fn key(self) -> Option<&'static str> {
         match self {
-            ThemePref::System => None,
+            ThemePref::Golden => None,
+            ThemePref::System => Some("system"),
             ThemePref::Light => Some("light"),
             ThemePref::Dark => Some("dark"),
-            ThemePref::Golden => Some("golden"),
             ThemePref::Omarchy => Some("omarchy"),
         }
     }
 
     fn from_key(key: &str) -> Self {
         match key {
+            "system" => ThemePref::System,
             "light" => ThemePref::Light,
             "dark" => ThemePref::Dark,
             "golden" => ThemePref::Golden,
             "omarchy" => ThemePref::Omarchy,
-            _ => ThemePref::System,
+            _ => ThemePref::Golden,
         }
     }
 }
@@ -233,10 +236,10 @@ fn decode_language(raw: u8) -> LanguagePref {
 
 fn encode_theme(pref: ThemePref) -> u8 {
     match pref {
-        ThemePref::System => 0,
+        ThemePref::Golden => 0,
         ThemePref::Light => 1,
         ThemePref::Dark => 2,
-        ThemePref::Golden => 3,
+        ThemePref::System => 3,
         ThemePref::Omarchy => 4,
     }
 }
@@ -245,9 +248,9 @@ fn decode_theme(raw: u8) -> ThemePref {
     match raw {
         1 => ThemePref::Light,
         2 => ThemePref::Dark,
-        3 => ThemePref::Golden,
+        3 => ThemePref::System,
         4 => ThemePref::Omarchy,
-        _ => ThemePref::System,
+        _ => ThemePref::Golden,
     }
 }
 
@@ -280,11 +283,11 @@ pub fn theme() -> ThemePref {
 /// The theme preference as it applies on this machine. Omarchy is
 /// offered only where `omarchy::selectable` says so; an `app.toml` that
 /// names it anywhere else — copied from an Omarchy box, or written by a
-/// development build — reads as System rather than as a palette nobody
+/// development build — reads as Golden rather than as a palette nobody
 /// can pick or unpick from the Interface page.
 pub fn theme_in_force() -> ThemePref {
     match theme() {
-        ThemePref::Omarchy if !omarchy::selectable() => ThemePref::System,
+        ThemePref::Omarchy if !omarchy::selectable() => ThemePref::Golden,
         pref => pref,
     }
 }
@@ -1025,6 +1028,7 @@ mod tests {
         write(&dir, &Prefs::default()).unwrap();
         let text = fs::read_to_string(file_path(&dir)).unwrap();
         assert!(!text.contains("language"), "System should omit the key");
+        assert!(!text.contains("theme"), "Golden should omit the key");
         assert!(!text.contains("tray"), "Auto should omit the key");
         assert!(
             !text.contains("opacity"),
@@ -1060,7 +1064,7 @@ mod tests {
         );
         let back = read(&dir);
         assert_eq!(back.language, LanguagePref::System);
-        assert_eq!(back.theme, ThemePref::System);
+        assert_eq!(back.theme, ThemePref::Golden);
         assert_eq!(back.tray, TrayPref::Auto);
         assert_eq!(back.opacity, None);
         assert!(back.proxy.is_empty());
@@ -1158,6 +1162,8 @@ mod tests {
         .unwrap();
         assert_eq!(read(&dir), system);
 
+        fs::write(file_path(&dir), "theme = \"system\"\n").unwrap();
+        assert_eq!(read(&dir).theme, ThemePref::System);
         fs::write(file_path(&dir), "theme = \"golden\"\n").unwrap();
         assert_eq!(read(&dir).theme, ThemePref::Golden);
         // Stored as written on any machine; whether it is honoured is

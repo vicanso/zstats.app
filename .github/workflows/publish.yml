@@ -385,11 +385,22 @@ jobs:
     if: needs.prepare_vars.outputs.should_build == 'true'
     name: linux-${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    env:
+      # `rustc`'s x86_64-unknown-linux-gnu target stays on the baseline
+      # x86-64 ISA (SSE2), while a newer Ubuntu GCC defaults to
+      # `-march=x86-64-v3` and compiles C crates (`ring`'s non-ADX
+      # X25519 fallback, `zstd-sys`) with unconditional AVX2 and BMI2
+      # instructions that die with SIGILL on pre-Haswell chips.
+      CFLAGS_x86_64_unknown_linux_gnu: -march=x86-64 -mtune=generic
+      CXXFLAGS_x86_64_unknown_linux_gnu: -march=x86-64 -mtune=generic
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned to 24.04 like the arm64 half (`scripts/ci-gtk4-layer-shell.sh`):
+          # `ubuntu-latest` moved to 26.04, whose glibc 2.43 and x86-64-v3
+          # GCC defaults break the binary on older systems and CPUs.
+          - os: ubuntu-24.04
             arch: x86_64
           - os: ubuntu-24.04-arm
             arch: aarch64
