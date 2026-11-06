@@ -56,9 +56,12 @@ pub(super) fn shortcut_hint() -> &'static str {
     }
 }
 
-/// A tab cell's fill and ink (`views::tab_strip`): the theme's selected
-/// look on the tab on screen, and red on Alerts while an alert of this
-/// session stands — that colour is the alarm, and wins over the theme.
+/// A tab cell's fill and ink: the theme's selected look on the tab on
+/// screen, and red on Alerts while an episode of this session has not
+/// been shown there (`SeenAlert::is_news`). Opening that tab is the end
+/// of the colour for every episode then on it; a later episode, or a
+/// graver report of one already shown, lights it again. The alarm wins
+/// over the theme.
 fn cell_paint(on: bool, alarm: bool) -> (Rgba, Rgba) {
     match (on, alarm) {
         (true, true) => (palette::accent_wash(16), palette::accent_light()),
@@ -95,7 +98,12 @@ fn tab_strut(tab: Tab) -> View {
 
 /// Every view in one row of icons, the one on screen wearing its name.
 pub fn tab_strip(live: Live, active: Memo<Tab>) -> View {
-    let alerting = live.memo(|state: &ZStatsAppState| state.alerts().iter().any(|seen| seen.live));
+    // News, not "a card exists". Opening this tab marks every episode
+    // then on it as shown (`see_alerts`), and the bell returns to the
+    // theme; the card underneath keeps its own red. A follow-up of one
+    // already shown does not light it again.
+    let alerting =
+        live.memo(|state: &ZStatsAppState| state.alerts().iter().any(|seen| seen.is_news()));
     let cells: Vec<AnyElement> = Tab::ALL
         .into_iter()
         .map(|tab| tab_cell(tab, active, alerting))

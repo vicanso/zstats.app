@@ -650,9 +650,12 @@ fn pad_rising<'a>(
 /// two forms differ only in how many rows.
 fn top_apps(live: Live, detail: bool) -> AnyElement {
     let top = live.watch(move || store::read(|state| top_apps_of(state, detail)));
-    let off = move || top.with(Option::is_none);
+    // Whether the card exists, and nothing else. The card used to be made
+    // again whenever its rows changed, so a drag that admitted one more
+    // row — and every tick that moved a percent — built every icon again.
+    let off = computed(move || top.with(Option::is_none));
     dynamic(move || {
-        if off() {
+        if off.get() {
             return widgets::empty_card(
                 i18n::tr("overview.top_cpu_off"),
                 i18n::tr("overview.top_cpu_off_body"),

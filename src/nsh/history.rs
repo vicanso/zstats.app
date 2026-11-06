@@ -5,8 +5,11 @@
 //!
 //! One card: the lens as its title and the menu that switches it, the
 //! range and a refresh beside it, Today's clock under it, then the rows in
-//! a region that ends on a whole row at the gap above the footer — kept
-//! by their `(pid, name)` (a row's identity in the records), so a refresh
+//! a region that ends on a whole row at the gap above the footer. A row
+//! stays at [`BAND_ROW`] or [`METER_ROW`]: sharing the leftover into its
+//! padding (`rows::fit_rows`) resized every row on almost every pixel of
+//! a drag. A row is kept by its `(pid, name)` (a row's identity in the
+//! records), so a refresh
 //! or another lens changes figures, not elements.
 
 use crate::assets::CustomIconName;
@@ -26,8 +29,9 @@ use rust_i18n::t;
 /// (`history::AXIS_ROW`).
 const AXIS_ROW: f32 = 16.;
 
-/// What stands above and below a row's lines, before the fit gives the
-/// row its share of the leftover (`history::ROW_PAD`).
+/// What stands above and below a row's lines (`history::ROW_PAD`). The
+/// row keeps this: the fit used to give it a share of the leftover, and
+/// that share changed on every pixel of a drag.
 const ROW_PAD: f32 = 9.;
 
 /// A row with Today's band, hairline included: the padding twice, the
@@ -151,7 +155,11 @@ fn page_of(state: &ZStatsAppState, body: f32) -> Page {
     let now_clock = historylist::now_clock(&now);
     let budget =
         (lists::rows_budget(body, false) - if today { AXIS_ROW } else { 0. }).max(ROWS_MIN);
-    let fit = rows::fit_rows(budget, if today { BAND_ROW } else { METER_ROW }, ROW_PAD);
+    // Natural height, not [`rows::fit_rows`]'s share of the leftover. The
+    // share changed with the page height, which a drag measures on every
+    // layout, and the rows jumped.
+    let natural = if today { BAND_ROW } else { METER_ROW };
+    let viewport = rows::fixed_viewport(budget, natural);
     let shown: Vec<Row> = ranked
         .shown
         .iter()
@@ -178,7 +186,7 @@ fn page_of(state: &ZStatsAppState, body: f32) -> Page {
                 .unwrap_or_default(),
             meter: historylist::meter_fraction(s, sort, ranked.top),
             first: i == 0,
-            pad: fit.pad(i),
+            pad: ROW_PAD,
         })
         .collect();
     Page {
@@ -191,7 +199,7 @@ fn page_of(state: &ZStatsAppState, body: f32) -> Page {
             Vec::new()
         },
         rows: shown,
-        viewport: fit.viewport,
+        viewport,
         more: (ranked.hidden > 0).then(|| {
             if show_all {
                 i18n::tr("history.less")
@@ -590,4 +598,42 @@ fn band(cells: Vec<Option<f32>>, row: Memo<Row>) -> AnyElement {
         }));
     }
     strip.into_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nsh::lists::LIST_HEADER;
+    use crate::nsh::root::CARD_GAP;
+
+    /// The region at the three standard heights, and one pixel taller than
+    /// the short panel. Today reserves the clock (`AXIS_ROW`). A row stays
+    /// at [`BAND_ROW`] or [`METER_ROW`]: a pixel of drag used to change its
+    /// padding (`rows::fit_rows`).
+    #[test]
+    fn a_row_keeps_its_height_while_the_panel_grows() {
+        let budget = |panel: f32, today: bool| {
+            let rows = panel - 60. - 44. - CARD_GAP - LIST_HEADER;
+            (rows - if today { AXIS_ROW } else { 0. }).max(ROWS_MIN)
+        };
+        for today in [false, true] {
+            let natural = if today { BAND_ROW } else { METER_ROW };
+            let short = rows::fixed_viewport(budget(539., today), natural);
+            let dragged = rows::fixed_viewport(budget(540., today), natural);
+            assert_eq!(short, dragged, "one pixel resized the rows, today={today}");
+        }
+        for (panel, today, expected) in [
+            (539., false, 5.),
+            (585., false, 6.),
+            (828., false, 10.),
+            (539., true, 5.),
+            (585., true, 5.),
+            (828., true, 9.),
+        ] {
+            let natural = if today { BAND_ROW } else { METER_ROW };
+            let viewport = rows::fixed_viewport(budget(panel, today), natural);
+            let count = (viewport + rows::ROW_SEAM) / natural;
+            assert_eq!(count, expected, "at {panel}, today={today}");
+        }
+    }
 }

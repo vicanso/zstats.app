@@ -6,7 +6,10 @@
 //!
 //! The top list: a pinned header (the count, the filter, the sort and the
 //! All chip), the name filter while it is open, and the rows in a region
-//! that ends on a whole row at the gap above the footer. A row is kept by
+//! that ends on a whole row at the gap above the footer. A collapsed row
+//! stays at [`COLLAPSED_ROW`]: sharing the leftover into its padding
+//! (`rows::fit_rows`) resized every row on almost every pixel of a drag.
+//! A row is kept by
 //! its tree's root pid (`each`), so it keeps its icon while its figures
 //! move; the open row carries its expansion — the tree's figures, its two
 //! alert bars with the chips that edit them, its members, and Quit. The
@@ -19,7 +22,7 @@ use crate::nsh::lists::{self, Editor, ROW_PAD, ScanChip, ScanWords};
 use crate::nsh::root::{CARD_GAP, CARD_PAD, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
-use crate::rows::{self, RowFit};
+use crate::rows;
 use crate::state::{AppSort, FullAppScan, ZStatsAppState};
 use crate::{format, fullscan, hot, i18n, palette, terminate, trend};
 use nsh_core::prelude::*;
@@ -121,7 +124,6 @@ fn row_of(
     ambiguous: bool,
     bar_full: f32,
     index: usize,
-    fit: Option<RowFit>,
 ) -> Row {
     let sort = state.app_sort();
     let face = applist::face_of(g, state);
@@ -140,7 +142,7 @@ fn row_of(
         fraction: applist::bar_fraction(sort, g, bar_full),
         open: state.selected_app() == Some(g.root_pid),
         first: index == 0,
-        pad: fit.map_or(ROW_PAD, |fit| fit.pad(index)),
+        pad: ROW_PAD,
     }
 }
 
@@ -160,7 +162,7 @@ fn repeated(groups: &[&ProcessGroupSnapshot], state: &ZStatsAppState) -> HashSet
 #[derive(Clone, PartialEq, Default)]
 struct Top {
     rows: Vec<Row>,
-    /// The region's height ([`rows::fit_rows`]).
+    /// The region's height ([`rows::fixed_viewport`]).
     viewport: f32,
     /// Where the open row starts in the region, when it is in it.
     open_at: Option<f32>,
@@ -175,10 +177,12 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
         return Top::default();
     };
     let shown = applist::top_rows(state, groups);
-    let fit = rows::fit_rows(
+    // Natural height, not [`rows::fit_rows`]'s share of the leftover. The
+    // share changed with the page height, which a drag measures on every
+    // layout, and the rows jumped.
+    let viewport = rows::fixed_viewport(
         lists::rows_budget(body, state.proc_filter_open()),
         COLLAPSED_ROW,
-        ROW_PAD,
     );
     let repeated = repeated(&shown, state);
     let bar_full = applist::bar_full_for(state.app_sort(), shown.iter().copied());
@@ -187,17 +191,17 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
         .enumerate()
         .map(|(i, g)| {
             let ambiguous = repeated.contains(&applist::face_of(g, state).text());
-            row_of(g, state, ambiguous, bar_full, i, Some(fit))
+            row_of(g, state, ambiguous, bar_full, i)
         })
         .collect();
     let open_at = rows
         .iter()
         .position(|r| r.open)
-        .map(|ix| (0..ix).map(|i| fit.height(i)).sum());
+        .map(|ix| ix as f32 * COLLAPSED_ROW);
     Top {
         no_match: !state.proc_filter_text().is_empty() && rows.is_empty(),
         rows,
-        viewport: fit.viewport,
+        viewport,
         open_at,
     }
 }
@@ -306,7 +310,7 @@ fn full_of(state: &ZStatsAppState) -> Full {
             .enumerate()
             .map(|(i, g)| {
                 let ambiguous = repeated.contains(&applist::face_of(g, state).text());
-                row_of(g, state, ambiguous, bar_full, i, None)
+                row_of(g, state, ambiguous, bar_full, i)
             })
             .collect(),
     }
@@ -908,27 +912,22 @@ mod tests {
     use super::*;
     use crate::nsh::lists::LIST_HEADER;
 
-    /// The region at the three standard heights: the page is the panel less
-    /// the tab strip's 60 and the footer's 44, the region that less the
-    /// gap under the card and the header — 386 on the short panel, 432
-    /// with its notice row's 46, 675 on the long one. Each ends on a whole
-    /// row, as many as the gpui page's (`apps::tests`), none far from its
-    /// own height.
+    /// The region at the three standard heights, and one pixel taller than
+    /// the short panel. The page is the panel less the tab strip's 60 and
+    /// the footer's 44, the region that less the gap under the card and
+    /// the header. Each collapsed row stays at [`COLLAPSED_ROW`]: a pixel
+    /// of drag used to change its padding (`rows::fit_rows`).
     #[test]
-    fn the_region_ends_on_a_whole_row() {
-        for (panel, expected) in [(539., 6), (585., 7), (828., 11)] {
+    fn a_collapsed_row_keeps_its_height_while_the_panel_grows() {
+        let short = rows::fixed_viewport(539. - 60. - 44. - CARD_GAP - LIST_HEADER, COLLAPSED_ROW);
+        let dragged =
+            rows::fixed_viewport(540. - 60. - 44. - CARD_GAP - LIST_HEADER, COLLAPSED_ROW);
+        assert_eq!(short, dragged, "one pixel resized the rows");
+        for (panel, expected) in [(539., 6.), (585., 6.), (828., 10.)] {
             let budget = panel - 60. - 44. - CARD_GAP - LIST_HEADER;
-            let fit = rows::fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
-            let (count, reach) = rows::tests::whole_rows(fit);
-            assert_eq!(count, expected, "at {panel}");
-            assert!(reach >= fit.viewport, "the rows stop short at {panel}");
-            for i in 0..count {
-                let over = fit.height(i) - COLLAPSED_ROW;
-                assert!(
-                    (-rows::ROW_SQUEEZE..=6.).contains(&over),
-                    "{over} at {panel}"
-                );
-            }
+            let viewport = rows::fixed_viewport(budget, COLLAPSED_ROW);
+            let rows = (viewport + rows::ROW_SEAM) / COLLAPSED_ROW;
+            assert_eq!(rows, expected, "at {panel}");
         }
     }
 }

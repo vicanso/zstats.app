@@ -86,8 +86,9 @@ fn decide(signs: Signs) -> Option<Notice> {
 /// episode did — a disk at 91% said so in red from the morning's banner
 /// to midnight, 46 of the panel's height, to someone who had opened the
 /// card hours before. Having been followed, or the bell having been, it
-/// is done; the red figure on the card below and the red bell go on
-/// saying that the condition holds.
+/// is done, and so is the bell — both announce what that tab has not
+/// shown. The red figure on the card below goes on saying that the
+/// condition holds.
 fn signs(state: &ZStatsAppState) -> Signs {
     Signs {
         memory: state.memory_is_news(),
