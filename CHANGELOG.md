@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.7](https://github.com/vicanso/zstats.app/compare/v0.5.6..v0.5.7) - 2026-11-06
+
+### 🐛 Bug Fixes
+
+- Dragging the panel no longer resizes the rows in Apps, Processes, and History - ([28100f7](https://github.com/vicanso/zstats.app/commit/28100f7b815a80cf8eb90ec934053bf38f78bd2f))
+
 ## [0.5.6](https://github.com/vicanso/zstats.app/compare/v0.5.5..v0.5.6) - 2026-11-03
 
 ### ⛰️  Features
