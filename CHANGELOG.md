@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.8](https://github.com/vicanso/zstats.app/compare/v0.5.7..v0.5.8) - 2026-11-11
+
+### 🐛 Bug Fixes
+
+- *(linux)* Polish Hyprland window behavior, disk analysis presets, and header layout ([#2](https://github.com/orhun/git-cliff/issues/2)) - ([12e1e3a](https://github.com/vicanso/zstats.app/commit/12e1e3a210747cd57c253629df1b9b5365757951))
+
 ## [0.5.7](https://github.com/vicanso/zstats.app/compare/v0.5.6..v0.5.7) - 2026-11-06
 
 ### 🐛 Bug Fixes
