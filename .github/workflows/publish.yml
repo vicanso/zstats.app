@@ -415,7 +415,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libgtk-4-dev
+            pkg-config libgtk-4-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           scripts/ci-gtk4-layer-shell.sh
       - uses: dtolnay/rust-toolchain@stable
         with:

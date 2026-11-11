@@ -6,10 +6,11 @@
 # bookworm ships 4.8.
 FROM docker.io/library/rust:1.98-trixie
 
-# GTK 4 and gtk4-layer-shell are the interface's (NSH's GTK backend and
-# the panel's layer surface); everything else builds from crates.
+# GTK 4, GStreamer and gtk4-layer-shell are the interface's (NSH's GTK
+# backend and the panel's layer surface); everything else builds from crates.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libgtk-4-dev libgtk4-layer-shell-dev \
+        libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Linted there as on macOS (`make linux-check` runs clippy); the image

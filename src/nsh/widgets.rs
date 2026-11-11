@@ -1008,13 +1008,14 @@ pub fn confirm(title: String, body: String, ok: String, on_ok: impl FnOnce() + '
     let answer = alert_dialog()
         .title(title)
         .description(body)
-        .cancel(i18n::tr("common.cancel"))
-        .destructive(ok.clone())
+        .cancel("cancel", i18n::tr("common.cancel"))
+        .destructive("ok", ok)
         .close_on_escape(true)
         .show();
     spawn(async move {
-        if let Ok(Some(chosen)) = answer.await
-            && chosen.as_str() == ok
+        if answer
+            .await
+            .is_ok_and(|r| r.action.as_deref() == Some("ok"))
         {
             on_ok();
         }
