@@ -309,8 +309,9 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
 }
 
 /// The header's controls: the filter and the window while the ranking is
-/// on screen, the abnormal filter while something is abnormal, the sort
-/// and the All chip.
+/// on screen (the window chip yields its slot when the abnormal filter is
+/// shown so the count title keeps room on narrow headers), the abnormal
+/// filter while something is abnormal, the sort and the All chip.
 fn controls(live: Live, full: bool) -> AnyElement {
     let only = live.memo(ZStatsAppState::only_abnormal);
     let abnormal = live.memo(|state: &ZStatsAppState| state.abnormal().len());
@@ -322,7 +323,10 @@ fn controls(live: Live, full: bool) -> AnyElement {
         .child(when(ranking, move || {
             lists::filter_chip(live, lists::NAME_FILTER)
         }))
-        .child(when(move || !full && !only.get(), avg_chip))
+        .child(when(
+            move || !full && !only.get() && abnormal.get() == 0,
+            avg_chip,
+        ))
         .child(when(
             move || !full && abnormal.get() > 0,
             move || abnormal_filter(only, abnormal),

@@ -1,0 +1,441 @@
+# Clean-up hints for the directory analyser, Linux list — annotation,
+# not action.
+#
+# One file per operating system (cleanhints-<os>.toml), because a cache
+# location is not a path that can be translated: ~/Library/Caches on
+# macOS corresponds to ~/.cache ($XDG_CACHE_HOME) and ~/.config/<App>
+# on Linux, the owning tools differ, and so do the documented cleanup
+# commands.
+#
+# Each entry states two facts about a well-known cache location: which
+# tool owns it, and (when the tool documents one) the tool's own cleanup
+# command. The app only ever *shows* these on matching rows; it never
+# runs a command or deletes anything based on this file.
+#
+# Entries come only from each tool's own documentation. Do not collect
+# or import data from third-party cleanup rule sets.
+#
+# match semantics:
+#   "~/path"  — exact directory, ~ expands to the user's home
+#   "/path"   — exact absolute directory
+#   "name"    — any directory whose last path component equals `name`
+# command is optional — omit it when the tool has no documented cleanup
+# command (the row is then labelled regenerable only).
+# trashable = true marks a directory whose whole content is derived and
+# safe to move to the Trash (the tool re-creates it) — these join the
+# analyser's cleanup suggestions. Leave it off for anything holding user
+# data (container volumes, pulled models, installed toolchains) or
+# living inside working trees (node_modules, target): those stay
+# annotation-only.
+#
+# A user copy at ~/.zstats/cleanhints-linux.toml replaces this list
+# wholesale (read once at launch).
+
+# --- package managers -------------------------------------------------
+
+[[hint]]
+match = "~/.npm"
+owner = "npm"
+command = "npm cache clean --force"
+trashable = true
+
+[[hint]]
+match = "~/.cache/yarn"
+owner = "Yarn"
+command = "yarn cache clean"
+trashable = true
+
+[[hint]]
+match = "~/.yarn/berry/cache"
+owner = "Yarn"
+command = "yarn cache clean"
+trashable = true
+
+[[hint]]
+match = "~/.local/share/pnpm/store"
+owner = "pnpm"
+command = "pnpm store prune"
+trashable = true
+
+[[hint]]
+match = "~/.cache/pnpm"
+owner = "pnpm"
+command = "pnpm store prune"
+trashable = true
+
+[[hint]]
+match = "~/.bun/install/cache"
+owner = "Bun"
+command = "bun pm cache rm"
+trashable = true
+
+[[hint]]
+match = "~/.cache/pip"
+owner = "pip"
+command = "pip cache purge"
+trashable = true
+
+[[hint]]
+match = "~/.cache/uv"
+owner = "uv"
+command = "uv cache clean"
+
+# uv's cache is hard-linked into environments (docs.astral.sh/uv/concepts/cache:
+# "clearing the cache will break all installed packages"). Annotation only.
+
+[[hint]]
+match = "~/.cache/pypoetry"
+owner = "Poetry"
+command = "poetry cache clear --all ."
+trashable = true
+
+[[hint]]
+match = "~/.m2/repository"
+owner = "Maven"
+command = "mvn dependency:purge-local-repository"
+trashable = true
+
+[[hint]]
+match = "~/.gradle/caches"
+owner = "Gradle"
+trashable = true
+
+[[hint]]
+match = "~/.gradle/wrapper/dists"
+owner = "Gradle"
+trashable = true
+
+[[hint]]
+match = "~/.gradle/daemon"
+owner = "Gradle"
+trashable = true
+
+[[hint]]
+match = "~/.cache/composer"
+owner = "Composer"
+command = "composer clear-cache"
+trashable = true
+
+[[hint]]
+match = "~/.composer/cache"
+owner = "Composer"
+command = "composer clear-cache"
+trashable = true
+
+[[hint]]
+match = "~/.nuget/packages"
+owner = "NuGet"
+command = "dotnet nuget locals all --clear"
+trashable = true
+
+[[hint]]
+match = "~/.pub-cache"
+owner = "Dart / Flutter"
+command = "dart pub cache clean"
+trashable = true
+
+[[hint]]
+match = "~/.cache/yay"
+owner = "yay"
+command = "yay -Sc"
+trashable = true
+
+[[hint]]
+match = "~/.cache/paru"
+owner = "paru"
+command = "paru -Sc"
+trashable = true
+
+# --- language toolchains ----------------------------------------------
+
+[[hint]]
+match = "~/.cargo/registry"
+owner = "Cargo"
+trashable = true
+
+[[hint]]
+match = "~/.cargo/git"
+owner = "Cargo"
+trashable = true
+
+[[hint]]
+match = "~/.rustup/downloads"
+owner = "rustup"
+trashable = true
+
+[[hint]]
+match = "~/.rustup/tmp"
+owner = "rustup"
+trashable = true
+
+[[hint]]
+match = "~/.rustup/toolchains"
+owner = "rustup"
+command = "rustup toolchain uninstall <toolchain>"
+
+[[hint]]
+match = "~/.cache/sccache"
+owner = "sccache"
+trashable = true
+
+[[hint]]
+match = "~/.ccache"
+owner = "ccache"
+command = "ccache -C"
+trashable = true
+
+[[hint]]
+match = "~/.cache/ccache"
+owner = "ccache"
+command = "ccache -C"
+trashable = true
+
+[[hint]]
+match = "~/.cache/go-build"
+owner = "Go"
+command = "go clean -cache"
+trashable = true
+
+[[hint]]
+match = "~/go/pkg/mod"
+owner = "Go"
+command = "go clean -modcache"
+trashable = true
+
+[[hint]]
+match = "~/.cache/deno"
+owner = "Deno"
+command = "deno clean"
+trashable = true
+
+[[hint]]
+match = "~/.cache/node-gyp"
+owner = "node-gyp"
+trashable = true
+
+[[hint]]
+match = "~/.cache/electron"
+owner = "Electron"
+trashable = true
+
+[[hint]]
+match = "~/.cache/typescript"
+owner = "TypeScript"
+trashable = true
+
+[[hint]]
+match = "~/.cache/mise"
+owner = "mise"
+command = "mise cache clear"
+trashable = true
+
+[[hint]]
+match = "~/.cache/coursier"
+owner = "Coursier"
+trashable = true
+
+[[hint]]
+match = "~/.android/build-cache"
+owner = "Android SDK"
+trashable = true
+
+# --- editors ----------------------------------------------------------
+
+[[hint]]
+match = "~/.config/Code/Cache"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/.config/Code/CachedData"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/.config/Code/CachedExtensionVSIXs"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/.config/Code/GPUCache"
+owner = "VS Code"
+trashable = true
+
+[[hint]]
+match = "~/.config/Cursor/Cache"
+owner = "Cursor"
+trashable = true
+
+[[hint]]
+match = "~/.config/Cursor/CachedData"
+owner = "Cursor"
+trashable = true
+
+[[hint]]
+match = "~/.config/Cursor/GPUCache"
+owner = "Cursor"
+trashable = true
+
+[[hint]]
+match = "~/.cache/zed"
+owner = "Zed"
+trashable = true
+
+[[hint]]
+match = "~/.cache/JetBrains"
+owner = "JetBrains"
+trashable = true
+
+# --- browsers for tests, containers, ML -------------------------------
+
+[[hint]]
+match = "~/.cache/ms-playwright"
+owner = "Playwright"
+command = "npx playwright uninstall --all"
+trashable = true
+
+[[hint]]
+match = "~/.cache/Cypress"
+owner = "Cypress"
+trashable = true
+
+[[hint]]
+match = "~/.local/share/containers"
+owner = "Podman"
+command = "podman system prune"
+
+[[hint]]
+match = "~/.local/share/docker"
+owner = "Docker"
+command = "docker system prune"
+
+[[hint]]
+match = "~/.cache/huggingface"
+owner = "Hugging Face"
+command = "huggingface-cli delete-cache"
+
+[[hint]]
+match = "~/.ollama/models"
+owner = "Ollama"
+command = "ollama rm <model>"
+
+# --- browsers & desktop apps (cache dirs only, never profiles) --------
+
+[[hint]]
+match = "~/.cache/google-chrome"
+owner = "Chrome"
+trashable = true
+
+[[hint]]
+match = "~/.cache/chromium"
+owner = "Chromium"
+trashable = true
+
+[[hint]]
+match = "~/.cache/microsoft-edge"
+owner = "Edge"
+trashable = true
+
+[[hint]]
+match = "~/.cache/mozilla/firefox"
+owner = "Firefox"
+trashable = true
+
+[[hint]]
+match = "~/.cache/BraveSoftware/Brave-Browser"
+owner = "Brave"
+trashable = true
+
+[[hint]]
+match = "~/.cache/spotify"
+owner = "Spotify"
+trashable = true
+
+[[hint]]
+match = "~/.config/Slack/Cache"
+owner = "Slack"
+trashable = true
+
+[[hint]]
+match = "~/.config/discord/Cache"
+owner = "Discord"
+trashable = true
+
+# --- special -------------------------------------------------------------
+
+# The walk sees the XDG Trash (under ~/.local/share) — often tens of GB
+# that only emptying actually frees. Never a trash suggestion itself.
+[[hint]]
+match = "~/.local/share/Trash"
+owner = "Trash 废纸篓"
+
+[[hint]]
+match = "~/.local/share/Steam"
+owner = "Steam"
+
+# --- per-project artifacts (matched anywhere by component) ------------
+# Never trashable: they live inside working trees.
+
+[[hint]]
+match = "node_modules"
+owner = "npm / pnpm / yarn"
+
+[[hint]]
+match = "target"
+owner = "Cargo"
+
+[[hint]]
+match = ".terraform"
+owner = "Terraform"
+
+[[hint]]
+match = ".next"
+owner = "Next.js"
+
+[[hint]]
+match = ".nuxt"
+owner = "Nuxt"
+
+[[hint]]
+match = ".turbo"
+owner = "Turborepo"
+
+[[hint]]
+match = ".parcel-cache"
+owner = "Parcel"
+
+[[hint]]
+match = ".vercel"
+owner = "Vercel"
+
+[[hint]]
+match = ".build"
+owner = "SwiftPM"
+
+[[hint]]
+match = ".dart_tool"
+owner = "Dart"
+
+[[hint]]
+match = ".nx"
+owner = "Nx"
+
+[[hint]]
+match = "__pycache__"
+owner = "Python"
+
+[[hint]]
+match = ".pytest_cache"
+owner = "pytest"
+
+[[hint]]
+match = ".mypy_cache"
+owner = "mypy"
+
+[[hint]]
+match = ".ruff_cache"
+owner = "Ruff"
+
+[[hint]]
+match = ".tox"
+owner = "tox"

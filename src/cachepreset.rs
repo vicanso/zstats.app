@@ -186,7 +186,6 @@ fn expand(raw: &str, home: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
     use std::process;
 
     fn p(s: &str) -> PathBuf {
@@ -221,9 +220,6 @@ roots = [
         );
     }
 
-    // No `caches-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
-    // the runtime degrades to "no hints", but these assert content.
-    #[cfg(target_os = "macos")]
     #[test]
     fn user_file_replaces_the_embedded_list_wholesale() {
         let home = p("/Users/x");
@@ -237,7 +233,7 @@ roots = [
             built_in
                 .roots
                 .iter()
-                .any(|r| r == &p("/Users/x/Library/Caches"))
+                .any(|r| r == &p("/Users/x/.cargo/registry"))
         );
 
         fs::write(dir.join(FILE), "roots = [\"~/custom\"]\n").unwrap();
@@ -252,15 +248,12 @@ roots = [
             fallback
                 .roots
                 .iter()
-                .any(|r| r == &p("/Users/x/Library/Caches"))
+                .any(|r| r == &p("/Users/x/.cargo/registry"))
         );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // No `caches-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
-    // the runtime degrades to "no hints", but these assert content.
-    #[cfg(target_os = "macos")]
     #[test]
     fn the_embedded_file_parses() {
         let bytes = assets::get(FILE).expect("caches list is embedded");
@@ -270,7 +263,9 @@ roots = [
             roots.len() >= 3,
             "built-in list should name the platform caches"
         );
+        #[cfg(target_os = "macos")]
         assert!(roots.contains(&p("/Users/x/Library/Caches")));
+        assert!(roots.contains(&p("/Users/x/.cache")));
         assert!(roots.contains(&p("/Users/x/.cargo/registry")));
     }
 }

@@ -372,7 +372,7 @@ impl ZStatsAppState {
     /// (docs/disk-analysis.md's scope table) — the answer would be
     /// wrong, not merely slow.
     pub fn set_disk_analysis_at(&mut self, root: PathBuf, fx: &mut dyn Effects) {
-        if root == Path::new("/") {
+        if cfg!(target_os = "macos") && root == Path::new("/") {
             self.cancel_disk_analysis_walk();
             self.drop_expansions();
             self.analysis.disk_analysis =

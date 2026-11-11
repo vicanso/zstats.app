@@ -194,7 +194,7 @@ const CUT_FLOOR: f32 = 320.;
 /// 358pt-wide panel; this is the value to move if the panel should sit
 /// on the same rhythm as the compositor's own window gaps (`gaps_out`
 /// in hyprland.conf), which is a per-desktop number nothing reports.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub const PANEL_MARGIN_RIGHT: f32 = 10.;
 
 /// Gap between the panel's top edge and the bar above it. Matches
@@ -221,7 +221,7 @@ pub const PANEL_MARGIN_RIGHT: f32 = 10.;
 /// the reservation entirely (an exclusive zone of -1) and
 /// subtracting the bar's height by hand — a number no protocol reports,
 /// so it would have to be configured rather than measured.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub const PANEL_MARGIN_TOP: f32 = 10.;
 
 /// Where the settings window opens. Disk space shared it until its
@@ -341,6 +341,20 @@ fn resolve_icon(anchor: TrayAnchor, screens: &[ScreenGeom]) -> ResolvedIcon {
 /// [`CUT_FLOOR`].
 fn fitted_height(wanted: f32, visible: f32) -> f32 {
     wanted.min(visible - TRAY_GAP).max(CUT_FLOOR)
+}
+
+/// The panel's height on a Wayland layer surface when the monitor's
+/// logical height is known: leaves [`PANEL_MARGIN_TOP`] above and
+/// [`PANEL_MARGIN_RIGHT`] below the panel so the footer stays on screen
+/// on short or scaled displays. Never under [`CUT_FLOOR`].
+#[cfg(any(target_os = "linux", test))]
+pub fn layer_fitted_height(wanted: f32, monitor_height: Option<f32>) -> f32 {
+    match monitor_height {
+        Some(h) if h > 0. => wanted
+            .min(h - PANEL_MARGIN_TOP - PANEL_MARGIN_RIGHT)
+            .max(CUT_FLOOR),
+        _ => wanted,
+    }
 }
 
 /// Where a panel's top edge and height land when it is given a new
@@ -537,6 +551,13 @@ mod tests {
         assert_eq!(fitted_height(828., 1080.), 828.);
         assert_eq!(fitted_height(1000., 876.), 876. - TRAY_GAP);
         assert_eq!(fitted_height(828., 200.), CUT_FLOOR);
+        assert_eq!(layer_fitted_height(775., Some(1080.)), 775.);
+        assert_eq!(
+            layer_fitted_height(775., Some(720.)),
+            720. - PANEL_MARGIN_TOP - PANEL_MARGIN_RIGHT
+        );
+        assert_eq!(layer_fitted_height(775., Some(200.)), CUT_FLOOR);
+        assert_eq!(layer_fitted_height(775., None), 775.);
     }
 
     /// One width for both forms — the layout does not reflow — and the

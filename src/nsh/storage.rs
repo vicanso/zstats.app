@@ -1334,8 +1334,8 @@ fn analysis_card(
                 parts,
                 empty_state(
                     i18n::tr("disk.ana_empty_lead"),
-                    i18n::tr("disk.ana_empty_cost"),
-                    i18n::tr("disk.ana_hint"),
+                    storagepage::empty_cost(),
+                    storagepage::run_tip(false),
                     primary_button(store::read(storagepage::start_label), || {
                         store::update(|state, fx| state.start_disk_analysis(fx))
                     }),

@@ -164,8 +164,19 @@ pub fn run_label(state: &ZStatsAppState) -> String {
 pub fn run_tip(stale: bool) -> String {
     i18n::tr(if stale {
         "disk.ana_stale"
-    } else {
+    } else if cfg!(target_os = "macos") {
         "disk.ana_hint"
+    } else {
+        "disk.ana_hint_linux"
+    })
+}
+
+/// The empty state's cost line: no TCC folder prompt on Linux.
+pub fn empty_cost() -> String {
+    i18n::tr(if cfg!(target_os = "macos") {
+        "disk.ana_empty_cost"
+    } else {
+        "disk.ana_empty_cost_linux"
     })
 }
 
@@ -342,22 +353,28 @@ pub fn home_result(result: &ScanResult) -> bool {
 
 /// The preset scopes the toolbar offers (docs/disk-analysis.md's scope
 /// table), in the toolbar's order — the whole disk last, the slowest.
+/// `~/Library` is macOS-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
     Home,
+    #[cfg(target_os = "macos")]
     Library,
     Caches,
     Disk,
 }
 
 impl Preset {
+    #[cfg(target_os = "macos")]
     pub const ALL: [Preset; 4] = [Preset::Home, Preset::Library, Preset::Caches, Preset::Disk];
+    #[cfg(not(target_os = "macos"))]
+    pub const ALL: [Preset; 3] = [Preset::Home, Preset::Caches, Preset::Disk];
 
     /// The chip's words: a word for home, not `~`; the exact path rides
     /// the tooltip.
     pub fn label(self) -> String {
         match self {
             Preset::Home => i18n::tr("disk.ana_preset_home"),
+            #[cfg(target_os = "macos")]
             Preset::Library => "~/Library".into(),
             Preset::Caches => i18n::tr("disk.ana_preset_caches"),
             Preset::Disk => i18n::tr("disk.ana_preset_disk"),
@@ -367,13 +384,24 @@ impl Preset {
     pub fn tip(self) -> String {
         match self {
             Preset::Home => i18n::tr("disk.ana_preset_home_tip"),
+            #[cfg(target_os = "macos")]
             Preset::Library => i18n::tr("disk.ana_preset_library_tip"),
-            Preset::Caches => i18n::tr("disk.ana_preset_caches_tip"),
-            Preset::Disk => format!(
-                "{} {}",
-                i18n::tr("disk.ana_preset_disk_tip"),
-                i18n::tr("disk.ana_scope_tip")
-            ),
+            Preset::Caches => i18n::tr(if cfg!(target_os = "macos") {
+                "disk.ana_preset_caches_tip"
+            } else {
+                "disk.ana_preset_caches_tip_linux"
+            }),
+            Preset::Disk => {
+                if cfg!(target_os = "macos") {
+                    format!(
+                        "{} {}",
+                        i18n::tr("disk.ana_preset_disk_tip"),
+                        i18n::tr("disk.ana_scope_tip")
+                    )
+                } else {
+                    i18n::tr("disk.ana_preset_disk_tip_linux")
+                }
+            }
         }
     }
 
@@ -381,6 +409,7 @@ impl Preset {
         let home = diskscan::default_root();
         match self {
             Preset::Home => home.map(ScanScope::single),
+            #[cfg(target_os = "macos")]
             Preset::Library => home.map(|h| ScanScope::single(h.join("Library"))),
             Preset::Caches => ScanScope::cache_set(),
             Preset::Disk => Some(ScanScope::whole_disk()),
@@ -404,6 +433,7 @@ impl Preset {
                     state.set_disk_analysis_at(home, fx);
                 }
             }
+            #[cfg(target_os = "macos")]
             Preset::Library => {
                 if let Some(home) = diskscan::default_root() {
                     state.set_disk_analysis_at(home.join("Library"), fx);
@@ -608,7 +638,16 @@ pub fn row_tip(
 
 /// The Trash itself: its row's reveal opens the Trash, never empties it.
 pub fn is_trash_dir(path: &Path) -> bool {
-    env::var_os("HOME").is_some_and(|home| path == Path::new(&home).join(".Trash"))
+    env::var_os("HOME").is_some_and(|home| {
+        #[cfg(target_os = "macos")]
+        {
+            path == Path::new(&home).join(".Trash")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            path == Path::new(&home).join(".local/share/Trash")
+        }
+    })
 }
 
 /// The reveal button's tooltip on `path`'s row.

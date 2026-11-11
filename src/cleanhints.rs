@@ -321,7 +321,6 @@ fn parse(content: &str, home: &Path) -> Vec<CleanHint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
     use std::process;
 
     fn p(s: &str) -> PathBuf {
@@ -367,9 +366,6 @@ owner = "skipped too"
         assert!(!nm.matches(&p("/Users/x/dev/node_modules_backup")));
     }
 
-    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
-    // the runtime degrades to "no hints", but these assert content.
-    #[cfg(target_os = "macos")]
     #[test]
     fn user_file_replaces_the_embedded_list_wholesale() {
         let home = p("/Users/x");
@@ -418,8 +414,6 @@ owner = "skipped too"
     /// A user file written before the per-OS split keeps working: it is
     /// adopted under the platform name once, and an already-migrated
     /// directory is left alone.
-    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
-    // the runtime degrades to "no hints", but these assert content.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_pre_split_user_file_is_adopted_not_ignored() {
@@ -454,9 +448,6 @@ owner = "skipped too"
     /// Every embedded entry must parse into one of the two rule forms —
     /// a typo in the shipped file should fail here, not silently drop
     /// the entry at runtime.
-    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
-    // the runtime degrades to "no hints", but these assert content.
-    #[cfg(target_os = "macos")]
     #[test]
     fn embedded_defaults_all_parse() {
         let raw = assets::get(FILE).expect("embedded");
@@ -470,14 +461,12 @@ owner = "skipped too"
     /// Working trees, pulled models and uv's hard-linked cache must stay
     /// annotation-only — trashable here would put a delete button on
     /// user data (docs/disk-analysis.md).
-    // No `cleanhints-linux.toml` ships yet (docs/omarchy-port.md, phase 6):
-    // the runtime degrades to "no hints", but these assert content.
-    #[cfg(target_os = "macos")]
     #[test]
     fn annotation_only_locations_are_not_trashable() {
         let home = p("/Users/x");
         let raw = assets::get(FILE).expect("embedded");
         let hints = parse(str::from_utf8(&raw).unwrap(), &home);
+        #[cfg(target_os = "macos")]
         let must_not_trash = [
             "/Users/x/.cache/huggingface",
             "/Users/x/.ollama/models",
@@ -505,6 +494,19 @@ owner = "skipped too"
             "/Users/x/Library/Containers/com.kingsoft.wpsoffice.mac",
             "/Users/x/.Trash",
         ];
+        #[cfg(not(target_os = "macos"))]
+        let must_not_trash = [
+            "/Users/x/.cache/huggingface",
+            "/Users/x/.ollama/models",
+            "/Users/x/.cache/uv",
+            "/Users/x/dev/proj/node_modules",
+            "/Users/x/dev/proj/target",
+            "/Users/x/.rustup/toolchains",
+            "/Users/x/.local/share/containers",
+            "/Users/x/.local/share/docker",
+            "/Users/x/.local/share/Steam",
+            "/Users/x/.local/share/Trash",
+        ];
         for path in must_not_trash {
             let hint = hints
                 .iter()
@@ -515,6 +517,7 @@ owner = "skipped too"
                 "{path} is user data / a working tree and must not be trashable"
             );
         }
+        #[cfg(target_os = "macos")]
         let must_trash = [
             "/Users/x/.npm",
             "/Users/x/Library/Caches/com.spotify.client",
@@ -526,6 +529,15 @@ owner = "skipped too"
             "/Users/x/Library/Application Support/Claude/Cache",
             "/Users/x/Library/Application Support/Notion/Cache",
             "/Users/x/Library/Developer/Xcode/watchOS DeviceSupport",
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let must_trash = [
+            "/Users/x/.npm",
+            "/Users/x/.cache/spotify",
+            "/Users/x/.cache/google-chrome",
+            "/Users/x/.cache/BraveSoftware/Brave-Browser",
+            "/Users/x/.config/Slack/Cache",
+            "/Users/x/.config/Code/Cache",
         ];
         for path in must_trash {
             let hint = hints

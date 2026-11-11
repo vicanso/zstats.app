@@ -515,11 +515,19 @@ pub(crate) fn tcc_deny() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "macos")]
+const VOLUME_PRUNES: &[&str] = &["Volumes", "home"];
+/// On Linux `/` is the whole-disk root itself: `/home` is where users
+/// live, while virtual kernel filesystems (`/proc`, `/sys`, `/dev`,
+/// `/run`) and external mount trees (`/mnt`, `/media`) must be pruned.
+#[cfg(not(target_os = "macos"))]
+const VOLUME_PRUNES: &[&str] = &["proc", "sys", "dev", "run", "mnt", "media"];
+
 fn volume_prunes(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots
         .iter()
         .filter(|root| root.as_path() == Path::new(DATA_VOLUME) || root.as_path() == Path::new("/"))
-        .flat_map(|root| [root.join("Volumes"), root.join("home")])
+        .flat_map(|root| VOLUME_PRUNES.iter().map(move |name| root.join(name)))
         .collect()
 }
 
@@ -1667,16 +1675,26 @@ mod tests {
     }
 
     /// A whole-disk walk must not wander onto other disks, and must not
-    /// trip the autofs mount at `home`. Pruned by exact path, so a
-    /// deliberately picked `/Volumes/Backup` is still walked — the rule
-    /// is about what a whole-disk root wanders into.
+    /// trip the autofs mount at `home` (or virtual filesystems on Linux).
+    /// Pruned by exact path, so a deliberately picked `/Volumes/Backup`
+    /// is still walked — the rule is about what a whole-disk root wanders
+    /// into.
     #[test]
     fn a_whole_disk_root_prunes_other_mounts_and_the_autofs_trigger() {
         let prunes = volume_prunes(&[p(DATA_VOLUME)]);
-        assert!(prunes.contains(&p("/System/Volumes/Data/Volumes")));
-        assert!(prunes.contains(&p("/System/Volumes/Data/home")));
-        // The pre-Catalina fallback root gets the same treatment.
-        assert_eq!(volume_prunes(&[p("/")]).len(), 2);
+        #[cfg(target_os = "macos")]
+        {
+            assert!(prunes.contains(&p("/System/Volumes/Data/Volumes")));
+            assert!(prunes.contains(&p("/System/Volumes/Data/home")));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(prunes.contains(&p("/System/Volumes/Data/proc")));
+            assert!(prunes.contains(&p("/System/Volumes/Data/sys")));
+            assert!(!prunes.contains(&p("/System/Volumes/Data/home")));
+        }
+        // The `/` root gets the same treatment.
+        assert_eq!(volume_prunes(&[p("/")]).len(), VOLUME_PRUNES.len());
         // Every other scope is untouched: a picked folder named
         // Volumes is the user's business, and a home walk has no
         // mount points to cross.

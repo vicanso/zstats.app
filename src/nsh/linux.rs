@@ -295,8 +295,26 @@ fn bind_quit(window: &gtk::Window) {
     window.add_controller(controller);
 }
 
+/// The logical height of the monitor `window` sits on (or the primary
+/// monitor before `window` is mapped), so the panel's height can be
+/// clamped on short or scaled displays.
+fn monitor_height(window: Option<&gtk::Window>) -> Option<f32> {
+    let display = window
+        .map(WidgetExt::display)
+        .or_else(gtk::gdk::Display::default)?;
+    if let Some(surface) = window.and_then(NativeExt::surface)
+        && let Some(monitor) = display.monitor_at_surface(&surface)
+    {
+        return Some(monitor.geometry().height() as f32);
+    }
+    let monitors = display.monitors();
+    let monitor = monitors.item(0)?.downcast::<gtk::gdk::Monitor>().ok()?;
+    Some(monitor.geometry().height() as f32)
+}
+
 /// The size Overview's form wants now — the design's, since a layer
-/// surface is not dragged — noting whether the notice row is in it.
+/// surface is not dragged — noting whether the notice row is in it, and
+/// clamped to the monitor's logical height so the footer stays on screen.
 fn panel_size() -> (i32, i32) {
     let notice = store::read(notice::row_shown);
     NOTICE_FITTED.store(notice, Ordering::Relaxed);
@@ -305,6 +323,10 @@ fn panel_size() -> (i32, i32) {
         notice,
         placement::Dragged::default(),
     );
+    let screen_h = with_panel(|panel| monitor_height(Some(&panel.window)))
+        .flatten()
+        .or_else(|| monitor_height(None));
+    let height = placement::layer_fitted_height(height, screen_h);
     (width as i32, height as i32)
 }
 
@@ -326,6 +348,7 @@ fn fit_panel() {
     with_panel(|panel| {
         let (width, height) = panel.window.default_size();
         let height = placement::notice_step(height as f32, notice, None);
+        let height = placement::layer_fitted_height(height, monitor_height(Some(&panel.window)));
         panel.window.set_default_size(width, height as i32);
     });
 }
@@ -531,9 +554,13 @@ fn slot(aux: AuxWindow) -> usize {
 
 /// Opens `aux`, or raises it if it is open. The panel is an overlay, so a
 /// window opened under it could not be reached: unless pinned it goes, as
-/// it does when focus leaves it.
+/// it does when focus leaves it — and for the maximized disk-space window
+/// it always goes, because the non-movable overlay panel sits over the
+/// top-right 358px of the maximized window.
 fn open_aux(aux: AuxWindow) {
-    if !prefs::pinned() && with_panel(|panel| panel.window.is_visible()) == Some(true) {
+    if (aux == AuxWindow::Storage || !prefs::pinned())
+        && with_panel(|panel| panel.window.is_visible()) == Some(true)
+    {
         hide();
     }
     let existing = AUX.with_borrow(|open| open[slot(aux)].as_ref().map(|a| a.window.clone()));
@@ -552,8 +579,17 @@ fn open_aux(aux: AuxWindow) {
     let window = gtk::Window::new();
     window.set_title(Some(&title));
     window.set_default_size(size.0 as i32, size.1 as i32);
-    let (min_w, min_h) = placement::AUX_MIN_WINDOW_SIZE;
-    window.set_size_request(min_w as i32, min_h as i32);
+    // Settings is a fixed-size 527×620 dialog: making it non-resizable
+    // sets `min_size == max_size` on the Wayland `xdg_toplevel`, so tiling
+    // compositors (Hyprland, Sway) float and centre it automatically
+    // instead of stretching the two-column form across a 1920px tile.
+    window.set_resizable(aux == AuxWindow::Storage);
+    if aux == AuxWindow::Storage {
+        let (min_w, min_h) = placement::AUX_MIN_WINDOW_SIZE;
+        window.set_size_request(min_w as i32, min_h as i32);
+    } else {
+        window.set_size_request(size.0 as i32, size.1 as i32);
+    }
     let view = AppView::new(AppOptions {
         app_id: APP_ID.to_owned(),
         title: title.clone(),
