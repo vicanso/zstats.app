@@ -49,7 +49,7 @@ use crate::nsh::{store, theme};
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
-use crate::{about, active, autostart, i18n, logger, notice, notify, prefs, updater};
+use crate::{about, active, autostart, clamshell, i18n, logger, notice, notify, prefs, updater};
 use nsh_platform_macos::{AppOptions, AppView, Appearance};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -257,6 +257,7 @@ pub fn run() {
     // status goes in the log, and the first slow-burn banner can already
     // say whether its subject is in use.
     autostart::refresh();
+    clamshell::init();
     active::start();
     start_collector(tab);
     // Child processes that block for seconds, off the main thread.
@@ -604,6 +605,7 @@ fn mark_shown() {
     if let Some(pace) = PACE.get() {
         pace.shown();
     }
+    let _ = clamshell::refresh();
     store::update(|state, fx| {
         state.enter_shown_tab(fx);
         state.see_alerts_if_showing(fx);
@@ -668,6 +670,8 @@ fn on_tray(action: TrayAction) {
 }
 
 fn quit() {
+    tracing::info!("quit requested");
+    clamshell::restore_on_exit();
     if let Some(mtm) = MainThreadMarker::new() {
         NSApplication::sharedApplication(mtm).terminate(None);
     }

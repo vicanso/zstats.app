@@ -1,12 +1,13 @@
 //! Keep the Mac awake — screen on, no idle sleep — for a set time.
 //!
 //! One IOKit power assertion, taken when a length is picked from the
-//! cup in the panel's footer and gone when that time is up. This is the app's third
-//! and last way of touching the system, and it is deliberately the
-//! weakest one: unlike the move-to-Trash and the quit request it needs
-//! no confirm sheet, because it changes nothing on the machine, ends
-//! with one click or on its own clock, and cannot outlive the process —
-//! the kernel drops an assertion when the holder exits, crash included.
+//! cup in the panel's footer and gone when that time is up. Alongside
+//! `clamshell.rs` (macOS lid-close sleep control), this is the app's
+//! lightest way of touching the system: unlike the move-to-Trash and the
+//! quit request it needs no confirm sheet, because it changes nothing on
+//! the machine, ends with one click or on its own clock, and cannot
+//! outlive the process — the kernel drops an assertion when the holder
+//! exits, crash included.
 //!
 //! `PreventUserIdleDisplaySleep`: the display does not dim or sleep and
 //! no screen saver starts, so nothing locks from sitting idle — and, in

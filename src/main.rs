@@ -38,6 +38,8 @@ mod autostart;
 mod awake;
 mod cachepreset;
 mod chart;
+#[cfg(target_os = "macos")]
+mod clamshell;
 mod cleanhints;
 mod color;
 mod dirmap;

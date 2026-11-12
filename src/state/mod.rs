@@ -1247,6 +1247,8 @@ impl ZStatsAppState {
         // anyone: the footer's cup is the one surface that shows a hold,
         // and it repaints with this tick.
         awake::expire();
+        #[cfg(target_os = "macos")]
+        crate::clamshell::on_tick(tick.snapshot.battery.as_ref(), fx);
 
         // Overview's half-hour lines. These three are already on the
         // tick while the panel is hidden; the ring is what makes that

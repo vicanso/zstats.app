@@ -62,6 +62,10 @@ pub enum CustomIconName {
     /// (gpui-kit's `Sun` / `Moon`) would read as the theme picker's glyphs —
     /// this one has to say "the Mac is being held awake" and nothing else.
     Coffee,
+    /// Footer lid-closed sleep toggle on macOS (`clamshell.rs`); lucide
+    /// `laptop`. Paired beside [`Self::Coffee`] so idle display keep-awake
+    /// and `pmset disablesleep` stay visually distinct.
+    Laptop,
     /// Move-to-Trash on the disk-space window's rows; lucide `trash-2`.
     /// Not a backspace key (gpui-kit's `Delete`, which read as "clear this
     /// field" on a control that moves files).
@@ -125,6 +129,7 @@ impl CustomIconName {
             CustomIconName::Shield => "icons/shield.svg",
             CustomIconName::Pin => "icons/pin.svg",
             CustomIconName::Coffee => "icons/coffee.svg",
+            CustomIconName::Laptop => "icons/laptop.svg",
             CustomIconName::Trash => "icons/trash.svg",
             CustomIconName::Expand => "icons/chevrons-up-down.svg",
             CustomIconName::Collapse => "icons/chevrons-down-up.svg",
@@ -172,6 +177,7 @@ mod tests {
             CustomIconName::Shield,
             CustomIconName::Pin,
             CustomIconName::Coffee,
+            CustomIconName::Laptop,
             CustomIconName::Trash,
             CustomIconName::Expand,
             CustomIconName::Collapse,

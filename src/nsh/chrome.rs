@@ -12,6 +12,8 @@
 //! the cup's is closed as the panel hides (`root::close_on_hide`).
 
 use crate::assets::CustomIconName;
+#[cfg(target_os = "macos")]
+use crate::clamshell;
 use crate::color::Rgba;
 use crate::nsh::root::{self, AuxWindow, CARD_GAP, GUTTER, HostAction, Live};
 use crate::nsh::widgets::{self, CLEAR};
@@ -301,6 +303,16 @@ pub fn footer(live: Live) -> View {
         }),
         || root::ask(HostAction::Open(AuxWindow::Settings)),
     );
+    let left = view()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .child(pin)
+        .child(form)
+        .child(settings)
+        .child(keep_awake(live));
+    #[cfg(target_os = "macos")]
+    let left = left.child(clamshell_sleep(live));
     view()
         .flex_row()
         .flex_none()
@@ -310,16 +322,7 @@ pub fn footer(live: Live) -> View {
         .px(px(8.))
         .border_t(px(1.))
         .border_color(theme::color(palette::border_subtle))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
-                .child(pin)
-                .child(form)
-                .child(settings)
-                .child(keep_awake(live)),
-        )
+        .child(left)
         .child(
             view()
                 .flex_none()
@@ -485,5 +488,143 @@ fn keep_awake(live: Live) -> AnyElement {
                 .bg(theme::color(palette::border_subtle)),
         )
         .child(item(i18n::tr("common.keep_awake_off"), 0))
+        .into_element()
+}
+
+/// Keep a MacBook running with the lid closed (`clamshell.rs`): the laptop
+/// beside the keep-awake cup, lit whenever `SleepDisabled` is on (whether set
+/// here or externally), with a countdown while timed.
+#[cfg(target_os = "macos")]
+fn clamshell_sleep(live: Live) -> AnyElement {
+    let mode = live.watch(clamshell::mode);
+    let busy = live.watch(clamshell::busy);
+    let active = move || mode.get().is_on();
+    let timed = move || matches!(mode.get(), clamshell::Mode::Timed { .. });
+    let tip = move || match mode.get() {
+        clamshell::Mode::Off => i18n::tr("common.clamshell_awake"),
+        clamshell::Mode::Timed { until, .. } => {
+            t!("common.clamshell_on_until", time = format::clock(until)).to_string()
+        }
+        clamshell::Mode::Indefinite => i18n::tr("common.clamshell_on_indefinite"),
+        clamshell::Mode::External => i18n::tr("common.clamshell_on_external"),
+    };
+    let left = live.watch(|| {
+        clamshell::mode()
+            .minutes_left(SystemTime::now())
+            .map_or_else(String::new, format::countdown)
+    });
+    let item = move |label: String, req: clamshell::Request| {
+        let on = move || match (mode.get(), req) {
+            (clamshell::Mode::Off, clamshell::Request::Off) => true,
+            (clamshell::Mode::Indefinite, clamshell::Request::Indefinite) => true,
+            (clamshell::Mode::Timed { minutes: m, .. }, clamshell::Request::Timed(target)) => {
+                m == target
+            }
+            _ => false,
+        };
+        menu_item()
+            .disabled(move || busy.get())
+            .on_select(move || clamshell::request(req, store::changed))
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(5.))
+            .hover(|s| s.bg(theme::color(palette::popover_hover)))
+            .child(
+                text(move || if on() { "✓" } else { "" })
+                    .flex_none()
+                    .w(px(14.))
+                    .text_size(px(12.))
+                    .text_color(theme::color(palette::gauge)),
+            )
+            .child(
+                text(label)
+                    .text_size(px(12.))
+                    .text_color(theme::color(palette::text)),
+            )
+    };
+    let open = signal(false);
+    root::close_on_hide(open);
+    let mut popup = menu()
+        .offset(px(4.))
+        .open(move || Some(open.get()))
+        .on_open_change(move |event: &MenuEvent| {
+            if let MenuEvent::OpenChange(next, _) = event {
+                open.set(*next);
+            }
+        })
+        .popup_style(|s| {
+            s.min_w(px(180.))
+                .p(px(4.))
+                .rounded(px(8.))
+                .bg(theme::color(palette::popover))
+                .outline(px(1.))
+                .outline_offset(px(-1.))
+                .outline_color(theme::color(palette::border))
+                .shadow_lg()
+        })
+        .trigger(
+            view()
+                .flex_row()
+                .flex_none()
+                .h(px(CELL))
+                .min_w(px(32.))
+                .items_center()
+                .justify_center()
+                .gap(px(4.))
+                .px(px(8.))
+                .rounded(px(7.))
+                .bg(move || theme::color(move || if active() { palette::chip() } else { CLEAR }))
+                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .tooltip(widgets::live_tooltip(tip).disabled(move || open.get()))
+                .child(widgets::icon(CustomIconName::Laptop, 16., move || {
+                    footer_ink(active())
+                }))
+                .child(when(timed, move || {
+                    text(move || left.get())
+                        .pr(px(2.))
+                        .tabular_nums()
+                        .text_size(px(10.))
+                        .line_height(px(14.))
+                        .text_color(theme::color(palette::text))
+                })),
+        )
+        .child(
+            text(move || match mode.get() {
+                clamshell::Mode::Off => i18n::tr("common.clamshell_title"),
+                clamshell::Mode::Timed { until, .. } => {
+                    t!("common.clamshell_until", time = format::clock(until)).to_string()
+                }
+                clamshell::Mode::Indefinite => i18n::tr("common.clamshell_active"),
+                clamshell::Mode::External => i18n::tr("common.clamshell_external"),
+            })
+            .px(px(8.))
+            .py(px(4.))
+            .text_size(px(12.))
+            .text_color(theme::color(palette::text_dim)),
+        );
+    for minutes in clamshell::HOLD_MINUTES {
+        popup = popup.child(item(
+            hold_label(minutes),
+            clamshell::Request::Timed(minutes),
+        ));
+    }
+    popup
+        .child(item(
+            i18n::tr("common.clamshell_indefinite"),
+            clamshell::Request::Indefinite,
+        ))
+        .child(
+            menu_separator()
+                .h(px(1.))
+                .my(px(4.))
+                .bg(theme::color(palette::border_subtle)),
+        )
+        .child(item(
+            i18n::tr("common.clamshell_off"),
+            clamshell::Request::Off,
+        ))
         .into_element()
 }

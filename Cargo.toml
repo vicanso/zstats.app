@@ -231,16 +231,20 @@ objc2-service-management = { version = "0.3", default-features = false, features
     "objc2-foundation",
     "std",
 ] }
-# The Interface page's keep-awake switch holds one IOKit power
-# assertion (`awake.rs`). Already in the tree — zstats' battery
-# readings pull the same version — so this costs no extra build.
+# Power management: `awake.rs` holds an IOKit assertion, and `clamshell.rs`
+# reads `SleepDisabled` off `IOPMrootDomain` without spawning `pmset`.
+# Already in the tree — zstats' battery readings pull the same version —
+# so this costs no extra build.
 objc2-io-kit = { version = "0.3", default-features = false, features = [
+    "libc",
     "pwr_mgt",
     "std",
 ] }
-# CFString for that assertion's type and name. Also already in the
-# tree: objc2-app-kit below depends on it.
+# CoreFoundation types for those two IOKit paths (`CFString`, `CFDictionary`,
+# `CFBoolean`). Also already in the tree: objc2-app-kit below depends on it.
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "CFDictionary",
+    "CFNumber",
     "CFString",
     "std",
 ] }

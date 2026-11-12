@@ -253,6 +253,14 @@ zstats 按平台编译进一张表，给「本来就忙、本来就大」的程�
 - **两端都记 INFO 日志，断言名带上应用名**。和托盘恢复时钟同一个理由：「为什么我的 Mac 不睡了」是对着装好的构建问的，那里抓不到 DEBUG；而 `pmset -g assertions` 会直接点名持有者是 zstats。
 - Linux 上是一条 logind 空闲抑制器加同一个时钟：那边息屏、锁屏、挂起都由空闲守护进程触发，一条抑制器管三件事（前提是守护进程尊重它），只做了编译检查。
 
+### 合盖不休眠（`clamshell.rs`，仅 macOS）
+
+杯子管的是「开着盖别闲置睡」，而合盖在 macOS 内核里优先级高于一切电源断言（即使接电源、没外接显示器也会触发 `Clamshell Sleep`）。想在拔掉电源用电池时合盖继续跑任务，系统唯一的开关是 root 级的 `pmset -a disablesleep 1`（恢复为 `0`）。因此底栏杯子右侧单独放一个笔记本图标（`CustomIconName::Laptop`），不和杯子混成一个开关：两者的权限边界、风险（包里发热耗电）和生命周期完全不同。
+
+- **读状态零提权、零子进程**。启动、每次打开面板（`host::mark_shown`）以及每个采集 tick 都直接读 IOKit 注册表 `IOPMrootDomain` 节点的 `SleepDisabled` 属性（与 `pmset -g` 同源，测试守着两者一致）。如果是外部命令先开了 `disablesleep 1`，笔记本图标同样点亮并标为「外部已开启」（`Mode::External`），菜单里可一键恢复休眠，但应用退出时绝不擅自替用户改回 `0`。
+- **密码最多问一次：最小范围 `sudoers.d` 规则**。首次点击开启且尚未免密时，通过系统原生授权框（`osascript` `with administrator privileges`）一次性写入 `0440 root:wheel` 的 `/private/etc/sudoers.d/zstats-pmset`，落盘前经 `/usr/sbin/visudo -cf` 校验语法，仅授予当前登录用户（`geteuid` + `getpwuid_r` 校验安全用户名）免密执行 `/usr/bin/pmset -a disablesleep 1` 与 `/usr/bin/pmset -a disablesleep 0` 两条固定命令——不驻留 root 守护进程，也不依赖本地构建拿不到的 `SMJobBless` 签名。之后切换、定时到点、低电量恢复、退出清理全部走 `sudo -n` 静默完成；「设置 → 权限」页同步展示授权状态并提供「授权… / 撤销免密…」。
+- **三道安全护栏**。第一，菜单提供与杯子一致的定时档（30m / 1h / 2h / 4h / 8h，图标旁显示等宽倒计时，到点自动恢复 `0`）以及显式的「一直开启」；第二，凡由本会话开启时，采集 tick 检测到正在用电池放电（`diskwatch::on_battery`）且电量 `<= 15%` 立即自动恢复 `disablesleep 0` 并记 INFO 日志，防止合盖塞包里把电池跑干或闷热；第三，只要是本会话开启的，正常退出（底栏/托盘退出、`⌘Q` 的 `atexit`、更新重启）和 `SIGTERM`/`SIGINT`（异步信号安全的 self-pipe 监听线程）都会自动执行 `sudo -n pmset -a disablesleep 0`，避免应用关了机器还一直合盖不睡。
+
 ### History：今天什么烧了 CPU
 
 唯一按**量**而不是按速率排序的视图。其他视图回答的都是「现在有多忙」，而这在结构上就看不见那个从不显得忙、却在一天里花掉最多的进程。

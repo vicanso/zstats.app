@@ -75,6 +75,7 @@ pub fn became_key() {
     #[cfg(target_os = "macos")]
     if section() == SettingsSection::Permissions {
         settingspage::refresh_full_disk_access();
+        crate::clamshell::refresh_authorized();
     }
     // The pages read them, and nothing else would say so.
     store::changed();
@@ -233,6 +234,7 @@ fn entered(section: SettingsSection) {
         #[cfg(target_os = "macos")]
         SettingsSection::Permissions => {
             settingspage::refresh_full_disk_access();
+            crate::clamshell::refresh_authorized();
             store::changed();
         }
         SettingsSection::About => store::update(|state, fx| state.refresh_update_for_about(fx)),
@@ -1530,15 +1532,23 @@ fn reset_card() -> AnyElement {
         .into_element()
 }
 
-/// Full Disk Access: whether it is granted, and the way to the pane that
-/// grants it while it is not. The app never touches the permission.
+/// Permissions: Full Disk Access (system pane) and passwordless `pmset
+/// disablesleep` (`sudoers.d` rule managed on demand).
 #[cfg(target_os = "macos")]
 fn permissions_card(live: Live) -> AnyElement {
-    let granted = computed(move || {
+    let fda_granted = computed(move || {
         live.track();
         settingspage::full_disk_access_granted()
     });
-    widgets::list_shell()
+    let clamshell_auth = computed(move || {
+        live.track();
+        crate::clamshell::is_authorized()
+    });
+    let clamshell_busy = computed(move || {
+        live.track();
+        crate::clamshell::busy()
+    });
+    let fda = widgets::list_shell()
         .child(widgets::list_header(
             titled(
                 i18n::tr("config.perm_fda"),
@@ -1546,7 +1556,7 @@ fn permissions_card(live: Live) -> AnyElement {
             ),
             Some(
                 text(move || {
-                    i18n::tr(if granted.get() {
+                    i18n::tr(if fda_granted.get() {
                         "config.perm_granted"
                     } else {
                         "config.perm_missing"
@@ -1558,7 +1568,7 @@ fn permissions_card(live: Live) -> AnyElement {
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     theme::color(move || {
-                        if granted.get() {
+                        if fda_granted.get() {
                             palette::text()
                         } else {
                             palette::ink()
@@ -1569,7 +1579,7 @@ fn permissions_card(live: Live) -> AnyElement {
             ),
         ))
         .child(when(
-            move || !granted.get(),
+            move || !fda_granted.get(),
             || {
                 view()
                     .flex_row()
@@ -1581,7 +1591,59 @@ fn permissions_card(live: Live) -> AnyElement {
                         opener::full_disk_access_settings,
                     ))
             },
+        ));
+    let clamshell = widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                i18n::tr("config.perm_clamshell"),
+                i18n::tr("config.perm_clamshell_note"),
+            ),
+            Some(
+                text(move || {
+                    i18n::tr(if clamshell_auth.get() {
+                        "config.perm_clamshell_granted"
+                    } else {
+                        "config.perm_clamshell_missing"
+                    })
+                })
+                .flex_none()
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    theme::color(move || {
+                        if clamshell_auth.get() {
+                            palette::text()
+                        } else {
+                            palette::ink()
+                        }
+                    })
+                })
+                .into_element(),
+            ),
         ))
+        .child(
+            view()
+                .flex_row()
+                .px(px(ROW_PAD_X))
+                .pb(px(11.))
+                .child(dynamic(move || {
+                    let busy = clamshell_busy.get();
+                    if clamshell_auth.get() {
+                        card_chip(i18n::tr("config.perm_clamshell_revoke"), busy, || {
+                            crate::clamshell::revoke(changed)
+                        })
+                    } else {
+                        card_chip(i18n::tr("config.perm_clamshell_grant"), busy, || {
+                            crate::clamshell::authorize(changed)
+                        })
+                    }
+                })),
+        );
+    view()
+        .gap(px(8.))
+        .child(fda)
+        .child(clamshell)
         .into_element()
 }
 
