@@ -5,17 +5,16 @@
 //!
 //! One card: the lens as its title and the menu that switches it, the
 //! range and a refresh beside it, Today's clock under it, then the rows in
-//! a region that ends on a whole row at the gap above the footer. A row
-//! stays at [`BAND_ROW`] or [`METER_ROW`]: sharing the leftover into its
-//! padding (`rows::fit_rows`) resized every row on almost every pixel of
-//! a drag. A row is kept by its `(pid, name)` (a row's identity in the
-//! records), so a refresh
+//! a region that ends on a whole row at the gap above the footer
+//! (`rows::fit_rows`, holding each row's padding steady while the panel is
+//! being dragged). A row is kept by its `(pid, name)` (a row's identity in
+//! the records), so a refresh
 //! or another lens changes figures, not elements.
 
 use crate::assets::CustomIconName;
 use crate::color::Rgba;
 use crate::historylist;
-use crate::nsh::lists;
+use crate::nsh::lists::Body;
 use crate::nsh::root::{CARD_PAD, Live};
 use crate::nsh::widgets::{self, CLEAR, Choice};
 use crate::nsh::{store, theme};
@@ -29,9 +28,8 @@ use rust_i18n::t;
 /// (`history::AXIS_ROW`).
 const AXIS_ROW: f32 = 16.;
 
-/// What stands above and below a row's lines (`history::ROW_PAD`). The
-/// row keeps this: the fit used to give it a share of the leftover, and
-/// that share changed on every pixel of a drag.
+/// What stands above and below a row's lines before [`rows::fit_rows`]
+/// divides the leftover (`history::ROW_PAD`).
 const ROW_PAD: f32 = 9.;
 
 /// A row with Today's band, hairline included: the padding twice, the
@@ -48,10 +46,10 @@ const METER_ROW: f32 = BAND_ROW - 8. + 4.;
 const ROWS_MIN: f32 = 160.;
 
 /// The History page; `body` is the height it has on screen.
-pub fn page(live: Live, body: ReadSignal<f32>) -> AnyElement {
+pub fn page(live: Live, body: Body) -> AnyElement {
     let page = live.watch(move || {
-        let body = body.get();
-        store::read(|state| page_of(state, body))
+        let (live_b, settled_b) = body.budgets(false);
+        store::read(|state| page_of(state, live_b, settled_b))
     });
     let kind = computed(move || page.with(Page::kind));
     dynamic(move || match kind.get() {
@@ -133,7 +131,7 @@ struct Row {
     pad: f32,
 }
 
-fn page_of(state: &ZStatsAppState, body: f32) -> Page {
+fn page_of(state: &ZStatsAppState, live_b: f32, settled_b: f32) -> Page {
     let sort = state.history_sort();
     let title = i18n::tr(sort.title_key());
     let Some(rows) = state.history() else {
@@ -153,13 +151,14 @@ fn page_of(state: &ZStatsAppState, body: f32) -> Page {
     let now = jiff::Zoned::now();
     let lived = historylist::lived(&now);
     let now_clock = historylist::now_clock(&now);
-    let budget =
-        (lists::rows_budget(body, false) - if today { AXIS_ROW } else { 0. }).max(ROWS_MIN);
-    // Natural height, not [`rows::fit_rows`]'s share of the leftover. The
-    // share changed with the page height, which a drag measures on every
-    // layout, and the rows jumped.
+    let axis = if today { AXIS_ROW } else { 0. };
     let natural = if today { BAND_ROW } else { METER_ROW };
-    let viewport = rows::fixed_viewport(budget, natural);
+    let fit = rows::fit_rows_dragged(
+        (settled_b - axis).max(ROWS_MIN),
+        (live_b - axis).max(ROWS_MIN),
+        natural,
+        ROW_PAD,
+    );
     let shown: Vec<Row> = ranked
         .shown
         .iter()
@@ -186,7 +185,7 @@ fn page_of(state: &ZStatsAppState, body: f32) -> Page {
                 .unwrap_or_default(),
             meter: historylist::meter_fraction(s, sort, ranked.top),
             first: i == 0,
-            pad: ROW_PAD,
+            pad: fit.pad(i),
         })
         .collect();
     Page {
@@ -199,7 +198,7 @@ fn page_of(state: &ZStatsAppState, body: f32) -> Page {
             Vec::new()
         },
         rows: shown,
-        viewport,
+        viewport: fit.viewport,
         more: (ranked.hidden > 0).then(|| {
             if show_all {
                 i18n::tr("history.less")
@@ -606,34 +605,50 @@ mod tests {
     use crate::nsh::lists::LIST_HEADER;
     use crate::nsh::root::CARD_GAP;
 
-    /// The region at the three standard heights, and one pixel taller than
-    /// the short panel. Today reserves the clock (`AXIS_ROW`). A row stays
-    /// at [`BAND_ROW`] or [`METER_ROW`]: a pixel of drag used to change its
-    /// padding (`rows::fit_rows`).
+    /// The region at the three standard heights fills down to the footer gap
+    /// on a whole row, while a pixel of live drag moves only the viewport and
+    /// leaves each row's padding untouched. Today reserves the clock (`AXIS_ROW`).
     #[test]
-    fn a_row_keeps_its_height_while_the_panel_grows() {
+    fn rows_fill_to_the_footer_gap_and_hold_steady_during_a_drag() {
         let budget = |panel: f32, today: bool| {
             let rows = panel - 60. - 44. - CARD_GAP - LIST_HEADER;
             (rows - if today { AXIS_ROW } else { 0. }).max(ROWS_MIN)
         };
         for today in [false, true] {
             let natural = if today { BAND_ROW } else { METER_ROW };
-            let short = rows::fixed_viewport(budget(539., today), natural);
-            let dragged = rows::fixed_viewport(budget(540., today), natural);
-            assert_eq!(short, dragged, "one pixel resized the rows, today={today}");
+            let settled = rows::fit_rows(budget(539., today), natural, ROW_PAD);
+            let dragged =
+                rows::fit_rows_dragged(budget(539., today), budget(540., today), natural, ROW_PAD);
+            assert_eq!(dragged.viewport, settled.viewport + 1.);
+            for i in 0..20 {
+                assert_eq!(
+                    dragged.pad(i),
+                    settled.pad(i),
+                    "one pixel of drag resized row {i}, today={today}"
+                );
+            }
         }
         for (panel, today, expected) in [
-            (539., false, 5.),
-            (585., false, 6.),
-            (828., false, 10.),
-            (539., true, 5.),
-            (585., true, 5.),
-            (828., true, 9.),
+            (539., false, 6),
+            (585., false, 6),
+            (828., false, 10),
+            (539., true, 5),
+            (585., true, 6),
+            (828., true, 9),
         ] {
             let natural = if today { BAND_ROW } else { METER_ROW };
-            let viewport = rows::fixed_viewport(budget(panel, today), natural);
-            let count = (viewport + rows::ROW_SEAM) / natural;
-            assert_eq!(count, expected, "at {panel}, today={today}");
+            let b = budget(panel, today);
+            let fit = rows::fit_rows(b, natural, ROW_PAD);
+            assert_eq!(
+                rows::tests::whole_rows(fit),
+                (expected, b),
+                "at {panel}, today={today}"
+            );
+            assert_eq!(
+                fit.viewport,
+                b - rows::ROW_SEAM,
+                "at {panel}, today={today}"
+            );
         }
     }
 }

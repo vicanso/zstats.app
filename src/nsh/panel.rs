@@ -14,6 +14,7 @@
 //! gpui's `secondary-` was, for the same reason (Super is the
 //! compositor's on a Hyprland desktop).
 
+use crate::nsh::lists::Body;
 use crate::nsh::root::{self, CARD_GAP, GUTTER, HostAction, Live};
 use crate::nsh::{
     alerts, apps, chrome, gallery, hardware, history, network, overview, processes, store, theme,
@@ -43,8 +44,24 @@ pub fn Panel() -> impl IntoElement {
     root::bind_window_keys(None);
     let tab = live.memo(ZStatsAppState::tab);
     // The page's height on screen, for the lists that end on a whole row
-    // at the gap above the footer.
-    let body = signal(0.0_f32);
+    // at the gap above the footer. `settled` holds still while an edge is
+    // being dragged so row padding does not resize on every pixel, then
+    // catches up as the drag ends.
+    let live_h = signal(0.0_f32);
+    let settled_h = signal(0.0_f32);
+    effect(move || {
+        live.track();
+        if !root::in_live_resize() {
+            let h = live_h.get_untracked();
+            if h > 0.0 {
+                settled_h.set(h);
+            }
+        }
+    });
+    let body = Body {
+        live: live_h.read_only(),
+        settled: settled_h.read_only(),
+    };
     view()
         .size_full()
         .bg(theme::color(palette::panel_ground))
@@ -52,19 +69,25 @@ pub fn Panel() -> impl IntoElement {
         .child(
             scroll()
                 .flex_1()
-                .on_layout(move |b: &Bounds<Points>| body.set(b.size.height.0))
+                .on_layout(move |b: &Bounds<Points>| {
+                    let h = b.size.height.0;
+                    live_h.set(h);
+                    if !root::in_live_resize() || settled_h.get_untracked() == 0.0 {
+                        settled_h.set(h);
+                    }
+                })
                 .child(
                     view()
                         .px(px(GUTTER))
                         .pb(px(CARD_GAP))
-                        .child(dynamic(move || page(tab.get(), live, body.read_only()))),
+                        .child(dynamic(move || page(tab.get(), live, body))),
                 ),
         )
         .child(chrome::footer(live))
 }
 
 /// The page of `tab`; `body` is the height it has on screen.
-fn page(tab: Tab, live: Live, body: ReadSignal<f32>) -> AnyElement {
+fn page(tab: Tab, live: Live, body: Body) -> AnyElement {
     match tab {
         Tab::Overview if gallery_asked() => gallery::page(live),
         Tab::Overview => overview::page(live),

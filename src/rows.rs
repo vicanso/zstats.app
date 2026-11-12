@@ -1,10 +1,11 @@
-//! A ranked list's rows: how tall the region under a list's pinned header
-//! is when every row stays at its own height ([`fixed_viewport`]), so a
-//! drag does not resize the rows, and the earlier division of that region
-//! among the rows (`fit_rows`, kept for its tests). The heights are the
-//! pages' own — measured from their type — and only the arithmetic is
-//! here. Moved out of the gpui Processes page for the NSH Apps page
-//! (phase 4d of docs/nsh-migration.md).
+//! A ranked list's rows: how the region under a list's pinned header is
+//! divided among whole rows, so a card ends on the gap above the footer as
+//! Overview's does and the region ends on a row ([`fit_rows`]), while an
+//! edge drag holds each row's padding steady and moves only the viewport
+//! ([`RowFit::with_live_budget`]), and what a full CPU meter means. The
+//! heights are the pages' own — measured from their type — and only the
+//! arithmetic is here. Moved out of the gpui Processes page for the NSH
+//! Apps page (phase 4d of docs/nsh-migration.md).
 
 /// Floor for the per-row CPU bar. The original scale was 800% (eight
 /// cores), which left every normal row looking empty. One core is the
@@ -17,14 +18,12 @@ pub const BAR_FLOOR_PERCENT: f32 = 100.0;
 /// denser list than the one on the next tab. It was 2, and History's
 /// wider ranges then held five rows on the short panel, each eleven
 /// over its own height, for want of a sixth at 2.2 under.
-#[cfg(test)]
 pub const ROW_SQUEEZE: f32 = 2.5;
 
 /// How far over it. Past this the rows would be another list's rows, so
 /// the region keeps natural ones and the leftover stays under the card.
 /// Only a panel dragged shorter than the short form gets there: with six
 /// rows or more the largest share is `(row − ROW_SQUEEZE) ÷ 6`, about 10.
-#[cfg(test)]
 const ROW_STRETCH: f32 = 12.;
 
 /// The rows run this far past the region's edge, so the boundary under
@@ -42,7 +41,6 @@ pub const ROW_SEAM: f32 = 0.5;
 /// gpui rounded each row's to the pixel): an equal fractional share came out
 /// three pixels short over nine History rows, and the tenth row's hairline
 /// stood in the gap.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowFit {
     /// The scrolling region's height.
@@ -56,7 +54,6 @@ pub struct RowFit {
     pad: f32,
 }
 
-#[cfg(test)]
 impl RowFit {
     /// The collapsed row at `index`, hairline included.
     pub fn height(self, index: usize) -> f32 {
@@ -66,6 +63,19 @@ impl RowFit {
     /// What stands above and below that row's lines.
     pub fn pad(self, index: usize) -> f32 {
         self.pad + (self.height(index) - self.natural) / 2.
+    }
+
+    /// Keeps each row's height and padding as `self` fitted them while
+    /// moving the scrolling region to `live_budget` during an edge drag,
+    /// so the card's bottom stays on the gap above the footer without
+    /// resizing every row on every pixel.
+    pub fn with_live_budget(self, live_budget: f32) -> Self {
+        let viewport = if live_budget <= 1.0 || live_budget < self.natural {
+            live_budget
+        } else {
+            (live_budget + ROW_SEAM).floor() - ROW_SEAM
+        };
+        Self { viewport, ..self }
     }
 }
 
@@ -87,7 +97,6 @@ impl RowFit {
 /// otherwise the rows that fit are stretched, by at most
 /// [`ROW_STRETCH`]. A window too short for one row keeps the budget, so
 /// the card still cannot run under the footer.
-#[cfg(test)]
 pub fn fit_rows(budget: f32, natural: f32, pad: f32) -> RowFit {
     let plain = |viewport: f32, row: f32| RowFit {
         viewport,
@@ -121,20 +130,15 @@ pub fn fit_rows(budget: f32, natural: f32, pad: f32) -> RowFit {
     }
 }
 
-/// How tall a rows region is when every row stays at `natural`.
-///
-/// `fit_rows` folds the leftover into each row's padding, and that
-/// padding is worked out from the page height. The page height is measured
-/// on every layout while an edge is dragged, so the padding — and which of
-/// the first rows was a point taller — changed on almost every pixel.
-/// Here the region grows by one row only when another whole one fits, and
-/// what is left over stays under the rows.
-pub fn fixed_viewport(budget: f32, natural: f32) -> f32 {
-    if natural <= 1.0 || budget < natural {
-        return budget;
+/// [`fit_rows`] on `settled`, with the scrolling region moved to `live`
+/// while an edge is being dragged (`live != settled`).
+pub fn fit_rows_dragged(settled: f32, live: f32, natural: f32, pad: f32) -> RowFit {
+    let fit = fit_rows(settled, natural, pad);
+    if (live - settled).abs() < f32::EPSILON {
+        fit
+    } else {
+        fit.with_live_budget(live)
     }
-    let n = ((budget + ROW_SEAM) / natural).floor().max(1.);
-    n * natural - ROW_SEAM
 }
 
 #[cfg(test)]
@@ -192,16 +196,17 @@ pub mod tests {
         assert_eq!(none.pad(0), ROW_PAD);
     }
 
-    /// A pixel of a drag does not resize the region. It grows by one whole
-    /// row, and a budget shorter than one row is kept.
+    /// During a live drag, the viewport follows the dragged budget while
+    /// every row keeps its settled height and padding.
     #[test]
-    fn a_fixed_viewport_grows_by_a_whole_row() {
-        let row = 62.;
-        let six = fixed_viewport(6.2 * row, row);
-        assert_eq!(six, 6. * row - ROW_SEAM);
-        assert_eq!(fixed_viewport(6.2 * row + 1., row), six);
-
-        assert_eq!(fixed_viewport(7. * row, row), 7. * row - ROW_SEAM);
-        assert_eq!(fixed_viewport(40., row), 40.);
+    fn a_live_drag_moves_the_viewport_without_resizing_rows() {
+        let settled = fit_rows(386., 62., ROW_PAD);
+        let dragged = settled.with_live_budget(415.);
+        assert_eq!(dragged.viewport, 415. - ROW_SEAM);
+        for i in 0..10 {
+            assert_eq!(dragged.height(i), settled.height(i));
+            assert_eq!(dragged.pad(i), settled.pad(i));
+        }
+        assert_eq!(settled.with_live_budget(40.).viewport, 40.);
     }
 }

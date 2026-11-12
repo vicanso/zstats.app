@@ -23,6 +23,7 @@ use crate::state::ZStatsAppState;
 use nsh_base::button;
 use nsh_core::prelude::*;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a root asks of the AppKit side, which owns the windows and the
 /// process.
@@ -70,6 +71,20 @@ pub enum AuxWindow {
 }
 
 static HOST: OnceLock<Box<dyn Fn(HostAction) + Send + Sync>> = OnceLock::new();
+
+/// True while a person is dragging the panel's edge: the ranked lists hold
+/// each row's padding steady until the drag ends, while their viewports
+/// track the live height so the card's bottom stays on the gap above the
+/// footer.
+static LIVE_RESIZE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_live_resize(active: bool) {
+    LIVE_RESIZE.store(active, Ordering::Relaxed);
+}
+
+pub fn in_live_resize() -> bool {
+    LIVE_RESIZE.load(Ordering::Relaxed)
+}
 
 /// Wires the roots to the host, before the first one mounts.
 pub fn connect(host: impl Fn(HostAction) + Send + Sync + 'static) {

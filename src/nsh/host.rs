@@ -130,6 +130,11 @@ define_class!(
             with_host(hide);
         }
 
+        #[unsafe(method(windowWillStartLiveResize:))]
+        fn window_will_start_live_resize(&self, _notification: &NSNotification) {
+            root::set_live_resize(true);
+        }
+
         /// A person dragging an edge, or the panel's own resize: the
         /// store learns the frame, and a drag carries Overview's form
         /// across the long form's height.
@@ -137,6 +142,7 @@ define_class!(
         fn window_did_resize(&self, _notification: &NSNotification) {
             with_host(|host| {
                 if host.panel.inLiveResize() {
+                    root::set_live_resize(true);
                     follow_dragged_height(host);
                 }
                 record_frame(host);
@@ -152,7 +158,9 @@ define_class!(
         /// resizes never start one.
         #[unsafe(method(windowDidEndLiveResize:))]
         fn window_did_end_live_resize(&self, _notification: &NSNotification) {
+            root::set_live_resize(false);
             with_host(remember_dragged_size);
+            store::changed();
         }
     }
 );
@@ -606,6 +614,7 @@ fn mark_shown() {
 }
 
 pub fn hide(host: &Host) {
+    root::set_live_resize(false);
     host.panel.orderOut(None);
     // Yesterday's query must not greet the next open, and the collector
     // drops to the hidden cadence.

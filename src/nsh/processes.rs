@@ -9,22 +9,21 @@
 //! while something is abnormal, the sort and the All chip): processes
 //! stuck in a state that should not persist above the ranking, then the
 //! rows, in a region that ends on a whole row at the gap above the
-//! footer. A collapsed row stays at [`COLLAPSED_ROW`]: sharing the
-//! leftover into its padding (`rows::fit_rows`) resized every row on
-//! almost every pixel of a drag. A row is kept by its pid (`each`); the
+//! footer (`rows::fit_rows`, holding each row's padding steady while the
+//! panel is being dragged). A row is kept by its pid (`each`); the
 //! open row carries its expansion — the command, the figures two-up, the
 //! two alert bars and the chips that edit them, and Quit (SIGTERM). The
 //! All chip swaps the list for a one-off scan of the whole table, a
 //! virtual list.
 
 use crate::alertbars::BarDisplay;
-use crate::nsh::lists::{self, Editor, ROW_PAD, ScanChip, ScanWords};
+use crate::nsh::lists::{self, Body, Editor, ROW_PAD, ScanChip, ScanWords};
 use crate::nsh::root::{CARD_GAP, CARD_PAD, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::proclist::{self, BarMeasure, BarScale};
 use crate::procscan::ProcState;
-use crate::rows;
+use crate::rows::{self, RowFit};
 use crate::state::{FullScan, ProcSort, ZStatsAppState};
 use crate::{format, hot, i18n, palette, terminate};
 use nsh_core::prelude::*;
@@ -76,7 +75,7 @@ fn shown(state: &ZStatsAppState) -> Shown {
 }
 
 /// The Processes page; `body` is the height it has on screen.
-pub fn page(live: Live, body: ReadSignal<f32>) -> AnyElement {
+pub fn page(live: Live, body: Body) -> AnyElement {
     let shown = live.memo(shown);
     let failed = live.memo(|state: &ZStatsAppState| matches!(state.full_scan(), FullScan::Failed));
     dynamic(move || match shown.get() {
@@ -131,6 +130,7 @@ fn row_of(
     bar: BarScale,
     state: &ZStatsAppState,
     index: usize,
+    fit: Option<RowFit>,
 ) -> Row {
     let sustained = state.sustained_load(p.pid);
     let notable = format::notable_status(&p.status);
@@ -166,7 +166,7 @@ fn row_of(
         fraction: bar.fraction(p, cpu),
         open: state.selected_pid() == Some(p.pid),
         first: index == 0,
-        pad: ROW_PAD,
+        pad: fit.map_or(ROW_PAD, |fit| fit.pad(index)),
     }
 }
 
@@ -241,7 +241,7 @@ fn abnormal_of(state: &ZStatsAppState, more_follows: bool) -> Vec<Abnormal> {
         .collect()
 }
 
-fn top_of(state: &ZStatsAppState, body: f32) -> Top {
+fn top_of(state: &ZStatsAppState, live_b: f32, settled_b: f32) -> Top {
     let Some(tick) = state.latest() else {
         return Top::default();
     };
@@ -273,26 +273,34 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
             .max()
             .unwrap_or(0),
     );
-    // Natural height, not [`rows::fit_rows`]'s share of the leftover. The
-    // share changed with the page height, which a drag measures on every
-    // layout, and the rows jumped.
-    let viewport = rows::fixed_viewport(
-        lists::rows_budget(body, state.proc_filter_open()),
-        COLLAPSED_ROW,
-    );
+    let abnormal_h = abnormal.len() as f32 * ABNORMAL_ROW;
+    let (fit, viewport) = if !only_abnormal && settled_b - abnormal_h >= COLLAPSED_ROW {
+        let mut fit = rows::fit_rows_dragged(
+            settled_b - abnormal_h,
+            (live_b - abnormal_h).max(0.),
+            COLLAPSED_ROW,
+            ROW_PAD,
+        );
+        fit.viewport += abnormal_h;
+        (Some(fit), fit.viewport)
+    } else {
+        (None, (live_b + rows::ROW_SEAM).floor() - rows::ROW_SEAM)
+    };
     let rows: Vec<Row> = if only_abnormal {
         Vec::new()
     } else {
         ranked
             .iter()
             .enumerate()
-            .map(|(i, (p, cpu))| row_of(p, *cpu, bar, state, i))
+            .map(|(i, (p, cpu))| row_of(p, *cpu, bar, state, i, fit))
             .collect()
     };
-    let open_at = rows
-        .iter()
-        .position(|r| r.open)
-        .map(|ix| abnormal.len() as f32 * ABNORMAL_ROW + ix as f32 * COLLAPSED_ROW);
+    let open_at = rows.iter().position(|r| r.open).map(|ix| {
+        abnormal_h
+            + (0..ix)
+                .map(|i| fit.map_or(COLLAPSED_ROW, |f| f.height(i)))
+                .sum::<f32>()
+    });
     Top {
         title: if only_abnormal {
             t!("processes.abnormal_only", count = abnormal.len()).to_string()
@@ -336,10 +344,11 @@ fn controls(live: Live, full: bool) -> AnyElement {
         .into_element()
 }
 
-fn top_card(live: Live, body: ReadSignal<f32>) -> View {
+fn top_card(live: Live, body: Body) -> View {
     let top = live.watch(move || {
-        let body = body.get();
-        store::read(|state| top_of(state, body))
+        let open = store::read(ZStatsAppState::proc_filter_open);
+        let (live_b, settled_b) = body.budgets(open);
+        store::read(|state| top_of(state, live_b, settled_b))
     });
     // A jump from an alert or History puts the open row in view, once, as
     // on Apps: asked for when the page is made, done once the region is
@@ -442,7 +451,7 @@ fn full_of(state: &ZStatsAppState) -> Full {
             .enumerate()
             .map(|(i, &ix)| {
                 let p = &processes[ix];
-                row_of(p, f64::from(p.cpu_usage_percent), bar, state, i)
+                row_of(p, f64::from(p.cpu_usage_percent), bar, state, i, None)
             })
             .collect(),
     }
@@ -450,7 +459,7 @@ fn full_of(state: &ZStatsAppState) -> Full {
 
 /// The All chip's listing: the card fills the page and the list takes
 /// what the header, the note and the filter leave.
-fn full_card(live: Live, body: ReadSignal<f32>) -> View {
+fn full_card(live: Live, body: Body) -> View {
     let full = live.memo(full_of);
     let list = element_ref();
     let reveal = signal(None::<usize>);
@@ -461,7 +470,7 @@ fn full_card(live: Live, body: ReadSignal<f32>) -> View {
         }
     });
     widgets::list_shell()
-        .h(move || px((body.get() - CARD_GAP).max(lists::LIST_MIN)))
+        .h(move || px((body.live.get() - CARD_GAP).max(lists::LIST_MIN)))
         .child(widgets::list_header(
             widgets::list_title(move || full.with(|f| f.title.clone())).into_element(),
             Some(controls(live, true)),
@@ -1008,21 +1017,32 @@ mod tests {
     use super::*;
     use crate::nsh::lists::LIST_HEADER;
 
-    /// The region at the three standard heights, and one pixel taller than
-    /// the short panel (`apps::tests` says how they are measured). Each
-    /// collapsed row stays at [`COLLAPSED_ROW`]: a pixel of drag used to
-    /// change its padding (`rows::fit_rows`).
+    /// The region at the three standard heights fills down to the footer gap
+    /// on a whole row, while a pixel of live drag moves only the viewport and
+    /// leaves each collapsed row's padding untouched.
     #[test]
-    fn a_collapsed_row_keeps_its_height_while_the_panel_grows() {
-        let short = rows::fixed_viewport(539. - 60. - 44. - CARD_GAP - LIST_HEADER, COLLAPSED_ROW);
+    fn rows_fill_to_the_footer_gap_and_hold_steady_during_a_drag() {
+        let short_budget = 539. - 60. - 44. - CARD_GAP - LIST_HEADER;
+        let settled = rows::fit_rows(short_budget, COLLAPSED_ROW, ROW_PAD);
         let dragged =
-            rows::fixed_viewport(540. - 60. - 44. - CARD_GAP - LIST_HEADER, COLLAPSED_ROW);
-        assert_eq!(short, dragged, "one pixel resized the rows");
-        for (panel, expected) in [(539., 6.), (585., 7.), (828., 11.)] {
+            rows::fit_rows_dragged(short_budget, short_budget + 1., COLLAPSED_ROW, ROW_PAD);
+        assert_eq!(dragged.viewport, settled.viewport + 1.);
+        for i in 0..20 {
+            assert_eq!(
+                dragged.pad(i),
+                settled.pad(i),
+                "one pixel of drag resized row {i}"
+            );
+        }
+        for (panel, expected) in [(539., 6), (585., 7), (828., 11)] {
             let budget = panel - 60. - 44. - CARD_GAP - LIST_HEADER;
-            let viewport = rows::fixed_viewport(budget, COLLAPSED_ROW);
-            let rows = (viewport + rows::ROW_SEAM) / COLLAPSED_ROW;
-            assert_eq!(rows, expected, "at {panel}");
+            let fit = rows::fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
+            assert_eq!(
+                rows::tests::whole_rows(fit),
+                (expected, budget),
+                "at {panel}"
+            );
+            assert_eq!(fit.viewport, budget - rows::ROW_SEAM, "at {panel}");
         }
     }
 }

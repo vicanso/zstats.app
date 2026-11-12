@@ -6,9 +6,8 @@
 //!
 //! The top list: a pinned header (the count, the filter, the sort and the
 //! All chip), the name filter while it is open, and the rows in a region
-//! that ends on a whole row at the gap above the footer. A collapsed row
-//! stays at [`COLLAPSED_ROW`]: sharing the leftover into its padding
-//! (`rows::fit_rows`) resized every row on almost every pixel of a drag.
+//! that ends on a whole row at the gap above the footer (`rows::fit_rows`,
+//! holding each row's padding steady while the panel is being dragged).
 //! A row is kept by
 //! its tree's root pid (`each`), so it keeps its icon while its figures
 //! move; the open row carries its expansion — the tree's figures, its two
@@ -18,11 +17,11 @@
 
 use crate::alertbars::BarDisplay;
 use crate::applist;
-use crate::nsh::lists::{self, Editor, ROW_PAD, ScanChip, ScanWords};
+use crate::nsh::lists::{self, Body, Editor, ROW_PAD, ScanChip, ScanWords};
 use crate::nsh::root::{CARD_GAP, CARD_PAD, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
-use crate::rows;
+use crate::rows::{self, RowFit};
 use crate::state::{AppSort, FullAppScan, ZStatsAppState};
 use crate::{format, fullscan, hot, i18n, palette, terminate, trend};
 use nsh_core::prelude::*;
@@ -72,7 +71,7 @@ fn shown(state: &ZStatsAppState) -> Shown {
 }
 
 /// The Apps page; `body` is the height it has on screen.
-pub fn page(live: Live, body: ReadSignal<f32>) -> AnyElement {
+pub fn page(live: Live, body: Body) -> AnyElement {
     let shown = live.memo(shown);
     let failed =
         live.memo(|state: &ZStatsAppState| matches!(state.full_app_scan(), FullAppScan::Failed));
@@ -124,6 +123,7 @@ fn row_of(
     ambiguous: bool,
     bar_full: f32,
     index: usize,
+    fit: Option<RowFit>,
 ) -> Row {
     let sort = state.app_sort();
     let face = applist::face_of(g, state);
@@ -142,7 +142,7 @@ fn row_of(
         fraction: applist::bar_fraction(sort, g, bar_full),
         open: state.selected_app() == Some(g.root_pid),
         first: index == 0,
-        pad: ROW_PAD,
+        pad: fit.map_or(ROW_PAD, |fit| fit.pad(index)),
     }
 }
 
@@ -162,14 +162,14 @@ fn repeated(groups: &[&ProcessGroupSnapshot], state: &ZStatsAppState) -> HashSet
 #[derive(Clone, PartialEq, Default)]
 struct Top {
     rows: Vec<Row>,
-    /// The region's height ([`rows::fixed_viewport`]).
+    /// The region's height ([`rows::fit_rows_dragged`]).
     viewport: f32,
     /// Where the open row starts in the region, when it is in it.
     open_at: Option<f32>,
     no_match: bool,
 }
 
-fn top_of(state: &ZStatsAppState, body: f32) -> Top {
+fn top_of(state: &ZStatsAppState, live_b: f32, settled_b: f32) -> Top {
     let Some(groups) = state
         .latest()
         .and_then(|t| t.snapshot.process_groups.as_deref())
@@ -177,13 +177,7 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
         return Top::default();
     };
     let shown = applist::top_rows(state, groups);
-    // Natural height, not [`rows::fit_rows`]'s share of the leftover. The
-    // share changed with the page height, which a drag measures on every
-    // layout, and the rows jumped.
-    let viewport = rows::fixed_viewport(
-        lists::rows_budget(body, state.proc_filter_open()),
-        COLLAPSED_ROW,
-    );
+    let fit = rows::fit_rows_dragged(settled_b, live_b, COLLAPSED_ROW, ROW_PAD);
     let repeated = repeated(&shown, state);
     let bar_full = applist::bar_full_for(state.app_sort(), shown.iter().copied());
     let rows: Vec<Row> = shown
@@ -191,17 +185,17 @@ fn top_of(state: &ZStatsAppState, body: f32) -> Top {
         .enumerate()
         .map(|(i, g)| {
             let ambiguous = repeated.contains(&applist::face_of(g, state).text());
-            row_of(g, state, ambiguous, bar_full, i)
+            row_of(g, state, ambiguous, bar_full, i, Some(fit))
         })
         .collect();
     let open_at = rows
         .iter()
         .position(|r| r.open)
-        .map(|ix| ix as f32 * COLLAPSED_ROW);
+        .map(|ix| (0..ix).map(|i| fit.height(i)).sum());
     Top {
         no_match: !state.proc_filter_text().is_empty() && rows.is_empty(),
         rows,
-        viewport,
+        viewport: fit.viewport,
         open_at,
     }
 }
@@ -218,10 +212,11 @@ fn controls(live: Live) -> AnyElement {
         .into_element()
 }
 
-fn top_card(live: Live, body: ReadSignal<f32>) -> View {
+fn top_card(live: Live, body: Body) -> View {
     let top = live.watch(move || {
-        let body = body.get();
-        store::read(|state| top_of(state, body))
+        let open = store::read(ZStatsAppState::proc_filter_open);
+        let (live_b, settled_b) = body.budgets(open);
+        store::read(|state| top_of(state, live_b, settled_b))
     });
     let count = live.memo(|state: &ZStatsAppState| {
         state
@@ -310,7 +305,7 @@ fn full_of(state: &ZStatsAppState) -> Full {
             .enumerate()
             .map(|(i, g)| {
                 let ambiguous = repeated.contains(&applist::face_of(g, state).text());
-                row_of(g, state, ambiguous, bar_full, i)
+                row_of(g, state, ambiguous, bar_full, i, None)
             })
             .collect(),
     }
@@ -318,7 +313,7 @@ fn full_of(state: &ZStatsAppState) -> Full {
 
 /// The All chip's listing: the card fills the page and the list takes
 /// what the header, the note and the filter leave.
-fn full_card(live: Live, body: ReadSignal<f32>) -> View {
+fn full_card(live: Live, body: Body) -> View {
     let full = live.memo(full_of);
     let list = element_ref();
     let reveal = signal(None::<usize>);
@@ -329,7 +324,7 @@ fn full_card(live: Live, body: ReadSignal<f32>) -> View {
         }
     });
     widgets::list_shell()
-        .h(move || px((body.get() - CARD_GAP).max(lists::LIST_MIN)))
+        .h(move || px((body.live.get() - CARD_GAP).max(lists::LIST_MIN)))
         .child(widgets::list_header(
             widgets::list_title(move || full.with(|f| f.title.clone())).into_element(),
             Some(controls(live)),
@@ -912,22 +907,32 @@ mod tests {
     use super::*;
     use crate::nsh::lists::LIST_HEADER;
 
-    /// The region at the three standard heights, and one pixel taller than
-    /// the short panel. The page is the panel less the tab strip's 60 and
-    /// the footer's 44, the region that less the gap under the card and
-    /// the header. Each collapsed row stays at [`COLLAPSED_ROW`]: a pixel
-    /// of drag used to change its padding (`rows::fit_rows`).
+    /// The region at the three standard heights fills down to the footer gap
+    /// on a whole row, while a pixel of live drag moves only the viewport and
+    /// leaves each collapsed row's padding untouched.
     #[test]
-    fn a_collapsed_row_keeps_its_height_while_the_panel_grows() {
-        let short = rows::fixed_viewport(539. - 60. - 44. - CARD_GAP - LIST_HEADER, COLLAPSED_ROW);
+    fn rows_fill_to_the_footer_gap_and_hold_steady_during_a_drag() {
+        let short_budget = 539. - 60. - 44. - CARD_GAP - LIST_HEADER;
+        let settled = rows::fit_rows(short_budget, COLLAPSED_ROW, ROW_PAD);
         let dragged =
-            rows::fixed_viewport(540. - 60. - 44. - CARD_GAP - LIST_HEADER, COLLAPSED_ROW);
-        assert_eq!(short, dragged, "one pixel resized the rows");
-        for (panel, expected) in [(539., 6.), (585., 6.), (828., 10.)] {
+            rows::fit_rows_dragged(short_budget, short_budget + 1., COLLAPSED_ROW, ROW_PAD);
+        assert_eq!(dragged.viewport, settled.viewport + 1.);
+        for i in 0..20 {
+            assert_eq!(
+                dragged.pad(i),
+                settled.pad(i),
+                "one pixel of drag resized row {i}"
+            );
+        }
+        for (panel, expected) in [(539., 6), (585., 7), (828., 11)] {
             let budget = panel - 60. - 44. - CARD_GAP - LIST_HEADER;
-            let viewport = rows::fixed_viewport(budget, COLLAPSED_ROW);
-            let rows = (viewport + rows::ROW_SEAM) / COLLAPSED_ROW;
-            assert_eq!(rows, expected, "at {panel}");
+            let fit = rows::fit_rows(budget, COLLAPSED_ROW, ROW_PAD);
+            assert_eq!(
+                rows::tests::whole_rows(fit),
+                (expected, budget),
+                "at {panel}"
+            );
+            assert_eq!(fit.viewport, budget - rows::ROW_SEAM, "at {panel}");
         }
     }
 }

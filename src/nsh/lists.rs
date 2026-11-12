@@ -35,6 +35,26 @@ const FIELD_H: f32 = 28.;
 /// (`processes::FULL_LIST_MIN`).
 pub const LIST_MIN: f32 = 120.;
 
+/// The panel's scroll height on screen: `live` moves on every layout, and
+/// `settled` holds still while a person is dragging an edge so a list's
+/// rows keep their padding during the drag while its viewport follows the
+/// edge.
+#[derive(Clone, Copy)]
+pub struct Body {
+    pub live: ReadSignal<f32>,
+    pub settled: ReadSignal<f32>,
+}
+
+impl Body {
+    /// `(live_budget, settled_budget)` for a list's rows region.
+    pub fn budgets(self, filter_open: bool) -> (f32, f32) {
+        (
+            rows_budget(self.live.get(), filter_open),
+            rows_budget(self.settled.get(), filter_open),
+        )
+    }
+}
+
 /// The rows region under the pinned header, from the page's height on
 /// screen: less the gap under the card, the header, and the filter row
 /// while one is open on the page (`processes::rows_height`). History has
