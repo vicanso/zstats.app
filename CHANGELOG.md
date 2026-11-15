@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.10](https://github.com/vicanso/zstats.app/compare/v0.5.7..v0.5.10) - 2026-11-15
+
+### ⛰️  Features
+
+- *(macos)* Add lid-closed sleep toggle to panel footer - ([f7bcfee](https://github.com/vicanso/zstats.app/commit/f7bcfee45616a5ab95fcc76dc8e041eef94b0f95))
+- *(ui)* Polish interaction states, theme tokens, and controls across panel and windows - ([57959c3](https://github.com/vicanso/zstats.app/commit/57959c3bb229175742c3707d3472a04236569550))
+
+### 🐛 Bug Fixes
+
+- *(linux)* Polish Hyprland window behavior, disk analysis presets, and header layout ([#2](https://github.com/orhun/git-cliff/issues/2)) - ([12e1e3a](https://github.com/vicanso/zstats.app/commit/12e1e3a210747cd57c253629df1b9b5365757951))
+- *(ui)* Fill Apps, Processes, and History cards to the footer gap while holding row padding steady during a drag - ([af87ad4](https://github.com/vicanso/zstats.app/commit/af87ad404fe8b7418762944ef2873888457ad951))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.5.9 - ([a86052e](https://github.com/vicanso/zstats.app/commit/a86052e0be528a30562d0a082728966f13e40e0d))
+- Version 0.5.8 - ([5481c03](https://github.com/vicanso/zstats.app/commit/5481c030fa0841506a7ecc96daa42e7c62330316))
+
 ## [0.5.9](https://github.com/vicanso/zstats.app/compare/v0.5.7..v0.5.9) - 2026-11-12
 
 ### ⛰️  Features
