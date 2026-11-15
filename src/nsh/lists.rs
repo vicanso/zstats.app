@@ -128,10 +128,50 @@ pub fn filter_chip(live: Live, filter: Filter) -> AnyElement {
         .tooltip(widgets::wrap_tooltip(i18n::tr(filter.tip)))
         .child(
             nsh_base::button()
-                .rounded(px(4.))
-                .p(px(2.))
-                .bg(move || theme::color(move || if on.get() { palette::chip() } else { CLEAR }))
-                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .flex_none()
+                .h(px(19.))
+                .px(px(6.))
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border(px(1.))
+                .selected(move || on.get())
+                .accessibility_label(Some(SharedString::from(i18n::tr(filter.tip))))
+                .hit_slop(EdgeInsets::all(px(3.)))
+                .border_color(move || {
+                    theme::color(move || {
+                        if on.get() {
+                            palette::choice_line(true)
+                        } else {
+                            palette::border_subtle()
+                        }
+                    })
+                })
+                .bg(move || {
+                    theme::color(move || {
+                        if on.get() {
+                            palette::choice_fill(true)
+                        } else {
+                            CLEAR
+                        }
+                    })
+                })
+                .hover(move |s| {
+                    s.bg(move || theme::color(move || palette::choice_hover(on.get())))
+                        .border_color(move || {
+                            theme::color(move || {
+                                if on.get() {
+                                    palette::choice_line(true)
+                                } else {
+                                    palette::border()
+                                }
+                            })
+                        })
+                })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .on_press(move || {
                     let open = on.get_untracked();
                     store::update(|state, fx| {
@@ -142,9 +182,9 @@ pub fn filter_chip(live: Live, filter: Filter) -> AnyElement {
                         }
                     });
                 })
-                .child(widgets::icon(CustomIconName::Search, 11., move || {
+                .child(widgets::icon(CustomIconName::Search, 10.5, move || {
                     if on.get() {
-                        palette::text()
+                        palette::choice_ink(true)
                     } else {
                         palette::text_muted()
                     }
@@ -180,23 +220,24 @@ pub fn filter_row(live: Live, filter: Filter) -> AnyElement {
                         .gap(px(6.))
                         .px(px(8.))
                         .rounded(px(6.))
+                        .bg(theme::color(palette::inset))
                         .border(px(1.))
                         .border_color(theme::color(palette::border))
+                        .focus_within(|s| s.border_color(theme::color(palette::focus_ring)))
+                        .transition_colors()
+                        .duration(120.)
                         .child(widgets::icon(
                             CustomIconName::Search,
                             12.,
                             palette::text_dim,
                         ))
                         .child(
-                            input()
+                            widgets::styled_input(input())
                                 .element_ref(&field)
                                 .flex_1()
                                 .value(move || typed.get())
                                 .placeholder(i18n::tr(filter.placeholder))
                                 .auto_focus(true)
-                                .auto_correct(false)
-                                .text_size(px(12.))
-                                .text_color(theme::color(palette::text))
                                 .on_change(move |text: &str| {
                                     typed.set(text.to_owned());
                                     store::update(|state, fx| (filter.set)(state, text, fx));
@@ -207,9 +248,19 @@ pub fn filter_row(live: Live, filter: Filter) -> AnyElement {
                             move || {
                                 nsh_base::button()
                                     .flex_none()
+                                    .w(px(20.))
+                                    .h(px(20.))
+                                    .mr(px(-2.))
+                                    .items_center()
+                                    .justify_center()
                                     .rounded_full()
-                                    .p(px(2.))
+                                    .hit_slop(EdgeInsets::all(px(3.)))
+                                    .accessibility_label(Some(SharedString::from("Clear")))
                                     .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                                    .transition_colors()
+                                    .duration(120.)
+                                    .active(|s| s.opacity(0.76))
+                                    .focus_visible(widgets::focus_ring)
                                     .on_press(move || {
                                         typed.set(String::new());
                                         store::update(|state, fx| (filter.set)(state, "", fx));
@@ -261,6 +312,7 @@ pub fn full_scan_chip(chip: Memo<ScanChip>, words: ScanWords, toggle: fn()) -> A
         }))
         .child(
             nsh_base::button()
+                .selected(move || chip.get() == ScanChip::Showing)
                 .rounded_full()
                 .border(px(1.))
                 .border_color(move || {
@@ -282,13 +334,24 @@ pub fn full_scan_chip(chip: Memo<ScanChip>, words: ScanWords, toggle: fn()) -> A
                     })
                 })
                 .hover(move |s| {
-                    if chip.get_untracked() == ScanChip::Off {
-                        s.bg(theme::color(palette::surface_raised))
-                            .border_color(theme::color(palette::border))
-                    } else {
-                        s
-                    }
+                    s.bg(move || {
+                        theme::color(move || match chip.get() {
+                            ScanChip::Off => palette::surface_raised(),
+                            ScanChip::Showing => palette::chip(),
+                            ScanChip::Running => CLEAR,
+                        })
+                    })
+                    .border_color(move || {
+                        theme::color(move || match chip.get() {
+                            ScanChip::Off | ScanChip::Showing => palette::border(),
+                            ScanChip::Running => palette::border_subtle(),
+                        })
+                    })
                 })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .px(px(7.))
                 .py(px(1.))
                 .on_press(toggle)
@@ -571,11 +634,16 @@ fn threshold_row(
             let on = move || editor().lit[i].as_deref() == Some(value);
             nsh_base::button()
                 .flex_none()
+                .selected(on)
                 .rounded_full()
                 .border(px(1.))
                 .border_color(move || theme::color(move || palette::choice_line(on())))
                 .bg(move || theme::color(move || palette::choice_fill(on())))
-                .hover(move |s| s.bg(theme::color(move || palette::choice_hover(on()))))
+                .hover(move |s| s.bg(move || theme::color(move || palette::choice_hover(on()))))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .px(px(6.))
                 .on_press(move || {
                     let name = editor().name;
@@ -636,6 +704,10 @@ pub fn quit_button(label: String, on_press: impl Fn() + 'static) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .hover(|s| s.bg(theme::color(|| palette::accent_wash(10))))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .on_press(on_press)
                 .child(
                     text(label)

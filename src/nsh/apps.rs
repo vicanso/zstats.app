@@ -460,7 +460,21 @@ fn app_row(row: Memo<Row>, live: Live) -> AnyElement {
                 .px(px(CARD_PAD))
                 .pt(move || px(pad()))
                 .pb(move || px(if open.get() { 0. } else { pad() }))
-                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .hover(move |s| {
+                    s.bg(move || {
+                        theme::color(move || {
+                            if open.get() {
+                                CLEAR
+                            } else {
+                                palette::surface_raised()
+                            }
+                        })
+                    })
+                })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.85))
+                .focus_visible(widgets::focus_ring)
                 .on_press(move || {
                     let pid = pid.get_untracked();
                     store::update(|state, fx| state.toggle_app(pid, fx));

@@ -25,8 +25,10 @@ use crate::nsh::root::{self, CARD_PAD};
 use crate::nsh::theme;
 use crate::{format, i18n, palette};
 use nsh_base::{
-    MenuEvent, ProgressElement, TooltipElement, alert_dialog, menu, menu_item, progress, tooltip,
+    MenuEvent, MenuItemElement, ProgressElement, TooltipElement, alert_dialog, menu, menu_item,
+    progress, tooltip,
 };
+use nsh_core::element::StyleRefinement;
 use nsh_core::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -172,6 +174,10 @@ pub fn quiet_link(
                 .px(px(8.))
                 .py(px(4.))
                 .hover(|s| s.bg(theme::color(palette::chip)))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(focus_ring)
                 .on_press(go)
                 .child(
                     text(label)
@@ -183,6 +189,24 @@ pub fn quiet_link(
                 .child(icon(CustomIconName::ChevronRight, 12., ink)),
         )
         .into_element()
+}
+
+/// Keyboard `focus-visible` outline aligned with the active scheme.
+pub fn focus_ring(s: StyleRefinement) -> StyleRefinement {
+    s.outline(px(1.5))
+        .outline_offset(px(1.))
+        .outline_color(theme::color(palette::focus_ring))
+}
+
+/// Text input defaults aligned with the active scheme: placeholder,
+/// caret, selection highlight and disabled auto-correct.
+pub fn styled_input(el: Input) -> Input {
+    el.auto_correct(false)
+        .text_size(px(12.))
+        .text_color(theme::color(palette::text))
+        .placeholder_color(theme::hsla(palette::text_dim))
+        .caret_color(theme::hsla(palette::caret))
+        .selection_color(theme::hsla(palette::selection))
 }
 
 /// A card that says why there is nothing to show (`widgets::empty_card`).
@@ -462,11 +486,31 @@ pub fn ghost_icon(
                 .items_center()
                 .justify_center()
                 .rounded(px(6.))
+                .hit_slop(EdgeInsets::all(px(3.)))
+                .accessibility_label(Some(SharedString::from(icon_accessibility_label(name))))
                 .hover(|s| s.bg(theme::color(ghost_hover)))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(focus_ring)
                 .on_press(on_press)
                 .child(icon(name, 12., palette::text)),
         )
         .into_element()
+}
+
+fn icon_accessibility_label(name: CustomIconName) -> &'static str {
+    match name {
+        CustomIconName::AppWindow => "Show in Apps",
+        CustomIconName::Cpu => "Show in Processes",
+        CustomIconName::HardDrive => "Show in Hardware",
+        CustomIconName::LogOut => "Quit",
+        CustomIconName::Close => "Close",
+        CustomIconName::Folder | CustomIconName::FolderOpen => "Reveal in Finder",
+        CustomIconName::Trash => "Move to Trash",
+        CustomIconName::RefreshCw => "Refresh",
+        _ => "Action",
+    }
 }
 
 fn ghost_hover() -> Rgba {
@@ -487,6 +531,7 @@ fn ghost_hover() -> Rgba {
 pub fn more_chip(label: String, showing: bool, toggle: fn()) -> AnyElement {
     nsh_base::button()
         .flex_none()
+        .selected(showing)
         .rounded_full()
         .border(px(1.))
         .border_color(theme::color(move || {
@@ -507,6 +552,10 @@ pub fn more_chip(label: String, showing: bool, toggle: fn()) -> AnyElement {
                     .border_color(theme::color(palette::border))
             }
         })
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(focus_ring)
         .px(px(7.))
         .py(px(1.))
         .on_press(toggle)
@@ -732,11 +781,16 @@ pub fn option_chip(
 ) -> AnyElement {
     nsh_base::button()
         .flex_none()
+        .selected(on)
         .rounded_full()
         .border(px(1.))
-        .border_color(move || theme::color(|| palette::choice_line(on())))
-        .bg(move || theme::color(|| palette::choice_fill(on())))
-        .hover(move |s| s.bg(theme::color(|| palette::choice_hover(on()))))
+        .border_color(move || theme::color(move || palette::choice_line(on())))
+        .bg(move || theme::color(move || palette::choice_fill(on())))
+        .hover(move |s| s.bg(move || theme::color(move || palette::choice_hover(on()))))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(focus_ring)
         .px(px(8.))
         .py(px(2.))
         .on_press(on_press)
@@ -890,6 +944,9 @@ pub fn menu_trigger(
                 s.bg(theme::color(palette::surface_raised))
                     .border_color(theme::color(palette::border))
             })
+            .transition_colors()
+            .duration(120.)
+            .active(|s| s.opacity(0.78))
             .tooltip(live_tooltip(tip).disabled(move || open.get()))
             .child(
                 text(label)
@@ -933,11 +990,85 @@ pub fn title_menu(
                 })
             })
             .hover(|s| s.bg(theme::color(palette::surface_raised)))
+            .transition_colors()
+            .duration(120.)
+            .active(|s| s.opacity(0.78))
             .tooltip(live_tooltip(tip).disabled(move || open.get()))
             .child(list_title(label).flex_shrink(1.))
             .child(icon(CustomIconName::ChevronDown, 10., palette::text_dim)),
         choices,
     )
+}
+
+/// The opaque popover surface shared by header and footer menus.
+pub fn popup_surface(min_w: f32) -> impl FnOnce(StyleRefinement) -> StyleRefinement {
+    move |s| {
+        s.min_w(px(min_w))
+            .p(px(4.))
+            .rounded(px(8.))
+            .bg(theme::color(palette::popover))
+            .outline(px(1.))
+            .outline_offset(px(-1.))
+            .outline_color(theme::color(palette::border))
+            .shadow_lg()
+    }
+}
+
+/// One checkable entry inside a popup menu, showing checked/unchecked and
+/// disabled states uniformly.
+pub fn check_item(
+    label: String,
+    on: impl Fn() -> bool + 'static,
+    disabled: impl Fn() -> bool + Copy + 'static,
+    on_select: impl Fn() + 'static,
+) -> MenuItemElement {
+    let on = Rc::new(on);
+    let checked = on.clone();
+    let check = on.clone();
+    let weight = on.clone();
+    let ink = on;
+    menu_item()
+        .disabled(disabled)
+        .checked(move || Some(checked()))
+        .on_select(on_select)
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .px(px(8.))
+        .py(px(4.))
+        .rounded(px(5.))
+        .disabled_style(|s| s.opacity(0.45))
+        .hover(move |s| {
+            s.bg(move || {
+                theme::color(move || {
+                    if disabled() {
+                        CLEAR
+                    } else {
+                        palette::popover_hover()
+                    }
+                })
+            })
+        })
+        .active(|s| s.opacity(0.78))
+        .child(
+            text(move || if check() { "✓" } else { "" })
+                .flex_none()
+                .w(px(14.))
+                .text_size(px(12.))
+                .text_color(theme::color(palette::gauge)),
+        )
+        .child(
+            text(label)
+                .text_size(px(12.))
+                .style_when(move || weight(), |s| s.font_weight(FontWeight::MEDIUM))
+                .text_color(move || {
+                    if ink() {
+                        theme::color(palette::text)
+                    } else {
+                        theme::color(palette::text_muted)
+                    }
+                }),
+        )
 }
 
 /// The menu a trigger opens: `choices`, the one in force checked, with
@@ -952,46 +1083,11 @@ fn menu_of(open: Signal<bool>, trigger: View, choices: Vec<Choice>) -> AnyElemen
                 open.set(*next);
             }
         })
-        .popup_style(|s| {
-            s.min_w(px(140.))
-                .p(px(4.))
-                .rounded(px(8.))
-                .bg(theme::color(palette::popover))
-                .outline(px(1.))
-                .outline_offset(px(-1.))
-                .outline_color(theme::color(palette::border))
-                .shadow_lg()
-        })
+        .popup_style(popup_surface(140.))
         .trigger(trigger);
     for choice in choices {
         let Choice { label, on, choose } = choice;
-        let on = Rc::new(on);
-        let check = on.clone();
-        popup = popup.child(
-            menu_item()
-                .on_select(choose)
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-                .py(px(4.))
-                .rounded(px(5.))
-                .hover(|s| s.bg(theme::color(palette::popover_hover)))
-                .child(
-                    text(move || if check() { "✓" } else { "" })
-                        .flex_none()
-                        .w(px(14.))
-                        .text_size(px(12.))
-                        .text_color(theme::color(palette::gauge)),
-                )
-                .child(text(label).text_size(px(12.)).text_color(move || {
-                    if on() {
-                        theme::color(palette::text)
-                    } else {
-                        theme::color(palette::text_muted)
-                    }
-                })),
-        );
+        popup = popup.child(check_item(label, on, || false, choose));
     }
     view().flex_none().child(popup).into_element()
 }

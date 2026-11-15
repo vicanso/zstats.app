@@ -717,6 +717,82 @@ pub fn choice_hover(on: bool) -> Rgba {
     }
 }
 
+/// Fill and ink of a selected navigation item, tab cell, active footer
+/// status toggle, or active segmented pill across all schemes.
+#[inline]
+pub fn active_item() -> (Rgba, Rgba) {
+    match (selected(), mark()) {
+        (Some((fill, ink)), _) | (None, Some((fill, ink))) => (fill, ink),
+        (None, None) => (chip(), text()),
+    }
+}
+
+/// Hover fill for an [`active_item`] control: keeps the active fill
+/// where a `mark` dictates its ink contrast, and raises on classic.
+#[inline]
+pub fn active_item_hover() -> Rgba {
+    match (selected(), mark()) {
+        (Some((fill, _)), _) | (None, Some((fill, _))) => fill,
+        (None, None) => surface_raised(),
+    }
+}
+
+/// Ink on a solid [`accent`] fill: white on brand red, or black/white by
+/// contrast on an Omarchy palette's red.
+#[inline]
+pub fn on_accent() -> Rgba {
+    let white = rgb(0xffffff);
+    let black = rgb(0x000000);
+    let fill = accent();
+    match scheme() {
+        Scheme::Omarchy
+            if contrast(fill, white) < 4.0 && contrast(fill, black) > contrast(fill, white) =>
+        {
+            black
+        }
+        _ => white,
+    }
+}
+
+/// Keyboard `focus-visible` outline and focused text input border:
+/// theme-aware without borrowing alarm red.
+#[inline]
+pub fn focus_ring() -> Rgba {
+    match scheme() {
+        Scheme::GoldenDark => Rgba { a: 0.55, ..gold() },
+        Scheme::GoldenLight => Rgba {
+            a: 0.55,
+            ..rgb(0xb07a20)
+        },
+        Scheme::Omarchy => omarchy_tokens()
+            .map_or_else(|| Rgba { a: 0.42, ..ink() }, |t| Rgba { a: 0.55, ..t.mark }),
+        Scheme::ClassicDark | Scheme::ClassicLight => Rgba { a: 0.42, ..ink() },
+    }
+}
+
+/// Text input caret colour aligned with the active theme's mark.
+#[inline]
+pub fn caret() -> Rgba {
+    match scheme() {
+        Scheme::GoldenDark => gold(),
+        Scheme::GoldenLight => rgb(0x8c5e1a),
+        Scheme::Omarchy => omarchy_tokens().map_or_else(ink, |t| t.mark),
+        Scheme::ClassicDark | Scheme::ClassicLight => ink(),
+    }
+}
+
+/// Text input selection highlight fill aligned with the active theme.
+#[inline]
+pub fn selection() -> Rgba {
+    match scheme() {
+        Scheme::GoldenDark => Rgba { a: 0.26, ..gold() },
+        Scheme::GoldenLight => Rgba { a: 0.35, ..gold() },
+        Scheme::Omarchy => omarchy_tokens()
+            .map_or_else(|| Rgba { a: 0.20, ..ink() }, |t| Rgba { a: 0.28, ..t.mark }),
+        Scheme::ClassicDark | Scheme::ClassicLight => Rgba { a: 0.20, ..ink() },
+    }
+}
+
 /// The directory map's hues. Every folder tile wears one, and no two
 /// tiles sharing an edge wear the same (`squarify::colour`); the largest
 /// takes the first.
@@ -918,5 +994,35 @@ mod tests {
         assert!(mark().is_none());
         assert_eq!(accent(), rgb(0xec3013));
         assert!(!omarchy_palette_is(&palette), "classic is on screen now");
+    }
+
+    #[test]
+    fn semantic_interaction_tokens_hold_across_schemes() {
+        let _scheme = SCHEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tokyo = Palette::tokyo_night();
+        set_omarchy(&tokyo);
+        for scheme in [
+            Scheme::ClassicDark,
+            Scheme::ClassicLight,
+            Scheme::GoldenDark,
+            Scheme::GoldenLight,
+            Scheme::Omarchy,
+        ] {
+            let (fill, ink_col) = pinned_to(scheme, active_item);
+            assert!(fill.a > 0.0, "active_item fill must paint");
+            assert!(ink_col.a > 0.0, "active_item ink must paint");
+            let accent_ink = pinned_to(scheme, on_accent);
+            let accent_fill = pinned_to(scheme, accent);
+            assert!(
+                contrast(accent_fill, accent_ink) >= 3.5,
+                "on_accent contrast failed for scheme {}",
+                scheme as u8
+            );
+            assert!(pinned_to(scheme, focus_ring).a > 0.3);
+            assert_eq!(pinned_to(scheme, caret).a, 1.0);
+            let sel = pinned_to(scheme, selection);
+            assert!(sel.a > 0.1 && sel.a < 0.5);
+        }
+        set_dark(true);
     }
 }

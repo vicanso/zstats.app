@@ -66,3 +66,13 @@ pub fn color(token: impl Fn() -> Rgba) -> AdaptiveColor {
         dark: half(true),
     }
 }
+
+/// `token` as a reactive [`Hsla`] following the root's resolved appearance,
+/// for host properties (`Input`'s `placeholder_color`, `caret_color`,
+/// `selection_color`) that take `Hsla` rather than [`AdaptiveColor`].
+pub fn hsla(token: impl Fn() -> Rgba + 'static) -> impl Fn() -> Hsla + 'static {
+    move || {
+        let rgba: nsh_core::Rgba = palette::in_mode(dark(), &token).into();
+        rgba.into()
+    }
+}

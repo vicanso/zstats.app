@@ -552,17 +552,26 @@ fn avg_chip() -> View {
 fn abnormal_filter(only: Memo<bool>, count: Memo<usize>) -> AnyElement {
     nsh_base::button()
         .flex_none()
+        .selected(move || only.get())
         .rounded_full()
         .border(px(1.))
         .border_color(theme::color(|| palette::accent_wash(45)))
         .bg(move || theme::color(move || if only.get() { palette::accent() } else { CLEAR }))
         .hover(move |s| {
-            if only.get_untracked() {
-                s
-            } else {
-                s.bg(theme::color(|| palette::accent_wash(14)))
-            }
+            s.bg(move || {
+                theme::color(move || {
+                    if only.get() {
+                        palette::accent()
+                    } else {
+                        palette::accent_wash(14)
+                    }
+                })
+            })
         })
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .px(px(7.))
         .py(px(1.))
         .on_press(|| store::update(|state, fx| state.toggle_only_abnormal(fx)))
@@ -574,7 +583,7 @@ fn abnormal_filter(only: Memo<bool>, count: Memo<usize>) -> AnyElement {
                 .text_color(move || {
                     theme::color(move || {
                         if only.get() {
-                            crate::color::rgba(0xffffffff)
+                            palette::on_accent()
                         } else {
                             palette::accent_light()
                         }
@@ -724,7 +733,21 @@ fn process_row(row: Memo<Row>, live: Live, full: bool) -> AnyElement {
                 .px(px(CARD_PAD))
                 .pt(move || px(pad()))
                 .pb(move || px(if open.get() { 0. } else { pad() }))
-                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .hover(move |s| {
+                    s.bg(move || {
+                        theme::color(move || {
+                            if open.get() {
+                                CLEAR
+                            } else {
+                                palette::surface_raised()
+                            }
+                        })
+                    })
+                })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.85))
+                .focus_visible(widgets::focus_ring)
                 .on_press(move || {
                     let pid = pid.get_untracked();
                     store::update(|state, fx| state.toggle_pid(pid, fx));

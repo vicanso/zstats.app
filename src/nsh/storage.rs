@@ -199,9 +199,7 @@ fn strip(shown: StorageTab, busy: Memo<(bool, bool)>) -> AnyElement {
             }));
         let mut bar = view().h(px(2.)).rounded_full();
         if on {
-            bar = bar.bg(theme::color(|| {
-                palette::mark().map_or(palette::text(), |(fill, _)| fill)
-            }));
+            bar = bar.bg(theme::color(palette::gauge));
         } else {
             label = label.group_hover(|s| s.text_color(theme::color(palette::text)));
             bar = bar.group_hover(|s| s.bg(theme::color(palette::border)));
@@ -212,7 +210,10 @@ fn strip(shown: StorageTab, busy: Memo<(bool, bool)>) -> AnyElement {
             .tooltip(widgets::wrap_tooltip(tip))
             .child(
                 tab()
+                    .rounded(px(4.))
                     .selected(on)
+                    .active(|s| s.opacity(0.78))
+                    .focus_visible(widgets::focus_ring)
                     .on_press(move || store::update(|state, fx| state.set_storage_tab(this, fx)))
                     .child(
                         view()
@@ -305,8 +306,8 @@ fn small_button(
     }
     nsh_base::button()
         .flex_none()
-        .h(px(20.))
-        .px(px(4.))
+        .h(px(22.))
+        .px(px(if ghost { 6. } else { 8. }))
         .rounded(px(6.))
         .border(px(if ghost { 0. } else { 1. }))
         .border_color(theme::color(palette::border))
@@ -316,6 +317,10 @@ fn small_button(
         .items_center()
         .justify_center()
         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .on_press(on_press)
         .child(
             content.child(
@@ -329,13 +334,13 @@ fn small_button(
 }
 
 /// The one filled button a tab shows before its first run — the theme's
-/// primary (`Button::primary().small()`): 24 tall, 8 in, words at 14.
+/// primary (`Button::primary().small()`): 28 tall, 12 in, words at 13.
 fn primary_button(label: String, on_press: impl Fn() + 'static) -> AnyElement {
     nsh_base::button()
         .flex_none()
-        .h(px(24.))
-        .px(px(8.))
-        .rounded(px(6.))
+        .h(px(28.))
+        .px(px(12.))
+        .rounded(px(7.))
         .bg(theme::color(palette::primary))
         .items_center()
         .justify_center()
@@ -345,11 +350,15 @@ fn primary_button(label: String, on_press: impl Fn() + 'static) -> AnyElement {
                 ..palette::primary()
             }))
         })
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.82))
+        .focus_visible(widgets::focus_ring)
         .on_press(on_press)
         .child(
             text(label)
-                .text_size(px(14.))
-                .line_height(px(17.5))
+                .text_size(px(13.))
+                .line_height(px(17.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::color(palette::primary_ink)),
         )
@@ -498,6 +507,10 @@ fn run_chip_with(
         .px(px(9.))
         .py(px(2.))
         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .on_press(on_press)
         .child(
             text(label)
@@ -541,7 +554,12 @@ fn toolbar_chip(
         })
         .child(content);
     if let Some(press) = on_press {
-        chip = chip.on_press(press);
+        chip = chip
+            .transition_colors()
+            .duration(120.)
+            .active(|s| s.opacity(0.76))
+            .focus_visible(widgets::focus_ring)
+            .on_press(press);
     }
     match tip {
         Some(tip) => view().flex_none().tooltip(tip).child(chip).into_element(),
@@ -1647,6 +1665,20 @@ fn exclude_drawer(entries: &[(String, bool)]) -> AnyElement {
                         .tooltip(widgets::wrap_tooltip(i18n::tr("disk.ana_exclude_drop")))
                         .child(
                             nsh_base::button()
+                                .w(px(16.))
+                                .h(px(16.))
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .hit_slop(EdgeInsets::all(px(3.)))
+                                .accessibility_label(Some(SharedString::from(i18n::tr(
+                                    "disk.ana_exclude_drop",
+                                ))))
+                                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                                .transition_colors()
+                                .duration(120.)
+                                .active(|s| s.opacity(0.76))
+                                .focus_visible(widgets::focus_ring)
                                 .on_press(move || {
                                     storagepage::drop_exclude(&drop_me);
                                     store::changed();
@@ -1677,17 +1709,16 @@ fn exclude_drawer(entries: &[(String, bool)]) -> AnyElement {
                     // Small and fixed: a field used once a month must not
                     // out-shout the table.
                     view().flex_none().w(px(180.)).child(
-                        input()
-                            .h(px(20.))
-                            .px(px(4.))
+                        widgets::styled_input(input())
+                            .h(px(24.))
+                            .px(px(7.))
                             .rounded(px(6.))
+                            .bg(theme::color(palette::surface))
                             .border(px(1.))
                             .border_color(theme::color(palette::border))
+                            .focus(|s| s.border_color(theme::color(palette::focus_ring)))
                             .value(move || typed.get())
                             .placeholder(i18n::tr("disk.ana_exclude_placeholder"))
-                            .auto_correct(false)
-                            .text_size(px(12.))
-                            .text_color(theme::color(palette::text))
                             .on_change(move |text: &str| typed.set(text.to_owned()))
                             .on_submit(move |text: &str| {
                                 if storagepage::add_exclude([text.to_owned()]) {
@@ -2391,13 +2422,19 @@ fn pick_sheet(sheet: Signal<Option<Sheet>>) -> AnyElement {
                                 .child(
                                     nsh_base::button()
                                         .flex_none()
-                                        .h(px(20.))
-                                        .px(px(6.))
+                                        .disabled(none)
+                                        .h(px(22.))
+                                        .px(px(8.))
                                         .rounded(px(6.))
                                         .bg(theme::color(|| palette::accent_wash(16)))
                                         .items_center()
                                         .justify_center()
+                                        .disabled_style(|s| s.opacity(0.5))
                                         .hover(|s| s.bg(theme::color(|| palette::accent_wash(24))))
+                                        .transition_colors()
+                                        .duration(120.)
+                                        .active(|s| s.opacity(0.76))
+                                        .focus_visible(widgets::focus_ring)
                                         .on_press(move || {
                                             let picked: Vec<PathBuf> = chosen()
                                                 .iter()
@@ -2582,6 +2619,10 @@ fn map_crumbs(map: Option<MapView>) -> AnyElement {
                 let crumb = if !here && interactive {
                     crumb
                         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                        .transition_colors()
+                        .duration(120.)
+                        .active(|s| s.opacity(0.76))
+                        .focus_visible(widgets::focus_ring)
                         .on_press(move || store::update(|state, fx| state.map_back_to(depth, fx)))
                 } else {
                     crumb
@@ -2673,8 +2714,8 @@ fn map_body(map: Option<MapView>) -> AnyElement {
 fn measure_button(label: String) -> AnyElement {
     nsh_base::button()
         .flex_none()
-        .h(px(24.))
-        .px(px(8.))
+        .h(px(26.))
+        .px(px(10.))
         .rounded(px(6.))
         .border(px(1.))
         .border_color(theme::color(palette::border))
@@ -2682,11 +2723,15 @@ fn measure_button(label: String) -> AnyElement {
         .items_center()
         .justify_center()
         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .on_press(|| store::update(|state, fx| state.measure_map_level(fx)))
         .child(
             text(label)
-                .text_size(px(14.))
-                .line_height(px(17.5))
+                .text_size(px(12.5))
+                .line_height(px(16.))
                 .text_color(theme::color(palette::text)),
         )
         .into_element()

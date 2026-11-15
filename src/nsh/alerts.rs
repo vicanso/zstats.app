@@ -12,7 +12,7 @@
 use crate::alertbars;
 use crate::alertlist::{self, Goto, OverrideTarget, PastRow, QuitSubject};
 use crate::assets::CustomIconName;
-use crate::color::{Rgba, rgba};
+use crate::color::Rgba;
 use crate::nsh::root::{self, AuxWindow, CARD_GAP, CARD_PAD, HostAction, Live};
 use crate::nsh::widgets;
 use crate::nsh::{store, theme};
@@ -22,9 +22,6 @@ use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::time::Duration;
 use zstats::{AlertDetail, Severity};
-
-/// The critical pill's words, on the alarm's fill.
-const WHITE: Rgba = rgba(0xffffffff);
 
 /// The Alerts page.
 pub fn page(live: Live) -> AnyElement {
@@ -488,7 +485,7 @@ fn alert_head(card: &Card) -> AnyElement {
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme::color(move || {
                 if critical {
-                    WHITE
+                    palette::on_accent()
                 } else {
                     palette::tiny_label(palette::text_muted())
                 }
@@ -511,6 +508,10 @@ fn adjust_chip(target: OverrideTarget) -> AnyElement {
                 .border_color(theme::color(palette::border))
                 .bg(theme::color(palette::inset))
                 .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .px(px(8.))
                 .py(px(2.))
                 .on_press(move || {
@@ -653,6 +654,10 @@ fn snooze_chip(label: String, act: impl Fn() + 'static) -> AnyElement {
         .border_color(theme::color(palette::border))
         .bg(theme::color(palette::inset))
         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .px(px(8.))
         .py(px(2.))
         .on_press(act)
@@ -778,14 +783,18 @@ fn growth_card(rows: Vec<(String, String)>) -> AnyElement {
                     // 12px words, the input's outline.
                     nsh_base::button()
                         .flex_none()
-                        .h(px(20.))
-                        .px(px(4.))
+                        .h(px(22.))
+                        .px(px(8.))
                         .items_center()
                         .justify_center()
                         .rounded(px(6.))
                         .border(px(1.))
                         .border_color(theme::color(palette::border))
                         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                        .transition_colors()
+                        .duration(120.)
+                        .active(|s| s.opacity(0.76))
+                        .focus_visible(widgets::focus_ring)
                         .on_press(|| root::ask(HostAction::Open(AuxWindow::Storage)))
                         .child(words(i18n::tr("alerts.growth_open"), 12., palette::text)),
                 ),

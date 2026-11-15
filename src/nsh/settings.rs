@@ -138,22 +138,59 @@ fn nav_items(current: Signal<SettingsSection>, nudge: Memo<bool>) -> AnyElement 
                 .into_iter()
                 .map(|item| {
                     let on = move || shown == item;
+                    let mut label = text(i18n::tr(item.label_key()))
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_size(px(12.))
+                        .line_height(widgets::line(12.))
+                        .font_weight(if on() {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(move || {
+                            theme::color(move || {
+                                if on() {
+                                    palette::active_item().1
+                                } else {
+                                    palette::text_muted()
+                                }
+                            })
+                        });
+                    if !on() {
+                        label = label.group_hover(|s| s.text_color(theme::color(palette::text)));
+                    }
                     tab()
+                        .group()
                         .w_full()
                         .rounded(px(6.))
                         .px(px(10.))
                         .py(px(6.))
                         .selected(on)
                         .bg(move || {
-                            theme::color(move || if on() { palette::surface() } else { CLEAR })
+                            theme::color(move || {
+                                if on() {
+                                    palette::active_item().0
+                                } else {
+                                    CLEAR
+                                }
+                            })
                         })
                         .hover(move |s| {
-                            if on() {
-                                s
-                            } else {
-                                s.bg(theme::color(palette::surface_raised))
-                            }
+                            s.bg(move || {
+                                theme::color(move || {
+                                    if on() {
+                                        palette::active_item_hover()
+                                    } else {
+                                        palette::surface_raised()
+                                    }
+                                })
+                            })
                         })
+                        .transition_colors()
+                        .duration(120.)
+                        .active(|s| s.opacity(0.78))
+                        .focus_visible(widgets::focus_ring)
                         .on_press(move || {
                             if current.get_untracked() != item {
                                 set_section(item);
@@ -168,32 +205,12 @@ fn nav_items(current: Signal<SettingsSection>, nudge: Memo<bool>) -> AnyElement 
                                 .gap(px(6.))
                                 .child(widgets::icon(section_icon(item), 13., move || {
                                     if on() {
-                                        palette::ink()
+                                        palette::active_item().1
                                     } else {
                                         palette::text_dim()
                                     }
                                 }))
-                                .child(
-                                    text(i18n::tr(item.label_key()))
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .text_size(px(12.))
-                                        .line_height(widgets::line(12.))
-                                        .font_weight(if on() {
-                                            FontWeight::MEDIUM
-                                        } else {
-                                            FontWeight::NORMAL
-                                        })
-                                        .text_color(move || {
-                                            theme::color(move || {
-                                                if on() {
-                                                    palette::ink()
-                                                } else {
-                                                    palette::text()
-                                                }
-                                            })
-                                        }),
-                                )
+                                .child(label)
                                 .child(when(
                                     move || item == SettingsSection::About && nudge.get() && !on(),
                                     || {
@@ -353,6 +370,10 @@ fn file_note(name: &'static str) -> AnyElement {
                 .ml(px(-4.))
                 .mr(px(-4.))
                 .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .on_press(move || settingspage::reveal_file(name))
                 .child(
                     text(name)
@@ -497,13 +518,20 @@ fn switch_row(
 fn switch(on: impl Fn() -> bool + Copy + 'static, set: impl Fn(bool) + 'static) -> AnyElement {
     nsh_base::switch()
         .flex_none()
+        .rounded_full()
+        .hit_slop(EdgeInsets::all(px(4.)))
         .checked(on)
+        .active(|s| s.opacity(0.82))
+        .focus_visible(widgets::focus_ring)
         .on_change(move |&next: &bool| set(next))
         .track_style(move |s| {
             s.w(px(28.))
                 .h(px(16.))
                 .p(px(2.))
                 .rounded_full()
+                .transition_colors()
+                .duration(140.)
+                .ease_out()
                 .bg(move || {
                     theme::color(move || {
                         if on() {
@@ -518,7 +546,10 @@ fn switch(on: impl Fn() -> bool + Copy + 'static, set: impl Fn(bool) + 'static) 
             s.w(px(12.))
                 .h(px(12.))
                 .rounded_full()
-                .ml(move || px(if on() { 12. } else { 0. }))
+                .translate_x(move || px(if on() { 12. } else { 0. }))
+                .transition_transform()
+                .duration(140.)
+                .ease_out()
                 .bg(theme::color(palette::switch_thumb))
         })
         .into_element()
@@ -550,6 +581,10 @@ fn autostart_row(live: Live) -> AnyElement {
                 .px(px(10.))
                 .py(px(3.))
                 .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .on_press(autostart::open_login_items)
                 .child(
                     text(words)
@@ -593,6 +628,10 @@ fn panel_size_row(live: Live) -> AnyElement {
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme::color(palette::chip)))
+                    .transition_colors()
+                    .duration(120.)
+                    .active(|s| s.opacity(0.76))
+                    .focus_visible(widgets::focus_ring)
                     .on_press(|| {
                         prefs::reset_panel_size();
                         changed();
@@ -798,11 +837,16 @@ fn threshold_row(row: ThresholdRow, last: bool) -> AnyElement {
 fn setting_chip(label: String, on: bool, act: impl Fn() + 'static) -> AnyElement {
     nsh_base::button()
         .flex_none()
+        .selected(on)
         .rounded_full()
         .border(px(1.))
         .border_color(theme::color(move || palette::choice_line(on)))
         .bg(theme::color(move || palette::choice_fill(on)))
         .hover(move |s| s.bg(theme::color(move || palette::choice_hover(on))))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .px(px(7.))
         .py(px(1.))
         .on_press(act)
@@ -894,6 +938,10 @@ fn override_row(key: &'static str, name: String, value: f64, last: bool) -> AnyE
                                 .px(px(7.))
                                 .py(px(1.))
                                 .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                                .transition_colors()
+                                .duration(120.)
+                                .active(|s| s.opacity(0.76))
+                                .focus_visible(widgets::focus_ring)
                                 .on_press(move || {
                                     let name = removal.clone();
                                     store::update(|state, fx| {
@@ -989,20 +1037,19 @@ fn advanced_card(live: Live) -> AnyElement {
         .into_element()
 }
 
-/// A free-text setting's field (`Input::xsmall`): 20 tall, its words at
-/// 12, the outline the page's chips wear.
+/// A free-text setting's field (`Input::xsmall`): 26 tall, inset well,
+/// words at 12, theme-aligned placeholder/caret and focus ring.
 fn field(placeholder: String, initial: String, change: impl Fn(&str) + 'static) -> AnyElement {
-    input()
-        .h(px(20.))
-        .px(px(4.))
+    widgets::styled_input(input())
+        .h(px(26.))
+        .px(px(8.))
         .rounded(px(6.))
+        .bg(theme::color(palette::inset))
         .border(px(1.))
         .border_color(theme::color(palette::border))
+        .focus(|s| s.border_color(theme::color(palette::focus_ring)))
         .value(initial)
         .placeholder(placeholder)
-        .auto_correct(false)
-        .text_size(px(12.))
-        .text_color(theme::color(palette::text))
         .on_change(move |text: &str| change(text))
         .into_element()
 }
@@ -1070,13 +1117,29 @@ fn webhook_row(live: Live) -> AnyElement {
                 .child(
                     nsh_base::button()
                         .flex_none()
+                        .disabled(move || !can_test())
                         .rounded_full()
                         .border(px(1.))
                         .border_color(theme::color(palette::border))
                         .bg(theme::color(palette::inset))
                         .px(px(10.))
                         .py(px(3.))
-                        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                        .disabled_style(|s| s.opacity(0.5))
+                        .hover(move |s| {
+                            s.bg(move || {
+                                theme::color(move || {
+                                    if can_test() {
+                                        palette::surface_raised()
+                                    } else {
+                                        palette::inset()
+                                    }
+                                })
+                            })
+                        })
+                        .transition_colors()
+                        .duration(120.)
+                        .active(|s| s.opacity(0.76))
+                        .focus_visible(widgets::focus_ring)
                         .on_press(move || {
                             if can_test() {
                                 store::update(|state, fx| state.test_webhook(fx));
@@ -1269,12 +1332,14 @@ fn collection_card(rows: Vec<settingspage::IntervalRow>, max: String) -> AnyElem
 fn card_chip(label: String, busy: bool, act: impl Fn() + 'static) -> AnyElement {
     nsh_base::button()
         .flex_none()
+        .disabled(busy)
         .rounded_full()
         .border(px(1.))
         .border_color(theme::color(palette::border))
         .bg(theme::color(palette::inset))
         .px(px(10.))
         .py(px(3.))
+        .disabled_style(|s| s.opacity(0.5))
         .hover(move |s| {
             if busy {
                 s
@@ -1282,6 +1347,10 @@ fn card_chip(label: String, busy: bool, act: impl Fn() + 'static) -> AnyElement 
                 s.bg(theme::color(palette::surface_raised))
             }
         })
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .on_press(move || {
             if !busy {
                 act();
@@ -1505,6 +1574,10 @@ fn reset_card() -> AnyElement {
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme::color(|| palette::accent_wash(10))))
+                    .transition_colors()
+                    .duration(120.)
+                    .active(|s| s.opacity(0.76))
+                    .focus_visible(widgets::focus_ring)
                     .on_press(|| {
                         widgets::confirm(
                             i18n::tr("config.reset_title"),
@@ -1737,6 +1810,10 @@ fn github_row() -> AnyElement {
         .border_t(px(1.))
         .border_color(theme::color(palette::border_subtle))
         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.82))
+        .focus_visible(widgets::focus_ring)
         .on_press(|| {
             let _ = opener::open([about::REPO_URL]);
         })
@@ -1834,6 +1911,10 @@ fn update_button(label: String, accent: bool, act: impl Fn() + 'static) -> Butto
         }))
         .px(px(10.))
         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .on_press(act)
         .child(
             text(label)

@@ -271,13 +271,18 @@ fn lens_title(live: Live, title: Memo<String>) -> AnyElement {
     )
 }
 
-/// Range and refresh, side by side in the header.
+/// Range and refresh, side by side in the header (kept within 19pt so
+/// `lists::LIST_HEADER` stays fixed).
 fn controls(live: Live) -> AnyElement {
     let range = live.memo(ZStatsAppState::history_range);
-    view()
+    let segmented = view()
         .flex_row()
+        .h(px(19.))
         .items_center()
-        .gap(px(2.))
+        .p(px(1.5))
+        .gap(px(1.))
+        .rounded(px(6.))
+        .bg(theme::color(palette::inset))
         .children(
             HistoryRange::ALL
                 .into_iter()
@@ -285,19 +290,36 @@ fn controls(live: Live) -> AnyElement {
                     let on = move || range.get() == choice;
                     nsh_base::button()
                         .flex_none()
-                        .rounded(px(4.))
-                        .px(px(5.))
-                        .py(px(1.))
+                        .selected(on)
+                        .h(px(16.))
+                        .px(px(6.))
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.5))
                         .bg(move || {
-                            theme::color(move || if on() { palette::chip() } else { CLEAR })
+                            theme::color(move || {
+                                if on() {
+                                    palette::active_item().0
+                                } else {
+                                    CLEAR
+                                }
+                            })
                         })
                         .hover(move |s| {
-                            if on() {
-                                s
-                            } else {
-                                s.bg(theme::color(palette::surface_raised))
-                            }
+                            s.bg(move || {
+                                theme::color(move || {
+                                    if on() {
+                                        palette::active_item_hover()
+                                    } else {
+                                        palette::surface_raised()
+                                    }
+                                })
+                            })
                         })
+                        .transition_colors()
+                        .duration(120.)
+                        .active(|s| s.opacity(0.78))
+                        .focus_visible(widgets::focus_ring)
                         .on_press(move || {
                             store::update(|state, fx| state.set_history_range(choice, fx))
                         })
@@ -309,7 +331,7 @@ fn controls(live: Live) -> AnyElement {
                                 .text_color(move || {
                                     theme::color(move || {
                                         if on() {
-                                            palette::text()
+                                            palette::active_item().1
                                         } else {
                                             palette::text_muted()
                                         }
@@ -319,17 +341,30 @@ fn controls(live: Live) -> AnyElement {
                         .into_element()
                 })
                 .collect::<Vec<_>>(),
-        )
+        );
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(5.))
+        .child(segmented)
         .child(
             view()
                 .flex_none()
                 .tooltip(widgets::wrap_tooltip(i18n::tr("history.refresh")))
                 .child(
                     nsh_base::button()
-                        .rounded(px(4.))
-                        .px(px(4.))
-                        .py(px(1.))
+                        .w(px(19.))
+                        .h(px(19.))
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .hit_slop(EdgeInsets::all(px(3.)))
+                        .accessibility_label(Some(SharedString::from(i18n::tr("history.refresh"))))
                         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                        .transition_colors()
+                        .duration(120.)
+                        .active(|s| s.opacity(0.76))
+                        .focus_visible(widgets::focus_ring)
                         .on_press(|| store::update(|state, fx| state.load_history(fx)))
                         .child(widgets::icon(
                             CustomIconName::RefreshCw,
@@ -380,6 +415,10 @@ fn more_chip(label: Memo<Option<String>>) -> AnyElement {
             s.bg(theme::color(palette::surface_raised))
                 .border_color(theme::color(palette::border))
         })
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
         .px(px(7.))
         .py(px(1.))
         .on_press(|| store::update(|state, fx| state.toggle_all_history(fx)))
@@ -420,6 +459,10 @@ fn history_row(row: Memo<Row>) -> AnyElement {
                 .pt(pad)
                 .pb(pad)
                 .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.85))
+                .focus_visible(widgets::focus_ring)
                 .on_press(move || {
                     let (pid, name) = key.get_untracked();
                     store::update(|state, fx| state.reveal_history_subject(pid, &name, fx));

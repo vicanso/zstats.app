@@ -20,7 +20,7 @@ use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
 use crate::state::{Tab, ZStatsAppState};
 use crate::{awake, format, i18n, palette, prefs};
-use nsh_base::{MenuEvent, TooltipElement, button, menu, menu_item, menu_separator, tab, tabs};
+use nsh_base::{MenuEvent, TooltipElement, button, menu, menu_separator, tab, tabs};
 use nsh_core::prelude::*;
 use rust_i18n::t;
 use std::time::SystemTime;
@@ -68,10 +68,7 @@ fn cell_paint(on: bool, alarm: bool) -> (Rgba, Rgba) {
     match (on, alarm) {
         (true, true) => (palette::accent_wash(16), palette::accent_light()),
         (false, true) => (CLEAR, palette::accent_light()),
-        (true, false) => match (palette::selected(), palette::mark()) {
-            (Some((fill, ink)), _) | (None, Some((fill, ink))) => (fill, ink),
-            (None, None) => (palette::chip(), palette::text()),
-        },
+        (true, false) => palette::active_item(),
         (false, false) => (CLEAR, palette::text_dim()),
     }
 }
@@ -144,7 +141,11 @@ fn tab_cell(this: Tab, active: Memo<Tab>, alerting: Memo<bool>) -> AnyElement {
         .child(
             tab()
                 .flex_none()
+                .accessibility_label(Some(SharedString::from(this.title())))
+                .rounded(px(7.))
                 .selected(move || active.get() == this)
+                .active(|s| s.opacity(0.78))
+                .focus_visible(widgets::focus_ring)
                 .on_press(move || store::update(|state, fx| state.set_tab(this, fx)))
                 .child(
                     when(
@@ -180,6 +181,8 @@ fn tab_cell(this: Tab, active: Memo<Tab>, alerting: Memo<bool>) -> AnyElement {
                             .justify_center()
                             .rounded(px(7.))
                             .hover(|s| s.bg(theme::color(palette::chip)))
+                            .transition_colors()
+                            .duration(120.)
                             .child(widgets::icon(tab_icon(this), 16., ink))
                     }),
                 ),
@@ -187,11 +190,12 @@ fn tab_cell(this: Tab, active: Memo<Tab>, alerting: Memo<bool>) -> AnyElement {
         .into_element()
 }
 
-/// One of the footer's icon buttons: a 32×30 box, the icon at 16, lit (the
-/// chip's fill, the full ink) while `lit` says so.
+/// One of the footer's icon buttons: a 32×30 box, the icon at 16, lit
+/// with the active theme item fill while `lit` says so.
 fn footer_button(
     icon: impl IntoElement,
     lit: impl Fn() -> bool + Copy + 'static,
+    label: impl Fn() -> String + 'static,
     tip: TooltipElement,
     on_press: impl Fn() + 'static,
 ) -> AnyElement {
@@ -201,13 +205,37 @@ fn footer_button(
         .child(
             button()
                 .flex_none()
+                .selected(lit)
+                .accessibility_label(move || Some(SharedString::from(label())))
                 .w(px(32.))
                 .h(px(CELL))
                 .items_center()
                 .justify_center()
                 .rounded(px(7.))
-                .bg(move || theme::color(move || if lit() { palette::chip() } else { CLEAR }))
-                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .bg(move || {
+                    theme::color(move || {
+                        if lit() {
+                            palette::active_item().0
+                        } else {
+                            CLEAR
+                        }
+                    })
+                })
+                .hover(move |s| {
+                    s.bg(move || {
+                        theme::color(move || {
+                            if lit() {
+                                palette::active_item_hover()
+                            } else {
+                                palette::surface_raised()
+                            }
+                        })
+                    })
+                })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.76))
+                .focus_visible(widgets::focus_ring)
                 .on_press(on_press)
                 .child(icon),
         )
@@ -217,7 +245,7 @@ fn footer_button(
 /// The ink of a footer glyph, lit or not.
 fn footer_ink(lit: bool) -> Rgba {
     if lit {
-        palette::text()
+        palette::active_item().1
     } else {
         palette::text_dim()
     }
@@ -235,6 +263,13 @@ pub fn footer(live: Live) -> View {
     let pin = footer_button(
         widgets::icon(CustomIconName::Pin, 16., move || footer_ink(pinned.get())),
         move || pinned.get(),
+        move || {
+            i18n::tr(if pinned.get() {
+                "common.unpin"
+            } else {
+                "common.pin"
+            })
+        },
         widgets::live_tooltip(move || {
             i18n::tr(if pinned.get() {
                 "common.unpin"
@@ -258,6 +293,13 @@ pub fn footer(live: Live) -> View {
             widgets::icon(glyph, 16., palette::text_dim)
         }),
         || false,
+        move || {
+            i18n::tr(if detail.get() {
+                "overview.collapse_tip"
+            } else {
+                "overview.expand_tip"
+            })
+        },
         widgets::live_tooltip(move || {
             i18n::tr(if detail.get() {
                 "overview.collapse_tip"
@@ -295,6 +337,7 @@ pub fn footer(live: Live) -> View {
                     .bg(theme::color(palette::accent))
             })),
         || false,
+        || i18n::tr("tabs.settings"),
         widgets::live_tooltip(move || match (nudge.get(), template_nudge.get()) {
             (Some(v), true) => t!("config.both_nudge_tip", v = v).to_string(),
             (Some(v), false) => t!("config.update_nudge_tip", v = v).to_string(),
@@ -319,6 +362,7 @@ pub fn footer(live: Live) -> View {
         .h(px(FOOTER_HEIGHT))
         .items_center()
         .justify_between()
+        .gap(px(8.))
         .px(px(8.))
         .border_t(px(1.))
         .border_color(theme::color(palette::border_subtle))
@@ -337,6 +381,10 @@ pub fn footer(live: Live) -> View {
                         .px(px(10.))
                         .rounded(px(7.))
                         .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                        .transition_colors()
+                        .duration(120.)
+                        .active(|s| s.opacity(0.76))
+                        .focus_visible(widgets::focus_ring)
                         .on_press(|| root::ask(HostAction::Quit))
                         .child(widgets::icon(CustomIconName::Power, 14., palette::text_dim))
                         .child(
@@ -391,30 +439,15 @@ fn keep_awake(live: Live) -> AnyElement {
     });
     let item = move |label: String, minutes: u32| {
         let on = move || hold.get().map_or(0, |hold| hold.minutes) == minutes;
-        menu_item()
-            .on_select(move || {
+        widgets::check_item(
+            label,
+            on,
+            || false,
+            move || {
                 awake::hold_for(minutes);
                 store::changed();
-            })
-            .flex_row()
-            .items_center()
-            .gap(px(6.))
-            .px(px(8.))
-            .py(px(4.))
-            .rounded(px(5.))
-            .hover(|s| s.bg(theme::color(palette::popover_hover)))
-            .child(
-                text(move || if on() { "✓" } else { "" })
-                    .flex_none()
-                    .w(px(14.))
-                    .text_size(px(12.))
-                    .text_color(theme::color(palette::gauge)),
-            )
-            .child(
-                text(label)
-                    .text_size(px(12.))
-                    .text_color(theme::color(palette::text)),
-            )
+            },
+        )
     };
     // No tooltip under the open menu: it came up over the items it
     // describes.
@@ -428,16 +461,7 @@ fn keep_awake(live: Live) -> AnyElement {
                 open.set(*next);
             }
         })
-        .popup_style(|s| {
-            s.min_w(px(170.))
-                .p(px(4.))
-                .rounded(px(8.))
-                .bg(theme::color(palette::popover))
-                .outline(px(1.))
-                .outline_offset(px(-1.))
-                .outline_color(theme::color(palette::border))
-                .shadow_lg()
-        })
+        .popup_style(widgets::popup_surface(170.))
         .trigger(
             view()
                 .flex_row()
@@ -449,11 +473,40 @@ fn keep_awake(live: Live) -> AnyElement {
                 .gap(px(4.))
                 .px(px(8.))
                 .rounded(px(7.))
-                .bg(move || theme::color(move || if held() { palette::chip() } else { CLEAR }))
-                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .bg(move || {
+                    theme::color(move || {
+                        if held() {
+                            palette::active_item().0
+                        } else if open.get() {
+                            palette::surface_raised()
+                        } else {
+                            CLEAR
+                        }
+                    })
+                })
+                .hover(move |s| {
+                    s.bg(move || {
+                        theme::color(move || {
+                            if held() {
+                                palette::active_item_hover()
+                            } else {
+                                palette::surface_raised()
+                            }
+                        })
+                    })
+                })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.78))
                 .tooltip(widgets::live_tooltip(tip).disabled(move || open.get()))
                 .child(widgets::icon(CustomIconName::Coffee, 16., move || {
-                    footer_ink(held())
+                    if held() {
+                        palette::active_item().1
+                    } else if open.get() {
+                        palette::text()
+                    } else {
+                        palette::text_dim()
+                    }
                 }))
                 .child(when(held, move || {
                     text(move || left.get())
@@ -461,7 +514,7 @@ fn keep_awake(live: Live) -> AnyElement {
                         .tabular_nums()
                         .text_size(px(10.))
                         .line_height(px(14.))
-                        .text_color(theme::color(palette::text))
+                        .text_color(move || theme::color(move || palette::active_item().1))
                 })),
         )
         // The menu's first line: until when, or what it is for.
@@ -522,28 +575,12 @@ fn clamshell_sleep(live: Live) -> AnyElement {
             }
             _ => false,
         };
-        menu_item()
-            .disabled(move || busy.get())
-            .on_select(move || clamshell::request(req, store::changed))
-            .flex_row()
-            .items_center()
-            .gap(px(6.))
-            .px(px(8.))
-            .py(px(4.))
-            .rounded(px(5.))
-            .hover(|s| s.bg(theme::color(palette::popover_hover)))
-            .child(
-                text(move || if on() { "✓" } else { "" })
-                    .flex_none()
-                    .w(px(14.))
-                    .text_size(px(12.))
-                    .text_color(theme::color(palette::gauge)),
-            )
-            .child(
-                text(label)
-                    .text_size(px(12.))
-                    .text_color(theme::color(palette::text)),
-            )
+        widgets::check_item(
+            label,
+            on,
+            move || busy.get(),
+            move || clamshell::request(req, store::changed),
+        )
     };
     let open = signal(false);
     root::close_on_hide(open);
@@ -555,16 +592,7 @@ fn clamshell_sleep(live: Live) -> AnyElement {
                 open.set(*next);
             }
         })
-        .popup_style(|s| {
-            s.min_w(px(180.))
-                .p(px(4.))
-                .rounded(px(8.))
-                .bg(theme::color(palette::popover))
-                .outline(px(1.))
-                .outline_offset(px(-1.))
-                .outline_color(theme::color(palette::border))
-                .shadow_lg()
-        })
+        .popup_style(widgets::popup_surface(180.))
         .trigger(
             view()
                 .flex_row()
@@ -576,11 +604,40 @@ fn clamshell_sleep(live: Live) -> AnyElement {
                 .gap(px(4.))
                 .px(px(8.))
                 .rounded(px(7.))
-                .bg(move || theme::color(move || if active() { palette::chip() } else { CLEAR }))
-                .hover(|s| s.bg(theme::color(palette::surface_raised)))
+                .bg(move || {
+                    theme::color(move || {
+                        if active() {
+                            palette::active_item().0
+                        } else if open.get() {
+                            palette::surface_raised()
+                        } else {
+                            CLEAR
+                        }
+                    })
+                })
+                .hover(move |s| {
+                    s.bg(move || {
+                        theme::color(move || {
+                            if active() {
+                                palette::active_item_hover()
+                            } else {
+                                palette::surface_raised()
+                            }
+                        })
+                    })
+                })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.78))
                 .tooltip(widgets::live_tooltip(tip).disabled(move || open.get()))
                 .child(widgets::icon(CustomIconName::Laptop, 16., move || {
-                    footer_ink(active())
+                    if active() {
+                        palette::active_item().1
+                    } else if open.get() {
+                        palette::text()
+                    } else {
+                        palette::text_dim()
+                    }
                 }))
                 .child(when(timed, move || {
                     text(move || left.get())
@@ -588,7 +645,7 @@ fn clamshell_sleep(live: Live) -> AnyElement {
                         .tabular_nums()
                         .text_size(px(10.))
                         .line_height(px(14.))
-                        .text_color(theme::color(palette::text))
+                        .text_color(move || theme::color(move || palette::active_item().1))
                 })),
         )
         .child(
