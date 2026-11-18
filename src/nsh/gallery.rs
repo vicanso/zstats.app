@@ -178,7 +178,7 @@ pub fn page(live: Live) -> AnyElement {
                     },
                 ))
                 .child(
-                    view()
+                    nsh_base::toggle_group()
                         .flex_row()
                         .gap(px(6.))
                         .px(px(CARD_PAD))

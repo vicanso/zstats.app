@@ -26,9 +26,9 @@ use crate::nsh::theme;
 use crate::{format, i18n, palette};
 use nsh_base::{
     MenuEvent, MenuItemElement, ProgressElement, TooltipElement, alert_dialog, menu, menu_item,
-    progress, tooltip,
+    progress, toggle, tooltip,
 };
-use nsh_core::element::StyleRefinement;
+use nsh_core::element::{ImageSrc, StyleRefinement};
 use nsh_core::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -55,40 +55,29 @@ pub fn fonts() -> Vec<Arc<[u8]>> {
     .collect()
 }
 
-/// A bundled SVG as a `data:` URI, made once per glyph.
-fn icon_uri(name: CustomIconName) -> SharedString {
-    static URIS: LazyLock<Mutex<HashMap<CustomIconName, SharedString>>> =
+/// A bundled SVG as an [`ImageSrc`], parsed once per glyph.
+fn icon_src(name: CustomIconName) -> ImageSrc {
+    static ICONS: LazyLock<Mutex<HashMap<CustomIconName, ImageSrc>>> =
         LazyLock::new(Mutex::default);
-    let mut uris = URIS.lock().unwrap_or_else(|e| e.into_inner());
-    uris.entry(name)
+    let mut icons = ICONS.lock().unwrap_or_else(|e| e.into_inner());
+    icons
+        .entry(name)
         .or_insert_with(|| {
-            let svg = assets::get(name.path()).unwrap_or_default();
-            format!("data:image/svg+xml,{}", percent_encode(&svg)).into()
+            let bytes = assets::get(name.path()).unwrap_or_default();
+            let markup = std::str::from_utf8(&bytes).unwrap_or_default();
+            ImageSrc::svg_markup(markup)
         })
         .clone()
-}
-
-/// RFC 3986's unreserved bytes as they are, every other byte escaped.
-fn percent_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 3);
-    for &b in bytes {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            out.push(char::from(b));
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// A bundled glyph, `size` points square, in `ink` — read again when
 /// what it reads changes (a tab turning red).
 pub fn icon(name: CustomIconName, size: f32, ink: impl Fn() -> Rgba + 'static) -> AnyElement {
-    image(icon_uri(name))
+    svg(icon_src(name))
         .flex_none()
         .w(px(size))
         .h(px(size))
-        .tint_color(move || theme::color(&ink))
+        .text_color(move || theme::color(&ink))
         .into_element()
 }
 
@@ -779,9 +768,9 @@ pub fn option_chip(
     on: impl Fn() -> bool + Copy + 'static,
     on_press: impl Fn() + 'static,
 ) -> AnyElement {
-    nsh_base::button()
+    toggle()
         .flex_none()
-        .selected(on)
+        .pressed(on)
         .rounded_full()
         .border(px(1.))
         .border_color(move || theme::color(move || palette::choice_line(on())))
@@ -793,7 +782,7 @@ pub fn option_chip(
         .focus_visible(focus_ring)
         .px(px(8.))
         .py(px(2.))
-        .on_press(on_press)
+        .on_change(move |_: &bool| on_press())
         .child(
             text(label.into())
                 .text_size(px(10.))

@@ -2372,96 +2372,88 @@ fn pick_sheet(sheet: Signal<Option<Sheet>>) -> AnyElement {
         move || storagepage::pick_ok(chosen().len(), total())
     };
     let none = move || chosen().is_empty();
-    overlay()
-        .absolute()
-        .inset_0()
+    nsh_base::dialog()
         .on_cancel(close)
+        .label(start.title.clone())
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .bg(theme::color(|| color::Rgba {
+            r: 0.,
+            g: 0.,
+            b: 0.,
+            a: 0.35,
+        }))
         .child(
             view()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .bg(theme::color(|| color::Rgba {
-                    r: 0.,
-                    g: 0.,
-                    b: 0.,
-                    a: 0.35,
-                }))
+                .w(px(360.))
+                .rounded(px(12.))
+                .bg(theme::color(palette::popover))
+                .p(px(16.))
+                .gap(px(8.))
+                .child(
+                    text(start.title)
+                        .text_size(px(13.))
+                        .line_height(widgets::line(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::color(palette::text)),
+                )
+                .child(
+                    text(start.body)
+                        .text_size(px(11.))
+                        .line_height(px(15.))
+                        .text_color(theme::color(palette::text_muted)),
+                )
+                .child(
+                    scroll()
+                        .max_h(px(PICK_LIST_MAX_H))
+                        .child(view().children(rows)),
+                )
                 .child(
                     view()
-                        .w(px(360.))
-                        .rounded(px(12.))
-                        .bg(theme::color(palette::popover))
-                        .p(px(16.))
-                        .gap(px(8.))
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(6.))
+                        .pt(px(4.))
+                        .child(small_button(i18n::tr("common.cancel"), None, close))
                         .child(
-                            text(start.title)
-                                .text_size(px(13.))
-                                .line_height(widgets::line(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::color(palette::text)),
-                        )
-                        .child(
-                            text(start.body)
-                                .text_size(px(11.))
-                                .line_height(px(15.))
-                                .text_color(theme::color(palette::text_muted)),
-                        )
-                        .child(
-                            scroll()
-                                .max_h(px(PICK_LIST_MAX_H))
-                                .child(view().children(rows)),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .justify_end()
-                                .gap(px(6.))
-                                .pt(px(4.))
-                                .child(small_button(i18n::tr("common.cancel"), None, close))
+                            nsh_base::button()
+                                .flex_none()
+                                .disabled(none)
+                                .h(px(22.))
+                                .px(px(8.))
+                                .rounded(px(6.))
+                                .bg(theme::color(|| palette::accent_wash(16)))
+                                .items_center()
+                                .justify_center()
+                                .disabled_style(|s| s.opacity(0.5))
+                                .hover(|s| s.bg(theme::color(|| palette::accent_wash(24))))
+                                .transition_colors()
+                                .duration(120.)
+                                .active(|s| s.opacity(0.76))
+                                .focus_visible(widgets::focus_ring)
+                                .on_press(move || {
+                                    let picked: Vec<PathBuf> =
+                                        chosen().iter().map(|&i| paths[i].clone()).collect();
+                                    if picked.is_empty() {
+                                        return;
+                                    }
+                                    sheet.set(None);
+                                    store::update(|state, fx| state.trash_regenerable(&picked, fx));
+                                })
                                 .child(
-                                    nsh_base::button()
-                                        .flex_none()
-                                        .disabled(none)
-                                        .h(px(22.))
-                                        .px(px(8.))
-                                        .rounded(px(6.))
-                                        .bg(theme::color(|| palette::accent_wash(16)))
-                                        .items_center()
-                                        .justify_center()
-                                        .disabled_style(|s| s.opacity(0.5))
-                                        .hover(|s| s.bg(theme::color(|| palette::accent_wash(24))))
-                                        .transition_colors()
-                                        .duration(120.)
-                                        .active(|s| s.opacity(0.76))
-                                        .focus_visible(widgets::focus_ring)
-                                        .on_press(move || {
-                                            let picked: Vec<PathBuf> = chosen()
-                                                .iter()
-                                                .map(|&i| paths[i].clone())
-                                                .collect();
-                                            if picked.is_empty() {
-                                                return;
-                                            }
-                                            sheet.set(None);
-                                            store::update(|state, fx| {
-                                                state.trash_regenerable(&picked, fx)
-                                            });
-                                        })
-                                        .child(
-                                            text(ok_label)
-                                                .text_size(px(12.))
-                                                .line_height(px(15.))
-                                                .text_color(move || {
-                                                    theme::color(move || {
-                                                        if none() {
-                                                            palette::text_dim()
-                                                        } else {
-                                                            palette::accent_light()
-                                                        }
-                                                    })
-                                                }),
-                                        ),
+                                    text(ok_label)
+                                        .text_size(px(12.))
+                                        .line_height(px(15.))
+                                        .text_color(move || {
+                                            theme::color(move || {
+                                                if none() {
+                                                    palette::text_dim()
+                                                } else {
+                                                    palette::accent_light()
+                                                }
+                                            })
+                                        }),
                                 ),
                         ),
                 ),

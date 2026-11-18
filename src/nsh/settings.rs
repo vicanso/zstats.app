@@ -422,7 +422,7 @@ fn pref_row<T: Copy + PartialEq + 'static>(
     row(
         label,
         tip,
-        view()
+        nsh_base::toggle_group()
             .flex_row()
             .flex_none()
             .gap(px(4.))
@@ -480,7 +480,7 @@ fn stacked_row(label: String, tip: String, chips: Vec<AnyElement>, last: bool) -
                 .child(widgets::info_icon(widgets::wrap_tooltip(tip))),
         )
         .child(
-            view()
+            nsh_base::toggle_group()
                 .flex_row()
                 .flex_wrap()
                 .mt(px(6.))
@@ -1799,9 +1799,9 @@ fn about_row(label: String, value: String, last: bool) -> AnyElement {
 /// The project page — the one control that opens something outside the
 /// app, and the one that wears the hand.
 fn github_row() -> AnyElement {
-    nsh_base::button()
+    nsh_base::link()
+        .href(about::REPO_URL)
         .flex_none()
-        .cursor_pointer()
         .flex_row()
         .items_center()
         .justify_between()
@@ -1814,9 +1814,6 @@ fn github_row() -> AnyElement {
         .duration(120.)
         .active(|s| s.opacity(0.82))
         .focus_visible(widgets::focus_ring)
-        .on_press(|| {
-            let _ = opener::open([about::REPO_URL]);
-        })
         .child(
             text(i18n::tr("common.github"))
                 .text_size(px(11.))

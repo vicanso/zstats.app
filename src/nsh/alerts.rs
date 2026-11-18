@@ -607,7 +607,13 @@ fn threshold_editor(target: &OverrideTarget, editor: &Editor) -> AnyElement {
         .border_t(px(1.))
         .border_color(theme::color(palette::border_subtle))
         .child(widgets::note(editor.caption.clone()))
-        .child(view().flex_row().mt(px(6.)).gap(px(4.)).children(chips))
+        .child(
+            nsh_base::toggle_group()
+                .flex_row()
+                .mt(px(6.))
+                .gap(px(4.))
+                .children(chips),
+        )
         .into_element()
 }
 
