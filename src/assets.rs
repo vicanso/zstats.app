@@ -66,6 +66,8 @@ pub enum CustomIconName {
     /// `laptop`. Paired beside [`Self::Coffee`] so idle display keep-awake
     /// and `pmset disablesleep` stay visually distinct.
     Laptop,
+    /// Footer desktop lock trigger (`screenlock.rs`); lucide `lock`.
+    Lock,
     /// Move-to-Trash on the disk-space window's rows; lucide `trash-2`.
     /// Not a backspace key (gpui-kit's `Delete`, which read as "clear this
     /// field" on a control that moves files).
@@ -130,6 +132,7 @@ impl CustomIconName {
             CustomIconName::Pin => "icons/pin.svg",
             CustomIconName::Coffee => "icons/coffee.svg",
             CustomIconName::Laptop => "icons/laptop.svg",
+            CustomIconName::Lock => "icons/lock.svg",
             CustomIconName::Trash => "icons/trash.svg",
             CustomIconName::Expand => "icons/chevrons-up-down.svg",
             CustomIconName::Collapse => "icons/chevrons-down-up.svg",
@@ -178,6 +181,7 @@ mod tests {
             CustomIconName::Pin,
             CustomIconName::Coffee,
             CustomIconName::Laptop,
+            CustomIconName::Lock,
             CustomIconName::Trash,
             CustomIconName::Expand,
             CustomIconName::Collapse,

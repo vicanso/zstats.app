@@ -49,6 +49,12 @@ pub enum HostAction {
     /// The system's folder panel, for what [`FolderPick`] says; NSH has
     /// none of its own.
     PickFolder(FolderPick),
+    /// Engages the full-screen desktop lock overlay after the password has
+    /// been armed in `screenlock`.
+    EngageScreenLock,
+    /// Clears NSH's opaque surface ground layer on the primary lock overlay
+    /// so the macOS frosted `NSVisualEffectView` shows through.
+    LockSurfaceReady,
 }
 
 /// What a folder picked in the system's panel is for (the disk-space
@@ -63,11 +69,12 @@ pub enum FolderPick {
     Dupes,
 }
 
-/// The two ordinary windows beside the panel.
+/// The auxiliary windows beside the panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuxWindow {
     Settings,
     Storage,
+    LockSetup,
 }
 
 static HOST: OnceLock<Box<dyn Fn(HostAction) + Send + Sync>> = OnceLock::new();

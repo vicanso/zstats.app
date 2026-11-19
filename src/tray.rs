@@ -48,6 +48,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 const MENU_ID_SHOW: &str = "show";
 const MENU_ID_QUIT: &str = "quit";
 const MENU_ID_STORAGE: &str = "storage";
+const MENU_ID_LOCK: &str = "lock";
 
 /// Which figure the menu bar item wears. The glyph and the percent beside
 /// it always agree — a bare `91%` means nothing until the icon says what
@@ -487,6 +488,8 @@ pub enum TrayAction {
     Show,
     /// The menu's way into the disk-space window.
     Storage,
+    /// Opens the desktop lock password setup dialog.
+    LockScreen,
     Quit,
     /// A tray host appeared on the session bus after the first build
     /// failed: call [`host_appeared`] on the thread that keeps the tray.
@@ -615,6 +618,12 @@ fn build_menu() -> Menu {
         true,
         None,
     ));
+    let _ = menu.append(&MenuItem::with_id(
+        MENU_ID_LOCK,
+        i18n::tr("common.lock_screen"),
+        true,
+        None,
+    ));
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&MenuItem::with_id(
         MENU_ID_QUIT,
@@ -712,6 +721,7 @@ fn route_events(deliver: Deliver) {
         let action = match event.id().0.as_str() {
             MENU_ID_SHOW => TrayAction::Show,
             MENU_ID_STORAGE => TrayAction::Storage,
+            MENU_ID_LOCK => TrayAction::LockScreen,
             MENU_ID_QUIT => TrayAction::Quit,
             _ => return,
         };

@@ -22,16 +22,17 @@
 //! gets looked at.
 
 use crate::metrics::{self, CollectorPace};
+use crate::nsh::lockscreen::LockSetup;
 use crate::nsh::panel::Panel;
 use crate::nsh::root::{self, AuxWindow, FolderPick, HostAction};
 use crate::nsh::settings::{self, Settings};
 use crate::nsh::storage::{self, Storage};
-use crate::nsh::{store, theme};
+use crate::nsh::{lock_linux, store, theme};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
 use crate::{
     APP_NAME, about, active, autostart, i18n, ipc, logger, notice, notify, placement, prefs,
-    updater,
+    screenlock, updater,
 };
 use gtk::glib;
 use gtk::prelude::*;
@@ -87,8 +88,8 @@ struct Aux {
 
 thread_local! {
     static PANEL: OnceCell<Rc<PanelHost>> = const { OnceCell::new() };
-    /// Settings, then disk space.
-    static AUX: RefCell<[Option<Aux>; 2]> = const { RefCell::new([None, None]) };
+    /// Settings, disk space, then desktop lock setup.
+    static AUX: RefCell<[Option<Aux>; 3]> = const { RefCell::new([None, None, None]) };
     static MAIN_LOOP: OnceCell<glib::MainLoop> = const { OnceCell::new() };
 }
 
@@ -153,6 +154,17 @@ pub fn run() {
             }
             HostAction::Restyle => restyle(),
             HostAction::PickFolder(pick) => pick_folder(pick),
+            HostAction::EngageScreenLock => {
+                close_aux(AuxWindow::LockSetup);
+                if with_panel(|panel| panel.window.is_visible()) == Some(true) {
+                    hide();
+                }
+                if !lock_linux::engage() {
+                    screenlock::abort_arm();
+                    store::changed();
+                }
+            }
+            HostAction::LockSurfaceReady => {}
         }));
     });
 
@@ -175,9 +187,14 @@ pub fn run() {
     let _ = fs::remove_file(zstats::settings::default_dir().join("bigfiles.toml"));
     if let Some(listener) = listener {
         ipc::serve(listener, |invocation| {
-            on_main(Box::new(move || match invocation {
-                ipc::Invocation::Toggle => toggle(),
-                ipc::Invocation::Launch => show(),
+            on_main(Box::new(move || {
+                if screenlock::is_active() {
+                    return;
+                }
+                match invocation {
+                    ipc::Invocation::Toggle => toggle(),
+                    ipc::Invocation::Launch => show(),
+                }
             }));
         });
     }
@@ -246,7 +263,11 @@ fn restyle() {
     store::read(tray::sync);
     with_panel(|panel| panel.view.load(root::make::<Panel>().into()));
     AUX.with_borrow(|open| {
-        for aux in [AuxWindow::Settings, AuxWindow::Storage] {
+        for aux in [
+            AuxWindow::Settings,
+            AuxWindow::Storage,
+            AuxWindow::LockSetup,
+        ] {
             if let Some(open) = &open[slot(aux)] {
                 let (_, title, root) = aux_parts(aux);
                 open.window.set_title(Some(&title));
@@ -264,6 +285,7 @@ fn on_main(job: Box<dyn FnOnce() + Send>) {
 }
 
 fn quit() {
+    lock_linux::disengage();
     MAIN_LOOP.with(|main_loop| {
         if let Some(main_loop) = main_loop.get() {
             main_loop.quit();
@@ -531,15 +553,22 @@ fn toggle() {
 
 /// A banner's click: the Alerts tab, then the panel.
 fn show_alerts() {
+    if screenlock::is_active() {
+        return;
+    }
     store::update(|state, fx| state.set_tab(Tab::Alerts, fx));
     show();
 }
 
 fn on_tray(action: TrayAction) {
+    if screenlock::is_active() {
+        return;
+    }
     match action {
         TrayAction::Toggle(_) => toggle(),
         TrayAction::Show => show(),
         TrayAction::Storage => open_aux(AuxWindow::Storage),
+        TrayAction::LockScreen => open_aux(AuxWindow::LockSetup),
         TrayAction::Quit => quit(),
         TrayAction::HostAppeared => tray::host_appeared(),
     }
@@ -549,6 +578,7 @@ fn slot(aux: AuxWindow) -> usize {
     match aux {
         AuxWindow::Settings => 0,
         AuxWindow::Storage => 1,
+        AuxWindow::LockSetup => 2,
     }
 }
 
@@ -574,6 +604,7 @@ fn open_aux(aux: AuxWindow) {
             autostart::refresh();
         }
         AuxWindow::Storage => store::update(|state, fx| state.reset_storage_views(fx)),
+        AuxWindow::LockSetup => screenlock::clear_start_error(),
     }
     let (size, title, root) = aux_parts(aux);
     let window = gtk::Window::new();
@@ -633,6 +664,11 @@ fn aux_parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::element::Root) {
             placement::STORAGE_WINDOW_SIZE,
             i18n::tr("disk.storage_title"),
             root::make::<Storage>(),
+        ),
+        AuxWindow::LockSetup => (
+            placement::LOCK_SETUP_WINDOW_SIZE,
+            i18n::tr("lock.title"),
+            root::make::<LockSetup>(),
         ),
     }
 }

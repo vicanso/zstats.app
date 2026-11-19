@@ -76,6 +76,7 @@ pub fn became_key() {
     if section() == SettingsSection::Permissions {
         settingspage::refresh_full_disk_access();
         crate::clamshell::refresh_authorized();
+        crate::screenlock::refresh_accessibility();
     }
     // The pages read them, and nothing else would say so.
     store::changed();
@@ -1621,6 +1622,10 @@ fn permissions_card(live: Live) -> AnyElement {
         live.track();
         crate::clamshell::busy()
     });
+    let ax_granted = computed(move || {
+        live.track();
+        crate::screenlock::refresh_accessibility()
+    });
     let fda = widgets::list_shell()
         .child(widgets::list_header(
             titled(
@@ -1713,10 +1718,55 @@ fn permissions_card(live: Live) -> AnyElement {
                     }
                 })),
         );
+    let accessibility = widgets::list_shell()
+        .child(widgets::list_header(
+            titled(
+                i18n::tr("config.perm_accessibility"),
+                i18n::tr("config.perm_accessibility_note"),
+            ),
+            Some(
+                text(move || {
+                    i18n::tr(if ax_granted.get() {
+                        "config.perm_granted"
+                    } else {
+                        "config.perm_missing"
+                    })
+                })
+                .flex_none()
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    theme::color(move || {
+                        if ax_granted.get() {
+                            palette::text()
+                        } else {
+                            palette::ink()
+                        }
+                    })
+                })
+                .into_element(),
+            ),
+        ))
+        .child(when(
+            move || !ax_granted.get(),
+            || {
+                view()
+                    .flex_row()
+                    .px(px(ROW_PAD_X))
+                    .pb(px(11.))
+                    .child(card_chip(
+                        i18n::tr("config.perm_open"),
+                        false,
+                        crate::screenlock::request_accessibility,
+                    ))
+            },
+        ));
     view()
         .gap(px(8.))
         .child(fda)
         .child(clamshell)
+        .child(accessibility)
         .into_element()
 }
 

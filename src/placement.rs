@@ -248,6 +248,8 @@ pub const STORAGE_WINDOW_SIZE: (f32, f32) = (720., 480.);
 /// sizes: a minimum wider than the opening width would silently widen
 /// the window.
 pub const AUX_MIN_WINDOW_SIZE: (f32, f32) = (460., 420.);
+/// The desktop lock password setup window: compact, non-resizable dialog.
+pub const LOCK_SETUP_WINDOW_SIZE: (f32, f32) = (360., 256.);
 
 /// Gap between the tray icon and the top of the window.
 pub const TRAY_GAP: f32 = 6.;

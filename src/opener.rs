@@ -36,6 +36,12 @@ pub fn full_disk_access_settings() {
     let _ = open(["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]);
 }
 
+/// System Settings' Accessibility pane: the desktop lock permission prompt
+/// and the settings window's Permissions page.
+pub fn accessibility_settings() {
+    let _ = open(["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]);
+}
+
 /// Spawn the platform's launcher with `args` and reap the child
 /// off-thread. The error is the spawn's own (binary missing, fork
 /// failure); the launcher's exit status is deliberately not consulted —

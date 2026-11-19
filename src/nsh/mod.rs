@@ -28,6 +28,11 @@ mod host;
 #[cfg(target_os = "linux")]
 mod linux;
 mod lists;
+#[cfg(target_os = "linux")]
+mod lock_linux;
+#[cfg(target_os = "macos")]
+mod lock_macos;
+mod lockscreen;
 mod network;
 mod overview;
 mod panel;

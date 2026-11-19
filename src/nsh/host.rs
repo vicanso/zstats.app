@@ -44,12 +44,13 @@ use crate::nsh::panel;
 #[cfg(debug_assertions)]
 use crate::nsh::probe;
 use crate::nsh::root::{self, AuxWindow, HostAction};
-use crate::nsh::windows;
-use crate::nsh::{store, theme};
+use crate::nsh::{lock_macos, store, theme, windows};
 use crate::placement::{self, Dragged, ScreenGeom, TrayAnchor};
 use crate::state::{self, Tab, ZStatsAppState};
 use crate::tray::{self, TrayAction};
-use crate::{about, active, autostart, clamshell, i18n, logger, notice, notify, prefs, updater};
+use crate::{
+    about, active, autostart, clamshell, i18n, logger, notice, notify, prefs, screenlock, updater,
+};
 use nsh_platform_macos::{AppOptions, AppView, Appearance};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -230,6 +231,10 @@ pub fn run() {
             }
             HostAction::Restyle => restyle(),
             HostAction::PickFolder(pick) => windows::pick_folder(pick),
+            HostAction::EngageScreenLock => {
+                let _ = lock_macos::engage();
+            }
+            HostAction::LockSurfaceReady => lock_macos::clear_surface_ground(),
         })
     });
     install_menu(mtm);
@@ -258,6 +263,7 @@ pub fn run() {
     // say whether its subject is in use.
     autostart::refresh();
     clamshell::init();
+    screenlock::refresh_accessibility();
     active::start();
     start_collector(tab);
     // Child processes that block for seconds, off the main thread.
@@ -314,6 +320,7 @@ fn follow_appearance(dark: bool) {
     theme::follow(dark);
     // NSH has just walled the glass off again for the new appearance.
     with_host(clear_surface_ground);
+    lock_macos::clear_surface_ground();
 }
 
 /// The appearance the panel's engine last resolved, for a change of theme
@@ -652,6 +659,9 @@ fn show_anchored() {
 /// A banner's click: the Alerts tab, then the panel — the tab first, so
 /// the panel's first frame is that tab.
 pub fn show_alerts() {
+    if screenlock::is_active() {
+        return;
+    }
     store::update(|state, fx| state.set_tab(Tab::Alerts, fx));
     show_anchored();
 }
@@ -660,17 +670,22 @@ pub fn show_alerts() {
 /// from AppKit's own action, on the main thread, so they reach the host
 /// directly.
 fn on_tray(action: TrayAction) {
+    if screenlock::is_active() {
+        return;
+    }
     match action {
         TrayAction::Toggle(anchor) => toggle(anchor),
         // Under the icon, as a click would put it (`show_main_window`).
         TrayAction::Show => show_anchored(),
         TrayAction::Storage => windows::open(AuxWindow::Storage),
+        TrayAction::LockScreen => windows::open(AuxWindow::LockSetup),
         TrayAction::Quit => quit(),
     }
 }
 
 fn quit() {
     tracing::info!("quit requested");
+    lock_macos::disengage();
     clamshell::restore_on_exit();
     if let Some(mtm) = MainThreadMarker::new() {
         NSApplication::sharedApplication(mtm).terminate(None);

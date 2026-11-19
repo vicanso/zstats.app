@@ -75,6 +75,7 @@ mod proclist;
 mod procscan;
 mod proxy;
 mod rows;
+mod screenlock;
 mod series;
 mod settingspage;
 mod spaceinfo;

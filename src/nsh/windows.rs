@@ -14,6 +14,7 @@
 //! minutes-long walk can live on a surface you cannot look away from.
 
 use crate::nsh::host;
+use crate::nsh::lockscreen::LockSetup;
 use crate::nsh::root::{self, AuxWindow, FolderPick};
 use crate::nsh::settings::{self, Settings};
 use crate::nsh::storage::{self, Storage};
@@ -45,8 +46,8 @@ struct Open {
 }
 
 thread_local! {
-    /// Settings, then disk space ([`slot`]).
-    static OPEN: RefCell<[Option<Open>; 2]> = const { RefCell::new([None, None]) };
+    /// Settings, disk space, then desktop lock setup ([`slot`]).
+    static OPEN: RefCell<[Option<Open>; 3]> = const { RefCell::new([None, None, None]) };
     /// Windows that have just closed, kept until the main queue's next
     /// turn: the last reference to a window must not go inside its own
     /// `windowWillClose:`.
@@ -61,6 +62,7 @@ fn slot(aux: AuxWindow) -> usize {
     match aux {
         AuxWindow::Settings => 0,
         AuxWindow::Storage => 1,
+        AuxWindow::LockSetup => 2,
     }
 }
 
@@ -89,8 +91,13 @@ define_class!(
         /// System Settings while this window was behind it.
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
-            if *self.ivars() == AuxWindow::Settings {
-                settings::became_key();
+            match *self.ivars() {
+                AuxWindow::Settings => settings::became_key(),
+                AuxWindow::LockSetup => {
+                    crate::screenlock::refresh_accessibility();
+                    store::changed();
+                }
+                AuxWindow::Storage => {}
             }
         }
     }
@@ -126,9 +133,13 @@ pub fn open(aux: AuxWindow) {
         // A fresh window, not a raised one: yesterday's opened rows are
         // not what someone reopening it is asking about.
         AuxWindow::Storage => store::update(|state, fx| state.reset_storage_views(fx)),
+        AuxWindow::LockSetup => {
+            crate::screenlock::clear_start_error();
+            crate::screenlock::refresh_accessibility();
+        }
     }
     let (size, title, root) = parts(aux);
-    let window = build(mtm, size, &title);
+    let window = build(mtm, size, &title, aux != AuxWindow::LockSetup);
     let view = AppView::new(
         mtm,
         AppOptions {
@@ -172,6 +183,11 @@ fn parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::element::Root) {
             i18n::tr("disk.storage_title"),
             root::make::<Storage>(),
         ),
+        AuxWindow::LockSetup => (
+            placement::LOCK_SETUP_WINDOW_SIZE,
+            i18n::tr("lock.title"),
+            root::make::<LockSetup>(),
+        ),
     }
 }
 
@@ -179,7 +195,11 @@ fn parts(aux: AuxWindow) -> ((f32, f32), String, nsh_core::element::Root) {
 /// in force, and titles it again (`host::restyle`).
 pub fn reload() {
     OPEN.with_borrow(|open| {
-        for aux in [AuxWindow::Settings, AuxWindow::Storage] {
+        for aux in [
+            AuxWindow::Settings,
+            AuxWindow::Storage,
+            AuxWindow::LockSetup,
+        ] {
             if let Some(open) = &open[slot(aux)] {
                 let (_, title, root) = parts(aux);
                 open.window.setTitle(&NSString::from_str(&title));
@@ -261,11 +281,16 @@ fn closed(aux: AuxWindow) {
 
 /// A titled window that closes, minimises and resizes, centred, on the
 /// theme's ground until its root's first frame lands.
-fn build(mtm: MainThreadMarker, size: (f32, f32), title: &str) -> Retained<NSWindow> {
-    let style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable
-        | NSWindowStyleMask::Resizable;
+fn build(
+    mtm: MainThreadMarker,
+    size: (f32, f32),
+    title: &str,
+    resizable: bool,
+) -> Retained<NSWindow> {
+    let mut style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
+    if resizable {
+        style |= NSWindowStyleMask::Miniaturizable | NSWindowStyleMask::Resizable;
+    }
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -281,8 +306,12 @@ fn build(mtm: MainThreadMarker, size: (f32, f32), title: &str) -> Retained<NSWin
     // SAFETY: the window is owned by `Open` and dropped on purpose.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(title));
-    let (min_w, min_h) = placement::AUX_MIN_WINDOW_SIZE;
-    window.setContentMinSize(NSSize::new(f64::from(min_w), f64::from(min_h)));
+    let min_size = if resizable {
+        placement::AUX_MIN_WINDOW_SIZE
+    } else {
+        size
+    };
+    window.setContentMinSize(NSSize::new(f64::from(min_size.0), f64::from(min_size.1)));
     window.setBackgroundColor(Some(&host::ns_color(palette::ground())));
     window.center();
     window

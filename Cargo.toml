@@ -244,8 +244,17 @@ objc2-io-kit = { version = "0.3", default-features = false, features = [
 # `CFBoolean`). Also already in the tree: objc2-app-kit below depends on it.
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "CFDictionary",
+    "CFMachPort",
     "CFNumber",
+    "CFRunLoop",
     "CFString",
+    "std",
+] }
+# Global input tap and shielding window level for the desktop lock overlay.
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "CGDirectDisplay",
+    "CGEvent",
+    "CGEventTypes",
     "std",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [

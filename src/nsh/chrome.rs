@@ -251,6 +251,19 @@ fn footer_ink(lit: bool) -> Rgba {
     }
 }
 
+/// Footer desktop lock button: opens the temporary-password setup dialog
+/// (available on both macOS and Linux).
+fn lock_button(live: Live) -> AnyElement {
+    let locked = live.watch(crate::screenlock::is_active);
+    footer_button(
+        widgets::icon(CustomIconName::Lock, 16., move || footer_ink(locked.get())),
+        move || locked.get(),
+        || i18n::tr("common.lock_screen"),
+        widgets::wrap_tooltip(i18n::tr("common.lock_screen_tip")),
+        || root::ask(HostAction::Open(AuxWindow::LockSetup)),
+    )
+}
+
 /// What the panel does to itself on the left — Pin, its form, Settings,
 /// the keep-awake cup — and, alone on the right and in words, Quit.
 pub fn footer(live: Live) -> View {
@@ -356,6 +369,7 @@ pub fn footer(live: Live) -> View {
         .child(keep_awake(live));
     #[cfg(target_os = "macos")]
     let left = left.child(clamshell_sleep(live));
+    let left = left.child(lock_button(live));
     view()
         .flex_row()
         .flex_none()
