@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.0](https://github.com/vicanso/zstats.app/compare/v0.5.10..v0.6.0) - 2026-11-19
+
+### ⛰️  Features
+
+- Add in-memory desktop lock overlay for macOS and Linux - ([f0ad148](https://github.com/vicanso/zstats.app/commit/f0ad148f8ee9437c7608b149d3c2b2f0518d8f60))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.5.11 - ([f7079d2](https://github.com/vicanso/zstats.app/commit/f7079d2182aecf737452436fc492faff2736236e))
+
 ## [0.5.11](https://github.com/vicanso/zstats.app/compare/v0.5.10..v0.5.11) - 2026-11-18
 
 ## [0.5.10](https://github.com/vicanso/zstats.app/compare/v0.5.7..v0.5.10) - 2026-11-15
