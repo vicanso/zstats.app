@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.1](https://github.com/vicanso/zstats.app/compare/v0.5.10..v0.6.1) - 2026-11-20
+
+### ⛰️  Features
+
+- Add Touch ID, persistent password, AI-friendly lock mode, and display sleep - ([e573c45](https://github.com/vicanso/zstats.app/commit/e573c4580fd92c60f5864c28f3b52af286e89f9c))
+- Add in-memory desktop lock overlay for macOS and Linux - ([f0ad148](https://github.com/vicanso/zstats.app/commit/f0ad148f8ee9437c7608b149d3c2b2f0518d8f60))
+
+### 🐛 Bug Fixes
+
+- *(linux)* Adapt remaining macOS-specific copy and accessibility labels - ([afe6173](https://github.com/vicanso/zstats.app/commit/afe617324d01899f537e017ef1263c8571e9be61))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.6.0 - ([aea4ecc](https://github.com/vicanso/zstats.app/commit/aea4ecc7564b063cecd374d495d01bd5cd4a0d34))
+- Version 0.5.11 - ([f7079d2](https://github.com/vicanso/zstats.app/commit/f7079d2182aecf737452436fc492faff2736236e))
+
 ## [0.6.0](https://github.com/vicanso/zstats.app/compare/v0.5.10..v0.6.0) - 2026-11-19
 
 ### ⛰️  Features
