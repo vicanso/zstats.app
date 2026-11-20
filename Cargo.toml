@@ -253,8 +253,10 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # Global input tap and shielding window level for the desktop lock overlay.
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "CGDirectDisplay",
+    "CGDisplayConfiguration",
     "CGEvent",
     "CGEventTypes",
+    "libc",
     "std",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
@@ -289,6 +291,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     # The disk-space window's folder pickers (`nsh/windows.rs`).
     "NSOpenPanel",
     "NSSavePanel",
+    "block2",
     "NSPanel",
     "NSResponder",
     "NSView",

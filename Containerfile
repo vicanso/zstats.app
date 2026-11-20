@@ -4,7 +4,7 @@
 # window).
 # trixie rather than bookworm: NSH's GTK backend asks for GTK 4.14, and
 # bookworm ships 4.8.
-FROM docker.io/library/rust:1.98-trixie
+FROM docker.io/library/rust:1.100-trixie
 
 # GTK 4, GStreamer and gtk4-layer-shell are the interface's (NSH's GTK
 # backend and the panel's layer surface); everything else builds from crates.

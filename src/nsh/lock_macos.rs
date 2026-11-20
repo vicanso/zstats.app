@@ -7,18 +7,21 @@
 //!   `⌘Tab`, Force Quit, and Hide.
 //! - Rebuilds monitor overlays dynamically if displays change while locked.
 
+use crate::i18n;
 use crate::nsh::lockscreen::LockOverlay;
 use crate::nsh::{host, root, store, theme, windows};
 use crate::screenlock::{self, KeyInput, KeyOutcome};
+use block2::RcBlock;
 use nsh_platform_macos::{AppOptions, AppView};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyClass, AnyObject, Bool};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationDidChangeScreenParametersNotification,
     NSApplicationPresentationOptions, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor,
     NSScreen, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSVisualEffectView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
@@ -27,11 +30,24 @@ use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventTapProxy, CGEventType, CGShieldingWindowLevel,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSRect};
+use objc2_foundation::{
+    NSError, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSRect, NSString,
+};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+#[link(name = "LocalAuthentication", kind = "framework")]
+unsafe extern "C" {}
+
+/// Popup menu window level: sits above Menu Bar (24), Dock (20), and all
+/// normal windows while letting the system Touch ID sheet appear on top.
+const TOUCH_ID_OVERLAY_LEVEL: isize = 101;
+const DISPLAY_IDLE_SLEEP_SECS: u64 = 15;
+static SLEEP_GEN: AtomicU64 = AtomicU64::new(0);
 
 const EVENT_MASK: CGEventMask = (1 << CGEventType::LeftMouseDown.0)
     | (1 << CGEventType::LeftMouseUp.0)
@@ -97,6 +113,11 @@ impl LockOverlayWindow {
         );
         window.setOpaque(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setSharingType(if screenlock::ai_friendly() {
+            NSWindowSharingType::None
+        } else {
+            NSWindowSharingType::ReadOnly
+        });
         window
     }
 }
@@ -133,6 +154,7 @@ struct ActiveLock {
     windows: Vec<Retained<LockOverlayWindow>>,
     primary_view: Option<Rc<AppView>>,
     observer: Retained<ScreenObserver>,
+    touch_id_ctx: Option<Retained<AnyObject>>,
 }
 
 struct RetiredOverlay {
@@ -244,10 +266,22 @@ pub fn engage() -> bool {
             windows,
             primary_view,
             observer,
+            touch_id_ctx: None,
         });
     });
 
     store::changed();
+    if screenlock::sleep_display_enabled() {
+        let epoch = SLEEP_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                if SLEEP_GEN.load(Ordering::Relaxed) == epoch && screenlock::is_active() {
+                    screenlock::sleep_display_now();
+                }
+            });
+        });
+    }
     true
 }
 
@@ -330,6 +364,11 @@ fn rebuild_overlays() {
                 w.orderOut(None);
             }
             let (next_windows, next_view) = build_overlay_windows(mtm);
+            if lock.touch_id_ctx.is_some() {
+                for w in &next_windows {
+                    w.setLevel(TOUCH_ID_OVERLAY_LEVEL);
+                }
+            }
             if let Some(primary) = next_windows.first() {
                 primary.makeKeyAndOrderFront(None);
             }
@@ -369,8 +408,16 @@ fn clear_app_view_ground(view: &AppView) {
 /// Disengages the macOS desktop lock on the main thread and restores system
 /// presentation options.
 pub fn disengage() {
+    SLEEP_GEN.fetch_add(1, Ordering::Relaxed);
     let taken = LOCK.with_borrow_mut(Option::take);
     if let Some(lock) = taken {
+        if let Some(mut ctx) = lock.touch_id_ctx {
+            // SAFETY: `ctx` is an active `LAContext`; invalidates any pending Touch ID sheet.
+            unsafe {
+                let _: () = msg_send![&*ctx, invalidate];
+            }
+            let _ = &mut ctx;
+        }
         CGEvent::tap_enable(&lock.tap_port, false);
         if let Some(run_loop) = CFRunLoop::current() {
             // SAFETY: `kCFRunLoopCommonModes` is a static CFRunLoopMode string.
@@ -431,26 +478,39 @@ unsafe extern "C-unwind" fn event_tap_callback(
         return event.as_ptr();
     }
 
+    // SAFETY: `event` is a valid non-null `CGEvent` provided by the tap.
+    let event_ref = unsafe { event.as_ref() };
+    if screenlock::ai_friendly() {
+        let source_pid =
+            CGEvent::integer_value_field(Some(event_ref), CGEventField::EventSourceUnixProcessID);
+        if source_pid > 0 && source_pid != i64::from(std::process::id()) {
+            return event.as_ptr();
+        }
+    }
+
     if event_type == CGEventType::KeyDown {
-        // SAFETY: `event` is a valid non-null `CGEvent` provided by the tap.
-        let event_ref = unsafe { event.as_ref() };
+        if screenlock::sleep_display_enabled() && screenlock::main_display_asleep() {
+            dispatch2::DispatchQueue::main().exec_async(wake_and_schedule_resleep);
+            return ptr::null_mut();
+        }
+
         let flags = CGEvent::flags(Some(event_ref));
         let keycode =
             CGEvent::integer_value_field(Some(event_ref), CGEventField::KeyboardEventKeycode);
         let cmd = flags.contains(CGEventFlags::MaskCommand);
         let ctrl = flags.contains(CGEventFlags::MaskControl);
 
-        let mut outcome = KeyOutcome::Ignored;
+        let mut inputs = Vec::new();
         if cmd || ctrl {
             // Support Ctrl+U (32) and Cmd+Delete (51) to clear the entry; swallow all other shortcuts.
             if (ctrl && !cmd && keycode == 32) || (cmd && !ctrl && keycode == 51) {
-                outcome = screenlock::handle_key(KeyInput::Clear);
+                inputs.push(KeyInput::Clear);
             }
         } else {
             match keycode {
-                36 | 76 => outcome = screenlock::handle_key(KeyInput::Submit),
-                51 | 117 => outcome = screenlock::handle_key(KeyInput::Backspace),
-                53 => outcome = screenlock::handle_key(KeyInput::Clear),
+                36 | 76 => inputs.push(KeyInput::Submit),
+                51 | 117 => inputs.push(KeyInput::Backspace),
+                53 => inputs.push(KeyInput::Clear),
                 _ => {
                     let mut len = 0;
                     let mut buf = [0u16; 8];
@@ -466,25 +526,196 @@ unsafe extern "C-unwind" fn event_tap_callback(
                     let count = (len as usize).min(buf.len());
                     for ch in char::decode_utf16(buf[..count].iter().copied()).flatten() {
                         if !ch.is_control() {
-                            let res = screenlock::handle_key(KeyInput::Char(ch));
-                            if res != KeyOutcome::Ignored {
-                                outcome = res;
-                            }
+                            inputs.push(KeyInput::Char(ch));
                         }
                     }
                 }
             }
         }
 
-        match outcome {
-            KeyOutcome::Unlocked => dispatch2::DispatchQueue::main().exec_async(disengage),
-            KeyOutcome::Updated | KeyOutcome::WrongPassword => {
-                dispatch2::DispatchQueue::main().exec_async(store::changed);
-            }
-            KeyOutcome::Ignored => {}
+        if !inputs.is_empty() {
+            dispatch2::DispatchQueue::main().exec_async(move || handle_key_on_main(inputs));
         }
     }
 
     // Swallow all mouse, scroll, system, and key events while locked.
     ptr::null_mut()
+}
+
+fn handle_key_on_main(inputs: Vec<KeyInput>) {
+    if !screenlock::is_active() {
+        return;
+    }
+    if screenlock::sleep_display_enabled() {
+        schedule_resleep();
+    }
+    for input in inputs {
+        if touch_id_active()
+            && matches!(
+                input,
+                KeyInput::Char(_) | KeyInput::Backspace | KeyInput::Clear
+            )
+        {
+            let was_empty = screenlock::snapshot().entered_len == 0;
+            cancel_touch_id();
+            if input == KeyInput::Clear && was_empty {
+                return;
+            }
+        }
+        match screenlock::handle_key(input) {
+            KeyOutcome::Unlocked => {
+                disengage();
+                return;
+            }
+            KeyOutcome::RequestTouchId => {
+                start_touch_id();
+                return;
+            }
+            KeyOutcome::Updated | KeyOutcome::WrongPassword => store::changed(),
+            KeyOutcome::Ignored => {}
+        }
+    }
+}
+
+fn wake_and_schedule_resleep() {
+    if !screenlock::is_active() {
+        return;
+    }
+    screenlock::wake_display_now();
+    schedule_resleep();
+}
+
+fn schedule_resleep() {
+    let epoch = SLEEP_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(DISPLAY_IDLE_SLEEP_SECS));
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if SLEEP_GEN.load(Ordering::Relaxed) == epoch
+                && screenlock::is_active()
+                && !touch_id_active()
+                && !screenlock::main_display_asleep()
+            {
+                screenlock::sleep_display_now();
+            }
+        });
+    });
+}
+
+fn touch_id_active() -> bool {
+    LOCK.with_borrow(|slot| {
+        slot.as_ref()
+            .is_some_and(|lock| lock.touch_id_ctx.is_some())
+    })
+}
+
+fn set_overlay_level(level: isize) {
+    LOCK.with_borrow(|slot| {
+        if let Some(lock) = slot {
+            for w in &lock.windows {
+                w.setLevel(level);
+            }
+        }
+    });
+}
+
+fn start_touch_id() {
+    let Some(cls) = AnyClass::get(c"LAContext") else {
+        screenlock::finish_touch_id();
+        store::changed();
+        return;
+    };
+    // SAFETY: `LAContext` is a standard `LocalAuthentication` NSObject subclass.
+    let ctx: Option<Retained<AnyObject>> = unsafe { msg_send![cls, new] };
+    let Some(ctx) = ctx else {
+        screenlock::finish_touch_id();
+        store::changed();
+        return;
+    };
+
+    let mut err: *mut NSError = ptr::null_mut();
+    // Policy 1 = `LAPolicyDeviceOwnerAuthenticationWithBiometrics`.
+    // SAFETY: `ctx` is a valid `LAContext`; `err` is a valid out-pointer.
+    let can: bool = unsafe { msg_send![&*ctx, canEvaluatePolicy: 1_isize, error: &mut err] };
+    if !can {
+        screenlock::finish_touch_id();
+        store::changed();
+        return;
+    }
+
+    // Empty `localizedFallbackTitle` disables fallback to macOS login password.
+    let empty = NSString::from_str("");
+    // SAFETY: `setLocalizedFallbackTitle:` accepts an `NSString *`.
+    unsafe {
+        let _: () = msg_send![&*ctx, setLocalizedFallbackTitle: &*empty];
+    }
+
+    set_overlay_level(TOUCH_ID_OVERLAY_LEVEL);
+    LOCK.with_borrow_mut(|slot| {
+        if let Some(lock) = slot {
+            lock.touch_id_ctx = Some(ctx.clone());
+        }
+    });
+    store::changed();
+
+    let reason = NSString::from_str(&i18n::tr("lock.touch_id_reason"));
+    let reply = RcBlock::new(move |success: Bool, _err: *mut NSError| {
+        let ok = success.as_bool();
+        dispatch2::DispatchQueue::main().exec_async(move || on_touch_id_result(ok));
+    });
+    // SAFETY: `evaluatePolicy:localizedReason:reply:` retains the block and
+    // invokes it asynchronously with `(BOOL, NSError *)`.
+    unsafe {
+        let _: () = msg_send![
+            &*ctx,
+            evaluatePolicy: 1_isize,
+            localizedReason: &*reason,
+            reply: &*reply
+        ];
+    }
+}
+
+fn on_touch_id_result(success: bool) {
+    if !screenlock::is_active() {
+        return;
+    }
+    LOCK.with_borrow_mut(|slot| {
+        if let Some(lock) = slot {
+            lock.touch_id_ctx = None;
+        }
+    });
+    set_overlay_level(CGShieldingWindowLevel() as isize);
+
+    if success && screenlock::unlock_by_biometrics() {
+        disengage();
+        return;
+    }
+
+    screenlock::finish_touch_id();
+    if screenlock::sleep_display_enabled() {
+        schedule_resleep();
+    }
+    LOCK.with_borrow(|slot| {
+        if let Some(lock) = slot
+            && let Some(primary) = lock.windows.first()
+        {
+            primary.makeKeyAndOrderFront(None);
+        }
+    });
+    store::changed();
+}
+
+fn cancel_touch_id() {
+    let ctx = LOCK.with_borrow_mut(|slot| slot.as_mut().and_then(|lock| lock.touch_id_ctx.take()));
+    if let Some(ctx) = ctx {
+        // SAFETY: `ctx` is an active `LAContext`; invalidates the pending sheet.
+        unsafe {
+            let _: () = msg_send![&*ctx, invalidate];
+        }
+    }
+    set_overlay_level(CGShieldingWindowLevel() as isize);
+    screenlock::finish_touch_id();
+    if screenlock::sleep_display_enabled() {
+        schedule_resleep();
+    }
+    store::changed();
 }

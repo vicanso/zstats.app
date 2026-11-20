@@ -20,7 +20,7 @@ use crate::assets::CustomIconName;
 use crate::nsh::root::{self, AuxWindow, HostAction, Live};
 use crate::nsh::widgets::{self, CLEAR};
 use crate::nsh::{store, theme};
-use crate::prefs::{self, LanguagePref, ThemePref, TrayPref};
+use crate::prefs::{self, LanguagePref, LockModePref, ThemePref, TrayPref};
 use crate::settingspage::{self, Autostart, Choices, SettingsSection, ThresholdRow};
 use crate::settingspage::{UpdateAction, UpdateView};
 use crate::state::{CachesSync, HintsSync, TemplateSync, WebhookTest, ZStatsAppState};
@@ -263,7 +263,11 @@ fn entered(section: SettingsSection) {
 /// `body` is the height the page has on screen.
 fn page(live: Live, section: SettingsSection, body: ReadSignal<f32>) -> AnyElement {
     match section {
-        SettingsSection::Interface => interface_card(live),
+        SettingsSection::Interface => view()
+            .gap(px(8.))
+            .child(dynamic(move || interface_card(live)))
+            .child(desktop_lock_card(live))
+            .into_element(),
         SettingsSection::Alerts => alerts_page(live),
         SettingsSection::Advanced => advanced_page(live),
         #[cfg(target_os = "macos")]
@@ -356,6 +360,299 @@ fn interface_card(live: Live) -> AnyElement {
         card = card.child(panel_size_row(live));
     }
     card.child(opacity_row(live)).into_element()
+}
+
+/// Desktop Lock card under Interface (`app.toml`): salted long-term
+/// password hash (macOS & Linux) and biometrics-only Touch ID toggle (macOS).
+fn desktop_lock_card(live: Live) -> AnyElement {
+    let has_pw = live.watch(prefs::has_lock_password);
+    let editing = signal(false);
+    let pw = signal(String::new());
+    let confirm = signal(String::new());
+    let err = signal(None::<&'static str>);
+    let confirm_ref = element_ref();
+
+    let cancel_edit = move || {
+        pw.set(String::new());
+        confirm.set(String::new());
+        err.set(None);
+        editing.set(false);
+    };
+
+    let save_edit = move || {
+        let p = pw.get_untracked();
+        let c = confirm.get_untracked();
+        match crate::screenlock::validate_setup(&p, &c) {
+            Ok(()) => {
+                if let Ok(hash) = crate::screenlock::hash_password(&p) {
+                    prefs::set_lock_password_hash(Some(hash));
+                    pw.set(String::new());
+                    confirm.set(String::new());
+                    err.set(None);
+                    editing.set(false);
+                    changed();
+                } else {
+                    err.set(Some("lock.err_empty"));
+                }
+            }
+            Err(crate::screenlock::SetupError::Empty) => err.set(Some("lock.err_empty")),
+            Err(crate::screenlock::SetupError::Mismatch) => err.set(Some("lock.err_mismatch")),
+        }
+    };
+
+    let password_controls = view()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            text(move || {
+                i18n::tr(if has_pw.get() {
+                    "config.lock_password_set"
+                } else {
+                    "config.lock_password_unset"
+                })
+            })
+            .text_size(px(11.))
+            .line_height(widgets::line(11.))
+            .text_color(move || {
+                theme::color(move || {
+                    if has_pw.get() {
+                        palette::text()
+                    } else {
+                        palette::text_dim()
+                    }
+                })
+            }),
+        )
+        .child(when(
+            move || !editing.get() && !has_pw.get(),
+            move || {
+                card_chip(i18n::tr("config.lock_password_set_btn"), false, move || {
+                    err.set(None);
+                    editing.set(true);
+                })
+            },
+        ))
+        .child(when(
+            move || !editing.get() && has_pw.get(),
+            move || {
+                view()
+                    .flex_row()
+                    .flex_none()
+                    .gap(px(4.))
+                    .child(card_chip(
+                        i18n::tr("config.lock_password_change_btn"),
+                        false,
+                        move || {
+                            err.set(None);
+                            editing.set(true);
+                        },
+                    ))
+                    .child(card_chip(
+                        i18n::tr("config.lock_password_clear_btn"),
+                        false,
+                        || {
+                            prefs::set_lock_password_hash(None);
+                            changed();
+                        },
+                    ))
+            },
+        ))
+        .into_element();
+
+    let editor = when(
+        move || editing.get(),
+        move || {
+            let border_b = if cfg!(target_os = "macos") { 1. } else { 0. };
+            view()
+                .px(px(ROW_PAD_X))
+                .pt(px(8.))
+                .pb(px(10.))
+                .gap(px(6.))
+                .border_b(px(border_b))
+                .border_color(theme::color(palette::border_subtle))
+                .child(
+                    view()
+                        .flex_row()
+                        .gap(px(6.))
+                        .child(
+                            lock_input(i18n::tr("lock.password_placeholder"), pw, true, None)
+                                .return_key_type(ReturnKeyType::Next)
+                                .submit_behavior(SubmitBehavior::Submit)
+                                .on_change(move |t: &str| {
+                                    pw.set(t.to_owned());
+                                    err.set(None);
+                                })
+                                .on_submit(move |_: &str| confirm_ref.focus()),
+                        )
+                        .child(
+                            lock_input(
+                                i18n::tr("lock.confirm_placeholder"),
+                                confirm,
+                                false,
+                                Some(&confirm_ref),
+                            )
+                            .return_key_type(ReturnKeyType::Go)
+                            .on_change(move |t: &str| {
+                                confirm.set(t.to_owned());
+                                err.set(None);
+                            })
+                            .on_submit(move |_: &str| save_edit()),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(view().flex_1().min_w(px(0.)).child(when(
+                            move || err.get().is_some(),
+                            move || {
+                                text(move || err.get().map(i18n::tr).unwrap_or_default())
+                                    .text_size(px(11.))
+                                    .line_height(widgets::line(11.))
+                                    .text_color(theme::color(palette::accent_light))
+                            },
+                        )))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_none()
+                                .gap(px(4.))
+                                .child(card_chip(i18n::tr("common.cancel"), false, cancel_edit))
+                                .child(card_chip(
+                                    i18n::tr("config.lock_password_save_btn"),
+                                    false,
+                                    save_edit,
+                                )),
+                        ),
+                )
+        },
+    );
+
+    let mut card = widgets::list_shell()
+        .child(widgets::list_header(
+            widgets::list_title(i18n::tr("config.lock_section")).into_element(),
+            Some(file_note("app.toml")),
+        ))
+        .child(
+            row(
+                i18n::tr("config.lock_password"),
+                Some(i18n::tr("config.lock_password_tip")),
+                password_controls,
+                !cfg!(target_os = "macos"),
+            )
+            .style_when(move || editing.get(), |s| s.border_b(px(0.))),
+        )
+        .child(editor);
+
+    if cfg!(target_os = "macos") {
+        let mode_chips = nsh_base::toggle_group()
+            .flex_row()
+            .flex_none()
+            .gap(px(4.))
+            .child(widgets::option_chip(
+                i18n::tr("config.lock_mode_strict"),
+                move || {
+                    live.track();
+                    prefs::lock_mode() == LockModePref::Strict
+                },
+                || {
+                    prefs::set_lock_mode(LockModePref::Strict);
+                    changed();
+                },
+            ))
+            .child(widgets::option_chip(
+                i18n::tr("config.lock_mode_ai"),
+                move || {
+                    live.track();
+                    prefs::lock_mode() == LockModePref::AiFriendly
+                },
+                || {
+                    prefs::set_lock_mode(LockModePref::AiFriendly);
+                    changed();
+                },
+            ))
+            .into_element();
+
+        let touch_id_control = if crate::screenlock::touch_id_available() {
+            switch(
+                move || {
+                    live.track();
+                    prefs::lock_touch_id()
+                },
+                |on| {
+                    prefs::set_lock_touch_id(on);
+                    changed();
+                },
+            )
+        } else {
+            text(i18n::tr("config.lock_touch_id_unavailable"))
+                .flex_none()
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text_dim))
+                .into_element()
+        };
+        card = card
+            .child(row(
+                i18n::tr("config.lock_mode"),
+                Some(i18n::tr("config.lock_mode_tip")),
+                mode_chips,
+                false,
+            ))
+            .child(row(
+                i18n::tr("config.lock_sleep_display"),
+                Some(i18n::tr("config.lock_sleep_display_tip")),
+                switch(
+                    move || {
+                        live.track();
+                        prefs::lock_sleep_display()
+                    },
+                    |on| {
+                        prefs::set_lock_sleep_display(on);
+                        changed();
+                    },
+                ),
+                false,
+            ))
+            .child(row(
+                i18n::tr("config.lock_touch_id"),
+                Some(i18n::tr("config.lock_touch_id_tip")),
+                touch_id_control,
+                true,
+            ));
+    }
+
+    card.into_element()
+}
+
+fn lock_input(
+    placeholder: String,
+    value: Signal<String>,
+    auto_focus: bool,
+    el_ref: Option<&ElementRef>,
+) -> Input {
+    let mut field = widgets::styled_input(input())
+        .flex_1()
+        .min_w(px(0.))
+        .h(px(26.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .bg(theme::color(palette::inset))
+        .border(px(1.))
+        .border_color(theme::color(palette::border))
+        .focus(|s| s.border_color(theme::color(palette::focus_ring)))
+        .masked(true)
+        .auto_focus(auto_focus)
+        .value(move || value.get())
+        .placeholder(placeholder);
+    if let Some(el_ref) = el_ref {
+        field = field.element_ref(el_ref);
+    }
+    field
 }
 
 /// A card header's file name, which shows the file: where these settings

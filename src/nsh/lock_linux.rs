@@ -194,7 +194,7 @@ fn build_window(idx: usize, monitor: Option<&gdk::Monitor>) -> (gtk::Window, Opt
                     let _ = glib::idle_add_once(disengage);
                 }
                 KeyOutcome::Updated | KeyOutcome::WrongPassword => store::changed(),
-                KeyOutcome::Ignored => {}
+                KeyOutcome::RequestTouchId | KeyOutcome::Ignored => {}
             }
         }
         glib::Propagation::Stop

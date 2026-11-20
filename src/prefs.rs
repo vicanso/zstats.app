@@ -67,6 +67,14 @@ pub enum TrayPref {
     Both,
 }
 
+/// How macOS Desktop Lock treats external automation / screenshots.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LockModePref {
+    #[default]
+    Strict,
+    AiFriendly,
+}
+
 impl LanguagePref {
     /// The value written to / read from `app.toml`; `None` for `System`,
     /// which is expressed by leaving the key out.
@@ -133,6 +141,22 @@ impl TrayPref {
             "memory" => TrayPref::Memory,
             "both" => TrayPref::Both,
             _ => TrayPref::Auto,
+        }
+    }
+}
+
+impl LockModePref {
+    fn key(self) -> Option<&'static str> {
+        match self {
+            LockModePref::Strict => None,
+            LockModePref::AiFriendly => Some("ai_friendly"),
+        }
+    }
+
+    fn from_key(key: &str) -> Self {
+        match key {
+            "ai_friendly" => LockModePref::AiFriendly,
+            _ => LockModePref::Strict,
         }
     }
 }
@@ -204,6 +228,15 @@ static OVERVIEW_DETAIL: AtomicBool = AtomicBool::new(false);
 /// is the one table of names, and an unknown key restores to Overview
 /// there — a second table here could only drift from it.
 static LAST_TAB: RwLock<Option<String>> = RwLock::new(None);
+/// Salted PBKDF2 hash for the long-term desktop lock password (`None` =
+/// unset, asks for a temporary password each time). Never plaintext.
+static LOCK_PASSWORD_HASH: RwLock<Option<String>> = RwLock::new(None);
+/// Whether Touch ID quick unlock is enabled on macOS while locked.
+static LOCK_TOUCH_ID: AtomicBool = AtomicBool::new(false);
+/// Desktop lock mode (`0` = Strict, `1` = AiFriendly).
+static LOCK_MODE: AtomicU8 = AtomicU8::new(0);
+/// Whether to turn off the display while locked (waking on keyboard input).
+static LOCK_SLEEP_DISPLAY: AtomicBool = AtomicBool::new(false);
 /// The size the panel was last dragged to, in whole points: one width,
 /// and a height per Overview form (`panel_width`, `panel_height` and
 /// `panel_height_detail` in the file; 0 = the design's, the file
@@ -488,6 +521,70 @@ pub fn set_analysis_roots(roots: &[PathBuf]) {
     persist();
 }
 
+/// Configured salted hash of the long-term desktop lock password, if any.
+pub fn lock_password_hash() -> Option<String> {
+    LOCK_PASSWORD_HASH
+        .read()
+        .expect("lock password hash pref lock poisoned")
+        .clone()
+}
+
+/// Whether a long-term desktop lock password hash is currently saved.
+pub fn has_lock_password() -> bool {
+    LOCK_PASSWORD_HASH
+        .read()
+        .expect("lock password hash pref lock poisoned")
+        .is_some()
+}
+
+/// Save or clear the salted hash of the long-term desktop lock password.
+pub fn set_lock_password_hash(hash: Option<String>) {
+    *LOCK_PASSWORD_HASH
+        .write()
+        .expect("lock password hash pref lock poisoned") = hash;
+    persist();
+}
+
+/// Whether Touch ID quick unlock is enabled while the desktop lock is active.
+pub fn lock_touch_id() -> bool {
+    LOCK_TOUCH_ID.load(Ordering::Relaxed)
+}
+
+/// Persist the Touch ID quick unlock preference.
+pub fn set_lock_touch_id(on: bool) {
+    LOCK_TOUCH_ID.store(on, Ordering::Relaxed);
+    persist();
+}
+
+/// Configured desktop lock mode (Strict by default).
+pub fn lock_mode() -> LockModePref {
+    match LOCK_MODE.load(Ordering::Relaxed) {
+        1 => LockModePref::AiFriendly,
+        _ => LockModePref::Strict,
+    }
+}
+
+/// Persist the desktop lock mode.
+pub fn set_lock_mode(pref: LockModePref) {
+    let code = match pref {
+        LockModePref::Strict => 0,
+        LockModePref::AiFriendly => 1,
+    };
+    LOCK_MODE.store(code, Ordering::Relaxed);
+    persist();
+}
+
+/// Whether the display should sleep while the desktop lock is active.
+pub fn lock_sleep_display() -> bool {
+    LOCK_SLEEP_DISPLAY.load(Ordering::Relaxed)
+}
+
+/// Persist whether the display sleeps while the desktop lock is active.
+pub fn set_lock_sleep_display(on: bool) {
+    LOCK_SLEEP_DISPLAY.store(on, Ordering::Relaxed);
+    persist();
+}
+
 fn encode_opacity(value: Option<f32>) -> u8 {
     match value {
         Some(v) if v >= OPACITY_MIN => (v.min(OPACITY_MAX) * 100.0).round() as u8,
@@ -529,6 +626,18 @@ pub fn load() {
     DISK_WATCH.store(!prefs.disk_watch_off, Ordering::Relaxed);
     OVERVIEW_DETAIL.store(prefs.overview_detail, Ordering::Relaxed);
     *LAST_TAB.write().expect("last tab pref lock poisoned") = prefs.last_tab;
+    *LOCK_PASSWORD_HASH
+        .write()
+        .expect("lock password hash pref lock poisoned") = prefs.lock_password_hash;
+    LOCK_TOUCH_ID.store(prefs.lock_touch_id, Ordering::Relaxed);
+    LOCK_MODE.store(
+        match prefs.lock_mode {
+            LockModePref::Strict => 0,
+            LockModePref::AiFriendly => 1,
+        },
+        Ordering::Relaxed,
+    );
+    LOCK_SLEEP_DISPLAY.store(prefs.lock_sleep_display, Ordering::Relaxed);
     PANEL_WIDTH.store(prefs.panel_width.unwrap_or(0), Ordering::Relaxed);
     PANEL_HEIGHT.store(prefs.panel_height.unwrap_or(0), Ordering::Relaxed);
     PANEL_HEIGHT_DETAIL.store(prefs.panel_height_detail.unwrap_or(0), Ordering::Relaxed);
@@ -590,6 +699,10 @@ fn persist() {
             .read()
             .expect("last tab pref lock poisoned")
             .clone(),
+        lock_password_hash: lock_password_hash(),
+        lock_touch_id: lock_touch_id(),
+        lock_mode: lock_mode(),
+        lock_sleep_display: lock_sleep_display(),
         panel_width: stored_points(&PANEL_WIDTH),
         panel_height: stored_points(&PANEL_HEIGHT),
         panel_height_detail: stored_points(&PANEL_HEIGHT_DETAIL),
@@ -638,6 +751,14 @@ struct Prefs {
     /// `tab` in the file; `None` is Overview, omitted like every other
     /// default.
     last_tab: Option<String>,
+    /// `lock_password_hash`: salted PBKDF2 hash for one-click desktop lock.
+    lock_password_hash: Option<String>,
+    /// `lock_touch_id = true` in the file; absent is off.
+    lock_touch_id: bool,
+    /// `lock_mode = "ai_friendly"` in the file; absent is Strict.
+    lock_mode: LockModePref,
+    /// `lock_sleep_display = true` in the file; absent is off.
+    lock_sleep_display: bool,
     /// `panel_width`, `panel_height` / `panel_height_detail`: where the
     /// panel was dragged to — one width, a height for each form; `None`
     /// is the design's.
@@ -703,6 +824,19 @@ fn read(dir: &Path) -> Prefs {
             .map(str::trim)
             .filter(|k| !k.is_empty())
             .map(str::to_string),
+        lock_password_hash: get("lock_password_hash")
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
+        lock_touch_id: table
+            .get("lock_touch_id")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+        lock_mode: get("lock_mode").map_or_else(Default::default, LockModePref::from_key),
+        lock_sleep_display: table
+            .get("lock_sleep_display")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
         panel_width: table.get("panel_width").and_then(parse_points),
         panel_height: table.get("panel_height").and_then(parse_points),
         panel_height_detail: table.get("panel_height_detail").and_then(parse_points),
@@ -908,6 +1042,21 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if let Some(key) = prefs.last_tab.as_deref() {
         doc.insert("tab".into(), toml::Value::String(key.into()));
     }
+    if let Some(hash) = prefs.lock_password_hash.as_deref() {
+        doc.insert(
+            "lock_password_hash".into(),
+            toml::Value::String(hash.into()),
+        );
+    }
+    if prefs.lock_touch_id {
+        doc.insert("lock_touch_id".into(), toml::Value::Boolean(true));
+    }
+    if let Some(key) = prefs.lock_mode.key() {
+        doc.insert("lock_mode".into(), toml::Value::String(key.into()));
+    }
+    if prefs.lock_sleep_display {
+        doc.insert("lock_sleep_display".into(), toml::Value::Boolean(true));
+    }
     if let Some(width) = prefs.panel_width {
         doc.insert("panel_width".into(), toml::Value::Integer(width.into()));
     }
@@ -988,6 +1137,10 @@ mod tests {
                 disk_watch_off: true,
                 overview_detail: true,
                 last_tab: Some("alerts".into()),
+                lock_password_hash: Some("pbkdf2-sha256$100000$0011$2233".into()),
+                lock_touch_id: true,
+                lock_mode: LockModePref::AiFriendly,
+                lock_sleep_display: true,
                 panel_width: Some(420),
                 panel_height: Some(612),
                 panel_height_detail: Some(900),
@@ -1016,18 +1169,33 @@ mod tests {
         assert!(back.disk_watch_off);
         assert!(back.overview_detail);
         assert_eq!(back.last_tab.as_deref(), Some("alerts"));
+        assert_eq!(
+            back.lock_password_hash.as_deref(),
+            Some("pbkdf2-sha256$100000$0011$2233")
+        );
+        assert!(back.lock_touch_id);
+        assert_eq!(back.lock_mode, LockModePref::AiFriendly);
+        assert!(back.lock_sleep_display);
         // The switch is stored as the off value only.
         assert!(back.muted);
         let text = fs::read_to_string(file_path(&dir)).unwrap();
         assert!(text.contains("notifications = false"), "{text}");
         assert!(text.contains("disk_watch = false"), "{text}");
         assert!(text.contains("overview_detail = true"), "{text}");
+        assert!(text.contains("lock_password_hash"), "{text}");
+        assert!(text.contains("lock_touch_id = true"), "{text}");
+        assert!(text.contains("lock_mode = \"ai_friendly\""), "{text}");
+        assert!(text.contains("lock_sleep_display = true"), "{text}");
 
         // Both back to System: the keys disappear rather than being written
         // as a third value. Same for an unset opacity.
         write(&dir, &Prefs::default()).unwrap();
         let text = fs::read_to_string(file_path(&dir)).unwrap();
         assert!(!text.contains("language"), "System should omit the key");
+        assert!(!text.contains("lock_password_hash"));
+        assert!(!text.contains("lock_touch_id"));
+        assert!(!text.contains("lock_mode"));
+        assert!(!text.contains("lock_sleep_display"));
         assert!(!text.contains("theme"), "Golden should omit the key");
         assert!(!text.contains("tray"), "Auto should omit the key");
         assert!(

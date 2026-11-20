@@ -260,7 +260,7 @@ fn lock_button(live: Live) -> AnyElement {
         move || locked.get(),
         || i18n::tr("common.lock_screen"),
         widgets::wrap_tooltip(i18n::tr("common.lock_screen_tip")),
-        || root::ask(HostAction::Open(AuxWindow::LockSetup)),
+        || root::ask(HostAction::RequestScreenLock),
     )
 }
 

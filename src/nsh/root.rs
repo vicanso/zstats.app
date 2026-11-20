@@ -49,6 +49,10 @@ pub enum HostAction {
     /// The system's folder panel, for what [`FolderPick`] says; NSH has
     /// none of its own.
     PickFolder(FolderPick),
+    /// Requests desktop locking: engages immediately when a long-term
+    /// password is saved (and Accessibility is granted on macOS), or opens
+    /// `AuxWindow::LockSetup` otherwise.
+    RequestScreenLock,
     /// Engages the full-screen desktop lock overlay after the password has
     /// been armed in `screenlock`.
     EngageScreenLock,

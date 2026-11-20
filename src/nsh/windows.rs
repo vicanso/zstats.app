@@ -20,18 +20,19 @@ use crate::nsh::settings::{self, Settings};
 use crate::nsh::storage::{self, Storage};
 use crate::nsh::{store, theme};
 use crate::{autostart, i18n, palette, placement};
+use block2::RcBlock;
 use nsh_platform_macos::{AppOptions, AppView};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSModalResponseOK, NSOpenPanel, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +53,8 @@ thread_local! {
     /// turn: the last reference to a window must not go inside its own
     /// `windowWillClose:`.
     static CLOSED: RefCell<Vec<Open>> = const { RefCell::new(Vec::new()) };
+    /// Guards against opening a second folder sheet while one is already active.
+    static PICKING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether the disk-space window is open, for the store
@@ -230,26 +233,48 @@ pub fn resize(aux: AuxWindow, width: f64, height: f64) {
 }
 
 /// The system's folder panel, for `pick`: one folder, or several for the
-/// exclusions. Modal, as gpui's `prompt_for_paths` was: the disk-space window
-/// is what asked, and stays put behind it. On the main thread.
+/// exclusions. Presented asynchronously as a sheet on the disk-space window
+/// (or modelessly if no parent is open) so the main thread never blocks on
+/// `runModal()`. On the main thread.
 pub fn pick_folder(pick: FolderPick) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    if PICKING.with(Cell::get) {
+        return;
+    }
+    PICKING.with(|p| p.set(true));
+
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseFiles(false);
     panel.setCanChooseDirectories(true);
     panel.setAllowsMultipleSelection(pick == FolderPick::Exclude);
     panel.setPrompt(Some(&NSString::from_str(&storage::pick_prompt(pick))));
-    if panel.runModal() != NSModalResponseOK {
-        return;
+
+    let panel_done = panel.clone();
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        PICKING.with(|p| p.set(false));
+        if response != NSModalResponseOK {
+            return;
+        }
+        let paths: Vec<PathBuf> = panel_done
+            .URLs()
+            .iter()
+            .filter_map(|url| url.path().map(|p| PathBuf::from(p.to_string())))
+            .collect();
+        storage::picked(pick, paths);
+    });
+
+    let parent = OPEN.with_borrow(|open| {
+        open[slot(AuxWindow::Storage)]
+            .as_ref()
+            .map(|o| o.window.clone())
+    });
+    if let Some(parent) = parent {
+        panel.beginSheetModalForWindow_completionHandler(&parent, &handler);
+    } else {
+        panel.beginWithCompletionHandler(&handler);
     }
-    let paths: Vec<PathBuf> = panel
-        .URLs()
-        .iter()
-        .filter_map(|url| url.path().map(|p| PathBuf::from(p.to_string())))
-        .collect();
-    storage::picked(pick, paths);
 }
 
 /// Closes `aux` if it is open. On the main thread.

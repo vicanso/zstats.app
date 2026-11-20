@@ -231,6 +231,7 @@ pub fn run() {
             }
             HostAction::Restyle => restyle(),
             HostAction::PickFolder(pick) => windows::pick_folder(pick),
+            HostAction::RequestScreenLock => request_screen_lock(),
             HostAction::EngageScreenLock => {
                 let _ = lock_macos::engage();
             }
@@ -678,9 +679,27 @@ fn on_tray(action: TrayAction) {
         // Under the icon, as a click would put it (`show_main_window`).
         TrayAction::Show => show_anchored(),
         TrayAction::Storage => windows::open(AuxWindow::Storage),
-        TrayAction::LockScreen => windows::open(AuxWindow::LockSetup),
+        TrayAction::LockScreen => request_screen_lock(),
         TrayAction::Quit => quit(),
     }
+}
+
+fn request_screen_lock() {
+    if screenlock::is_active() {
+        return;
+    }
+    if !screenlock::refresh_accessibility() {
+        windows::open(AuxWindow::LockSetup);
+        return;
+    }
+    if prefs::has_lock_password() && screenlock::arm_saved() {
+        let _ = lock_macos::engage();
+        if !screenlock::is_active() {
+            windows::open(AuxWindow::LockSetup);
+        }
+        return;
+    }
+    windows::open(AuxWindow::LockSetup);
 }
 
 fn quit() {

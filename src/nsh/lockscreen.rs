@@ -7,10 +7,10 @@ use crate::assets::CustomIconName;
 use crate::color::Rgba;
 use crate::nsh::root::{self, AuxWindow, HostAction, Live};
 use crate::nsh::theme;
-use crate::nsh::widgets;
+use crate::nsh::widgets::{self, CLEAR};
 use crate::screenlock::{self, SetupError};
-use crate::{format, i18n, palette};
-use nsh_base::input;
+use crate::{format, i18n, palette, prefs};
+use nsh_base::{checkbox, input};
 use nsh_core::prelude::*;
 use std::time::{Duration, SystemTime};
 
@@ -29,6 +29,7 @@ pub fn LockSetup() -> impl IntoElement {
 
     let password = signal(String::new());
     let confirm = signal(String::new());
+    let save_permanent = signal(false);
     let err = signal(None::<&'static str>);
     let confirm_ref = element_ref();
 
@@ -63,7 +64,17 @@ pub fn LockSetup() -> impl IntoElement {
             Ok(()) => {
                 err.set(None);
                 screenlock::clear_start_error();
-                if screenlock::arm(&p) {
+                let armed = if save_permanent.get_untracked() {
+                    if let Ok(hash) = screenlock::hash_password(&p) {
+                        prefs::set_lock_password_hash(Some(hash));
+                        screenlock::arm_saved() || screenlock::arm(&p)
+                    } else {
+                        screenlock::arm(&p)
+                    }
+                } else {
+                    screenlock::arm(&p)
+                };
+                if armed {
                     password.set(String::new());
                     confirm.set(String::new());
                     root::ask(HostAction::EngageScreenLock);
@@ -85,6 +96,7 @@ pub fn LockSetup() -> impl IntoElement {
                 setup_view(
                     password,
                     confirm,
+                    save_permanent,
                     err,
                     start_err,
                     confirm_ref,
@@ -136,9 +148,11 @@ fn permission_view(close: impl Fn() + Copy + 'static) -> View {
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup_view(
     password: Signal<String>,
     confirm: Signal<String>,
+    save_permanent: Signal<bool>,
     err: Signal<Option<&'static str>>,
     start_err: Memo<bool>,
     confirm_ref: ElementRef,
@@ -219,7 +233,8 @@ fn setup_view(
                                 screenlock::clear_start_error();
                             })
                             .on_submit(move |_: &str| submit()),
-                        ),
+                        )
+                        .child(save_permanent_row(save_permanent)),
                 )
                 .child(
                     view()
@@ -241,6 +256,47 @@ fn setup_view(
                 .child(secondary_button(i18n::tr("common.cancel"), close))
                 .child(primary_button(i18n::tr("lock.lock_btn"), submit)),
         )
+}
+
+fn save_permanent_row(save_permanent: Signal<bool>) -> AnyElement {
+    let on = move || save_permanent.get();
+    checkbox()
+        .checked(on)
+        .on_change(move |v: &bool| save_permanent.set(*v))
+        .flex_row()
+        .items_center()
+        .gap(px(7.))
+        .pt(px(2.))
+        .focus_visible(widgets::focus_ring)
+        .indicator_style(move |s| {
+            s.flex_none()
+                .w(px(14.))
+                .h(px(14.))
+                .rounded(px(3.))
+                .border(px(1.))
+                .border_color(move || {
+                    theme::color(move || {
+                        if on() {
+                            palette::primary()
+                        } else {
+                            palette::border()
+                        }
+                    })
+                })
+                .bg(move || theme::color(move || if on() { palette::primary() } else { CLEAR }))
+                .items_center()
+                .justify_center()
+        })
+        .indicator(when(on, || {
+            widgets::icon(CustomIconName::Check, 10., palette::primary_ink)
+        }))
+        .child(
+            text(i18n::tr("lock.save_permanent"))
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text_muted)),
+        )
+        .into_element()
 }
 
 fn password_field(
@@ -418,11 +474,17 @@ pub fn LockOverlay() -> impl IntoElement {
                         .justify_center()
                         .child(
                             text(move || {
-                                let len = snap.get().entered_len;
-                                if len == 0 {
-                                    i18n::tr("lock.overlay_placeholder")
+                                let state = snap.get();
+                                if state.entered_len == 0 {
+                                    if state.touch_id_busy {
+                                        i18n::tr("lock.overlay_touch_id_waiting")
+                                    } else if state.touch_id_enabled {
+                                        i18n::tr("lock.overlay_placeholder_touch_id")
+                                    } else {
+                                        i18n::tr("lock.overlay_placeholder")
+                                    }
                                 } else {
-                                    "•".repeat(len.min(32))
+                                    "•".repeat(state.entered_len.min(32))
                                 }
                             })
                             .number_of_lines(1u32)
@@ -452,10 +514,16 @@ pub fn LockOverlay() -> impl IntoElement {
                     },
                 ))
                 .child(
-                    text(i18n::tr("lock.overlay_hint"))
-                        .text_size(px(10.))
-                        .line_height(widgets::line(10.))
-                        .text_color(theme::color(palette::text_dim)),
+                    text(move || {
+                        if snap.get().touch_id_enabled {
+                            i18n::tr("lock.overlay_hint_touch_id")
+                        } else {
+                            i18n::tr("lock.overlay_hint")
+                        }
+                    })
+                    .text_size(px(10.))
+                    .line_height(widgets::line(10.))
+                    .text_color(theme::color(palette::text_dim)),
                 ),
         )
 }

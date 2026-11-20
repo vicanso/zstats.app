@@ -154,6 +154,7 @@ pub fn run() {
             }
             HostAction::Restyle => restyle(),
             HostAction::PickFolder(pick) => pick_folder(pick),
+            HostAction::RequestScreenLock => request_screen_lock(),
             HostAction::EngageScreenLock => {
                 close_aux(AuxWindow::LockSetup);
                 if with_panel(|panel| panel.window.is_visible()) == Some(true) {
@@ -568,10 +569,29 @@ fn on_tray(action: TrayAction) {
         TrayAction::Toggle(_) => toggle(),
         TrayAction::Show => show(),
         TrayAction::Storage => open_aux(AuxWindow::Storage),
-        TrayAction::LockScreen => open_aux(AuxWindow::LockSetup),
+        TrayAction::LockScreen => request_screen_lock(),
         TrayAction::Quit => quit(),
         TrayAction::HostAppeared => tray::host_appeared(),
     }
+}
+
+fn request_screen_lock() {
+    if screenlock::is_active() {
+        return;
+    }
+    if prefs::has_lock_password() && screenlock::arm_saved() {
+        if with_panel(|panel| panel.window.is_visible()) == Some(true) {
+            hide();
+        }
+        if lock_linux::engage() {
+            return;
+        }
+        screenlock::abort_arm();
+        store::changed();
+        open_aux(AuxWindow::LockSetup);
+        return;
+    }
+    open_aux(AuxWindow::LockSetup);
 }
 
 fn slot(aux: AuxWindow) -> usize {
