@@ -700,7 +700,11 @@ fn top_apps(live: Live, detail: bool) -> AnyElement {
                             }))
                             .child(widgets::info_icon(widgets::live_tooltip(move || {
                                 i18n::tr(if by_cpu() {
-                                    "overview.top_apps_tip"
+                                    if cfg!(target_os = "macos") {
+                                        "overview.top_apps_tip"
+                                    } else {
+                                        "overview.top_apps_tip_linux"
+                                    }
                                 } else {
                                     "overview.rising_tip"
                                 })

@@ -814,7 +814,11 @@ fn expand_block(live: Live, pid: u32) -> View {
                 .mt(px(8.))
                 .child(widgets::note(i18n::tr("apps.members_section")))
                 .child(widgets::info_icon(widgets::wrap_tooltip(i18n::tr(
-                    "apps.members_lead",
+                    if cfg!(target_os = "macos") {
+                        "apps.members_lead"
+                    } else {
+                        "apps.members_lead_linux"
+                    },
                 )))),
         )
         .child(each(
@@ -905,7 +909,11 @@ fn quit_button(pid: u32, x: Memo<Expansion>) -> AnyElement {
         };
         widgets::confirm(
             t!("apps.quit_title", name = display.clone()).to_string(),
-            t!("apps.quit_body", name = display).to_string(),
+            if cfg!(target_os = "macos") {
+                t!("apps.quit_body", name = display).to_string()
+            } else {
+                t!("apps.quit_body_linux", name = display).to_string()
+            },
             i18n::tr("apps.quit_ok"),
             move || {
                 if !terminate::request_quit(pid, &identity) {

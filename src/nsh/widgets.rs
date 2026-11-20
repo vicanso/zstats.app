@@ -495,7 +495,13 @@ fn icon_accessibility_label(name: CustomIconName) -> &'static str {
         CustomIconName::HardDrive => "Show in Hardware",
         CustomIconName::LogOut => "Quit",
         CustomIconName::Close => "Close",
-        CustomIconName::Folder | CustomIconName::FolderOpen => "Reveal in Finder",
+        CustomIconName::Folder | CustomIconName::FolderOpen => {
+            if cfg!(target_os = "macos") {
+                "Reveal in Finder"
+            } else {
+                "Open in File Manager"
+            }
+        }
         CustomIconName::Trash => "Move to Trash",
         CustomIconName::RefreshCw => "Refresh",
         _ => "Action",
