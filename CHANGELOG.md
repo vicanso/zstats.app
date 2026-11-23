@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.2](https://github.com/vicanso/zstats.app/compare/v0.6.1..v0.6.2) - 2026-11-23
+
+### ⛰️  Features
+
+- Replace lock display sleep with blackout and hardware brightness dimming - ([7562855](https://github.com/vicanso/zstats.app/commit/7562855ecc74a6ee090162c0b3cc64e21bb628b4))
+
 ## [0.6.1](https://github.com/vicanso/zstats.app/compare/v0.5.10..v0.6.1) - 2026-11-20
 
 ### ⛰️  Features
