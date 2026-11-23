@@ -413,117 +413,129 @@ pub fn LockOverlay() -> impl IntoElement {
         }
     };
 
+    let black = Rgba {
+        r: 0.,
+        g: 0.,
+        b: 0.,
+        a: 1.0,
+    };
+
     view()
         .size_full()
         .items_center()
         .justify_center()
-        .bg(theme::color(move || backdrop))
+        .bg(move || theme::color(move || if snap.get().dimmed { black } else { backdrop }))
+        .child(when(
+            move || !snap.get().dimmed,
+            move || unlock_card(snap, clock),
+        ))
+}
+
+fn unlock_card(snap: Memo<screenlock::Snapshot>, clock: Signal<String>) -> View {
+    view()
+        .w(px(320.))
+        .rounded(px(16.))
+        .p(px(24.))
+        .gap(px(12.))
+        .items_center()
+        .bg(theme::color(palette::popover))
+        .border(px(1.))
+        .border_color(theme::color(palette::border))
+        .shadow_lg()
         .child(
             view()
-                .w(px(320.))
-                .rounded(px(16.))
-                .p(px(24.))
-                .gap(px(12.))
+                .w(px(44.))
+                .h(px(44.))
+                .rounded_full()
+                .bg(theme::color(palette::inset))
                 .items_center()
-                .bg(theme::color(palette::popover))
+                .justify_center()
+                .child(widgets::icon(CustomIconName::Lock, 20., palette::text)),
+        )
+        .child(
+            text(move || clock.get())
+                .tabular_nums()
+                .text_size(px(36.))
+                .line_height(px(42.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::color(palette::text)),
+        )
+        .child(
+            text(i18n::tr("lock.overlay_title"))
+                .text_size(px(12.))
+                .line_height(widgets::line(12.))
+                .text_color(theme::color(palette::text_muted)),
+        )
+        .child(
+            view()
+                .w_full()
+                .h(px(38.))
+                .px(px(12.))
+                .rounded(px(8.))
+                .bg(theme::color(palette::inset))
                 .border(px(1.))
-                .border_color(theme::color(palette::border))
-                .shadow_lg()
-                .child(
-                    view()
-                        .w(px(44.))
-                        .h(px(44.))
-                        .rounded_full()
-                        .bg(theme::color(palette::inset))
-                        .items_center()
-                        .justify_center()
-                        .child(widgets::icon(CustomIconName::Lock, 20., palette::text)),
-                )
-                .child(
-                    text(move || clock.get())
-                        .tabular_nums()
-                        .text_size(px(36.))
-                        .line_height(px(42.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::color(palette::text)),
-                )
-                .child(
-                    text(i18n::tr("lock.overlay_title"))
-                        .text_size(px(12.))
-                        .line_height(widgets::line(12.))
-                        .text_color(theme::color(palette::text_muted)),
-                )
-                .child(
-                    view()
-                        .w_full()
-                        .h(px(38.))
-                        .px(px(12.))
-                        .rounded(px(8.))
-                        .bg(theme::color(palette::inset))
-                        .border(px(1.))
-                        .border_color(move || {
-                            theme::color(move || {
-                                if snap.get().error {
-                                    palette::accent()
-                                } else {
-                                    palette::focus_ring()
-                                }
-                            })
-                        })
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            text(move || {
-                                let state = snap.get();
-                                if state.entered_len == 0 {
-                                    if state.touch_id_busy {
-                                        i18n::tr("lock.overlay_touch_id_waiting")
-                                    } else if state.touch_id_enabled {
-                                        i18n::tr("lock.overlay_placeholder_touch_id")
-                                    } else {
-                                        i18n::tr("lock.overlay_placeholder")
-                                    }
-                                } else {
-                                    "•".repeat(state.entered_len.min(32))
-                                }
-                            })
-                            .number_of_lines(1u32)
-                            .text_size(px(11.))
-                            .style_when(
-                                move || snap.get().entered_len > 0,
-                                |s| s.text_size(px(16.)).font_weight(FontWeight::BOLD),
-                            )
-                            .text_color(move || {
-                                theme::color(move || {
-                                    if snap.get().entered_len == 0 {
-                                        palette::text_dim()
-                                    } else {
-                                        palette::text()
-                                    }
-                                })
-                            }),
-                        ),
-                )
-                .child(when(
-                    move || snap.get().error,
-                    || {
-                        text(i18n::tr("lock.overlay_wrong"))
-                            .text_size(px(11.))
-                            .line_height(widgets::line(11.))
-                            .text_color(theme::color(palette::accent_light))
-                    },
-                ))
-                .child(
-                    text(move || {
-                        if snap.get().touch_id_enabled {
-                            i18n::tr("lock.overlay_hint_touch_id")
+                .border_color(move || {
+                    theme::color(move || {
+                        if snap.get().error {
+                            palette::accent()
                         } else {
-                            i18n::tr("lock.overlay_hint")
+                            palette::focus_ring()
                         }
                     })
-                    .text_size(px(10.))
-                    .line_height(widgets::line(10.))
-                    .text_color(theme::color(palette::text_dim)),
+                })
+                .items_center()
+                .justify_center()
+                .child(
+                    text(move || {
+                        let state = snap.get();
+                        if state.entered_len == 0 {
+                            if state.touch_id_busy {
+                                i18n::tr("lock.overlay_touch_id_waiting")
+                            } else if state.touch_id_enabled {
+                                i18n::tr("lock.overlay_placeholder_touch_id")
+                            } else {
+                                i18n::tr("lock.overlay_placeholder")
+                            }
+                        } else {
+                            "•".repeat(state.entered_len.min(32))
+                        }
+                    })
+                    .number_of_lines(1u32)
+                    .text_size(px(11.))
+                    .style_when(
+                        move || snap.get().entered_len > 0,
+                        |s| s.text_size(px(16.)).font_weight(FontWeight::BOLD),
+                    )
+                    .text_color(move || {
+                        theme::color(move || {
+                            if snap.get().entered_len == 0 {
+                                palette::text_dim()
+                            } else {
+                                palette::text()
+                            }
+                        })
+                    }),
                 ),
+        )
+        .child(when(
+            move || snap.get().error,
+            || {
+                text(i18n::tr("lock.overlay_wrong"))
+                    .text_size(px(11.))
+                    .line_height(widgets::line(11.))
+                    .text_color(theme::color(palette::accent_light))
+            },
+        ))
+        .child(
+            text(move || {
+                if snap.get().touch_id_enabled {
+                    i18n::tr("lock.overlay_hint_touch_id")
+                } else {
+                    i18n::tr("lock.overlay_hint")
+                }
+            })
+            .text_size(px(10.))
+            .line_height(widgets::line(10.))
+            .text_color(theme::color(palette::text_dim)),
         )
 }

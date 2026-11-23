@@ -489,6 +489,7 @@ pub fn on_tick(battery: Option<&BatterySnapshot>, fx: &mut dyn Effects) {
 /// Synchronous exit cleanup: restores `disablesleep 0` at most once, and only
 /// when zstats itself turned `disablesleep` on during this session.
 pub fn restore_on_exit() {
+    crate::displaydim::release_sync();
     let should_restore = {
         let mut state = STATE
             .lock()

@@ -235,8 +235,8 @@ static LOCK_PASSWORD_HASH: RwLock<Option<String>> = RwLock::new(None);
 static LOCK_TOUCH_ID: AtomicBool = AtomicBool::new(false);
 /// Desktop lock mode (`0` = Strict, `1` = AiFriendly).
 static LOCK_MODE: AtomicU8 = AtomicU8::new(0);
-/// Whether to turn off the display while locked (waking on keyboard input).
-static LOCK_SLEEP_DISPLAY: AtomicBool = AtomicBool::new(false);
+/// Whether to black out & dim displays while locked on macOS.
+static LOCK_DIM_DISPLAY: AtomicBool = AtomicBool::new(false);
 /// The size the panel was last dragged to, in whole points: one width,
 /// and a height per Overview form (`panel_width`, `panel_height` and
 /// `panel_height_detail` in the file; 0 = the design's, the file
@@ -574,14 +574,14 @@ pub fn set_lock_mode(pref: LockModePref) {
     persist();
 }
 
-/// Whether the display should sleep while the desktop lock is active.
-pub fn lock_sleep_display() -> bool {
-    LOCK_SLEEP_DISPLAY.load(Ordering::Relaxed)
+/// Whether displays black out & dim to 0 brightness while locked on macOS.
+pub fn lock_dim_display() -> bool {
+    LOCK_DIM_DISPLAY.load(Ordering::Relaxed)
 }
 
-/// Persist whether the display sleeps while the desktop lock is active.
-pub fn set_lock_sleep_display(on: bool) {
-    LOCK_SLEEP_DISPLAY.store(on, Ordering::Relaxed);
+/// Persist whether displays black out & dim to 0 brightness while locked.
+pub fn set_lock_dim_display(on: bool) {
+    LOCK_DIM_DISPLAY.store(on, Ordering::Relaxed);
     persist();
 }
 
@@ -637,7 +637,7 @@ pub fn load() {
         },
         Ordering::Relaxed,
     );
-    LOCK_SLEEP_DISPLAY.store(prefs.lock_sleep_display, Ordering::Relaxed);
+    LOCK_DIM_DISPLAY.store(prefs.lock_dim_display, Ordering::Relaxed);
     PANEL_WIDTH.store(prefs.panel_width.unwrap_or(0), Ordering::Relaxed);
     PANEL_HEIGHT.store(prefs.panel_height.unwrap_or(0), Ordering::Relaxed);
     PANEL_HEIGHT_DETAIL.store(prefs.panel_height_detail.unwrap_or(0), Ordering::Relaxed);
@@ -702,7 +702,7 @@ fn persist() {
         lock_password_hash: lock_password_hash(),
         lock_touch_id: lock_touch_id(),
         lock_mode: lock_mode(),
-        lock_sleep_display: lock_sleep_display(),
+        lock_dim_display: lock_dim_display(),
         panel_width: stored_points(&PANEL_WIDTH),
         panel_height: stored_points(&PANEL_HEIGHT),
         panel_height_detail: stored_points(&PANEL_HEIGHT_DETAIL),
@@ -757,8 +757,8 @@ struct Prefs {
     lock_touch_id: bool,
     /// `lock_mode = "ai_friendly"` in the file; absent is Strict.
     lock_mode: LockModePref,
-    /// `lock_sleep_display = true` in the file; absent is off.
-    lock_sleep_display: bool,
+    /// `lock_dim_display = true` in the file; absent is off.
+    lock_dim_display: bool,
     /// `panel_width`, `panel_height` / `panel_height_detail`: where the
     /// panel was dragged to — one width, a height for each form; `None`
     /// is the design's.
@@ -833,8 +833,8 @@ fn read(dir: &Path) -> Prefs {
             .and_then(toml::Value::as_bool)
             .unwrap_or(false),
         lock_mode: get("lock_mode").map_or_else(Default::default, LockModePref::from_key),
-        lock_sleep_display: table
-            .get("lock_sleep_display")
+        lock_dim_display: table
+            .get("lock_dim_display")
             .and_then(toml::Value::as_bool)
             .unwrap_or(false),
         panel_width: table.get("panel_width").and_then(parse_points),
@@ -1054,8 +1054,8 @@ fn write(dir: &Path, prefs: &Prefs) -> io::Result<()> {
     if let Some(key) = prefs.lock_mode.key() {
         doc.insert("lock_mode".into(), toml::Value::String(key.into()));
     }
-    if prefs.lock_sleep_display {
-        doc.insert("lock_sleep_display".into(), toml::Value::Boolean(true));
+    if prefs.lock_dim_display {
+        doc.insert("lock_dim_display".into(), toml::Value::Boolean(true));
     }
     if let Some(width) = prefs.panel_width {
         doc.insert("panel_width".into(), toml::Value::Integer(width.into()));
@@ -1140,7 +1140,7 @@ mod tests {
                 lock_password_hash: Some("pbkdf2-sha256$100000$0011$2233".into()),
                 lock_touch_id: true,
                 lock_mode: LockModePref::AiFriendly,
-                lock_sleep_display: true,
+                lock_dim_display: true,
                 panel_width: Some(420),
                 panel_height: Some(612),
                 panel_height_detail: Some(900),
@@ -1175,7 +1175,7 @@ mod tests {
         );
         assert!(back.lock_touch_id);
         assert_eq!(back.lock_mode, LockModePref::AiFriendly);
-        assert!(back.lock_sleep_display);
+        assert!(back.lock_dim_display);
         // The switch is stored as the off value only.
         assert!(back.muted);
         let text = fs::read_to_string(file_path(&dir)).unwrap();
@@ -1185,7 +1185,7 @@ mod tests {
         assert!(text.contains("lock_password_hash"), "{text}");
         assert!(text.contains("lock_touch_id = true"), "{text}");
         assert!(text.contains("lock_mode = \"ai_friendly\""), "{text}");
-        assert!(text.contains("lock_sleep_display = true"), "{text}");
+        assert!(text.contains("lock_dim_display = true"), "{text}");
 
         // Both back to System: the keys disappear rather than being written
         // as a third value. Same for an unset opacity.
@@ -1195,7 +1195,7 @@ mod tests {
         assert!(!text.contains("lock_password_hash"));
         assert!(!text.contains("lock_touch_id"));
         assert!(!text.contains("lock_mode"));
-        assert!(!text.contains("lock_sleep_display"));
+        assert!(!text.contains("lock_dim_display"));
         assert!(!text.contains("theme"), "Golden should omit the key");
         assert!(!text.contains("tray"), "Auto should omit the key");
         assert!(

@@ -45,6 +45,7 @@ mod color;
 mod dirmap;
 mod diskscan;
 mod diskwatch;
+mod displaydim;
 mod dupes;
 mod finder;
 mod format;

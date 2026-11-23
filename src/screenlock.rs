@@ -71,6 +71,7 @@ pub struct Snapshot {
     pub wrong_attempts: u32,
     pub touch_id_enabled: bool,
     pub touch_id_busy: bool,
+    pub dimmed: bool,
 }
 
 /// Overwrites every byte in `buf` with volatile writes before clearing so
@@ -284,6 +285,7 @@ struct LockState {
     wrong_attempts: u32,
     touch_id_enabled: bool,
     touch_id_busy: bool,
+    dimmed: bool,
     last_start_error: bool,
     display_guard: Option<DisplayAwakeGuard>,
 }
@@ -305,6 +307,7 @@ impl LockState {
         self.wrong_attempts = 0;
         self.touch_id_enabled = touch_id;
         self.touch_id_busy = false;
+        self.dimmed = false;
         self.last_start_error = false;
         self.display_guard = acquire_guard();
         self.active = true;
@@ -327,6 +330,7 @@ impl LockState {
         self.wrong_attempts = 0;
         self.touch_id_enabled = touch_id;
         self.touch_id_busy = false;
+        self.dimmed = false;
         self.last_start_error = false;
         self.display_guard = acquire_guard();
         self.active = true;
@@ -341,6 +345,7 @@ impl LockState {
         self.wrong_attempts = 0;
         self.touch_id_enabled = false;
         self.touch_id_busy = false;
+        self.dimmed = false;
         self.last_start_error = true;
         self.display_guard = None;
     }
@@ -353,6 +358,7 @@ impl LockState {
         self.wrong_attempts = 0;
         self.touch_id_enabled = false;
         self.touch_id_busy = false;
+        self.dimmed = false;
         self.display_guard = None;
     }
 
@@ -421,6 +427,7 @@ impl LockState {
             wrong_attempts: self.wrong_attempts,
             touch_id_enabled: self.touch_id_enabled,
             touch_id_busy: self.touch_id_busy,
+            dimmed: self.dimmed,
         }
     }
 }
@@ -433,6 +440,7 @@ static STATE: Mutex<LockState> = Mutex::new(LockState {
     wrong_attempts: 0,
     touch_id_enabled: false,
     touch_id_busy: false,
+    dimmed: false,
     last_start_error: false,
     display_guard: None,
 });
@@ -442,12 +450,9 @@ static STATE: Mutex<LockState> = Mutex::new(LockState {
 /// or the lock is already active.
 pub fn arm(password: &str) -> bool {
     let touch_id = crate::prefs::lock_touch_id() && touch_id_available();
-    let sleep_display = sleep_display_enabled();
     let ok = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.arm(password, touch_id, || {
-            DisplayAwakeGuard::acquire(sleep_display)
-        })
+        state.arm(password, touch_id, DisplayAwakeGuard::acquire)
     };
     if ok {
         tracing::info!("screen lock engaged");
@@ -465,10 +470,9 @@ pub fn arm_saved() -> bool {
         return false;
     }
     let touch_id = crate::prefs::lock_touch_id() && touch_id_available();
-    let sleep_display = sleep_display_enabled();
     let ok = {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.arm_hash(hash, touch_id, || DisplayAwakeGuard::acquire(sleep_display))
+        state.arm_hash(hash, touch_id, DisplayAwakeGuard::acquire)
     };
     if ok {
         tracing::info!("screen lock engaged (saved password)");
@@ -561,63 +565,31 @@ pub fn ai_friendly() -> bool {
     cfg!(target_os = "macos") && crate::prefs::lock_mode() == crate::prefs::LockModePref::AiFriendly
 }
 
-/// Whether the display should turn off while locked on macOS.
-pub fn sleep_display_enabled() -> bool {
-    cfg!(target_os = "macos") && crate::prefs::lock_sleep_display()
+/// Whether displays should black out & dim to 0 brightness while locked on macOS.
+pub fn dim_display_enabled() -> bool {
+    cfg!(target_os = "macos") && crate::prefs::lock_dim_display()
 }
 
-/// Turns off displays immediately (`pmset displaysleepnow`) while keeping the
-/// system awake via `PreventUserIdleSystemSleep`.
-pub fn sleep_display_now() {
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(mut child) = std::process::Command::new("/usr/bin/pmset")
-            .arg("displaysleepnow")
-            .spawn()
-        {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
+/// Updates the lock blackout/dimmed state while active. Returns `true` if changed.
+pub fn set_dimmed(dimmed: bool) -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.active || state.dimmed == dimmed {
+        return false;
     }
+    state.dimmed = dimmed;
+    true
 }
 
-/// Wakes the display on user keyboard input while locked.
-pub fn wake_display_now() {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_core_foundation::CFString;
-        use objc2_io_kit::{
-            IOPMAssertionDeclareUserActivity, IOPMUserActiveType, kIOPMNullAssertionID,
-        };
-
-        let name = CFString::from_static_str("zstats desktop lock wake");
-        let mut id = kIOPMNullAssertionID;
-        // SAFETY: static `CFString` outlives the call and `id` is a valid out-pointer.
-        let _ = unsafe {
-            IOPMAssertionDeclareUserActivity(Some(&name), IOPMUserActiveType::Local, &mut id)
-        };
-    }
-}
-
-/// Whether the main display is currently asleep.
-pub fn main_display_asleep() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID};
-
-        CGDisplayIsAsleep(CGMainDisplayID())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+/// Whether the lock screen is currently in the black-out dimmed state.
+pub fn is_dimmed() -> bool {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.active && state.dimmed
 }
 
 // ---- independent display-awake guard ---------------------------------------
 
-/// Holds the display (or system when `sleep_display` is enabled) awake while
-/// the desktop lock is active without touching the user's timed `awake` menu.
+/// Holds the display awake while the desktop lock is active without touching
+/// the user's timed `awake` menu.
 struct DisplayAwakeGuard {
     #[cfg(target_os = "macos")]
     assertion_id: u32,
@@ -626,7 +598,7 @@ struct DisplayAwakeGuard {
 }
 
 impl DisplayAwakeGuard {
-    fn acquire(sleep_display: bool) -> Option<Self> {
+    fn acquire() -> Option<Self> {
         #[cfg(target_os = "macos")]
         {
             use objc2_core_foundation::CFString;
@@ -634,11 +606,7 @@ impl DisplayAwakeGuard {
                 IOPMAssertionCreateWithName, kIOPMAssertionLevelOn, kIOPMNullAssertionID,
             };
 
-            let kind = CFString::from_static_str(if sleep_display {
-                "PreventUserIdleSystemSleep"
-            } else {
-                "PreventUserIdleDisplaySleep"
-            });
+            let kind = CFString::from_static_str("PreventUserIdleDisplaySleep");
             let name = CFString::from_static_str("zstats desktop lock");
             let mut id = kIOPMNullAssertionID;
             // SAFETY: static CFStrings outlive the call and `id` is a valid out-pointer.
@@ -658,7 +626,6 @@ impl DisplayAwakeGuard {
         }
         #[cfg(target_os = "linux")]
         {
-            let _ = sleep_display;
             use zbus::blocking::{Connection, Proxy};
 
             let inhibit = || -> zbus::Result<zbus::zvariant::OwnedFd> {
@@ -689,7 +656,6 @@ impl DisplayAwakeGuard {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = sleep_display;
             None
         }
     }
@@ -855,6 +821,7 @@ mod tests {
                 wrong_attempts: 0,
                 touch_id_enabled: false,
                 touch_id_busy: false,
+                dimmed: false,
             }
         );
 
@@ -875,6 +842,7 @@ mod tests {
                 wrong_attempts: 1,
                 touch_id_enabled: false,
                 touch_id_busy: false,
+                dimmed: false,
             }
         );
 
@@ -937,7 +905,24 @@ mod tests {
         s.abort_arm();
         assert!(!s.active);
         assert!(s.last_start_error);
+        assert!(!s.dimmed);
         assert!(s.secret.is_empty());
         assert!(s.attempt.is_empty());
+    }
+
+    #[test]
+    fn dimmed_flag_resets_on_abort_and_disarm() {
+        let mut s = LockState::default();
+        assert!(s.arm("secret", false, || None));
+        assert!(!s.snapshot().dimmed);
+        s.dimmed = true;
+        assert!(s.snapshot().dimmed);
+        s.force_disarm();
+        assert!(!s.snapshot().dimmed);
+
+        assert!(s.arm("secret", false, || None));
+        s.dimmed = true;
+        s.abort_arm();
+        assert!(!s.snapshot().dimmed);
     }
 }

@@ -604,15 +604,15 @@ fn desktop_lock_card(live: Live) -> AnyElement {
                 false,
             ))
             .child(row(
-                i18n::tr("config.lock_sleep_display"),
-                Some(i18n::tr("config.lock_sleep_display_tip")),
+                i18n::tr("config.lock_dim_display"),
+                Some(i18n::tr("config.lock_dim_display_tip")),
                 switch(
                     move || {
                         live.track();
-                        prefs::lock_sleep_display()
+                        prefs::lock_dim_display()
                     },
                     |on| {
-                        prefs::set_lock_sleep_display(on);
+                        prefs::set_lock_dim_display(on);
                         changed();
                     },
                 ),

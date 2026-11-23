@@ -46,8 +46,8 @@ unsafe extern "C" {}
 /// Popup menu window level: sits above Menu Bar (24), Dock (20), and all
 /// normal windows while letting the system Touch ID sheet appear on top.
 const TOUCH_ID_OVERLAY_LEVEL: isize = 101;
-const DISPLAY_IDLE_SLEEP_SECS: u64 = 15;
-static SLEEP_GEN: AtomicU64 = AtomicU64::new(0);
+const DISPLAY_IDLE_DIM_SECS: u64 = 15;
+static DIM_GEN: AtomicU64 = AtomicU64::new(0);
 
 const EVENT_MASK: CGEventMask = (1 << CGEventType::LeftMouseDown.0)
     | (1 << CGEventType::LeftMouseUp.0)
@@ -153,6 +153,7 @@ struct ActiveLock {
     run_loop_source: CFRetained<CFRunLoopSource>,
     windows: Vec<Retained<LockOverlayWindow>>,
     primary_view: Option<Rc<AppView>>,
+    secondary_tints: Vec<Retained<NSView>>,
     observer: Retained<ScreenObserver>,
     touch_id_ctx: Option<Retained<AnyObject>>,
 }
@@ -160,6 +161,7 @@ struct ActiveLock {
 struct RetiredOverlay {
     _windows: Vec<Retained<LockOverlayWindow>>,
     _primary_view: Option<Rc<AppView>>,
+    _secondary_tints: Vec<Retained<NSView>>,
 }
 
 thread_local! {
@@ -228,10 +230,15 @@ pub fn engage() -> bool {
     host::with_host(host::hide);
     windows::close(root::AuxWindow::LockSetup);
 
-    let (windows, primary_view) = build_overlay_windows(mtm);
+    let dim = screenlock::dim_display_enabled();
+    if dim {
+        screenlock::set_dimmed(true);
+    }
+
+    let overlay = build_overlay_windows(mtm, dim);
     let app = NSApplication::sharedApplication(mtm);
     app.activate();
-    if let Some(primary) = windows.first() {
+    if let Some(primary) = overlay.windows.first() {
         primary.makeKeyAndOrderFront(None);
     }
 
@@ -263,34 +270,33 @@ pub fn engage() -> bool {
         *slot = Some(ActiveLock {
             tap_port,
             run_loop_source,
-            windows,
-            primary_view,
+            windows: overlay.windows,
+            primary_view: overlay.primary_view,
+            secondary_tints: overlay.secondary_tints,
             observer,
             touch_id_ctx: None,
         });
     });
 
     store::changed();
-    if screenlock::sleep_display_enabled() {
-        let epoch = SLEEP_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
-            dispatch2::DispatchQueue::main().exec_async(move || {
-                if SLEEP_GEN.load(Ordering::Relaxed) == epoch && screenlock::is_active() {
-                    screenlock::sleep_display_now();
-                }
-            });
-        });
+    if dim {
+        crate::displaydim::dim_async();
     }
     true
 }
 
-fn build_overlay_windows(
-    mtm: MainThreadMarker,
-) -> (Vec<Retained<LockOverlayWindow>>, Option<Rc<AppView>>) {
+struct OverlayBundle {
+    windows: Vec<Retained<LockOverlayWindow>>,
+    primary_view: Option<Rc<AppView>>,
+    secondary_tints: Vec<Retained<NSView>>,
+}
+
+fn build_overlay_windows(mtm: MainThreadMarker, dimmed: bool) -> OverlayBundle {
     let screens = NSScreen::screens(mtm);
     let mut windows = Vec::with_capacity(screens.count().max(1));
     let mut primary_view = None;
+    let mut secondary_tints = Vec::new();
+    let secondary_alpha = if dimmed { 1.0 } else { 0.52 };
 
     for (idx, screen) in screens.iter().enumerate() {
         let frame = screen.frame();
@@ -335,18 +341,39 @@ fn build_overlay_windows(
                     | NSAutoresizingMaskOptions::ViewHeightSizable,
             );
             if let Some(layer) = tint.layer() {
-                let dark = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.52);
+                let dark =
+                    NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, secondary_alpha);
                 layer.setBackgroundColor(Some(&dark.CGColor()));
             }
             glass.addSubview(&tint);
             window.setContentView(Some(&glass));
+            secondary_tints.push(tint);
         }
 
         window.orderFrontRegardless();
         windows.push(window);
     }
 
-    (windows, primary_view)
+    OverlayBundle {
+        windows,
+        primary_view,
+        secondary_tints,
+    }
+}
+
+fn set_secondary_tints_blackout(blackout: bool) {
+    let alpha = if blackout { 1.0 } else { 0.52 };
+    let color = NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, alpha);
+    let cg = color.CGColor();
+    LOCK.with_borrow(|slot| {
+        if let Some(lock) = slot {
+            for tint in &lock.secondary_tints {
+                if let Some(layer) = tint.layer() {
+                    layer.setBackgroundColor(Some(&cg));
+                }
+            }
+        }
+    });
 }
 
 fn rebuild_overlays() {
@@ -356,27 +383,31 @@ fn rebuild_overlays() {
     if !screenlock::is_active() {
         return;
     }
+    let dimmed = screenlock::is_dimmed();
     let old = LOCK.with_borrow_mut(|slot| {
         slot.as_mut().map(|lock| {
             let prev_windows = std::mem::take(&mut lock.windows);
             let prev_view = lock.primary_view.take();
+            let prev_tints = std::mem::take(&mut lock.secondary_tints);
             for w in &prev_windows {
                 w.orderOut(None);
             }
-            let (next_windows, next_view) = build_overlay_windows(mtm);
+            let next = build_overlay_windows(mtm, dimmed);
             if lock.touch_id_ctx.is_some() {
-                for w in &next_windows {
+                for w in &next.windows {
                     w.setLevel(TOUCH_ID_OVERLAY_LEVEL);
                 }
             }
-            if let Some(primary) = next_windows.first() {
+            if let Some(primary) = next.windows.first() {
                 primary.makeKeyAndOrderFront(None);
             }
-            lock.windows = next_windows;
-            lock.primary_view = next_view;
+            lock.windows = next.windows;
+            lock.primary_view = next.primary_view;
+            lock.secondary_tints = next.secondary_tints;
             RetiredOverlay {
                 _windows: prev_windows,
                 _primary_view: prev_view,
+                _secondary_tints: prev_tints,
             }
         })
     });
@@ -408,7 +439,8 @@ fn clear_app_view_ground(view: &AppView) {
 /// Disengages the macOS desktop lock on the main thread and restores system
 /// presentation options.
 pub fn disengage() {
-    SLEEP_GEN.fetch_add(1, Ordering::Relaxed);
+    DIM_GEN.fetch_add(1, Ordering::Relaxed);
+    crate::displaydim::release_async();
     let taken = LOCK.with_borrow_mut(Option::take);
     if let Some(lock) = taken {
         if let Some(mut ctx) = lock.touch_id_ctx {
@@ -447,6 +479,7 @@ pub fn disengage() {
             list.push(RetiredOverlay {
                 _windows: lock.windows,
                 _primary_view: lock.primary_view,
+                _secondary_tints: lock.secondary_tints,
             });
         });
         dispatch2::DispatchQueue::main().exec_async(|| {
@@ -489,8 +522,8 @@ unsafe extern "C-unwind" fn event_tap_callback(
     }
 
     if event_type == CGEventType::KeyDown {
-        if screenlock::sleep_display_enabled() && screenlock::main_display_asleep() {
-            dispatch2::DispatchQueue::main().exec_async(wake_and_schedule_resleep);
+        if screenlock::is_dimmed() {
+            dispatch2::DispatchQueue::main().exec_async(wake_and_schedule_redim);
             return ptr::null_mut();
         }
 
@@ -546,8 +579,8 @@ fn handle_key_on_main(inputs: Vec<KeyInput>) {
     if !screenlock::is_active() {
         return;
     }
-    if screenlock::sleep_display_enabled() {
-        schedule_resleep();
+    if screenlock::dim_display_enabled() {
+        schedule_redim();
     }
     for input in inputs {
         if touch_id_active()
@@ -577,25 +610,32 @@ fn handle_key_on_main(inputs: Vec<KeyInput>) {
     }
 }
 
-fn wake_and_schedule_resleep() {
+fn wake_and_schedule_redim() {
     if !screenlock::is_active() {
         return;
     }
-    screenlock::wake_display_now();
-    schedule_resleep();
+    if screenlock::set_dimmed(false) {
+        set_secondary_tints_blackout(false);
+        store::changed();
+        crate::displaydim::wake_async();
+    }
+    schedule_redim();
 }
 
-fn schedule_resleep() {
-    let epoch = SLEEP_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+fn schedule_redim() {
+    let epoch = DIM_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(DISPLAY_IDLE_SLEEP_SECS));
+        std::thread::sleep(Duration::from_secs(DISPLAY_IDLE_DIM_SECS));
         dispatch2::DispatchQueue::main().exec_async(move || {
-            if SLEEP_GEN.load(Ordering::Relaxed) == epoch
+            if DIM_GEN.load(Ordering::Relaxed) == epoch
                 && screenlock::is_active()
                 && !touch_id_active()
-                && !screenlock::main_display_asleep()
+                && !screenlock::is_dimmed()
+                && screenlock::set_dimmed(true)
             {
-                screenlock::sleep_display_now();
+                set_secondary_tints_blackout(true);
+                store::changed();
+                crate::displaydim::dim_async();
             }
         });
     });
@@ -691,8 +731,8 @@ fn on_touch_id_result(success: bool) {
     }
 
     screenlock::finish_touch_id();
-    if screenlock::sleep_display_enabled() {
-        schedule_resleep();
+    if screenlock::dim_display_enabled() {
+        schedule_redim();
     }
     LOCK.with_borrow(|slot| {
         if let Some(lock) = slot
@@ -714,8 +754,8 @@ fn cancel_touch_id() {
     }
     set_overlay_level(CGShieldingWindowLevel() as isize);
     screenlock::finish_touch_id();
-    if screenlock::sleep_display_enabled() {
-        schedule_resleep();
+    if screenlock::dim_display_enabled() {
+        schedule_redim();
     }
     store::changed();
 }
