@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.3](https://github.com/vicanso/zstats.app/compare/v0.6.2..v0.6.3) - 2026-11-24
+
+### 🐛 Bug Fixes
+
+- *(macos)* Keep Touch ID toggle in clamshell mode and hide cursor while dimmed - ([c27045b](https://github.com/vicanso/zstats.app/commit/c27045be29471c88ec68d41eeb15b332ef95f1d7))
+
 ## [0.6.2](https://github.com/vicanso/zstats.app/compare/v0.6.1..v0.6.2) - 2026-11-23
 
 ### ⛰️  Features
