@@ -745,9 +745,20 @@ pub fn request_accessibility() {
 #[link(name = "LocalAuthentication", kind = "framework")]
 unsafe extern "C" {}
 
-/// Whether Touch ID (biometrics only — never falling back to login password)
-/// is available and enrolled on this machine.
-pub fn touch_id_available() -> bool {
+/// Availability state of Touch ID on this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchIdStatus {
+    /// Touch ID hardware is present and ready to evaluate right now.
+    Ready,
+    /// Touch ID hardware exists on this Mac, but cannot evaluate right now
+    /// (for example in closed clamshell mode, unenrolled, or locked out).
+    TemporarilyUnavailable,
+    /// This Mac has no Touch ID hardware (or non-macOS).
+    Unsupported,
+}
+
+/// Current Touch ID hardware & policy readiness on this machine.
+pub fn touch_id_status() -> TouchIdStatus {
     #[cfg(target_os = "macos")]
     {
         use objc2::msg_send;
@@ -757,24 +768,39 @@ pub fn touch_id_available() -> bool {
 
         autoreleasepool(|_| {
             let Some(cls) = AnyClass::get(c"LAContext") else {
-                return false;
+                return TouchIdStatus::Unsupported;
             };
             // SAFETY: `LAContext` is a standard `LocalAuthentication` NSObject subclass.
             let ctx: Option<Retained<AnyObject>> = unsafe { msg_send![cls, new] };
             let Some(ctx) = ctx else {
-                return false;
+                return TouchIdStatus::Unsupported;
             };
             let mut err: *mut NSError = ptr::null_mut();
             // Policy 1 = `LAPolicyDeviceOwnerAuthenticationWithBiometrics`.
             // SAFETY: `ctx` is a live `LAContext`; `err` is a valid out-pointer.
             let ok: bool = unsafe { msg_send![&*ctx, canEvaluatePolicy: 1_isize, error: &mut err] };
-            ok
+            if ok {
+                return TouchIdStatus::Ready;
+            }
+            // SAFETY: `biometryType` returns `LABiometryType` (`0` = None).
+            let biometry_type: isize = unsafe { msg_send![&*ctx, biometryType] };
+            if biometry_type != 0 {
+                TouchIdStatus::TemporarilyUnavailable
+            } else {
+                TouchIdStatus::Unsupported
+            }
         })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        false
+        TouchIdStatus::Unsupported
     }
+}
+
+/// Whether Touch ID (biometrics only — never falling back to login password)
+/// is available and enrolled right now.
+pub fn touch_id_available() -> bool {
+    touch_id_status() == TouchIdStatus::Ready
 }
 
 #[cfg(test)]

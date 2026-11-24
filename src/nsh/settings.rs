@@ -577,7 +577,7 @@ fn desktop_lock_card(live: Live) -> AnyElement {
             ))
             .into_element();
 
-        let touch_id_control = if crate::screenlock::touch_id_available() {
+        let touch_id_switch = || {
             switch(
                 move || {
                     live.track();
@@ -588,13 +588,30 @@ fn desktop_lock_card(live: Live) -> AnyElement {
                     changed();
                 },
             )
-        } else {
-            text(i18n::tr("config.lock_touch_id_unavailable"))
-                .flex_none()
-                .text_size(px(11.))
-                .line_height(widgets::line(11.))
-                .text_color(theme::color(palette::text_dim))
-                .into_element()
+        };
+        let touch_id_control = match crate::screenlock::touch_id_status() {
+            crate::screenlock::TouchIdStatus::Ready => touch_id_switch(),
+            crate::screenlock::TouchIdStatus::TemporarilyUnavailable => view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    text(i18n::tr("config.lock_touch_id_paused"))
+                        .flex_none()
+                        .text_size(px(11.))
+                        .line_height(widgets::line(11.))
+                        .text_color(theme::color(palette::text_dim)),
+                )
+                .child(touch_id_switch())
+                .into_element(),
+            crate::screenlock::TouchIdStatus::Unsupported => {
+                text(i18n::tr("config.lock_touch_id_unavailable"))
+                    .flex_none()
+                    .text_size(px(11.))
+                    .line_height(widgets::line(11.))
+                    .text_color(theme::color(palette::text_dim))
+                    .into_element()
+            }
         };
         card = card
             .child(row(

@@ -19,9 +19,9 @@ use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationDidChangeScreenParametersNotification,
     NSApplicationPresentationOptions, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor,
-    NSScreen, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
-    NSWindowStyleMask,
+    NSCursor, NSScreen, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
@@ -156,6 +156,7 @@ struct ActiveLock {
     secondary_tints: Vec<Retained<NSView>>,
     observer: Retained<ScreenObserver>,
     touch_id_ctx: Option<Retained<AnyObject>>,
+    cursor_hidden: bool,
 }
 
 struct RetiredOverlay {
@@ -275,11 +276,13 @@ pub fn engage() -> bool {
             secondary_tints: overlay.secondary_tints,
             observer,
             touch_id_ctx: None,
+            cursor_hidden: false,
         });
     });
 
     store::changed();
     if dim {
+        set_cursor_hidden(true);
         crate::displaydim::dim_async();
     }
     true
@@ -474,6 +477,9 @@ pub fn disengage() {
         for w in &lock.windows {
             w.orderOut(None);
         }
+        if lock.cursor_hidden {
+            NSCursor::unhide();
+        }
 
         RETIRED.with_borrow_mut(|list| {
             list.push(RetiredOverlay {
@@ -615,6 +621,7 @@ fn wake_and_schedule_redim() {
         return;
     }
     if screenlock::set_dimmed(false) {
+        set_cursor_hidden(false);
         set_secondary_tints_blackout(false);
         store::changed();
         crate::displaydim::wake_async();
@@ -633,11 +640,27 @@ fn schedule_redim() {
                 && !screenlock::is_dimmed()
                 && screenlock::set_dimmed(true)
             {
+                set_cursor_hidden(true);
                 set_secondary_tints_blackout(true);
                 store::changed();
                 crate::displaydim::dim_async();
             }
         });
+    });
+}
+
+fn set_cursor_hidden(hidden: bool) {
+    LOCK.with_borrow_mut(|slot| {
+        if let Some(lock) = slot
+            && lock.cursor_hidden != hidden
+        {
+            lock.cursor_hidden = hidden;
+            if hidden {
+                NSCursor::hide();
+            } else {
+                NSCursor::unhide();
+            }
+        }
     });
 }
 
