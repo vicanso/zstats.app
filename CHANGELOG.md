@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.4](https://github.com/vicanso/zstats.app/compare/v0.6.2..v0.6.4) - 2026-11-25
+
+### ⛰️  Features
+
+- *(macos)* Merge keep-awake and lid-closed no-sleep into single coffee button - ([1df1ad5](https://github.com/vicanso/zstats.app/commit/1df1ad532625720af418b5a29db7d5a41720dba0))
+
+### 🐛 Bug Fixes
+
+- *(macos)* Avoid trapping Universal Control cursor while locked - ([f1eb83c](https://github.com/vicanso/zstats.app/commit/f1eb83c20d49770cb8d3da23b1cbf6cd27c1ec5f))
+- *(macos)* Keep Touch ID toggle in clamshell mode and hide cursor while dimmed - ([c27045b](https://github.com/vicanso/zstats.app/commit/c27045be29471c88ec68d41eeb15b332ef95f1d7))
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.6.3 - ([a66d7a2](https://github.com/vicanso/zstats.app/commit/a66d7a203931797ac805beac59c9c7270dd0e141))
+
 ## [0.6.3](https://github.com/vicanso/zstats.app/compare/v0.6.2..v0.6.3) - 2026-11-24
 
 ### 🐛 Bug Fixes
