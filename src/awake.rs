@@ -70,21 +70,36 @@ pub const HOLD_MINUTES: [u32; 5] = [30, 60, 120, 240, 480];
 
 /// A running hold, as the views read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Hold {
-    /// The length that was picked — which menu item wears the check.
-    pub minutes: u32,
-    /// When it ends, on the wall clock.
-    pub until: SystemTime,
+pub enum Hold {
+    Timed { minutes: u32, until: SystemTime },
+    Indefinite,
 }
 
 impl Hold {
+    /// Original timed duration in minutes, or `None` for an indefinite hold.
+    pub fn minutes(&self) -> Option<u32> {
+        match self {
+            Hold::Timed { minutes, .. } => Some(*minutes),
+            Hold::Indefinite => None,
+        }
+    }
+
+    /// Wall-clock deadline, or `None` for an indefinite hold.
+    pub fn until(&self) -> Option<SystemTime> {
+        match self {
+            Hold::Timed { until, .. } => Some(*until),
+            Hold::Indefinite => None,
+        }
+    }
+
     /// Whole minutes left at `now`, rounded up — the figure beside the
     /// footer's cup. Up, because a hold picked a second ago is the
     /// thirty minutes that was asked for, not "29m", and its last
     /// minute reads "1m" until it ends rather than a minute of "0m".
-    pub fn minutes_left(&self, now: SystemTime) -> u32 {
-        let left = self.until.duration_since(now).unwrap_or_default();
-        u32::try_from(left.as_secs().div_ceil(60)).unwrap_or(u32::MAX)
+    pub fn minutes_left(&self, now: SystemTime) -> Option<u32> {
+        let until = self.until()?;
+        let left = until.duration_since(now).unwrap_or_default();
+        Some(u32::try_from(left.as_secs().div_ceil(60)).unwrap_or(u32::MAX))
     }
 }
 
@@ -102,38 +117,59 @@ type Token = ();
 /// that from being an assumption a future caller can break.
 static HELD: Mutex<Option<(Hold, Token)>> = Mutex::new(None);
 
+fn release_locked(held: &mut Option<(Hold, Token)>) {
+    if let Some((hold, token)) = held.take() {
+        release(token);
+        match hold {
+            Hold::Timed { minutes, .. } => {
+                tracing::info!(minutes, "keep awake off: released before its end");
+            }
+            Hold::Indefinite => {
+                tracing::info!("keep awake off: indefinite hold released");
+            }
+        }
+    }
+}
+
 /// Keep the machine awake for `minutes` from now, replacing a hold
 /// already running; `0` ends it. A platform that refuses leaves no
 /// hold, and the footer then shows none — a lit cup over a machine that
 /// sleeps anyway would be the one outcome worse than no feature.
 pub fn hold_for(minutes: u32) {
     let mut held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((hold, token)) = held.take() {
-        release(token);
-        tracing::info!(
-            minutes = hold.minutes,
-            "keep awake off: released before its end"
-        );
-    }
+    release_locked(&mut held);
     if minutes == 0 {
         return;
     }
     let span = Duration::from_secs(u64::from(minutes) * 60);
-    let Some(token) = take(span) else {
+    let Some(token) = take(Some(span)) else {
         return;
     };
     let until = SystemTime::now() + span;
     tracing::info!(minutes, "keep awake on: display and idle sleep held");
-    *held = Some((Hold { minutes, until }, token));
+    *held = Some((Hold::Timed { minutes, until }, token));
+}
+
+/// Keep the machine awake until turned off or the process exits, replacing
+/// any existing hold.
+pub fn hold_indefinite() {
+    let mut held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    release_locked(&mut held);
+    let Some(token) = take(None) else {
+        return;
+    };
+    tracing::info!("keep awake on: display and idle sleep held indefinitely");
+    *held = Some((Hold::Indefinite, token));
 }
 
 /// The hold in force. One past its deadline reads as none even before
 /// [`expire`] has released it.
 pub fn held() -> Option<Hold> {
     let held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    held.as_ref()
-        .map(|(hold, _)| *hold)
-        .filter(|hold| !ended(hold.until, SystemTime::now()))
+    held.as_ref().map(|(hold, _)| *hold).filter(|hold| {
+        hold.until()
+            .is_none_or(|until| !ended(until, SystemTime::now()))
+    })
 }
 
 /// Release a hold whose time is up; `true` when one just ended. Called
@@ -141,15 +177,19 @@ pub fn held() -> Option<Hold> {
 /// this is what keeps the promise on the wall clock across a sleep.
 pub fn expire() -> bool {
     let mut held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let due = held
-        .as_ref()
-        .is_some_and(|(hold, _)| ended(hold.until, SystemTime::now()));
+    let due = held.as_ref().is_some_and(|(hold, _)| {
+        hold.until()
+            .is_some_and(|until| ended(until, SystemTime::now()))
+    });
     if !due {
         return false;
     }
     if let Some((hold, token)) = held.take() {
         release(token);
-        tracing::info!(minutes = hold.minutes, "keep awake off: its time is up");
+        tracing::info!(
+            minutes = hold.minutes().unwrap_or(0),
+            "keep awake off: its time is up"
+        );
     }
     true
 }
@@ -159,28 +199,38 @@ fn ended(until: SystemTime, now: SystemTime) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn take(span: Duration) -> Option<Token> {
+fn take(span: Option<Duration>) -> Option<Token> {
     use objc2_core_foundation::CFString;
-    use objc2_io_kit::{IOPMAssertionCreateWithDescription, kIOPMNullAssertionID};
+    use objc2_io_kit::{
+        IOPMAssertionCreateWithDescription, IOPMAssertionCreateWithName, kIOPMAssertionLevelOn,
+        kIOPMNullAssertionID,
+    };
 
     // Plain strings in IOKit's header rather than exported symbols.
     let kind = CFString::from_static_str("PreventUserIdleDisplaySleep");
     let name = CFString::from_static_str(crate::APP_NAME);
-    let on_timeout = CFString::from_static_str("TimeoutActionRelease");
     let mut id = kIOPMNullAssertionID;
-    // SAFETY: the strings outlive the call, the three absent ones are
-    // optional in the API, and `id` is a valid pointer for the handle.
-    let result = unsafe {
-        IOPMAssertionCreateWithDescription(
-            Some(&kind),
-            Some(&name),
-            None,
-            None,
-            None,
-            span.as_secs_f64(),
-            Some(&on_timeout),
-            &mut id,
-        )
+    let result = if let Some(span) = span {
+        let on_timeout = CFString::from_static_str("TimeoutActionRelease");
+        // SAFETY: the strings outlive the call, the three absent ones are
+        // optional in the API, and `id` is a valid pointer for the handle.
+        unsafe {
+            IOPMAssertionCreateWithDescription(
+                Some(&kind),
+                Some(&name),
+                None,
+                None,
+                None,
+                span.as_secs_f64(),
+                Some(&on_timeout),
+                &mut id,
+            )
+        }
+    } else {
+        // SAFETY: static CFStrings outlive the call and `id` is a valid out-pointer.
+        unsafe {
+            IOPMAssertionCreateWithName(Some(&kind), kIOPMAssertionLevelOn, Some(&name), &mut id)
+        }
     };
     // `kIOReturnSuccess` is 0 and is not exported by the bindings.
     if result != 0 || id == kIOPMNullAssertionID {
@@ -204,7 +254,7 @@ fn release(id: Token) {
 /// itself is dropped on return — the inhibit lives in the descriptor,
 /// not the connection.
 #[cfg(target_os = "linux")]
-fn take(_span: Duration) -> Option<Token> {
+fn take(_span: Option<Duration>) -> Option<Token> {
     use zbus::blocking::{Connection, Proxy};
 
     let inhibit = || -> zbus::Result<Token> {
@@ -240,7 +290,7 @@ fn release(fd: Token) {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn take(_span: Duration) -> Option<Token> {
+fn take(_span: Option<Duration>) -> Option<Token> {
     None
 }
 
@@ -266,19 +316,22 @@ mod tests {
     #[test]
     fn minutes_left_round_up_and_stop_at_zero() {
         let now = SystemTime::now();
-        let hold = |secs: u64| Hold {
+        let hold = |secs: u64| Hold::Timed {
             minutes: 30,
             until: now + Duration::from_secs(secs),
         };
-        assert_eq!(hold(30 * 60).minutes_left(now), 30);
-        assert_eq!(hold(30 * 60 - 1).minutes_left(now), 30);
-        assert_eq!(hold(29 * 60).minutes_left(now), 29);
-        assert_eq!(hold(61).minutes_left(now), 2);
-        assert_eq!(hold(60).minutes_left(now), 1);
-        assert_eq!(hold(1).minutes_left(now), 1);
-        assert_eq!(hold(0).minutes_left(now), 0);
+        assert_eq!(hold(30 * 60).minutes_left(now), Some(30));
+        assert_eq!(hold(30 * 60 - 1).minutes_left(now), Some(30));
+        assert_eq!(hold(29 * 60).minutes_left(now), Some(29));
+        assert_eq!(hold(61).minutes_left(now), Some(2));
+        assert_eq!(hold(60).minutes_left(now), Some(1));
+        assert_eq!(hold(1).minutes_left(now), Some(1));
+        assert_eq!(hold(0).minutes_left(now), Some(0));
         // Past its end — a tick before `expire` has released it.
-        assert_eq!(hold(0).minutes_left(now + Duration::from_secs(5)), 0);
+        assert_eq!(hold(0).minutes_left(now + Duration::from_secs(5)), Some(0));
+        assert_eq!(Hold::Indefinite.minutes_left(now), None);
+        assert_eq!(Hold::Indefinite.minutes(), None);
+        assert_eq!(Hold::Indefinite.until(), None);
     }
 
     /// The real IOKit round trip: taken with its length, replaced rather
@@ -294,15 +347,19 @@ mod tests {
         let before = SystemTime::now();
         hold_for(30);
         let hold = held().expect("held after a length is picked");
-        assert_eq!(hold.minutes, 30);
-        let left = hold.until.duration_since(before).unwrap();
+        assert_eq!(hold.minutes(), Some(30));
+        let left = hold.until().unwrap().duration_since(before).unwrap();
         assert!(
             left >= Duration::from_secs(30 * 60 - 1) && left <= Duration::from_secs(30 * 60 + 5)
         );
         assert!(!expire(), "nothing to expire half an hour early");
 
         hold_for(60);
-        assert_eq!(held().map(|h| h.minutes), Some(60), "replaced");
+        assert_eq!(held().and_then(|h| h.minutes()), Some(60), "replaced");
+
+        hold_indefinite();
+        assert_eq!(held(), Some(Hold::Indefinite), "indefinite replaces timed");
+        assert!(!expire(), "indefinite never expires by clock");
 
         hold_for(0);
         assert_eq!(held(), None, "released on request");

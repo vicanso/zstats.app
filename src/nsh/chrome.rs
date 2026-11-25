@@ -366,10 +366,8 @@ pub fn footer(live: Live) -> View {
         .child(pin)
         .child(form)
         .child(settings)
-        .child(keep_awake(live));
-    #[cfg(target_os = "macos")]
-    let left = left.child(clamshell_sleep(live));
-    let left = left.child(lock_button(live));
+        .child(keep_awake(live))
+        .child(lock_button(live));
     view()
         .flex_row()
         .flex_none()
@@ -419,40 +417,231 @@ fn hold_label(minutes: u32) -> String {
     }
 }
 
-/// Keep the machine awake for a while (`awake.rs`): the cup, lit while a
-/// hold runs with the time left beside it, opens a menu of lengths with
-/// the running one checked, and Off (`views::keep_awake_menu`).
+/// Keep the machine awake for a while (`awake.rs`, plus `clamshell.rs` on
+/// macOS): one coffee-cup control that prevents both display sleep/auto-lock
+/// and lid-closed sleep. Lit while either hold runs, with a countdown when
+/// timed.
+#[cfg(target_os = "macos")]
 fn keep_awake(live: Live) -> AnyElement {
     let hold = live.watch(awake::held);
-    let held = move || hold.get().is_some();
-    let mac = cfg!(target_os = "macos");
-    let tip = move || match hold.get() {
-        Some(hold) => t!(
-            if mac {
-                "common.keep_awake_on"
+    let mode = live.watch(clamshell::mode);
+    let busy = live.watch(clamshell::busy);
+    let held = move || hold.get().is_some() || mode.get().is_on();
+    let timed_until = move || {
+        hold.get()
+            .and_then(|h| h.until())
+            .or_else(|| match mode.get() {
+                clamshell::Mode::Timed { until, .. } => Some(until),
+                _ => None,
+            })
+    };
+    let timed = move || timed_until().is_some();
+    let tip = move || match (hold.get(), mode.get()) {
+        (None, clamshell::Mode::Off) => i18n::tr("common.keep_awake"),
+        (Some(h), m) => {
+            if let Some(until) = h.until() {
+                t!(
+                    if m.is_on() {
+                        "common.keep_awake_on"
+                    } else {
+                        "common.keep_awake_on_display_only"
+                    },
+                    time = format::clock(until)
+                )
+                .to_string()
+            } else if m.is_on() {
+                i18n::tr("common.keep_awake_on_indefinite")
             } else {
-                "common.keep_awake_on_linux"
-            },
-            time = format::clock(hold.until)
-        )
-        .to_string(),
-        None => i18n::tr(if mac {
-            "common.keep_awake"
-        } else {
-            "common.keep_awake_linux"
-        }),
+                i18n::tr("common.keep_awake_on_indefinite_display_only")
+            }
+        }
+        (None, clamshell::Mode::Timed { until, .. }) => {
+            t!("common.clamshell_on_until", time = format::clock(until)).to_string()
+        }
+        (None, clamshell::Mode::Indefinite) => i18n::tr("common.clamshell_on_indefinite"),
+        (None, clamshell::Mode::External) => i18n::tr("common.clamshell_on_external"),
     };
     // Worked out again on every change of the store — a tick, while the
     // panel is on screen — and heard of only when the figure moves. Off
     // `hold` it never moved: a hold is the same value from the pick to its
     // end, so "30m" stood for the whole half hour.
     let left = live.watch(|| {
-        awake::held().map_or_else(String::new, |hold| {
-            format::countdown(hold.minutes_left(SystemTime::now()))
+        let now = SystemTime::now();
+        awake::held()
+            .and_then(|hold| hold.minutes_left(now))
+            .or_else(|| clamshell::mode().minutes_left(now))
+            .map_or_else(String::new, format::countdown)
+    });
+    let item = move |label: String, req: clamshell::Request| {
+        let on = move || match req {
+            clamshell::Request::Off => {
+                hold.get().is_none() && matches!(mode.get(), clamshell::Mode::Off)
+            }
+            clamshell::Request::Indefinite => {
+                matches!(hold.get(), Some(awake::Hold::Indefinite))
+                    || (hold.get().is_none() && matches!(mode.get(), clamshell::Mode::Indefinite))
+            }
+            clamshell::Request::Timed(minutes) => match hold.get() {
+                Some(h) => h.minutes() == Some(minutes),
+                None => {
+                    matches!(mode.get(), clamshell::Mode::Timed { minutes: m, .. } if m == minutes)
+                }
+            },
+        };
+        widgets::check_item(
+            label,
+            on,
+            move || busy.get(),
+            move || match req {
+                clamshell::Request::Timed(minutes) => {
+                    awake::hold_for(minutes);
+                    clamshell::request(req, store::changed);
+                }
+                clamshell::Request::Indefinite => {
+                    awake::hold_indefinite();
+                    clamshell::request(req, store::changed);
+                }
+                clamshell::Request::Off => {
+                    awake::hold_for(0);
+                    if clamshell::mode().is_on() {
+                        clamshell::request(req, store::changed);
+                    } else {
+                        store::changed();
+                    }
+                }
+            },
+        )
+    };
+    // No tooltip under the open menu: it came up over the items it
+    // describes.
+    let open = signal(false);
+    root::close_on_hide(open);
+    let mut popup = menu()
+        .offset(px(4.))
+        .open(move || Some(open.get()))
+        .on_open_change(move |event: &MenuEvent| {
+            if let MenuEvent::OpenChange(next, _) = event {
+                open.set(*next);
+            }
         })
+        .popup_style(widgets::popup_surface(180.))
+        .trigger(
+            view()
+                .flex_row()
+                .flex_none()
+                .h(px(CELL))
+                .min_w(px(32.))
+                .items_center()
+                .justify_center()
+                .gap(px(4.))
+                .px(px(8.))
+                .rounded(px(7.))
+                .bg(move || {
+                    theme::color(move || {
+                        if held() {
+                            palette::active_item().0
+                        } else if open.get() {
+                            palette::surface_raised()
+                        } else {
+                            CLEAR
+                        }
+                    })
+                })
+                .hover(move |s| {
+                    s.bg(move || {
+                        theme::color(move || {
+                            if held() {
+                                palette::active_item_hover()
+                            } else {
+                                palette::surface_raised()
+                            }
+                        })
+                    })
+                })
+                .transition_colors()
+                .duration(120.)
+                .active(|s| s.opacity(0.78))
+                .tooltip(widgets::live_tooltip(tip).disabled(move || open.get()))
+                .child(widgets::icon(CustomIconName::Coffee, 16., move || {
+                    if held() {
+                        palette::active_item().1
+                    } else if open.get() {
+                        palette::text()
+                    } else {
+                        palette::text_dim()
+                    }
+                }))
+                .child(when(timed, move || {
+                    text(move || left.get())
+                        .pr(px(2.))
+                        .tabular_nums()
+                        .text_size(px(10.))
+                        .line_height(px(14.))
+                        .text_color(move || theme::color(move || palette::active_item().1))
+                })),
+        )
+        // The menu's first line: until when, or what it is for.
+        .child(
+            text(move || {
+                if let Some(until) = timed_until() {
+                    t!("common.keep_awake_until", time = format::clock(until)).to_string()
+                } else if matches!(hold.get(), Some(awake::Hold::Indefinite))
+                    || matches!(mode.get(), clamshell::Mode::Indefinite)
+                {
+                    i18n::tr("common.keep_awake_active")
+                } else if matches!(mode.get(), clamshell::Mode::External) {
+                    i18n::tr("common.clamshell_external")
+                } else {
+                    i18n::tr("common.keep_awake_for")
+                }
+            })
+            .px(px(8.))
+            .py(px(4.))
+            .text_size(px(12.))
+            .text_color(theme::color(palette::text_dim)),
+        );
+    for minutes in awake::HOLD_MINUTES {
+        popup = popup.child(item(
+            hold_label(minutes),
+            clamshell::Request::Timed(minutes),
+        ));
+    }
+    popup
+        .child(item(
+            i18n::tr("common.clamshell_indefinite"),
+            clamshell::Request::Indefinite,
+        ))
+        .child(
+            menu_separator()
+                .h(px(1.))
+                .my(px(4.))
+                .bg(theme::color(palette::border_subtle)),
+        )
+        .child(item(
+            i18n::tr("common.keep_awake_off"),
+            clamshell::Request::Off,
+        ))
+        .into_element()
+}
+
+/// Keep the machine awake for a while (`awake.rs`): the cup, lit while a
+/// hold runs with the time left beside it, opens a menu of lengths with
+/// the running one checked, and Off (`views::keep_awake_menu`).
+#[cfg(not(target_os = "macos"))]
+fn keep_awake(live: Live) -> AnyElement {
+    let hold = live.watch(awake::held);
+    let held = move || hold.get().is_some();
+    let tip = move || match hold.get().and_then(|h| h.until()) {
+        Some(until) => t!("common.keep_awake_on_linux", time = format::clock(until)).to_string(),
+        None => i18n::tr("common.keep_awake_linux"),
+    };
+    let left = live.watch(|| {
+        awake::held()
+            .and_then(|hold| hold.minutes_left(SystemTime::now()))
+            .map_or_else(String::new, format::countdown)
     });
     let item = move |label: String, minutes: u32| {
-        let on = move || hold.get().map_or(0, |hold| hold.minutes) == minutes;
+        let on = move || hold.get().and_then(|hold| hold.minutes()).unwrap_or(0) == minutes;
         widgets::check_item(
             label,
             on,
@@ -533,9 +722,9 @@ fn keep_awake(live: Live) -> AnyElement {
         )
         // The menu's first line: until when, or what it is for.
         .child(
-            text(move || match hold.get() {
-                Some(hold) => {
-                    t!("common.keep_awake_until", time = format::clock(hold.until)).to_string()
+            text(move || match hold.get().and_then(|h| h.until()) {
+                Some(until) => {
+                    t!("common.keep_awake_until", time = format::clock(until)).to_string()
                 }
                 None => i18n::tr("common.keep_awake_for"),
             })
@@ -555,147 +744,5 @@ fn keep_awake(live: Live) -> AnyElement {
                 .bg(theme::color(palette::border_subtle)),
         )
         .child(item(i18n::tr("common.keep_awake_off"), 0))
-        .into_element()
-}
-
-/// Keep a MacBook running with the lid closed (`clamshell.rs`): the laptop
-/// beside the keep-awake cup, lit whenever `SleepDisabled` is on (whether set
-/// here or externally), with a countdown while timed.
-#[cfg(target_os = "macos")]
-fn clamshell_sleep(live: Live) -> AnyElement {
-    let mode = live.watch(clamshell::mode);
-    let busy = live.watch(clamshell::busy);
-    let active = move || mode.get().is_on();
-    let timed = move || matches!(mode.get(), clamshell::Mode::Timed { .. });
-    let tip = move || match mode.get() {
-        clamshell::Mode::Off => i18n::tr("common.clamshell_awake"),
-        clamshell::Mode::Timed { until, .. } => {
-            t!("common.clamshell_on_until", time = format::clock(until)).to_string()
-        }
-        clamshell::Mode::Indefinite => i18n::tr("common.clamshell_on_indefinite"),
-        clamshell::Mode::External => i18n::tr("common.clamshell_on_external"),
-    };
-    let left = live.watch(|| {
-        clamshell::mode()
-            .minutes_left(SystemTime::now())
-            .map_or_else(String::new, format::countdown)
-    });
-    let item = move |label: String, req: clamshell::Request| {
-        let on = move || match (mode.get(), req) {
-            (clamshell::Mode::Off, clamshell::Request::Off) => true,
-            (clamshell::Mode::Indefinite, clamshell::Request::Indefinite) => true,
-            (clamshell::Mode::Timed { minutes: m, .. }, clamshell::Request::Timed(target)) => {
-                m == target
-            }
-            _ => false,
-        };
-        widgets::check_item(
-            label,
-            on,
-            move || busy.get(),
-            move || clamshell::request(req, store::changed),
-        )
-    };
-    let open = signal(false);
-    root::close_on_hide(open);
-    let mut popup = menu()
-        .offset(px(4.))
-        .open(move || Some(open.get()))
-        .on_open_change(move |event: &MenuEvent| {
-            if let MenuEvent::OpenChange(next, _) = event {
-                open.set(*next);
-            }
-        })
-        .popup_style(widgets::popup_surface(180.))
-        .trigger(
-            view()
-                .flex_row()
-                .flex_none()
-                .h(px(CELL))
-                .min_w(px(32.))
-                .items_center()
-                .justify_center()
-                .gap(px(4.))
-                .px(px(8.))
-                .rounded(px(7.))
-                .bg(move || {
-                    theme::color(move || {
-                        if active() {
-                            palette::active_item().0
-                        } else if open.get() {
-                            palette::surface_raised()
-                        } else {
-                            CLEAR
-                        }
-                    })
-                })
-                .hover(move |s| {
-                    s.bg(move || {
-                        theme::color(move || {
-                            if active() {
-                                palette::active_item_hover()
-                            } else {
-                                palette::surface_raised()
-                            }
-                        })
-                    })
-                })
-                .transition_colors()
-                .duration(120.)
-                .active(|s| s.opacity(0.78))
-                .tooltip(widgets::live_tooltip(tip).disabled(move || open.get()))
-                .child(widgets::icon(CustomIconName::Laptop, 16., move || {
-                    if active() {
-                        palette::active_item().1
-                    } else if open.get() {
-                        palette::text()
-                    } else {
-                        palette::text_dim()
-                    }
-                }))
-                .child(when(timed, move || {
-                    text(move || left.get())
-                        .pr(px(2.))
-                        .tabular_nums()
-                        .text_size(px(10.))
-                        .line_height(px(14.))
-                        .text_color(move || theme::color(move || palette::active_item().1))
-                })),
-        )
-        .child(
-            text(move || match mode.get() {
-                clamshell::Mode::Off => i18n::tr("common.clamshell_title"),
-                clamshell::Mode::Timed { until, .. } => {
-                    t!("common.clamshell_until", time = format::clock(until)).to_string()
-                }
-                clamshell::Mode::Indefinite => i18n::tr("common.clamshell_active"),
-                clamshell::Mode::External => i18n::tr("common.clamshell_external"),
-            })
-            .px(px(8.))
-            .py(px(4.))
-            .text_size(px(12.))
-            .text_color(theme::color(palette::text_dim)),
-        );
-    for minutes in clamshell::HOLD_MINUTES {
-        popup = popup.child(item(
-            hold_label(minutes),
-            clamshell::Request::Timed(minutes),
-        ));
-    }
-    popup
-        .child(item(
-            i18n::tr("common.clamshell_indefinite"),
-            clamshell::Request::Indefinite,
-        ))
-        .child(
-            menu_separator()
-                .h(px(1.))
-                .my(px(4.))
-                .bg(theme::color(palette::border_subtle)),
-        )
-        .child(item(
-            i18n::tr("common.clamshell_off"),
-            clamshell::Request::Off,
-        ))
         .into_element()
 }

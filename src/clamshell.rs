@@ -53,9 +53,6 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 use zstats::snapshot::BatterySnapshot;
 
-/// Offered timed lengths, in minutes — the same set as [`crate::awake`].
-pub const HOLD_MINUTES: [u32; 5] = crate::awake::HOLD_MINUTES;
-
 /// Discharging at or below this charge restores normal sleep while zstats
 /// owns `disablesleep`, so a closed MacBook on battery keeps a reserve to
 /// sleep instead of running flat.
@@ -464,6 +461,7 @@ pub fn on_tick(battery: Option<&BatterySnapshot>, fx: &mut dyn Effects) {
                         tracing::info!(minutes, "clamshell no-sleep off: timed hold expired");
                     }
                     AutoRestore::LowBattery { charge_percent } => {
+                        crate::awake::hold_for(0);
                         tracing::info!(
                             charge_percent,
                             floor = LOW_BATTERY_FLOOR_PERCENT,
