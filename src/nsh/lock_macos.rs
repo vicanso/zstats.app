@@ -49,11 +49,14 @@ const TOUCH_ID_OVERLAY_LEVEL: isize = 101;
 const DISPLAY_IDLE_DIM_SECS: u64 = 15;
 static DIM_GEN: AtomicU64 = AtomicU64::new(0);
 
+// Leave `MouseMoved` untapped: a `SessionEventTap` cannot freeze the hardware
+// cursor anyway, while swallowing `MouseMoved` starves macOS Universal Control's
+// edge-push detection and traps the pointer on the locked Mac. Clicks, drags,
+// scroll, tablet, and keyboard/system events remain intercepted.
 const EVENT_MASK: CGEventMask = (1 << CGEventType::LeftMouseDown.0)
     | (1 << CGEventType::LeftMouseUp.0)
     | (1 << CGEventType::RightMouseDown.0)
     | (1 << CGEventType::RightMouseUp.0)
-    | (1 << CGEventType::MouseMoved.0)
     | (1 << CGEventType::LeftMouseDragged.0)
     | (1 << CGEventType::RightMouseDragged.0)
     | (1 << CGEventType::KeyDown.0)
@@ -527,6 +530,20 @@ unsafe extern "C-unwind" fn event_tap_callback(
         }
     }
 
+    if event_type == CGEventType::KeyDown || event_type == CGEventType::KeyUp {
+        let flags = CGEvent::flags(Some(event_ref));
+        let keycode =
+            CGEvent::integer_value_field(Some(event_ref), CGEventField::KeyboardEventKeycode);
+        // Preserve macOS Universal Control's escape shortcut (`⌃⌥⌘⌫`).
+        if keycode == 51
+            && flags.contains(
+                CGEventFlags::MaskControl | CGEventFlags::MaskAlternate | CGEventFlags::MaskCommand,
+            )
+        {
+            return event.as_ptr();
+        }
+    }
+
     if event_type == CGEventType::KeyDown {
         if screenlock::is_dimmed() {
             dispatch2::DispatchQueue::main().exec_async(wake_and_schedule_redim);
@@ -577,7 +594,7 @@ unsafe extern "C-unwind" fn event_tap_callback(
         }
     }
 
-    // Swallow all mouse, scroll, system, and key events while locked.
+    // Swallow all mouse clicks, drags, scroll, system, and key events while locked.
     ptr::null_mut()
 }
 
