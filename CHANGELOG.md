@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.5](https://github.com/vicanso/zstats.app/compare/v0.6.4..v0.6.5) - 2026-11-26
+
+### 🐛 Bug Fixes
+
+- *(macos)* Harden lock screen input fallback, ASCII IME switching, and system lock escape - ([d29316c](https://github.com/vicanso/zstats.app/commit/d29316c010af825209834b6d5462d3f5750a5865))
+
 ## [0.6.4](https://github.com/vicanso/zstats.app/compare/v0.6.2..v0.6.4) - 2026-11-25
 
 ### ⛰️  Features
