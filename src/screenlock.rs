@@ -549,6 +549,18 @@ pub fn finish_touch_id() {
     state.touch_id_busy = false;
 }
 
+/// Marks Touch ID as in-flight when triggered explicitly (e.g. from the unlock
+/// card button). Returns `true` only if locked, Touch ID is enabled, and idle.
+pub fn request_touch_id() -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.active || !state.touch_id_enabled || state.touch_id_busy {
+        return false;
+    }
+    state.touch_id_busy = true;
+    state.error = false;
+    true
+}
+
 /// Snapshot of the current lock state for UI rendering.
 pub fn snapshot() -> Snapshot {
     STATE.lock().unwrap_or_else(|e| e.into_inner()).snapshot()
@@ -950,5 +962,34 @@ mod tests {
         s.dimmed = true;
         s.abort_arm();
         assert!(!s.snapshot().dimmed);
+    }
+
+    #[test]
+    fn request_touch_id_guards_and_sets_busy() {
+        let mut s = LockState::default();
+        // Inactive lock cannot request Touch ID.
+        assert!(!s.active);
+
+        // Enabled lock accepts handle_key(Submit) -> RequestTouchId and rejects duplicate.
+        assert!(s.arm("secret", true, || None));
+        s.error = true;
+        assert_eq!(s.handle_key(KeyInput::Submit), KeyOutcome::RequestTouchId);
+        assert!(s.touch_id_busy);
+        assert!(!s.error);
+        assert_eq!(s.handle_key(KeyInput::Submit), KeyOutcome::Ignored);
+        s.force_disarm();
+
+        // Module-level API obeys the same guards.
+        force_disarm();
+        assert!(!request_touch_id());
+        let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(guard.arm("secret", true, || None));
+        guard.error = true;
+        drop(guard);
+        assert!(request_touch_id());
+        assert!(!request_touch_id());
+        assert!(snapshot().touch_id_busy);
+        assert!(!snapshot().error);
+        force_disarm();
     }
 }

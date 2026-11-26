@@ -236,6 +236,8 @@ pub fn run() {
                 let _ = lock_macos::engage();
             }
             HostAction::LockSurfaceReady => lock_macos::clear_surface_ground(),
+            HostAction::RequestTouchId => lock_macos::trigger_touch_id(),
+            HostAction::SwitchToSystemLock => lock_macos::switch_to_system_lock(),
         })
     });
     install_menu(mtm);

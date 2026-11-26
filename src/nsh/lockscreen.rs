@@ -526,6 +526,10 @@ fn unlock_card(snap: Memo<screenlock::Snapshot>, clock: Signal<String>) -> View 
                     .text_color(theme::color(palette::accent_light))
             },
         ))
+        .child(when(
+            move || snap.get().touch_id_enabled,
+            move || touch_id_button(snap),
+        ))
         .child(
             text(move || {
                 if snap.get().touch_id_enabled {
@@ -538,4 +542,58 @@ fn unlock_card(snap: Memo<screenlock::Snapshot>, clock: Signal<String>) -> View 
             .line_height(widgets::line(10.))
             .text_color(theme::color(palette::text_dim)),
         )
+        .child(when(|| cfg!(target_os = "macos"), system_lock_button))
+}
+
+fn system_lock_button() -> AnyElement {
+    nsh_base::button()
+        .px(px(10.))
+        .py(px(5.))
+        .rounded(px(6.))
+        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .focus_visible(widgets::focus_ring)
+        .on_press(|| root::ask(HostAction::SwitchToSystemLock))
+        .child(
+            text(i18n::tr("lock.overlay_system_lock_btn"))
+                .text_size(px(11.))
+                .line_height(widgets::line(11.))
+                .text_color(theme::color(palette::text_dim)),
+        )
+        .into_element()
+}
+
+fn touch_id_button(snap: Memo<screenlock::Snapshot>) -> AnyElement {
+    nsh_base::button()
+        .w_full()
+        .h(px(30.))
+        .px(px(12.))
+        .rounded(px(7.))
+        .border(px(1.))
+        .border_color(theme::color(palette::border))
+        .bg(theme::color(palette::inset))
+        .items_center()
+        .justify_center()
+        .hover(|s| s.bg(theme::color(palette::surface_raised)))
+        .transition_colors()
+        .duration(120.)
+        .active(|s| s.opacity(0.76))
+        .style_when(move || snap.get().touch_id_busy, |s| s.opacity(0.6))
+        .focus_visible(widgets::focus_ring)
+        .on_press(|| root::ask(HostAction::RequestTouchId))
+        .child(
+            text(move || {
+                if snap.get().touch_id_busy {
+                    i18n::tr("lock.overlay_touch_id_waiting")
+                } else {
+                    i18n::tr("lock.overlay_touch_id_btn")
+                }
+            })
+            .text_size(px(12.))
+            .line_height(px(15.))
+            .text_color(theme::color(palette::text)),
+        )
+        .into_element()
 }

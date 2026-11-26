@@ -19,9 +19,9 @@ use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationDidChangeScreenParametersNotification,
     NSApplicationPresentationOptions, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor,
-    NSCursor, NSScreen, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowSharingType, NSWindowStyleMask,
+    NSCursor, NSEvent, NSEventModifierFlags, NSEventType, NSScreen, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
@@ -33,21 +33,113 @@ use objc2_core_graphics::{
 use objc2_foundation::{
     NSError, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSRect, NSString,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 #[link(name = "LocalAuthentication", kind = "framework")]
 unsafe extern "C" {}
 
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn TISCopyCurrentKeyboardInputSource() -> *mut c_void;
+    fn TISCopyCurrentASCIICapableKeyboardInputSource() -> *mut c_void;
+    fn TISSelectInputSource(input_source: *mut c_void) -> i32;
+    fn IsSecureEventInputEnabled() -> bool;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const c_void);
+}
+
 /// Popup menu window level: sits above Menu Bar (24), Dock (20), and all
 /// normal windows while letting the system Touch ID sheet appear on top.
 const TOUCH_ID_OVERLAY_LEVEL: isize = 101;
 const DISPLAY_IDLE_DIM_SECS: u64 = 15;
+const WATCHDOG_INTERVAL_SECS: u64 = 2;
 static DIM_GEN: AtomicU64 = AtomicU64::new(0);
+static LOCK_EPOCH: AtomicU64 = AtomicU64::new(0);
+static FALLBACK_LOGGED: AtomicBool = AtomicBool::new(false);
+
+struct SavedInputSource(*mut c_void);
+
+impl SavedInputSource {
+    fn switch_to_ascii() -> Option<Self> {
+        // SAFETY: returns an owned `TISInputSourceRef` or NULL.
+        let prev = unsafe { TISCopyCurrentKeyboardInputSource() };
+        ensure_ascii_input_source();
+        if prev.is_null() {
+            None
+        } else {
+            Some(Self(prev))
+        }
+    }
+
+    fn restore(self) {
+        if !self.0.is_null() {
+            // SAFETY: `self.0` is a valid retained `TISInputSourceRef`.
+            let rc = unsafe { TISSelectInputSource(self.0) };
+            if rc != 0 {
+                tracing::debug!(rc, "could not restore previous keyboard input source");
+            }
+        }
+        // `Drop` releases `self.0`.
+    }
+}
+
+impl Drop for SavedInputSource {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: `self.0` was retained by `TISCopyCurrentKeyboardInputSource`.
+            unsafe { CFRelease(self.0) };
+            self.0 = ptr::null_mut();
+        }
+    }
+}
+
+fn ensure_ascii_input_source() {
+    // SAFETY: returns an owned ASCII-capable `TISInputSourceRef` or NULL.
+    let ascii = unsafe { TISCopyCurrentASCIICapableKeyboardInputSource() };
+    if !ascii.is_null() {
+        // SAFETY: `ascii` is a valid retained `TISInputSourceRef`; release after selecting.
+        let rc = unsafe { TISSelectInputSource(ascii) };
+        unsafe { CFRelease(ascii) };
+        if rc != 0 {
+            tracing::debug!(rc, "could not switch keyboard input source to ASCII");
+        }
+    }
+}
+
+fn is_secure_event_input_enabled() -> bool {
+    // SAFETY: zero-arg Carbon query.
+    unsafe { IsSecureEventInputEnabled() }
+}
+
+fn is_universal_control_pid(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    thread_local! {
+        static CACHE: Cell<(i32, bool)> = const { Cell::new((-1, false)) };
+    }
+    CACHE.with(|cache| {
+        let (cached_pid, cached_res) = cache.get();
+        if cached_pid == pid {
+            return cached_res;
+        }
+        let mut buf = [0_u8; 4096];
+        // SAFETY: `buf` is a writable stack buffer of length `buf.len()`.
+        let written = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        let res = written > 0 && buf[..written as usize].ends_with(b"/UniversalControl");
+        cache.set((pid, res));
+        res
+    })
+}
 
 // Leave `MouseMoved` untapped: a `SessionEventTap` cannot freeze the hardware
 // cursor anyway, while swallowing `MouseMoved` starves macOS Universal Control's
@@ -87,6 +179,18 @@ define_class!(
         #[unsafe(method(canBecomeMainWindow))]
         fn can_become_main_window(&self) -> bool {
             true
+        }
+
+        #[unsafe(method(sendEvent:))]
+        fn send_event(&self, event: &NSEvent) {
+            if screenlock::is_active() && event.r#type() == NSEventType::KeyDown {
+                handle_ns_key_down(event);
+                return;
+            }
+            // SAFETY: forwards all non-fallback events to `NSWindow::sendEvent:`.
+            unsafe {
+                let _: () = msg_send![super(self), sendEvent: event];
+            }
         }
     }
 );
@@ -160,6 +264,7 @@ struct ActiveLock {
     observer: Retained<ScreenObserver>,
     touch_id_ctx: Option<Retained<AnyObject>>,
     cursor_hidden: bool,
+    saved_input_source: Option<SavedInputSource>,
 }
 
 struct RetiredOverlay {
@@ -239,6 +344,16 @@ pub fn engage() -> bool {
         screenlock::set_dimmed(true);
     }
 
+    let lock_epoch = LOCK_EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
+    FALLBACK_LOGGED.store(false, Ordering::Relaxed);
+    if is_secure_event_input_enabled() {
+        tracing::warn!(
+            "Secure Event Input is enabled while engaging screen lock; fallback key routing active"
+        );
+    }
+
+    let saved_input_source = SavedInputSource::switch_to_ascii();
+
     let overlay = build_overlay_windows(mtm, dim);
     let app = NSApplication::sharedApplication(mtm);
     app.activate();
@@ -246,17 +361,7 @@ pub fn engage() -> bool {
         primary.makeKeyAndOrderFront(None);
     }
 
-    // Valid AppKit presentation options combination (`HideDock` without
-    // `AutoHideDock`, `HideMenuBar` without `AutoHideMenuBar`).
-    app.setPresentationOptions(
-        NSApplicationPresentationOptions::HideDock
-            | NSApplicationPresentationOptions::HideMenuBar
-            | NSApplicationPresentationOptions::DisableProcessSwitching
-            | NSApplicationPresentationOptions::DisableForceQuit
-            | NSApplicationPresentationOptions::DisableHideApplication
-            | NSApplicationPresentationOptions::DisableAppleMenu
-            | NSApplicationPresentationOptions::DisableCursorLocationAssistance,
-    );
+    apply_presentation_options(&app);
 
     let observer = ScreenObserver::new(mtm);
     let center = NSNotificationCenter::defaultCenter();
@@ -280,15 +385,60 @@ pub fn engage() -> bool {
             observer,
             touch_id_ctx: None,
             cursor_hidden: false,
+            saved_input_source,
         });
     });
 
+    start_tap_watchdog(lock_epoch);
     store::changed();
     if dim {
         set_cursor_hidden(true);
         crate::displaydim::dim_async();
     }
     true
+}
+
+fn apply_presentation_options(app: &NSApplication) {
+    // Valid AppKit presentation options combination (`HideDock` without
+    // `AutoHideDock`, `HideMenuBar` without `AutoHideMenuBar`).
+    app.setPresentationOptions(
+        NSApplicationPresentationOptions::HideDock
+            | NSApplicationPresentationOptions::HideMenuBar
+            | NSApplicationPresentationOptions::DisableProcessSwitching
+            | NSApplicationPresentationOptions::DisableForceQuit
+            | NSApplicationPresentationOptions::DisableHideApplication
+            | NSApplicationPresentationOptions::DisableAppleMenu
+            | NSApplicationPresentationOptions::DisableCursorLocationAssistance,
+    );
+}
+
+fn start_tap_watchdog(epoch: u64) {
+    let _ = std::thread::Builder::new()
+        .name("lock-tap-watchdog".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(WATCHDOG_INTERVAL_SECS));
+                if LOCK_EPOCH.load(Ordering::Relaxed) != epoch || !screenlock::is_active() {
+                    break;
+                }
+                dispatch2::DispatchQueue::main().exec_async(move || {
+                    if LOCK_EPOCH.load(Ordering::Relaxed) != epoch || !screenlock::is_active() {
+                        return;
+                    }
+                    LOCK.with_borrow(|slot| {
+                        if let Some(lock) = slot
+                            && !CGEvent::tap_is_enabled(&lock.tap_port)
+                        {
+                            tracing::warn!(
+                                secure_input = is_secure_event_input_enabled(),
+                                "screen lock CGEventTap found disabled; re-enabling"
+                            );
+                            CGEvent::tap_enable(&lock.tap_port, true);
+                        }
+                    });
+                });
+            }
+        });
 }
 
 struct OverlayBundle {
@@ -445,10 +595,15 @@ fn clear_app_view_ground(view: &AppView) {
 /// Disengages the macOS desktop lock on the main thread and restores system
 /// presentation options.
 pub fn disengage() {
+    LOCK_EPOCH.fetch_add(1, Ordering::Relaxed);
+    FALLBACK_LOGGED.store(false, Ordering::Relaxed);
     DIM_GEN.fetch_add(1, Ordering::Relaxed);
     crate::displaydim::release_async();
     let taken = LOCK.with_borrow_mut(Option::take);
     if let Some(lock) = taken {
+        if let Some(src) = lock.saved_input_source {
+            src.restore();
+        }
         if let Some(mut ctx) = lock.touch_id_ctx {
             // SAFETY: `ctx` is an active `LAContext`; invalidates any pending Touch ID sheet.
             unsafe {
@@ -508,6 +663,10 @@ unsafe extern "C-unwind" fn event_tap_callback(
     if event_type == CGEventType::TapDisabledByTimeout
         || event_type == CGEventType::TapDisabledByUserInput
     {
+        tracing::warn!(
+            ?event_type,
+            "screen lock CGEventTap disabled by system; re-enabling"
+        );
         LOCK.with_borrow(|slot| {
             if let Some(lock) = slot {
                 CGEvent::tap_enable(&lock.tap_port, true);
@@ -525,9 +684,27 @@ unsafe extern "C-unwind" fn event_tap_callback(
     if screenlock::ai_friendly() {
         let source_pid =
             CGEvent::integer_value_field(Some(event_ref), CGEventField::EventSourceUnixProcessID);
-        if source_pid > 0 && source_pid != i64::from(std::process::id()) {
+        if source_pid > 0
+            && source_pid != i64::from(std::process::id())
+            && !is_universal_control_pid(source_pid as i32)
+        {
             return event.as_ptr();
         }
+    }
+
+    if event_type == CGEventType::LeftMouseDown || event_type == CGEventType::LeftMouseUp {
+        if screenlock::is_dimmed() {
+            if event_type == CGEventType::LeftMouseDown {
+                dispatch2::DispatchQueue::main().exec_async(wake_and_reclaim_on_main);
+            }
+            return ptr::null_mut();
+        }
+        if event_type == CGEventType::LeftMouseDown {
+            dispatch2::DispatchQueue::main().exec_async(reclaim_focus_on_main);
+        }
+        // Let left clicks reach the shielding `LockOverlayWindow` so clicking
+        // anywhere reclaims focus and the Touch ID button inside the card works.
+        return event.as_ptr();
     }
 
     if event_type == CGEventType::KeyDown || event_type == CGEventType::KeyUp {
@@ -556,38 +733,26 @@ unsafe extern "C-unwind" fn event_tap_callback(
         let cmd = flags.contains(CGEventFlags::MaskCommand);
         let ctrl = flags.contains(CGEventFlags::MaskControl);
 
-        let mut inputs = Vec::new();
-        if cmd || ctrl {
-            // Support Ctrl+U (32) and Cmd+Delete (51) to clear the entry; swallow all other shortcuts.
-            if (ctrl && !cmd && keycode == 32) || (cmd && !ctrl && keycode == 51) {
-                inputs.push(KeyInput::Clear);
-            }
-        } else {
-            match keycode {
-                36 | 76 => inputs.push(KeyInput::Submit),
-                51 | 117 => inputs.push(KeyInput::Backspace),
-                53 => inputs.push(KeyInput::Clear),
-                _ => {
-                    let mut len = 0;
-                    let mut buf = [0u16; 8];
-                    // SAFETY: `buf` holds 8 `UniChar` elements and `len` is a valid out-pointer.
-                    unsafe {
-                        CGEvent::keyboard_get_unicode_string(
-                            Some(event_ref),
-                            buf.len() as _,
-                            &mut len,
-                            buf.as_mut_ptr(),
-                        );
-                    }
-                    let count = (len as usize).min(buf.len());
-                    for ch in char::decode_utf16(buf[..count].iter().copied()).flatten() {
-                        if !ch.is_control() {
-                            inputs.push(KeyInput::Char(ch));
-                        }
-                    }
-                }
+        let mut len = 0;
+        let mut buf = [0u16; 8];
+        if !cmd && !ctrl && !matches!(keycode, 36 | 76 | 51 | 117 | 53) {
+            // SAFETY: `buf` holds 8 `UniChar` elements and `len` is a valid out-pointer.
+            unsafe {
+                CGEvent::keyboard_get_unicode_string(
+                    Some(event_ref),
+                    buf.len() as _,
+                    &mut len,
+                    buf.as_mut_ptr(),
+                );
             }
         }
+        let count = (len as usize).min(buf.len());
+        let inputs = parse_key_inputs(
+            keycode as u16,
+            cmd,
+            ctrl,
+            char::decode_utf16(buf[..count].iter().copied()).flatten(),
+        );
 
         if !inputs.is_empty() {
             dispatch2::DispatchQueue::main().exec_async(move || handle_key_on_main(inputs));
@@ -596,6 +761,165 @@ unsafe extern "C-unwind" fn event_tap_callback(
 
     // Swallow all mouse clicks, drags, scroll, system, and key events while locked.
     ptr::null_mut()
+}
+
+fn parse_key_inputs(
+    keycode: u16,
+    cmd: bool,
+    ctrl: bool,
+    chars: impl Iterator<Item = char>,
+) -> Vec<KeyInput> {
+    let mut inputs = Vec::new();
+    if cmd || ctrl {
+        // Support Ctrl+U (32) and Cmd+Delete (51) to clear the entry; swallow all other shortcuts.
+        if (ctrl && !cmd && keycode == 32) || (cmd && !ctrl && keycode == 51) {
+            inputs.push(KeyInput::Clear);
+        }
+        return inputs;
+    }
+    match keycode {
+        36 | 76 => inputs.push(KeyInput::Submit),
+        51 | 117 => inputs.push(KeyInput::Backspace),
+        53 => inputs.push(KeyInput::Clear),
+        _ => {
+            for ch in chars {
+                if !ch.is_control() {
+                    inputs.push(KeyInput::Char(ch));
+                }
+            }
+        }
+    }
+    inputs
+}
+
+fn handle_ns_key_down(event: &NSEvent) {
+    if !screenlock::is_active() {
+        return;
+    }
+    if !FALLBACK_LOGGED.swap(true, Ordering::Relaxed) {
+        tracing::info!(
+            secure_input = is_secure_event_input_enabled(),
+            "screen lock using NSWindow sendEvent key fallback"
+        );
+    }
+
+    let flags = event.modifierFlags();
+    let keycode = event.keyCode();
+    if keycode == 51
+        && flags.contains(
+            NSEventModifierFlags::Control
+                | NSEventModifierFlags::Option
+                | NSEventModifierFlags::Command,
+        )
+    {
+        return;
+    }
+
+    if screenlock::is_dimmed() {
+        wake_and_schedule_redim();
+        return;
+    }
+
+    let cmd = flags.contains(NSEventModifierFlags::Command);
+    let ctrl = flags.contains(NSEventModifierFlags::Control);
+    let chars = event
+        .characters()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let inputs = parse_key_inputs(keycode, cmd, ctrl, chars.chars());
+    if !inputs.is_empty() {
+        handle_key_on_main(inputs);
+    }
+}
+
+pub fn trigger_touch_id() {
+    if !screenlock::is_active() {
+        return;
+    }
+    if screenlock::is_dimmed() {
+        wake_and_schedule_redim();
+    }
+    reclaim_focus_on_main();
+    if screenlock::request_touch_id() {
+        start_touch_id();
+    }
+}
+
+fn sac_lock_screen_immediate() -> Option<unsafe extern "C" fn()> {
+    type SacLockFn = unsafe extern "C" fn();
+    static FN: OnceLock<Option<SacLockFn>> = OnceLock::new();
+    *FN.get_or_init(|| {
+        // SAFETY: constant NUL-terminated system private framework path; handle kept process-wide.
+        let handle = unsafe {
+            libc::dlopen(
+                c"/System/Library/PrivateFrameworks/login.framework/Versions/Current/login"
+                    .as_ptr(),
+                libc::RTLD_LAZY | libc::RTLD_LOCAL,
+            )
+        };
+        if handle.is_null() {
+            return None;
+        }
+        // SAFETY: `SACLockScreenImmediate` takes no arguments and returns void.
+        let sym = unsafe { libc::dlsym(handle, c"SACLockScreenImmediate".as_ptr()) };
+        if sym.is_null() {
+            None
+        } else {
+            // SAFETY: symbol matches `extern "C" fn()`.
+            Some(unsafe { std::mem::transmute::<*mut c_void, SacLockFn>(sym) })
+        }
+    })
+}
+
+/// Switches from zstats's lock overlay to macOS's native lock screen,
+/// keeping zstats's overlay up if `SACLockScreenImmediate` cannot be loaded.
+pub fn switch_to_system_lock() {
+    if !screenlock::is_active() {
+        return;
+    }
+    let Some(lock_fn) = sac_lock_screen_immediate() else {
+        tracing::warn!("SACLockScreenImmediate unavailable; keeping zstats lock active");
+        return;
+    };
+    let epoch = LOCK_EPOCH.load(Ordering::Relaxed);
+    tracing::info!("switching desktop lock to macOS system lock screen");
+    // SAFETY: resolved `SACLockScreenImmediate` takes zero arguments.
+    unsafe { lock_fn() };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(350));
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            if LOCK_EPOCH.load(Ordering::Relaxed) == epoch && screenlock::is_active() {
+                disengage();
+            }
+        });
+    });
+}
+
+fn reclaim_focus_on_main() {
+    if !screenlock::is_active() {
+        return;
+    }
+    ensure_ascii_input_source();
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    app.activate();
+    if !touch_id_active() {
+        apply_presentation_options(&app);
+        LOCK.with_borrow(|slot| {
+            if let Some(lock) = slot
+                && let Some(primary) = lock.windows.first()
+            {
+                primary.makeKeyAndOrderFront(None);
+            }
+        });
+    }
+}
+
+fn wake_and_reclaim_on_main() {
+    wake_and_schedule_redim();
+    reclaim_focus_on_main();
 }
 
 fn handle_key_on_main(inputs: Vec<KeyInput>) {

@@ -166,6 +166,8 @@ pub fn run() {
                 }
             }
             HostAction::LockSurfaceReady => {}
+            HostAction::RequestTouchId => {}
+            HostAction::SwitchToSystemLock => {}
         }));
     });
 

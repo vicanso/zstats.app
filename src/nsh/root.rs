@@ -59,6 +59,10 @@ pub enum HostAction {
     /// Clears NSH's opaque surface ground layer on the primary lock overlay
     /// so the macOS frosted `NSVisualEffectView` shows through.
     LockSurfaceReady,
+    /// Triggers the Touch ID prompt from the lock overlay button on macOS.
+    RequestTouchId,
+    /// Switches from zstats's desktop lock to the native macOS lock screen.
+    SwitchToSystemLock,
 }
 
 /// What a folder picked in the system's panel is for (the disk-space
